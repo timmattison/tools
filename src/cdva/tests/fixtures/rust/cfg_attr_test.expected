@@ -1,0 +1,9 @@
+. #[cfg_attr(test, allow(dead_code))]
+. fn production_helper() -> u32 {
+.     2
+. }
+. 
+T #[test]
+T fn production_helper_is_two() {
+T     assert_eq!(production_helper(), 2);
+T }

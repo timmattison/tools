@@ -45,20 +45,18 @@ fn main() -> Result<()> {
     };
 
     let mut found_dirs = Vec::new();
-    let mut total_size = 0u64;
+    let mut total_size = 0_u64;
 
     for entry in walker {
         let entry = entry?;
 
-        if entry.file_type().is_dir() {
-            if is_idea_only_directory(entry.path())? {
-                if cli.delete || cli.dry_run {
-                    let size = calculate_dir_size(entry.path())?;
-                    total_size += size;
-                    found_dirs.push((entry.path().to_path_buf(), size));
-                } else {
-                    println!("{}", entry.path().display());
-                }
+        if entry.file_type().is_dir() && is_idea_only_directory(entry.path())? {
+            if cli.delete || cli.dry_run {
+                let size = calculate_dir_size(entry.path())?;
+                total_size += size;
+                found_dirs.push((entry.path().to_path_buf(), size));
+            } else {
+                println!("{}", entry.path().display());
             }
         }
     }
@@ -119,14 +117,12 @@ fn is_idea_only_directory(dir_path: &Path) -> Result<bool> {
 }
 
 fn calculate_dir_size(dir_path: &Path) -> Result<u64> {
-    let mut total_size = 0u64;
+    let mut total_size = 0_u64;
 
-    for entry in WalkDir::new(dir_path) {
-        if let Ok(entry) = entry {
-            if let Ok(metadata) = entry.metadata() {
-                if metadata.is_file() {
-                    total_size += metadata.len();
-                }
+    for entry in WalkDir::new(dir_path).into_iter().flatten() {
+        if let Ok(metadata) = entry.metadata() {
+            if metadata.is_file() {
+                total_size += metadata.len();
             }
         }
     }

@@ -141,11 +141,13 @@ fn main() -> Result<()> {
     // Print the objects (largest first, limited by topCount)
     // Start from the end of the slice to get the largest objects
     let start_index = objects.len() - display_count;
-    for i in 0..display_count {
-        let obj = &objects[start_index + i];
+    for obj in objects.iter().skip(start_index).take(display_count) {
+        // git object hashes are ASCII hex, so a character-level prefix matches
+        // the historical 12-byte short hash without risking UTF-8 panics.
+        let short_hash: String = obj.hash.chars().take(12).collect();
         println!(
             "{} {} {}",
-            &obj.hash[0..12],
+            short_hash,
             human_bytes(obj.size as f64),
             obj.path
         );

@@ -1,10 +1,10 @@
 use buildinfo::version_string;
 use repowalker::{find_git_repo, RepoWalker};
 use std::path::Path;
-use std::process::{exit, Command};
+use std::process::exit;
 
 fn run_command_in_directory(dir: &Path, command: &[&str]) -> Result<(), std::io::Error> {
-    let output = Command::new(command[0])
+    let output = childenv::command(command[0])
         .args(&command[1..])
         .current_dir(dir)
         .output()?;
@@ -16,10 +16,7 @@ fn run_command_in_directory(dir: &Path, command: &[&str]) -> Result<(), std::io:
             dir.display(),
             String::from_utf8_lossy(&output.stderr)
         );
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "Command failed",
-        ));
+        return Err(std::io::Error::other("Command failed"));
     }
 
     println!("Ran {} in {}", command.join(" "), dir.display());
@@ -41,7 +38,7 @@ fn main() {
         }
     };
 
-    let walker = RepoWalker::new(repo_root.clone())
+    let walker = RepoWalker::new(repo_root)
         .respect_gitignore(false) // Don't respect gitignore - find ALL Go projects
         .skip_node_modules(true)
         .skip_worktrees(true)

@@ -1,3 +1,15 @@
+// Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+#![allow(
+    clippy::module_name_repetitions,
+    reason = "the public surface deliberately repeats the crate name (ShellIntegration, ShellCommand, ShellSetupError) so callers read `shellsetup::ShellIntegration` and plain `ShellIntegration` the same way"
+)]
+#![allow(
+    clippy::must_use_candidate,
+    reason = "the builder methods are consumed by chaining at every call site; marking each one #[must_use] would document nothing a reader does not already see"
+)]
+
 //! Shell integration library for adding tool functions to shell config files.
 //!
 //! This library provides a standardized way to add shell functions and aliases
@@ -59,6 +71,18 @@ pub enum ShellSetupError {
         path: PathBuf,
         source: std::io::Error,
     },
+
+    /// The shell config is yadm-managed with ambiguous alternates, so we can't
+    /// safely choose which template to edit. Editing the rendered file would be
+    /// silently discarded on the next render.
+    #[error(
+        "{rendered} is yadm-managed and cannot be safely auto-edited \
+         (ambiguous alternates). Edit the correct template by hand and re-render.\n{manual_instructions}"
+    )]
+    YadmAmbiguousConfig {
+        rendered: PathBuf,
+        manual_instructions: String,
+    },
 }
 
 /// Result type for shell setup operations.
@@ -99,9 +123,9 @@ impl ShellCommand {
 /// information about available commands.
 #[derive(Debug, Clone)]
 pub struct ShellIntegration {
-    /// Short name of the tool (e.g., "cwt", "prcp").
+    /// Short name of the tool (e.g., "cwt", "nwt").
     tool_name: String,
-    /// Human-readable description (e.g., "Change Worktree", "Progress Copy").
+    /// Human-readable description (e.g., "Change Worktree", "New Worktree").
     tool_description: String,
     /// The shell code to add (functions, aliases, etc.).
     shell_code: String,
@@ -202,6 +226,20 @@ impl ShellIntegration {
     /// 2. Finds the appropriate config file
     /// 3. Checks for existing installation
     /// 4. Either installs fresh, upgrades old installation, or updates existing
+    ///
+    /// # Errors
+    ///
+    /// - [`ShellSetupError::NoHomeDir`] when the home directory cannot be determined,
+    ///   so there is no config file to locate.
+    /// - [`ShellSetupError::UnsupportedShell`] when `$SHELL` names something other than
+    ///   bash or zsh. The error carries the block to add by hand.
+    /// - [`ShellSetupError::YadmAmbiguousConfig`] when the config file is yadm-managed
+    ///   with alternates this library cannot choose between, so writing anywhere would
+    ///   either be discarded on the next render or edit the wrong template.
+    /// - [`ShellSetupError::ReadError`] when an existing config file cannot be read
+    ///   while checking for a previous installation.
+    /// - [`ShellSetupError::WriteError`] when the config file cannot be opened for
+    ///   append or written back after the block is replaced or upgraded.
     pub fn setup(&self) -> Result<()> {
         let home = dirs::home_dir().ok_or(ShellSetupError::NoHomeDir)?;
 
@@ -238,11 +276,50 @@ impl ShellIntegration {
             }
         };
 
+        // Redirect away from yadm-rendered files: writing to them is silently
+        // discarded on the next `yadm alt`, so target the template instead (or
+        // refuse when we can't tell which template applies).
+        match resolve_config_target(&config_file) {
+            ConfigTarget::Direct(path) => self.install_into(&path, false),
+            ConfigTarget::YadmTemplate(template) => {
+                println!(
+                    "{} Detected yadm-managed shell config. Writing to the template \
+                     instead of the rendered file (which yadm would overwrite).",
+                    "ℹ".cyan()
+                );
+                self.install_into(&template, true)
+            }
+            ConfigTarget::YadmAmbiguous {
+                rendered,
+                candidates,
+            } => {
+                let listed = candidates
+                    .iter()
+                    .map(|p| format!("  - {}", p.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Err(ShellSetupError::YadmAmbiguousConfig {
+                    rendered,
+                    manual_instructions: format!(
+                        "Found multiple yadm alternates:\n{listed}\n\nAdd this block to the \
+                         correct template, then re-render (e.g. `yadm alt`):\n{}",
+                        self.full_block()
+                    ),
+                })
+            }
+        }
+    }
+
+    /// Installs (or upgrades) the integration block into `config_file`.
+    ///
+    /// `yadm_template` selects activation instructions: a real shell config can
+    /// be `source`d directly, but a yadm template must be re-rendered first.
+    fn install_into(&self, config_file: &Path, yadm_template: bool) -> Result<()> {
         // Check if already installed and handle upgrades
         if config_file.exists() {
             let contents =
-                fs::read_to_string(&config_file).map_err(|e| ShellSetupError::ReadError {
-                    path: config_file.clone(),
+                fs::read_to_string(config_file).map_err(|e| ShellSetupError::ReadError {
+                    path: config_file.to_path_buf(),
                     source: e,
                 })?;
 
@@ -260,9 +337,9 @@ impl ShellIntegration {
                     (self.upgrade_old_installation(&contents), "upgraded")
                 };
 
-                fs::write(&config_file, &result.content).map_err(|e| {
+                fs::write(config_file, &result.content).map_err(|e| {
                     ShellSetupError::WriteError {
-                        path: config_file.clone(),
+                        path: config_file.to_path_buf(),
                         source: e,
                     }
                 })?;
@@ -285,7 +362,7 @@ impl ShellIntegration {
                     action,
                     config_file.display()
                 );
-                self.print_activation_instructions(&config_file);
+                self.print_activation_instructions(config_file, yadm_template);
                 return Ok(());
             }
         }
@@ -294,15 +371,15 @@ impl ShellIntegration {
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&config_file)
+            .open(config_file)
             .map_err(|e| ShellSetupError::WriteError {
-                path: config_file.clone(),
+                path: config_file.to_path_buf(),
                 source: e,
             })?;
 
         file.write_all(self.full_block().as_bytes())
             .map_err(|e| ShellSetupError::WriteError {
-                path: config_file.clone(),
+                path: config_file.to_path_buf(),
                 source: e,
             })?;
 
@@ -311,7 +388,7 @@ impl ShellIntegration {
             "✓".green(),
             config_file.display()
         );
-        self.print_activation_instructions(&config_file);
+        self.print_activation_instructions(config_file, yadm_template);
 
         Ok(())
     }
@@ -419,8 +496,26 @@ impl ShellIntegration {
     }
 
     /// Prints activation instructions after shell integration is added or updated.
-    fn print_activation_instructions(&self, config_file: &Path) {
+    ///
+    /// For a yadm template the rendered config must be regenerated first — you
+    /// cannot `source` the template directly (it may contain template syntax).
+    fn print_activation_instructions(&self, config_file: &Path, yadm_template: bool) {
         println!();
+        if yadm_template {
+            println!("This is a yadm template. To activate, render and reload:");
+            println!("  {}", "yadm alt".cyan());
+            println!("  {} ~/<your rendered shell config>", "source".cyan());
+            println!();
+            println!("Or open a new terminal window after rendering.");
+            if !self.commands.is_empty() {
+                println!();
+                println!("Available commands:");
+                for cmd in &self.commands {
+                    println!("  {} - {}", cmd.name.yellow(), cmd.description);
+                }
+            }
+            return;
+        }
         println!("To activate, run:");
         println!("  {} {}", "source".cyan(), config_file.display());
         println!();
@@ -433,6 +528,92 @@ impl ShellIntegration {
                 println!("  {} - {}", cmd.name.yellow(), cmd.description);
             }
         }
+    }
+}
+
+/// Where shell integration should actually be written for a given rendered
+/// config path, accounting for [yadm](https://yadm.io)-managed dotfiles.
+///
+/// yadm renders files like `~/.zshrc` from alternates/templates named
+/// `~/.zshrc##template.default` (and similar). Writing to the *rendered* file
+/// is a footgun: the next `yadm alt` overwrites it, silently discarding the
+/// shell integration. This enum lets [`resolve_config_target`] redirect writes
+/// to the template instead, or refuse when the right target is ambiguous.
+#[derive(Debug, PartialEq, Eq)]
+enum ConfigTarget {
+    /// Not yadm-managed: write directly to this file (the normal case).
+    Direct(PathBuf),
+    /// yadm-managed via a single template: write the integration here, then
+    /// the user re-renders to apply it to the rendered config.
+    YadmTemplate(PathBuf),
+    /// yadm-managed but with ambiguous alternates (multiple templates, or a
+    /// non-template alternate whose applicability depends on yadm's class/OS
+    /// logic). We can't safely guess which file to edit.
+    YadmAmbiguous {
+        /// The rendered config path that would normally be written.
+        rendered: PathBuf,
+        /// The yadm alternate files found alongside it.
+        candidates: Vec<PathBuf>,
+    },
+}
+
+/// Resolves where to write shell integration for `rendered_path`, detecting
+/// yadm alternate files (`<name>##...`) in the same directory.
+///
+/// Rules:
+/// - No alternates → [`ConfigTarget::Direct`].
+/// - Exactly one alternate and it is a `##template*` file →
+///   [`ConfigTarget::YadmTemplate`].
+/// - Any other combination of alternates → [`ConfigTarget::YadmAmbiguous`].
+fn resolve_config_target(rendered_path: &Path) -> ConfigTarget {
+    let direct = || ConfigTarget::Direct(rendered_path.to_path_buf());
+
+    let (Some(parent), Some(file_name)) = (rendered_path.parent(), rendered_path.file_name())
+    else {
+        return direct();
+    };
+    let prefix = format!("{}##", file_name.to_string_lossy());
+
+    // Collect yadm alternates (`<name>##...`) sitting next to the rendered file,
+    // tracking which ones are `##template*` files we could edit in place.
+    let mut alternates: Vec<PathBuf> = Vec::new();
+    let mut templates: Vec<PathBuf> = Vec::new();
+    let Ok(entries) = fs::read_dir(parent) else {
+        return direct();
+    };
+    for entry in entries.flatten() {
+        let entry_name = entry.file_name();
+        let Some(suffix) = entry_name
+            .to_string_lossy()
+            .strip_prefix(&prefix)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let path = entry.path();
+        // yadm reserves `template` as the alternate keyword (e.g.
+        // `##template`, `##template.default`, `##template.j2`).
+        if suffix.split('.').next() == Some("template") {
+            templates.push(path.clone());
+        }
+        alternates.push(path);
+    }
+
+    if alternates.is_empty() {
+        return direct();
+    }
+
+    // Only auto-edit when there is exactly one alternate and it is a template;
+    // anything else (multiple templates, or a host/OS/class alternate yadm
+    // selects by rules we don't evaluate) is ambiguous.
+    if alternates.len() == 1 && templates.len() == 1 {
+        return ConfigTarget::YadmTemplate(templates.into_iter().next().expect("len checked"));
+    }
+
+    alternates.sort();
+    ConfigTarget::YadmAmbiguous {
+        rendered: rendered_path.to_path_buf(),
+        candidates: alternates,
     }
 }
 
@@ -478,7 +659,7 @@ alias ttv='tt --verbose'
     #[test]
     fn test_replace_block() {
         let integration = create_test_integration();
-        let old_contents = r#"# Some config
+        let old_contents = r"# Some config
 export FOO=bar
 
 # testtool - Test Tool shell integration
@@ -490,7 +671,7 @@ function tt() {
 
 # More config
 export BAZ=qux
-"#;
+";
         let result = integration.replace_block(old_contents);
 
         // Should not need warning (end marker was found)
@@ -509,7 +690,7 @@ export BAZ=qux
     #[test]
     fn test_upgrade_old_installation() {
         let integration = create_test_integration();
-        let old_contents = r#"# Some config
+        let old_contents = r"# Some config
 export FOO=bar
 
 # testtool - Test Tool shell integration
@@ -521,7 +702,7 @@ alias ttv='tt --verbose'
 
 # More config
 export BAZ=qux
-"#;
+";
         let result = integration.upgrade_old_installation(old_contents);
 
         // Should not need warning (old end marker was found)
@@ -563,7 +744,7 @@ export BAZ=qux
     #[test]
     fn test_upgrade_old_format_at_file_start() {
         let integration = create_test_integration();
-        let old_contents = r#"# testtool - Test Tool shell integration
+        let old_contents = r"# testtool - Test Tool shell integration
 # Added by: testtool --shell-setup
 function tt() {
     OLD CONTENT
@@ -572,7 +753,7 @@ alias ttv='tt --verbose'
 
 # Other config
 export PATH=/usr/bin
-"#;
+";
         let result = integration.upgrade_old_installation(old_contents);
 
         // Should not need warning (old end marker was found)
@@ -590,7 +771,7 @@ export PATH=/usr/bin
     #[test]
     fn test_upgrade_old_format_at_file_end() {
         let integration = create_test_integration();
-        let old_contents = r#"# Other config
+        let old_contents = r"# Other config
 export PATH=/usr/bin
 
 # testtool - Test Tool shell integration
@@ -598,7 +779,7 @@ export PATH=/usr/bin
 function tt() {
     OLD CONTENT
 }
-alias ttv='tt --verbose'"#;
+alias ttv='tt --verbose'";
         let result = integration.upgrade_old_installation(old_contents);
 
         // Should not need warning (old end marker was found)
@@ -616,12 +797,12 @@ alias ttv='tt --verbose'"#;
     #[test]
     fn test_upgrade_old_format_only_block() {
         let integration = create_test_integration();
-        let old_contents = r#"# testtool - Test Tool shell integration
+        let old_contents = r"# testtool - Test Tool shell integration
 # Added by: testtool --shell-setup
 function tt() {
     OLD CONTENT
 }
-alias ttv='tt --verbose'"#;
+alias ttv='tt --verbose'";
         let result = integration.upgrade_old_installation(old_contents);
 
         // Should not need warning (old end marker was found)
@@ -645,12 +826,12 @@ alias ttv='tt --verbose'"#;
         .with_old_end_marker("FIRST_MARKER")
         .with_old_end_marker("SECOND_MARKER");
 
-        let old_contents = r#"# testtool - Test Tool shell integration
+        let old_contents = r"# testtool - Test Tool shell integration
 OLD LINE 1
 FIRST_MARKER
 SHOULD_BE_PRESERVED
 SECOND_MARKER
-"#;
+";
         let result = integration.upgrade_old_installation(old_contents);
 
         // Should not need warning (old end marker was found)
@@ -695,7 +876,7 @@ export BAZ=qux
     #[test]
     fn test_replace_block_at_file_start() {
         let integration = create_test_integration();
-        let old_contents = r#"# testtool - Test Tool shell integration
+        let old_contents = r"# testtool - Test Tool shell integration
 # Added by: testtool --shell-setup
 function tt() {
     OLD CONTENT
@@ -704,7 +885,7 @@ function tt() {
 
 # Other config
 export PATH=/usr/bin
-"#;
+";
         let result = integration.replace_block(old_contents);
 
         // Should not need warning (end marker was found)
@@ -720,7 +901,7 @@ export PATH=/usr/bin
     #[test]
     fn test_replace_block_at_file_end() {
         let integration = create_test_integration();
-        let old_contents = r#"# Other config
+        let old_contents = r"# Other config
 export PATH=/usr/bin
 
 # testtool - Test Tool shell integration
@@ -728,7 +909,7 @@ export PATH=/usr/bin
 function tt() {
     OLD CONTENT
 }
-# End testtool shell integration"#;
+# End testtool shell integration";
         let result = integration.replace_block(old_contents);
 
         // Should not need warning (end marker was found)
@@ -744,12 +925,12 @@ function tt() {
     #[test]
     fn test_replace_block_only_block() {
         let integration = create_test_integration();
-        let old_contents = r#"# testtool - Test Tool shell integration
+        let old_contents = r"# testtool - Test Tool shell integration
 # Added by: testtool --shell-setup
 function tt() {
     OLD CONTENT
 }
-# End testtool shell integration"#;
+# End testtool shell integration";
         let result = integration.replace_block(old_contents);
 
         // Should not need warning (end marker was found)
@@ -801,7 +982,7 @@ export FOO=bar
     #[test]
     fn test_replace_is_idempotent() {
         let integration = create_test_integration();
-        let initial = r#"# Config
+        let initial = r"# Config
 export FOO=bar
 
 # testtool - Test Tool shell integration
@@ -812,7 +993,7 @@ function tt() {
 # End testtool shell integration
 
 export BAZ=qux
-"#;
+";
         let first_replace = integration.replace_block(initial);
         let second_replace = integration.replace_block(&first_replace.content);
 
@@ -826,7 +1007,7 @@ export BAZ=qux
     #[test]
     fn test_upgrade_then_replace_is_idempotent() {
         let integration = create_test_integration();
-        let old_format = r#"# Config
+        let old_format = r"# Config
 export FOO=bar
 
 # testtool - Test Tool shell integration
@@ -837,7 +1018,7 @@ function tt() {
 alias ttv='tt --verbose'
 
 export BAZ=qux
-"#;
+";
         // First upgrade from old format
         let upgraded = integration.upgrade_old_installation(old_format);
         // Then replace (simulating running --shell-setup again)
@@ -875,7 +1056,7 @@ export BAZ=qux
     #[test]
     fn test_preserves_comments_around_block() {
         let integration = create_test_integration();
-        let old_contents = r#"# === MY CUSTOM SECTION ===
+        let old_contents = r"# === MY CUSTOM SECTION ===
 export FOO=bar
 # === END CUSTOM ===
 
@@ -885,7 +1066,7 @@ OLD
 
 # === ANOTHER SECTION ===
 export BAZ=qux
-"#;
+";
         let result = integration.replace_block(old_contents);
 
         assert!(result.content.contains("# === MY CUSTOM SECTION ==="));
@@ -1006,46 +1187,6 @@ alias ll='ls -la'
         assert!(result.content.contains("# End cwt shell integration"));
     }
 
-    #[test]
-    fn test_prcp_old_format_upgrade() {
-        // Simulates the actual old prcp format (before end marker was added)
-        let integration = ShellIntegration::new(
-            "prcp",
-            "Progress Copy",
-            r#"
-function prmv() {
-    prcp --rm "$@"
-}
-"#,
-        )
-        .with_old_end_marker(r#"prcp --rm "$@""#);
-
-        let old_zshrc = r#"# User config
-export EDITOR=vim
-
-# prcp - Progress Copy shell integration
-# Added by: prcp --shell-setup
-function prmv() {
-    prcp --rm "$@"
-}
-
-# Other aliases
-alias ll='ls -la'
-"#;
-        let result = integration.upgrade_old_installation(old_zshrc);
-
-        // Should not need warning (old end marker was found)
-        assert!(!result.needs_warning);
-        // Should preserve user config before
-        assert!(result.content.contains("export EDITOR=vim"));
-        // Should preserve other aliases after
-        assert!(result.content.contains("alias ll='ls -la'"));
-        // Should have end marker now
-        assert!(result.content.contains("# End prcp shell integration"));
-        // Should have new function
-        assert!(result.content.contains("function prmv()"));
-    }
-
     // ========== Safety tests ==========
 
     #[test]
@@ -1105,40 +1246,123 @@ alias ll='ls -la'
     #[test]
     fn test_different_tools_dont_interfere() {
         let cwt = ShellIntegration::new("cwt", "Change Worktree", "\nfunction wt() { cwt; }\n");
-        let prcp = ShellIntegration::new(
-            "prcp",
-            "Progress Copy",
-            "\nfunction prmv() { prcp --rm; }\n",
-        );
+        let nwt =
+            ShellIntegration::new("nwt", "New Worktree", "\nfunction nwt() { command nwt; }\n");
 
-        let file_with_both = r#"# cwt - Change Worktree shell integration
+        let file_with_both = r"# cwt - Change Worktree shell integration
 function wt() { OLD_CWT; }
 # End cwt shell integration
 
-# prcp - Progress Copy shell integration
-function prmv() { OLD_PRCP; }
-# End prcp shell integration
-"#;
-        // Replacing cwt should not affect prcp
+# nwt - New Worktree shell integration
+function nwt() { OLD_NWT; }
+# End nwt shell integration
+";
+        // Replacing cwt should not affect nwt
         let after_cwt_replace = cwt.replace_block(file_with_both);
 
         assert!(!after_cwt_replace.needs_warning);
         assert!(after_cwt_replace.content.contains("function wt() { cwt; }"));
         assert!(after_cwt_replace
             .content
-            .contains("function prmv() { OLD_PRCP; }"));
+            .contains("function nwt() { OLD_NWT; }"));
         assert!(!after_cwt_replace.content.contains("OLD_CWT"));
 
-        // Replacing prcp should not affect cwt
-        let after_prcp_replace = prcp.replace_block(&after_cwt_replace.content);
+        // Replacing nwt should not affect cwt
+        let after_both_replaces = nwt.replace_block(&after_cwt_replace.content);
 
-        assert!(!after_prcp_replace.needs_warning);
-        assert!(after_prcp_replace
+        assert!(!after_both_replaces.needs_warning);
+        assert!(after_both_replaces
             .content
             .contains("function wt() { cwt; }"));
-        assert!(after_prcp_replace
+        assert!(after_both_replaces
             .content
-            .contains("function prmv() { prcp --rm; }"));
-        assert!(!after_prcp_replace.content.contains("OLD_PRCP"));
+            .contains("function nwt() { command nwt; }"));
+        assert!(!after_both_replaces.content.contains("OLD_NWT"));
+    }
+
+    // ========== yadm-aware config target resolution ==========
+
+    /// Creates a process-unique temp dir so parallel test runs don't clobber
+    /// each other (a `bacon` loop runs the same tests concurrently).
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("shellsetup-{tag}-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create unique temp dir");
+        dir
+    }
+
+    #[test]
+    fn resolve_target_is_direct_without_yadm_alternates() {
+        let dir = unique_temp_dir("direct");
+        let rc = dir.join(".zshrc");
+        fs::write(&rc, "# config\n").unwrap();
+
+        assert_eq!(resolve_config_target(&rc), ConfigTarget::Direct(rc.clone()));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_target_uses_template_when_single_yadm_template_present() {
+        let dir = unique_temp_dir("template");
+        let rc = dir.join(".zshrc");
+        let template = dir.join(".zshrc##template.default");
+        fs::write(&rc, "# rendered\n").unwrap();
+        fs::write(&template, "# template\n").unwrap();
+
+        assert_eq!(
+            resolve_config_target(&rc),
+            ConfigTarget::YadmTemplate(template)
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_target_is_ambiguous_with_multiple_templates() {
+        let dir = unique_temp_dir("multi");
+        let rc = dir.join(".zshrc");
+        let default = dir.join(".zshrc##template.default");
+        let work = dir.join(".zshrc##template.work");
+        fs::write(&rc, "x").unwrap();
+        fs::write(&default, "x").unwrap();
+        fs::write(&work, "x").unwrap();
+
+        match resolve_config_target(&rc) {
+            ConfigTarget::YadmAmbiguous {
+                rendered,
+                candidates,
+            } => {
+                assert_eq!(rendered, rc);
+                assert_eq!(candidates.len(), 2);
+            }
+            other => panic!("expected YadmAmbiguous, got {other:?}"),
+        }
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_target_is_ambiguous_with_nontemplate_alternate() {
+        // e.g. `.zshrc##os.Darwin`: yadm selects it by host/class, so we can't
+        // know it applies here. Refuse rather than guess.
+        let dir = unique_temp_dir("alt");
+        let rc = dir.join(".zshrc");
+        let alt = dir.join(".zshrc##os.Darwin");
+        fs::write(&rc, "x").unwrap();
+        fs::write(&alt, "x").unwrap();
+
+        match resolve_config_target(&rc) {
+            ConfigTarget::YadmAmbiguous { rendered, .. } => {
+                assert_eq!(rendered, rc);
+            }
+            other => panic!("expected YadmAmbiguous, got {other:?}"),
+        }
+
+        fs::remove_dir_all(&dir).ok();
     }
 }

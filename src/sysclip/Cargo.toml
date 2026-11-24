@@ -1,0 +1,25 @@
+[package]
+name = "sysclip"
+version = "0.1.0"
+edition.workspace = true
+description = "The clipboard of a tool, with the order rule for a mosh-rs session"
+license = "MIT"
+
+[dependencies]
+arboard.workspace = true
+childenv.workspace = true
+thiserror.workspace = true
+# Quotes the message of the refusing `pbpaste` in `testing`. Optional, so a
+# build without the `testing` feature holds none of it.
+shellquote = { workspace = true, optional = true }
+
+[features]
+# The fake `pbcopy` and `pbpaste` of a mosh-rs session, for the tests of other
+# crates. Take it as a dev-dependency only.
+testing = ["dep:shellquote"]
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

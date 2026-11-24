@@ -1,0 +1,17 @@
+. package com.example.greet;
+. 
+. import static org.junit.jupiter.api.Assertions.assertEquals;
+. 
+. import org.junit.jupiter.api.Test;
+. 
+. class Multibyte {
+.     String greet() {
+.         return "こんにちは";
+.     }
+. 
+T     @Test
+T     void greetsInJapanese() {
+T         // 挨拶を確かめる
+T         assertEquals("こんにちは", greet());
+T     }
+. }

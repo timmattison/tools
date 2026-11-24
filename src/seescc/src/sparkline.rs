@@ -1,0 +1,463 @@
+//! Pure rendering of a numeric series into a one-line Unicode block sparkline.
+//!
+//! sccache history is just a sequence of per-bucket metric values (produced by
+//! the [`crate::history`] ring), and the watch view wants to show each metric's
+//! *shape* over the window in a single row of glyphs. This module is the bottom
+//! of that pipeline: a pure `&[f64] -> String` with no state, no clock, and no
+//! terminal — so it is trivially unit-testable and can never drift with the rest
+//! of the UI.
+//!
+//! The series is **auto-scaled to its own min..max** rather than to any fixed
+//! axis, because the metrics differ by orders of magnitude (a handful of cache
+//! errors versus thousands of compile requests) and the point of the sparkline
+//! is the *trend*, not the absolute height. Scaling each series independently
+//! means the smallest value in the window always sits at the baseline glyph and
+//! the largest always reaches the tallest bar (`▇` — one eighth shy of a full
+//! cell, so adjacent rows never visually merge), keeping the shape visible
+//! regardless of magnitude. A flat series (every value equal, including
+//! all-zero) has no shape and renders as an unbroken row of baseline glyphs.
+
+use colored::{ColoredString, Colorize};
+
+use crate::config::MetricKind;
+
+/// The seven block-drawing glyphs used for a sparkline, lowest bar to highest.
+///
+/// Index 0 (`▁`) is the baseline a min value or an inactive bucket renders at;
+/// index 6 (`▇`) is the tallest bar a max value reaches. The full block `█` is
+/// deliberately excluded: it fills its entire character cell, so a maxed bar
+/// would touch the bottom of whatever the row above renders and the two would
+/// read as one merged shape — capping at `▇` keeps the top eighth of every cell
+/// clear. Each glyph is exactly one `char` and display width 1, so a sparkline's
+/// column count equals its glyph count — no `unicode-width` measurement is
+/// needed at this layer.
+const SPARK_GLYPHS: [char; 7] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇'];
+
+/// Map a whole-number scale `level` in `0.0..=6.0` to its block glyph.
+///
+/// The level comes out of [`sparkline`]'s interpolation already `round`ed and
+/// clamped to the valid range, so this is a direct lookup — implemented by
+/// scanning for the matching integer index rather than a lossy `f64 as usize`
+/// cast, which clippy's `cast_possible_truncation`/`cast_sign_loss` lints forbid.
+/// Any out-of-band level (which the clamp makes unreachable) falls back to the
+/// tallest glyph, so the function is total and never panics.
+fn glyph_for_level(level: f64) -> char {
+    SPARK_GLYPHS
+        .iter()
+        .enumerate()
+        .find(|(index, _)| (*index as f64) == level)
+        .map_or(SPARK_GLYPHS[SPARK_GLYPHS.len() - 1], |(_, &glyph)| glyph)
+}
+
+/// Render `values` as a sparkline — one glyph per value, auto-scaled to the
+/// series' own `min..max`.
+///
+/// Each value `v` maps to a glyph index by linear interpolation across the
+/// series' observed range, rounded to the nearest of the seven levels:
+///
+/// ```text
+/// index = ((v - min) / (max - min) * 6.0).round()   clamped to 0..=6
+/// ```
+///
+/// This pins the two endpoints exactly: the series minimum lands at index 0
+/// (`▁`) and the maximum at index 6 (`▇`) whenever `min < max` — never the full
+/// block `█`, which would touch the cell top and visually merge into the row
+/// above (see [`SPARK_GLYPHS`]). Rounding (rather than truncating) keeps the
+/// mapping symmetric — a value at the mid-point of the range lands on a mid
+/// glyph instead of biasing low.
+///
+/// Degenerate inputs are handled defensively so the watch loop can never panic on
+/// live data:
+///
+/// - **Empty slice** → empty string (nothing to draw).
+/// - **All values equal** (including all-zero) → every glyph is the baseline
+///   `▁`; there is no range to scale against, so a flat row is correct and the
+///   `(max - min)` divisor is never exercised.
+/// - **Single value** → a single `▁`; a one-point series has no shape.
+/// - **Non-finite values** (`NaN`, `±inf`) → that position renders at the
+///   baseline `▁`. Callers are expected to pass finite data; this is
+///   belt-and-braces so a stray non-finite value degrades gracefully instead of
+///   propagating into a panic or a garbage index.
+///
+/// The result is a `String` of glyph characters only — no leading/trailing
+/// whitespace and no newline.
+///
+/// Private: callers outside this module go through [`metric_sparkline`], which
+/// layers the kind-aware direction coloring on top of this plain scale.
+fn sparkline(values: &[f64]) -> String {
+    // The top index into SPARK_GLYPHS, as an f64 for the interpolation below. The
+    // seven glyphs span indices 0..=6, so a value's fractional position in the
+    // range scales across `0.0..=6.0` and rounds to one of those seven levels.
+    const TOP_INDEX: f64 = (SPARK_GLYPHS.len() - 1) as f64;
+
+    // Only finite values participate in the scale: a NaN/±inf would poison min/max
+    // (and any comparison with it is false), so they are excluded from range
+    // detection and later rendered at the baseline.
+    let (min, max) = values
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+            (lo.min(v), hi.max(v))
+        });
+
+    // No finite range to scale against — either the series is empty/all-non-finite
+    // (min stays +inf, max stays -inf, so `range` is -inf) or it is flat
+    // (min == max, so `range` is 0). Either way there is no shape, so every position
+    // collapses to the baseline glyph. Returning here also guarantees the
+    // `(max - min)` divisor below is strictly positive. `range` is finite-minus
+    // -finite (or the ±inf no-finite case), never NaN, so `<= 0.0` is well-defined.
+    let range = max - min;
+    if range <= 0.0 {
+        return SPARK_GLYPHS[0].to_string().repeat(values.len());
+    }
+
+    values
+        .iter()
+        .map(|&v| {
+            if !v.is_finite() {
+                // Defensive: a stray non-finite value can't be scaled, so it
+                // degrades to the baseline rather than producing a garbage index.
+                return SPARK_GLYPHS[0];
+            }
+            // Linear interpolation across the observed range, rounded to the
+            // nearest of the seven levels. `round` is half-away-from-zero; clamping
+            // the *float* to `0.0..=TOP_INDEX` before any integer conversion folds
+            // away both endpoints' floating-point overshoot and keeps the value
+            // non-negative — so the resulting index is provably in `0..=6` without a
+            // lossy `f64 as usize` cast. The level is whole after `round`, so the
+            // glyph lookup just scans for the matching index.
+            let level = ((v - min) / range * TOP_INDEX)
+                .round()
+                .clamp(0.0, TOP_INDEX);
+            glyph_for_level(level)
+        })
+        .collect()
+}
+
+/// Render the sparkline for a metric of `kind`: the glyphs from [`sparkline`],
+/// with rate metrics direction-colored per bucket.
+///
+/// This is the kind-aware entrance the watch view draws spark cells through.
+/// [`MetricKind::Rate`] (the hit rate) is a *quality* signal, so each of its
+/// glyphs is colored by where the windowed rate moved relative to the previous
+/// bucket — green for a rise, red for a fall, the terminal's default color for
+/// flat / first / non-finite buckets (see [`metric_spark_cells`]). Counts and
+/// sizes render plain: their movement is activity, not quality, so painting it
+/// green/red would imply a judgment the data doesn't carry.
+///
+/// The coloring wraps each glyph in a [`ColoredString`]; whether that emits
+/// ANSI is the `colored` crate's global decision (TTY detection, `NO_COLOR`,
+/// the force-color override in `main`), so under `NO_COLOR` or a plain pipe
+/// this degrades byte-for-byte to the uncolored glyph row. The glyph sequence
+/// itself is always exactly [`sparkline`]'s output — coloring never adds,
+/// drops, or changes a glyph, which keeps the spark column exactly as many
+/// display columns wide as its budget.
+pub(crate) fn metric_sparkline(kind: MetricKind, values: &[f64]) -> String {
+    metric_spark_cells(kind, values)
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// The typed spark cells behind [`metric_sparkline`], one [`ColoredString`]
+/// per value.
+///
+/// Kept separate from the string assembly so tests can assert each cell's
+/// typed `fgcolor` directly instead of parsing ANSI bytes — the `colored`
+/// crate gates ANSI emission on a process-global override that races under
+/// parallel tests (the same reasoning as [`crate::render::banner_text`]).
+fn metric_spark_cells(kind: MetricKind, values: &[f64]) -> Vec<ColoredString> {
+    let glyphs = sparkline(values);
+    match kind {
+        // Rates color each glyph by its direction vs the previous bucket.
+        // `sparkline` emits exactly one glyph per value, so the zip is total.
+        MetricKind::Rate => glyphs
+            .chars()
+            .zip(trends(values))
+            .map(|(glyph, trend)| trend_cell(glyph, trend))
+            .collect(),
+        // Counts and sizes are plain — movement is activity, not quality.
+        MetricKind::Count | MetricKind::Size => glyphs
+            .chars()
+            .map(|glyph| glyph.to_string().normal())
+            .collect(),
+    }
+}
+
+/// The direction one bucket's value moved relative to its predecessor — the
+/// signal a rate sparkline colors by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Trend {
+    /// The value rose vs the previous bucket.
+    Up,
+    /// The value fell vs the previous bucket.
+    Down,
+    /// No direction: the first bucket (no predecessor), equal neighbors, or a
+    /// comparison involving a non-finite value.
+    Flat,
+}
+
+/// The per-position [`Trend`]s for `values` — element `i` is where `values[i]`
+/// moved relative to `values[i - 1]`. The output length equals `values.len()`.
+///
+/// The first position is [`Trend::Flat`] (nothing to compare against), as is
+/// any comparison where either side is non-finite — a `NaN`/`±inf` renders at
+/// the baseline glyph, so coloring it (or its successor) by "direction" would
+/// paint a movement the chart doesn't actually draw.
+fn trends(values: &[f64]) -> Vec<Trend> {
+    // The previous value, `None` only for the first position. Non-finite
+    // values still become the next comparison's `previous` so the Flat
+    // degradation stays local to the affected pair.
+    let mut previous: Option<f64> = None;
+    values
+        .iter()
+        .map(|&current| {
+            let trend = match previous {
+                Some(prev) if prev.is_finite() && current.is_finite() => {
+                    match current.partial_cmp(&prev) {
+                        Some(std::cmp::Ordering::Greater) => Trend::Up,
+                        Some(std::cmp::Ordering::Less) => Trend::Down,
+                        // Equal neighbors have no direction. (`None` is
+                        // unreachable here — both sides are finite — but Flat
+                        // is the only sane answer anyway.)
+                        _ => Trend::Flat,
+                    }
+                }
+                // First bucket, or a non-finite side: no direction to draw.
+                _ => Trend::Flat,
+            };
+            previous = Some(current);
+            trend
+        })
+        .collect()
+}
+
+/// One spark cell: `glyph` colored by `trend` — green for [`Trend::Up`], red
+/// for [`Trend::Down`], and the terminal's default color for [`Trend::Flat`].
+fn trend_cell(glyph: char, trend: Trend) -> ColoredString {
+    let cell = glyph.to_string();
+    match trend {
+        Trend::Up => cell.green(),
+        Trend::Down => cell.red(),
+        Trend::Flat => cell.normal(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The baseline glyph, named for readability in the assertions below.
+    const BASELINE: char = '▁';
+    /// The tallest glyph on the scale — `▇`, deliberately NOT the full block
+    /// `█`: a full-height bar touches the top of its cell and visually fuses
+    /// with the bottom of whatever is rendered on the row above, so the scale
+    /// caps one eighth short of the cell.
+    const TOP: char = '▇';
+
+    #[test]
+    fn strictly_increasing_seven_values_map_to_all_seven_glyphs_in_order() {
+        // A series that steps evenly from min to max across seven points must hit
+        // each level once, in order: index = round(i/6 * 6) = i for i in 0..=6.
+        // The scale tops out at ▇ — never the full block █, which would touch
+        // the cell top and merge into the row above.
+        let out = sparkline(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(out, "▁▂▃▄▅▆▇");
+    }
+
+    #[test]
+    fn known_mixed_series_maps_by_the_scaling_rule() {
+        // [0, 4, 8]: min = 0, max = 8, range = 8.
+        //   0 -> round(0/8 * 6) = round(0.0) = 0 -> ▁
+        //   4 -> round(4/8 * 6) = round(3.0) = 3 -> ▄
+        //   8 -> round(8/8 * 6) = round(6.0) = 6 -> ▇
+        let out = sparkline(&[0.0, 4.0, 8.0]);
+        assert_eq!(out, "▁▄▇");
+    }
+
+    #[test]
+    fn max_value_renders_top_glyph_never_the_full_block() {
+        // The full block █ fills its entire character cell, so a maxed bar
+        // would touch the bottom of the glyph above it and the two would read
+        // as one merged shape. The scale therefore tops out at ▇ and █ must
+        // never appear in any output.
+        let out = sparkline(&[0.0, 1.0]);
+        assert_eq!(out, "▁▇");
+        assert!(
+            !out.contains('█'),
+            "the tallest bar must not touch the cell top: {out:?}"
+        );
+    }
+
+    #[test]
+    fn all_equal_series_renders_all_baseline_no_panic() {
+        // A flat series has no range to scale against; every glyph is the
+        // baseline and the (max - min) divisor is never exercised (no NaN).
+        let out = sparkline(&[3.0, 3.0, 3.0, 3.0]);
+        assert_eq!(out, "▁▁▁▁");
+        assert!(out.chars().all(|c| c == BASELINE));
+    }
+
+    #[test]
+    fn all_zero_series_renders_all_baseline() {
+        // All-zero is the most common flat case (no activity at all) and must not
+        // divide by zero — every bucket renders at baseline.
+        let out = sparkline(&[0.0, 0.0, 0.0]);
+        assert_eq!(out, "▁▁▁");
+    }
+
+    #[test]
+    fn single_value_is_single_baseline() {
+        // One point has no shape, so it renders at the baseline regardless of
+        // magnitude.
+        assert_eq!(sparkline(&[42.0]), "▁");
+        assert_eq!(sparkline(&[0.0]), "▁");
+    }
+
+    #[test]
+    fn empty_slice_is_empty_string() {
+        assert_eq!(sparkline(&[]), "");
+    }
+
+    #[test]
+    fn min_maps_to_baseline_and_max_maps_to_top_for_any_ranged_series() {
+        // For any series with min < max, the smallest value sits at ▁ and the
+        // largest reaches ▇ (the capped top), irrespective of magnitude or sign.
+        let series = [-5.0, 100.0, 12.5, -5.0, 99.9, 100.0];
+        let out: Vec<char> = sparkline(&series).chars().collect();
+        assert_eq!(out.len(), series.len());
+        // Positions of the global min (-5.0) must be baseline.
+        assert_eq!(out[0], BASELINE);
+        assert_eq!(out[3], BASELINE);
+        // Positions of the global max (100.0) must be the top glyph.
+        assert_eq!(out[1], TOP);
+        assert_eq!(out[5], TOP);
+    }
+
+    #[test]
+    fn large_magnitude_series_still_spans_full_scale() {
+        // Auto-scaling is magnitude-independent: a series in the billions still
+        // pins its own min to ▁ and its own max to ▇.
+        let out: Vec<char> = sparkline(&[1_000_000_000.0, 2_000_000_000.0])
+            .chars()
+            .collect();
+        assert_eq!(out, vec![BASELINE, TOP]);
+    }
+
+    #[test]
+    fn non_finite_values_render_at_baseline_without_panicking() {
+        // Callers guarantee finite input; this is belt-and-braces. A NaN or ±inf
+        // at any position must render at the baseline and never panic or produce
+        // an out-of-range glyph index.
+        let out: Vec<char> = sparkline(&[0.0, f64::NAN, 10.0, f64::INFINITY, f64::NEG_INFINITY])
+            .chars()
+            .collect();
+        assert_eq!(out.len(), 5);
+        // Finite endpoints still scale: 0.0 is the min -> baseline, 10.0 is the
+        // max -> top glyph.
+        assert_eq!(out[0], BASELINE);
+        assert_eq!(out[2], TOP);
+        // The three non-finite positions degrade to baseline.
+        assert_eq!(out[1], BASELINE);
+        assert_eq!(out[3], BASELINE);
+        assert_eq!(out[4], BASELINE);
+    }
+
+    #[test]
+    fn all_non_finite_series_is_all_baseline() {
+        // If every value is non-finite there is no finite range at all; the whole
+        // row must collapse to baseline rather than panic.
+        let out = sparkline(&[f64::NAN, f64::INFINITY, f64::NEG_INFINITY]);
+        assert_eq!(out, "▁▁▁");
+    }
+
+    #[test]
+    fn every_glyph_is_a_known_spark_glyph() {
+        // Defensive invariant: whatever the input, the output only ever contains
+        // glyphs from SPARK_GLYPHS — no stray characters from a rounding bug.
+        let out = sparkline(&[0.0, 1.3, 9.9, 4.0, 7.7, 2.2]);
+        assert!(out.chars().all(|c| SPARK_GLYPHS.contains(&c)));
+    }
+
+    // --- direction-colored rate sparklines --------------------------------
+    //
+    // Color assertions inspect the typed `ColoredString` cells directly (the
+    // same pattern as `render::banner_text`'s test): the `colored` crate gates
+    // ANSI emission on a process-global override that races under parallel
+    // tests, so no test here ever asserts on escape bytes.
+
+    use colored::Color;
+
+    #[test]
+    fn rate_cells_are_green_on_rise_red_on_fall_plain_on_flat_or_first() {
+        // Windowed rate series [0, 50, 50, 25, 100]:
+        //   bucket 0: first bucket, no predecessor -> plain
+        //   bucket 1: 50 > 0,   rate rose          -> green
+        //   bucket 2: 50 == 50, unchanged          -> plain
+        //   bucket 3: 25 < 50,  rate fell          -> red
+        //   bucket 4: 100 > 25, rate rose          -> green
+        let values = [0.0, 50.0, 50.0, 25.0, 100.0];
+        let cells = metric_spark_cells(MetricKind::Rate, &values);
+        let colors: Vec<Option<Color>> = cells.iter().map(|c| c.fgcolor).collect();
+        assert_eq!(
+            colors,
+            vec![
+                None,
+                Some(Color::Green),
+                None,
+                Some(Color::Red),
+                Some(Color::Green),
+            ],
+            "each rate cell must be colored by its direction vs the previous bucket",
+        );
+        // The coloring must not disturb the shape: cell N's text is exactly the
+        // plain scale's glyph N.
+        let glyphs: String = cells.iter().map(|c| c.input.as_str()).collect();
+        assert_eq!(glyphs, sparkline(&values));
+    }
+
+    #[test]
+    fn count_and_size_cells_are_never_direction_colored() {
+        // Direction coloring is a rate-only signal: a counter's per-bucket
+        // delta or a size's absolute value going up is not inherently "good"
+        // or "bad", so Count and Size cells stay uncolored regardless of shape.
+        let values = [0.0, 50.0, 25.0, 100.0];
+        for kind in [MetricKind::Count, MetricKind::Size] {
+            let cells = metric_spark_cells(kind, &values);
+            assert_eq!(cells.len(), values.len());
+            assert!(
+                cells.iter().all(|c| c.fgcolor.is_none()),
+                "{kind:?} cells must carry no direction color",
+            );
+        }
+    }
+
+    #[test]
+    fn rate_cells_with_non_finite_neighbors_stay_plain() {
+        // hit_rate never emits NaN, but the cells must degrade gracefully: a
+        // comparison of (or against) a non-finite value has no direction, so
+        // those cells stay plain rather than guessing a color.
+        let values = [50.0, f64::NAN, 60.0, f64::INFINITY, 40.0];
+        let cells = metric_spark_cells(MetricKind::Rate, &values);
+        assert_eq!(cells.len(), values.len());
+        assert!(
+            cells.iter().all(|c| c.fgcolor.is_none()),
+            "non-finite comparisons must not produce a direction color",
+        );
+    }
+
+    #[test]
+    fn metric_sparkline_renders_the_same_glyphs_as_the_plain_scale() {
+        // Whatever the global color mode, the glyph sequence (ANSI filtered out
+        // by keeping only SPARK_GLYPHS chars) must match the plain scale for
+        // every kind — coloring may wrap glyphs, never add, drop, or change
+        // them. This is what keeps the spark column exactly budget glyphs wide.
+        let values = [0.0, 50.0, 25.0, 100.0];
+        for kind in [MetricKind::Count, MetricKind::Rate, MetricKind::Size] {
+            let spark = metric_sparkline(kind, &values);
+            let glyphs: String = spark.chars().filter(|c| SPARK_GLYPHS.contains(c)).collect();
+            assert_eq!(glyphs, sparkline(&values), "glyphs must survive {kind:?}");
+        }
+    }
+}

@@ -1,12 +1,26 @@
 # R2 Bucket Cleaner
 
-A Rust CLI tool that lists and optionally clears all objects from a Cloudflare R2 bucket. This tool uses `wrangler` under the hood to perform the operations, so you need to have `wrangler` installed and configured.
+A Rust CLI tool that lists and optionally clears all objects from a Cloudflare R2 bucket, and can delete the bucket itself once it's empty. It talks to R2's S3-compatible endpoint via `aws-sdk-s3` — no `wrangler` required.
 
 ## Prerequisites
 
 - Rust (latest stable version)
-- `wrangler` CLI tool installed and authenticated (`npm install -g wrangler`)
-- Valid Cloudflare credentials configured in wrangler
+- R2 API credentials (account id + S3-compatible access key id + secret access key)
+
+### Credentials
+
+The tool loads credentials from the first source that satisfies all three values:
+
+1. **Environment variables** (all three must be set and non-empty):
+   - `R2_ACCOUNT_ID`
+   - `R2_ACCESS_KEY_ID`
+   - `R2_SECRET_ACCESS_KEY`
+2. **1Password via [op-cache](../op-cache)**, from the item `R2 Credentials` in the `Private` vault:
+   - `op://Private/R2 Credentials/R2_ACCOUNT_ID`
+   - `op://Private/R2 Credentials/R2_ACCESS_KEY_ID`
+   - `op://Private/R2 Credentials/R2_SECRET_ACCESS_KEY`
+
+Generate R2 access keys under *R2 → Manage API Tokens* in the Cloudflare dashboard.
 
 ## Installation
 
@@ -19,7 +33,7 @@ The binary will be available at `target/release/r2-bucket-cleaner`.
 ## Usage
 
 ```bash
-# List all objects in a bucket
+# List the first page of objects in a bucket
 r2-bucket-cleaner BUCKET_NAME --list-only
 
 # Delete objects in a bucket (with confirmation prompt)
@@ -28,60 +42,55 @@ r2-bucket-cleaner BUCKET_NAME
 # Delete all objects without confirmation
 r2-bucket-cleaner BUCKET_NAME --force
 
-# Automatically continue deleting until all objects are removed (bypass 20 object limit)
+# Automatically continue deleting until every object is removed (bypass preview cap)
 r2-bucket-cleaner BUCKET_NAME --all
 
-# Delete all objects without confirmation and bypass limit
+# Delete all objects without confirmation and without the preview cap
 r2-bucket-cleaner BUCKET_NAME --force --all
+
+# Empty the bucket and then delete the bucket itself
+r2-bucket-cleaner BUCKET_NAME --delete-bucket --all
+
+# Delete an empty (or emptied) bucket without any prompts
+r2-bucket-cleaner BUCKET_NAME -d --force --all
 ```
 
 ## Options
 
 - `BUCKET_NAME`: The name of the R2 bucket to operate on (required)
 - `-l, --list-only`: Only list objects, don't delete them
-- `-f, --force`: Skip confirmation prompt and delete all objects
-- `-a, --all`: Automatically continue until all objects are deleted (bypass 20 object limit)
+- `-f, --force`: Skip confirmation prompts and delete without asking
+- `-a, --all`: Automatically continue until all objects are deleted (bypass the 20-object preview cap)
+- `-d, --delete-bucket`: After emptying, delete the bucket itself (conflicts with `--list-only`)
 - `-h, --help`: Print help information
 - `-V, --version`: Print version information
 
 ## Safety
 
 By default, the tool will:
-1. List all objects in the bucket
+1. List a preview of objects in the bucket (up to 20)
 2. Show you the count of objects to be deleted
 3. Ask for confirmation before proceeding with deletion
 
-Use the `--force` flag with caution as it will delete all objects without confirmation.
+With `--delete-bucket`, the confirmation prompt's wording is updated to make it clear the bucket itself will also be removed.
+
+Use the `--force` flag with caution — it suppresses every confirmation, including the bucket-delete prompt.
 
 ## Performance
 
-The tool deletes objects with the following optimizations:
-- Processes 10 objects concurrently for improved speed
-- Implements retry logic with exponential backoff (200ms, 400ms, 600ms)
-- Shows progress every 20 objects deleted
-- Minimal delays between operations (50ms between batches, 200ms between passes)
+- Listing uses `ListObjectsV2` with a page size of 1000 when `--all` is set.
+- Deletion uses batched `DeleteObjects` — up to 1000 keys per request.
+- A progress bar tracks batch deletion.
 
-## Known Limitations
+For very large buckets, [rclone with R2](https://developers.cloudflare.com/r2/examples/rclone/) is still a reasonable alternative.
 
-**Wrangler CLI Pagination**: Due to a limitation in the wrangler CLI, only 20 objects can be listed at a time. The tool handles this by:
-- Automatically detecting when there are more objects
-- Using the `--all` flag to automatically continue deleting in batches of 20 until all objects are removed
-- Showing progress after each batch
+## Preview cap
 
-When using the `--all` flag:
-- The tool displays "Found at least 20 objects" instead of an exact count when more objects exist
-- A warning is shown that more files will be deleted than initially listed
-- The detailed file list is skipped to avoid misleading users about the scope of deletion
-
-Without the `--all` flag, you'll need to run the tool multiple times for buckets with more than 20 objects.
-
-For very large buckets (thousands of objects), consider using [rclone with R2](https://developers.cloudflare.com/r2/examples/rclone/) for better performance.
+Without `--all`, the tool shows only the first 20 objects and, for buckets with more, asks you to re-run with `--all` (or re-invoke manually). Pass `--all` to skip the preview cap and delete everything in one run.
 
 ## How it Works
 
-This tool wraps the `wrangler r2` commands to provide a convenient way to clear out R2 buckets. It:
-1. Uses `wrangler r2 object get --remote BUCKET/` to list objects (limited to 20 per request)
-2. Uses `wrangler r2 object delete` to remove objects with retries
-3. Reports any failures at the end
-
-The tool inherits authentication from your existing wrangler configuration (typically stored in `~/Library/Preferences/.wrangler/config/default.toml` on macOS).
+1. Builds an S3 client pointed at `https://<account-id>.r2.cloudflarestorage.com` with `region = "auto"` and the credentials described above.
+2. Calls `ListObjectsV2` to enumerate keys (paginated with a continuation token when `--all` is set).
+3. Calls `DeleteObjects` in batches of up to 1000 keys each to remove them, reporting any per-object failures.
+4. If `--delete-bucket` is set and emptying succeeded, calls `DeleteBucket` to remove the now-empty bucket.

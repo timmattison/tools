@@ -4,7 +4,11 @@
 //! adapt to terminal width changes. It includes:
 //!
 //! - **Terminal width detection**: Synchronous and async utilities for getting
-//!   the current terminal width and watching for resize events.
+//!   the current terminal width and watching for resize events. The width comes
+//!   from the environment when it states one in [`WIDTH_VARIABLE`], and from the
+//!   controlling terminal otherwise. A statement wins, which is the rule POSIX
+//!   gives that variable, and it is how a wrapper reports the terminal it holds
+//!   and how a test states a width of its own.
 //! - **Progress style builders**: Pre-configured styles for common operations
 //!   like file copying, verification, hashing, and batch operations.
 //! - **Dynamic resizing**: Support for updating progress bar styles when the
@@ -47,7 +51,7 @@ mod width;
 
 pub use error::{Result, TermbarError};
 pub use style::ProgressStyleBuilder;
-pub use width::{TerminalWidth, TerminalWidthWatcher};
+pub use width::{TerminalWidth, TerminalWidthWatcher, WIDTH_VARIABLE};
 
 /// Default terminal width when detection fails (80 columns).
 pub const DEFAULT_TERMINAL_WIDTH: u16 = 80;
@@ -391,12 +395,24 @@ fn take_chars_by_width(s: &str, max_width: usize) -> String {
 fn split_filename_extension(filename: &str) -> (&str, Option<&str>) {
     // Handle hidden files: ".bashrc" -> basename=".bashrc", ext=None
     // Handle ".hidden.txt" -> basename=".hidden", ext=Some("txt")
+    //
+    // We scan via char_indices() to find the last '.' that is *not* the leading
+    // dot of a hidden-file name. This avoids slicing strings at arbitrary byte
+    // offsets, which would panic on multi-byte UTF-8 boundaries.
 
-    let search_start = if filename.starts_with('.') { 1 } else { 0 };
+    let mut last_dot_byte: Option<usize> = None;
+    for (byte_idx, ch) in filename.char_indices() {
+        if ch == '.' && byte_idx != 0 {
+            last_dot_byte = Some(byte_idx);
+        }
+    }
 
-    if let Some(dot_pos) = filename[search_start..].rfind('.') {
-        let actual_pos = search_start + dot_pos;
-        let ext = &filename[actual_pos + 1..];
+    if let Some(actual_pos) = last_dot_byte {
+        // `actual_pos` was produced by char_indices() and points to a 1-byte
+        // ASCII '.', so split_at(actual_pos) is on a valid UTF-8 boundary and
+        // the trailing slice starts with '.' (which we skip via the `dot`).
+        let (basename, rest) = filename.split_at(actual_pos);
+        let ext = rest.strip_prefix('.').unwrap_or(rest);
         // Only treat as extension if it's non-empty and reasonable length.
         // We use chars().count() (character count) rather than display width because:
         // 1. Extension length limits are about recognizing file types, not display fitting
@@ -404,7 +420,7 @@ fn split_filename_extension(filename: &str) -> (&str, Option<&str>) {
         //    limits inconsistent (e.g., ".日本語" would be "3 chars but 6 columns")
         // 3. Character count provides predictable behavior across all scripts
         if !ext.is_empty() && ext.chars().count() <= MAX_EXTENSION_LEN {
-            return (&filename[..actual_pos], Some(ext));
+            return (basename, Some(ext));
         }
     }
 
@@ -947,10 +963,16 @@ mod tests {
     fn test_min_basename_chars_minimum_bound() {
         // Verify MIN_BASENAME_CHARS is at least 1 (mirrors compile-time assertion).
         // A value of 0 would produce truncated filenames with no visible content.
-        assert!(
-            MIN_BASENAME_CHARS >= 1,
-            "MIN_BASENAME_CHARS must be at least 1 to ensure visible content"
-        );
+        #[expect(
+            clippy::assertions_on_constants,
+            reason = "intentional change-detector test mirroring the compile-time assertion at the constant's definition"
+        )]
+        {
+            assert!(
+                MIN_BASENAME_CHARS >= 1,
+                "MIN_BASENAME_CHARS must be at least 1 to ensure visible content"
+            );
+        }
     }
 
     #[test]
@@ -1250,7 +1272,11 @@ mod tests {
         );
 
         // Verify the actual truncation produces the expected result
-        // min_with_ext = 1 + 2 + 4 = 7 for .txt
+        // min_with_ext = 1 + 2 + 4 = 7 for .txt; well within u16 range.
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "min_with_ext is the sum of small constants (= 7 here) and cannot exceed u16::MAX"
+        )]
         let result = truncate_filename("longfilename.txt", min_with_ext as u16);
 
         // At min_with_ext, the result should be "l...txt" (1 basename char + ".." + ".txt")

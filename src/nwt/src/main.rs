@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command, ExitStatus, Stdio};
 use std::thread;
@@ -9,10 +9,13 @@ use std::thread;
 use buildinfo::version_string;
 use clap::Parser;
 use names::Generator;
-use repowalker::find_main_repo;
+use repowalker::find_repo_context;
 use serde::Deserialize;
 use shellsetup::ShellIntegration;
 use walkdir::WalkDir;
+
+mod children;
+mod refspec;
 
 /// Directories to skip when copying .env files.
 ///
@@ -44,21 +47,33 @@ const SKIP_DIRECTORIES: &[&str] = &[
     "venv",
 ];
 
+/// Permission bits for `.env` files created in the new worktree (owner read/write only).
+///
+/// `.env` files hold secrets — API keys, database passwords, tokens. They must never
+/// land group- or world-readable, no matter how loose the main worktree's copy is.
+/// `fs::copy` would stamp the source's bits onto the destination, so the mode is set
+/// explicitly at creation time instead.
+#[cfg(unix)]
+const ENV_FILE_MODE: u32 = 0o600;
+
+/// The git configuration key with which a repository states where its worktrees
+/// belong.
+///
+/// The default answer, `{repo-name}-worktrees` beside the main worktree, is
+/// right for a normal repository and for a repository whose git directory is
+/// detached from its work tree. It is not right for every layout, and a
+/// repository with an unusual one says so here. The key lives in git
+/// configuration rather than in `~/.nwt.toml` because the answer belongs to one
+/// repository, and because `yadm` already tracks the repository's own
+/// configuration file.
+const WORKTREES_DIR_KEY: &str = "nwt.worktreesDir";
+
 /// Shell code to be installed by --shell-setup.
 ///
 /// This function wraps the nwt binary and automatically changes to the new worktree
-/// directory after creation. When --tmux is specified, it skips the cd since the
-/// worktree opens in a new tmux window.
+/// directory after creation.
 const SHELL_CODE: &str = r#"
 function nwt() {
-    # If --tmux is specified, don't cd (worktree opens in new tmux window)
-    case " $* " in
-        *" --tmux "* | *" --tmux")
-            command nwt "$@"
-            return $?
-            ;;
-    esac
-
     # Capture the worktree path and cd to it
     local dir
     dir=$(command nwt "$@")
@@ -75,6 +90,16 @@ function nwt() {
 
 /// Returns the default value for copy_env (true).
 fn default_copy_env() -> bool {
+    true
+}
+
+/// Returns the default value for bootstrap_hooks (true).
+fn default_bootstrap_hooks() -> bool {
+    true
+}
+
+/// Returns the default value for link_children (true).
+fn default_link_children() -> bool {
     true
 }
 
@@ -96,6 +121,16 @@ struct NwtConfig {
     #[serde(default = "default_copy_env")]
     copy_env: bool,
 
+    /// Run the package manager's install in a new worktree to regenerate
+    /// git-hook directories (e.g. husky's `.husky/_`). Defaults to true.
+    #[serde(default = "default_bootstrap_hooks")]
+    bootstrap_hooks: bool,
+
+    /// Link each child repository of the main worktree into the new worktree.
+    /// Defaults to true if not specified.
+    #[serde(default = "default_link_children")]
+    link_children: bool,
+
     /// Enable quiet mode by default.
     #[serde(default)]
     quiet: bool,
@@ -103,9 +138,13 @@ struct NwtConfig {
     /// Default command to run after worktree creation.
     run: Option<String>,
 
-    /// Open worktree in tmux by default.
-    #[serde(default)]
-    tmux: bool,
+    /// The removed `tmux` key (#527). nwt no longer supports tmux.
+    ///
+    /// The slot stays so that a config that still sets the key gets a message
+    /// that says why, instead of serde's bare "unknown field `tmux`". The slot
+    /// accepts a value of any type, and `validate_config` refuses every one.
+    #[serde(default, rename = "tmux")]
+    removed_tmux: Option<serde::de::IgnoredAny>,
 }
 
 impl Default for NwtConfig {
@@ -120,10 +159,12 @@ impl Default for NwtConfig {
         Self {
             branch: None,
             checkout: None,
-            copy_env: true, // Must match default_copy_env()
-            quiet: false,   // Must match #[serde(default)] (false)
+            copy_env: true,        // Must match default_copy_env()
+            bootstrap_hooks: true, // Must match default_bootstrap_hooks()
+            link_children: true,   // Must match default_link_children()
+            quiet: false,          // Must match #[serde(default)] (false)
             run: None,
-            tmux: false, // Must match #[serde(default)] (false)
+            removed_tmux: None, // Must match #[serde(default)] (None)
         }
     }
 }
@@ -169,9 +210,10 @@ struct MergedConfig {
     branch: Option<String>,
     checkout: Option<String>,
     copy_env: bool,
+    bootstrap_hooks: bool,
+    link_children: bool,
     quiet: bool,
     run: Option<String>,
-    tmux: bool,
 }
 
 /// Returns the path to the config file.
@@ -203,8 +245,17 @@ fn load_config() -> Result<Option<NwtConfig>, ConfigError> {
     Ok(Some(config))
 }
 
-/// Validates the config file for conflicting options.
+/// The refusal of a config file that still sets the removed `tmux` key.
+const REMOVED_TMUX_KEY_MESSAGE: &str =
+    "nwt no longer supports tmux (removed in #527). Delete the `tmux` key from the config file.";
+
+/// Validates the config file for conflicting options and removed keys.
 fn validate_config(config: &NwtConfig) -> Result<(), ConfigError> {
+    if config.removed_tmux.is_some() {
+        return Err(ConfigError::Validation(
+            REMOVED_TMUX_KEY_MESSAGE.to_string(),
+        ));
+    }
     if config.branch.is_some() && config.checkout.is_some() {
         return Err(ConfigError::Validation(
             "branch and checkout cannot both be set in config file".to_string(),
@@ -219,14 +270,14 @@ fn validate_config(config: &NwtConfig) -> Result<(), ConfigError> {
 ///
 /// # Boolean Flag Merging Design Decision
 ///
-/// Boolean flags (`quiet`, `tmux`) use OR logic: `cli.flag || config.flag`. This means:
-/// - If CLI specifies `--quiet` or `--tmux`, the flag is enabled (CLI wins).
+/// The boolean flag `quiet` uses OR logic: `cli.quiet || config.quiet`. This means:
+/// - If CLI specifies `--quiet`, the flag is enabled (CLI wins).
 /// - If CLI doesn't specify the flag, the config file value is used.
 /// - **Limitation**: Users cannot disable a config file's `true` value from CLI.
 ///
 /// This is an intentional design choice, not a bug:
 /// 1. **Standard CLI convention**: Most tools (git, docker, etc.) use this pattern.
-///    Adding `--no-quiet`/`--no-tmux` flags adds CLI complexity for a rare use case.
+///    Adding a `--no-quiet` flag adds CLI complexity for a rare use case.
 /// 2. **Simple mental model**: "CLI flags enable features" is easier to understand
 ///    than "CLI flags toggle features based on config state".
 /// 3. **Workaround exists**: Users who need to temporarily disable a config default
@@ -248,11 +299,16 @@ fn merge_config(cli: &Cli, config: Option<NwtConfig>) -> MergedConfig {
         // copy_env: config default is true, CLI --no-copy-env disables it.
         // If CLI specifies --no-copy-env, we disable. Otherwise use config value.
         copy_env: !cli.no_copy_env && config.copy_env,
-        // Boolean flags use OR: CLI can enable but not disable config defaults.
+        // bootstrap_hooks: config default is true, CLI --no-bootstrap-hooks disables it.
+        // Same merge shape as copy_env: CLI disables, otherwise use config value.
+        bootstrap_hooks: !cli.no_bootstrap_hooks && config.bootstrap_hooks,
+        // link_children: config default is true, CLI --no-link-children disables it.
+        // Same merge shape as copy_env: CLI disables, otherwise use config value.
+        link_children: !cli.no_link_children && config.link_children,
+        // The boolean flag uses OR: CLI can enable but not disable the config default.
         // See function-level doc comment for rationale.
         quiet: cli.quiet || config.quiet,
         run: cli.run.clone().or(config.run),
-        tmux: cli.tmux || config.tmux,
     }
 }
 
@@ -281,7 +337,7 @@ enum ShellCommandResult {
 /// on other platforms (e.g., wasm32).
 fn run_shell_command(cmd: &str, working_dir: &Path) -> ShellCommandResult {
     #[cfg(unix)]
-    let result = Command::new("sh")
+    let result = childenv::command("sh")
         .args(["-c", cmd])
         .current_dir(working_dir)
         .stdout(Stdio::inherit())
@@ -289,7 +345,7 @@ fn run_shell_command(cmd: &str, working_dir: &Path) -> ShellCommandResult {
         .status();
 
     #[cfg(windows)]
-    let result = Command::new("cmd")
+    let result = childenv::command("cmd")
         .args(["/C", cmd])
         .current_dir(working_dir)
         .stdout(Stdio::inherit())
@@ -334,75 +390,26 @@ fn get_exit_code(status: ExitStatus) -> i32 {
     1
 }
 
-/// Escapes a string for safe use as a Unix shell argument.
-///
-/// Wraps the string in single quotes and escapes any embedded single quotes
-/// using the `'\''` technique (end quote, escaped quote, start quote).
-///
-/// # Platform Note
-///
-/// This function uses Unix single-quote escaping conventions and is only
-/// compiled on Unix platforms. It is used by the `--tmux` code path, which
-/// is itself Unix-only (tmux is not typically available on Windows).
-#[cfg(unix)]
-fn shell_escape(s: &str) -> String {
-    // Wrap in single quotes and escape any embedded single quotes
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
 /// Checks if a string contains any ASCII control characters.
 ///
-/// Control characters (0x00-0x1F and 0x7F) can cause unexpected behavior
-/// in terminal applications like tmux when used in window names.
+/// Control characters are the bytes 0x00-0x1F and 0x7F.
+/// [`SparseExcludeDir::parse`] uses this check to refuse a `--sparse-exclude`
+/// value that holds one, before the value reaches git. A sparse pattern file
+/// holds one pattern on each line, so a line break in a value makes two
+/// patterns.
 ///
-/// # Why ASCII-only, not full Unicode control characters (U+0080-U+009F)?
-///
-/// We only check ASCII control characters because:
-/// 1. The `names` crate generates only lowercase ASCII letters and hyphens,
-///    so Unicode control characters cannot appear in generated names.
-/// 2. Even if a future version allowed Unicode, the C1 control characters
-///    (U+0080-U+009F) are extremely rare in practice and tmux handles them
-///    by displaying replacement characters rather than causing terminal issues.
-/// 3. Using `char::is_control()` would add overhead for a theoretical edge case
-///    that cannot occur with the current name generator.
+/// The check reads bytes, so it finds only the ASCII control characters. A C1
+/// control character (U+0080-U+009F) is two bytes in UTF-8, and neither byte is
+/// a line break, so git reads it as part of one pattern.
 fn contains_control_chars(s: &str) -> bool {
     s.bytes().any(|b| b < 0x20 || b == 0x7F)
-}
-
-/// Checks if the current process is running inside a tmux session.
-///
-/// This is determined by the presence of the `TMUX` environment variable,
-/// which tmux sets automatically when a shell is spawned inside it.
-fn is_running_in_tmux() -> bool {
-    std::env::var("TMUX").is_ok()
-}
-
-/// Checks if the current process is running inside a Zellij session.
-///
-/// This is determined by the presence of the `ZELLIJ` environment variable,
-/// which Zellij sets automatically when a shell is spawned inside it.
-fn is_running_in_zellij() -> bool {
-    std::env::var("ZELLIJ").is_ok()
-}
-
-/// Renames the current Zellij tab to the given name.
-///
-/// This is a best-effort operation — if the rename fails (e.g., `zellij` binary
-/// not found or Zellij IPC error), the error is silently ignored. Tab renaming
-/// is a convenience feature, not worth failing the whole command over.
-fn rename_zellij_tab(name: &str) {
-    let _ = Command::new("zellij")
-        .args(["action", "rename-tab", name])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
 }
 
 /// Exit codes for different failure modes.
 ///
 /// # Exit Code Design Decision: Why --run passes through the command's exit code
 ///
-/// When `--run` is used without `--tmux`, we pass through the command's exit code
+/// When `--run` is used, we pass through the command's exit code
 /// directly. This means exit codes 1-8 from the user's command will shadow nwt's
 /// own error codes. This is intentional:
 ///
@@ -428,8 +435,9 @@ mod exit_codes {
     pub const INVALID_REPO_NAME: i32 = 2;
     /// Repository has no parent directory
     pub const NO_PARENT_DIR: i32 = 3;
-    /// Failed to create worktrees directory
-    pub const DIR_CREATE_FAILED: i32 = 4;
+    // Note: Exit code 4 is reserved (previously DIR_CREATE_FAILED, now
+    // unreachable because `git worktree add` makes the worktrees directory
+    // itself)
     /// Could not find available directory name after max attempts
     pub const NAME_COLLISION: i32 = 5;
     /// Git command failed to execute
@@ -440,21 +448,1056 @@ mod exit_codes {
     pub const INVALID_PATH_ENCODING: i32 = 8;
     /// Command specified with --run failed to execute (not the command's own exit code)
     pub const RUN_COMMAND_FAILED: i32 = 9;
-    /// Tmux command failed to execute
-    pub const TMUX_FAILED: i32 = 10;
-    // Note: Exit code 11 is reserved (previously INVALID_WINDOW_NAME, now a debug assertion)
-    /// Config file error (invalid TOML, validation failed, etc.)
+    // Note: Exit code 10 is reserved (previously TMUX_FAILED; nwt removed its
+    // tmux support in #527)
+    // Note: Exit code 11 is reserved (previously INVALID_WINDOW_NAME, later a
+    // debug assertion that #527 removed)
+    /// Configuration error: an invalid `~/.nwt.toml` (bad TOML, failed
+    /// validation), or a `nwt.worktreesDir` git configuration key that is set to
+    /// an empty value and therefore names no directory.
     pub const CONFIG_ERROR: i32 = 12;
-    /// Tmux option specified but not running inside tmux
-    pub const TMUX_NOT_RUNNING: i32 = 13;
+    // Note: Exit code 13 is reserved (previously TMUX_NOT_RUNNING; nwt removed
+    // its tmux support in #527)
     /// Shell setup failed
     pub const SHELL_SETUP_ERROR: i32 = 14;
+    /// `nwt` refuses a `--sparse-exclude` value: an empty value, an absolute
+    /// path, a path with a `..` component, a value with a control character,
+    /// or a path that git does not track as a directory at the ref. `nwt`
+    /// refuses it before it makes anything.
+    pub const INVALID_SPARSE_EXCLUDE: i32 = 15;
+    /// More than one remote holds the branch that the run makes, and
+    /// `checkout.defaultRemote` picks none of them. `nwt` cannot know which
+    /// branch to track, so it refuses before it makes anything.
+    pub const AMBIGUOUS_REMOTE_BRANCH: i32 = 16;
 }
 
 /// Maximum attempts to find an available directory name before giving up.
 /// The `names` crate has ~100 adjectives and ~200 nouns, giving ~20,000 combinations.
 /// With 10 attempts, the probability of failure when <2000 worktrees exist is negligible.
 const MAX_ATTEMPTS: u32 = 10;
+
+/// The reason `nwt` refuses a `--sparse-exclude` value.
+///
+/// Each lexical variant keeps the value as the user typed it, so the message
+/// names what the user gave and not the normalized form.
+/// [`SparseExcludeError::NotTrackedDirectory`] keeps the normalized directory,
+/// because that is the path that git checked. `nwt` refuses the value before
+/// it makes anything: no directory, no branch, and no `worktrees/<name>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SparseExcludeError {
+    /// The value names no directory. It is empty, or it holds only `.` and `/`.
+    Empty { raw: String },
+    /// The value starts at the root of the file system. A sparse pattern is
+    /// relative to the root of the repository.
+    Absolute { raw: String },
+    /// The value holds a `..` component, so it can point out of the repository.
+    ParentComponent { raw: String },
+    /// The value holds an ASCII control character. A sparse pattern file holds
+    /// one pattern on each line, so a line break in a value makes two patterns.
+    ControlCharacter { raw: String },
+    /// Git does not track the directory as a directory at `at_ref`, the ref
+    /// that the new worktree checks out. The path is missing at that ref, is a
+    /// file there, or is a directory only on disk.
+    NotTrackedDirectory {
+        dir: SparseExcludeDir,
+        at_ref: String,
+    },
+    /// Git cannot read `at_ref`, so it cannot tell what the ref tracks. This is
+    /// a bad ref and not a bad directory. `stderr` holds what git wrote.
+    UnreadableRef { at_ref: String, stderr: String },
+    /// Git did not start, so it cannot tell what the ref tracks. `command`
+    /// names the git subcommand, and `error` holds the reason that the
+    /// operating system gave.
+    GitCommand {
+        command: &'static str,
+        error: String,
+    },
+}
+
+impl fmt::Display for SparseExcludeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty { raw } => write!(
+                f,
+                "--sparse-exclude '{raw}' names no directory. Give a directory path \
+                 relative to the root of the repository."
+            ),
+            Self::Absolute { raw } => write!(
+                f,
+                "--sparse-exclude '{raw}' is an absolute path. Give a path relative to \
+                 the root of the repository."
+            ),
+            Self::ParentComponent { raw } => write!(
+                f,
+                "--sparse-exclude '{raw}' has a '..' component. Give a path inside the \
+                 repository."
+            ),
+            // The escapes keep the message on one line, and they keep an
+            // escape sequence in the value away from the terminal.
+            Self::ControlCharacter { raw } => write!(
+                f,
+                "--sparse-exclude '{}' holds a control character. Give a directory \
+                 name without control characters.",
+                raw.escape_debug()
+            ),
+            Self::NotTrackedDirectory { dir, at_ref } => write!(
+                f,
+                "--sparse-exclude '{}' is not a directory that git tracks at '{}'. Give a \
+                 directory that git tracks at that ref.",
+                dir.as_str(),
+                at_ref.escape_debug()
+            ),
+            Self::UnreadableRef { at_ref, stderr } => write!(
+                f,
+                "git cannot read the ref '{}' to check --sparse-exclude: {stderr}",
+                at_ref.escape_debug()
+            ),
+            Self::GitCommand { command, error } => write!(
+                f,
+                "could not run git {command} to check --sparse-exclude: {error}"
+            ),
+        }
+    }
+}
+
+impl SparseExcludeError {
+    /// The exit code of `nwt` for this refusal.
+    ///
+    /// A refused directory exits [`exit_codes::INVALID_SPARSE_EXCLUDE`]. A ref
+    /// that git cannot read exits [`exit_codes::WORKTREE_FAILED`], because
+    /// `git worktree add` fails for the same ref without the flag, and that is
+    /// the code such a failure gets. A git that does not start exits
+    /// [`exit_codes::GIT_COMMAND_ERROR`], as it does for `git worktree add`.
+    fn exit_code(&self) -> i32 {
+        match self {
+            Self::Empty { .. }
+            | Self::Absolute { .. }
+            | Self::ParentComponent { .. }
+            | Self::ControlCharacter { .. }
+            | Self::NotTrackedDirectory { .. } => exit_codes::INVALID_SPARSE_EXCLUDE,
+            Self::UnreadableRef { .. } => exit_codes::WORKTREE_FAILED,
+            Self::GitCommand { .. } => exit_codes::GIT_COMMAND_ERROR,
+        }
+    }
+}
+
+/// One tracked directory that `--sparse-exclude` keeps out of a new worktree.
+///
+/// The value is relative to the root of the repository, and `/` separates its
+/// components. It has no empty component, no `.` component, no `..` component,
+/// and no trailing `/`. Thus `heavy`, `heavy/`, and `./heavy` give the same
+/// value, and two flags that name one directory are equal.
+///
+/// The field is private, and [`SparseExcludeDir::parse`] is the only
+/// constructor. So every value that reaches git obeys these rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SparseExcludeDir(String);
+
+impl SparseExcludeDir {
+    /// Parse one `--sparse-exclude` value and normalize it.
+    ///
+    /// The check is lexical only. It does not ask git whether the directory is
+    /// tracked.
+    ///
+    /// # Errors
+    ///
+    /// - [`SparseExcludeError::ControlCharacter`] when `raw` holds an ASCII
+    ///   control character. This check comes first.
+    /// - [`SparseExcludeError::Absolute`] when `raw` starts at the root of the
+    ///   file system.
+    /// - [`SparseExcludeError::ParentComponent`] when `raw` holds a `..`
+    ///   component.
+    /// - [`SparseExcludeError::Empty`] when nothing is left after the empty and
+    ///   `.` components are removed.
+    fn parse(raw: &str) -> Result<Self, SparseExcludeError> {
+        if contains_control_chars(raw) {
+            return Err(SparseExcludeError::ControlCharacter {
+                raw: raw.to_owned(),
+            });
+        }
+
+        let path = Path::new(raw);
+        if raw.starts_with('/') || path.has_root() || path.is_absolute() {
+            return Err(SparseExcludeError::Absolute {
+                raw: raw.to_owned(),
+            });
+        }
+
+        // Split on `/` and never on a byte offset, so a multi-byte name stays
+        // intact. An empty component comes from `//` or a trailing `/`.
+        let components: Vec<&str> = raw
+            .split('/')
+            .filter(|component| !component.is_empty() && *component != ".")
+            .collect();
+
+        if components.contains(&"..") {
+            return Err(SparseExcludeError::ParentComponent {
+                raw: raw.to_owned(),
+            });
+        }
+        if components.is_empty() {
+            return Err(SparseExcludeError::Empty {
+                raw: raw.to_owned(),
+            });
+        }
+
+        Ok(Self(components.join("/")))
+    }
+
+    /// The normalized path, relative to the root of the repository.
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The non-cone sparse pattern that excludes this directory.
+    ///
+    /// The pattern is `!/` + the escaped path + `/`. The leading `/` anchors
+    /// the pattern at the root of the repository, so `!/heavy/` does not
+    /// exclude `src/heavy/`. The trailing `/` matches a directory only, so it
+    /// does not exclude a file named `heavy`.
+    fn pattern(&self) -> String {
+        format!("!/{}/", escape_sparse_pattern(self.as_str()))
+    }
+}
+
+/// Escape a path so that a non-cone sparse pattern matches its name literally.
+///
+/// Non-cone sparse patterns use gitignore syntax. A directory named
+/// `we[ir]d dir` written as `!/we[ir]d dir/` excluded nothing, and git gave no
+/// error. So an unescaped name fails silently: `nwt` reports success and writes
+/// the heavy directory.
+///
+/// This function puts `\` before every `\`, `[`, `]`, `*`, and `?`, and before
+/// a `!` or a `#` at the start of `s`. A `!` or a `#` at a different position
+/// is literal in gitignore syntax, so it stays as it is.
+///
+/// This is the one place that holds these rules. Every sparse pattern comes
+/// from [`SparseExcludeDir::pattern`], and that method calls this function.
+fn escape_sparse_pattern(s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len());
+
+    // Walk characters and never bytes, so a multi-byte name stays intact.
+    for (index, character) in s.chars().enumerate() {
+        let always_special = matches!(character, '\\' | '[' | ']' | '*' | '?');
+        let leading_special = index == 0 && matches!(character, '!' | '#');
+        if always_special || leading_special {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+
+    escaped
+}
+
+/// The non-cone sparse pattern that includes every path of the repository.
+///
+/// A non-cone pattern list without an include pattern includes nothing. So the
+/// list starts with this pattern, and each `--sparse-exclude` pattern after it
+/// takes one directory back out.
+const SPARSE_INCLUDE_EVERYTHING: &str = "/*";
+
+/// Parse every `--sparse-exclude` value of the command line, in the order the
+/// user gave.
+///
+/// Two values that name one directory (`heavy` and `heavy/`) give that
+/// directory one time, at the position of the first value. So git gets one
+/// pattern for each directory, and the notice names each directory one time.
+///
+/// The check is lexical only (see [`SparseExcludeDir::parse`]).
+/// [`resolve_sparse_excludes`] calls this, and then asks git about each
+/// directory.
+///
+/// # Errors
+///
+/// Returns the refusal of the first value that [`SparseExcludeDir::parse`]
+/// refuses.
+fn parse_sparse_excludes(raw: &[String]) -> Result<Vec<SparseExcludeDir>, SparseExcludeError> {
+    let mut dirs: Vec<SparseExcludeDir> = Vec::with_capacity(raw.len());
+
+    for value in raw {
+        let dir = SparseExcludeDir::parse(value)?;
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+
+    Ok(dirs)
+}
+
+/// The ref that a new worktree checks out for
+/// [`WorktreeSource::NewBranchAtHead`].
+///
+/// `git worktree add <path> -b <branch>` starts the branch at `HEAD` of the
+/// worktree it runs in, and `nwt` runs it in the main worktree.
+const SPARSE_DEFAULT_REF: &str = "HEAD";
+
+/// Ask git whether it tracks `dir` as a directory at `tree_ref`.
+///
+/// `tree_ref` is the ref that git reads. `at_ref` is the ref as the user reads
+/// it, and each message names it. The two differ for a branch that only a
+/// remote holds (see [`resolve_checkout_ref`] and
+/// [`WorktreeSource::NewBranchTracking`]).
+///
+/// The command is
+/// `git --literal-pathspecs ls-tree -z -d --name-only <tree_ref> -- <dir>`, in
+/// `repo_root`. Git exits 0 for a directory, for a file, and for a missing
+/// path, so only the output gives the answer. Git exits with a status that is
+/// not zero only when it cannot read `tree_ref`.
+///
+/// - A directory prints its own path.
+/// - A file and a missing path print nothing.
+/// - `heavy/` prints the children of `heavy` and not `heavy` itself. So only
+///   an entry that is equal to `dir` counts, and `dir` has no trailing `/`.
+///
+/// `-z` ends each entry with a NUL and stops git from quoting a path that
+/// holds a `\`, a `"`, or a character that is not ASCII. `--literal-pathspecs`
+/// makes sure that git never reads `*`, `?`, or `[` in `dir` as a glob. The
+/// `ls-tree` of git 2.55 does not read a glob without it either, so this flag
+/// is protection against a later git, and no test shows a difference today.
+///
+/// # Errors
+///
+/// - [`SparseExcludeError::UnreadableRef`] when git exits with a status that is
+///   not zero. Git does that for a ref that names no commit and no tree.
+/// - [`SparseExcludeError::GitCommand`] when git does not start.
+fn tracks_directory(
+    repo_root: &Path,
+    at_ref: &str,
+    tree_ref: &str,
+    dir: &SparseExcludeDir,
+) -> Result<bool, SparseExcludeError> {
+    let mut ls_tree = production_git_command(repo_root);
+    ls_tree.args([
+        "--literal-pathspecs",
+        "ls-tree",
+        "-z",
+        "-d",
+        "--name-only",
+        tree_ref,
+        "--",
+        dir.as_str(),
+    ]);
+
+    let output = sparse_check_output(ls_tree, "ls-tree")?;
+
+    if !output.status.success() {
+        return Err(SparseExcludeError::UnreadableRef {
+            at_ref: at_ref.to_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
+    }
+
+    Ok(output
+        .stdout
+        .split(|byte| *byte == b'\0')
+        .any(|entry| entry == dir.as_str().as_bytes()))
+}
+
+/// Run one git child of the `--sparse-exclude` check to its end, with its
+/// output captured.
+///
+/// # Errors
+///
+/// [`SparseExcludeError::GitCommand`], which names `subcommand`, when git does
+/// not start.
+fn sparse_check_output(
+    mut command: Command,
+    subcommand: &'static str,
+) -> Result<std::process::Output, SparseExcludeError> {
+    command
+        .output()
+        .map_err(|e| SparseExcludeError::GitCommand {
+            command: subcommand,
+            error: e.to_string(),
+        })
+}
+
+/// The prefix of every remote-tracking ref.
+const REMOTE_TRACKING_PREFIX: &str = "refs/remotes/";
+
+/// A remote-tracking branch: the ref where the fetch refspec of a remote puts
+/// a branch of that remote.
+///
+/// [`find_remote_tracking_branch`] makes each value from a ref that the fetch
+/// refspec of `remote` maps, and that the clone holds. The default refspec
+/// puts the branch `<branch>` at `refs/remotes/<remote>/<branch>`. Another
+/// refspec can put it at another ref, for example
+/// `refs/remotes/mirror/heads/<branch>`.
+///
+/// [`fmt::Display`] gives the short form, and each message of `nwt` names the
+/// branch in that form: the ref without `refs/remotes/`, or the full ref when
+/// it is not under `refs/remotes/`. For a ref under `refs/remotes/`, that is
+/// the form in which git names the upstream (`origin/issue-33`).
+/// [`RemoteTrackingBranch::full_ref`] gives the full ref, and each git command
+/// takes that form. So a tag or a local branch with the name of the short form
+/// cannot shadow the remote-tracking branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteTrackingBranch {
+    /// The name of the remote whose fetch refspec maps the branch, for example
+    /// `origin`.
+    remote: String,
+    /// The full ref, for example `refs/remotes/origin/issue-33`.
+    tracking_ref: String,
+}
+
+impl RemoteTrackingBranch {
+    /// The full ref, for example `refs/remotes/origin/issue-33`.
+    fn full_ref(&self) -> &str {
+        &self.tracking_ref
+    }
+
+    /// The name of the remote.
+    fn remote(&self) -> &str {
+        &self.remote
+    }
+
+    /// The ref without `refs/remotes/`, or the full ref when it is not under
+    /// `refs/remotes/`. The function removes a prefix, and it never cuts at a
+    /// byte offset, so a name with multi-byte characters stays intact.
+    fn short_form(&self) -> &str {
+        self.tracking_ref
+            .strip_prefix(REMOTE_TRACKING_PREFIX)
+            .unwrap_or(&self.tracking_ref)
+    }
+
+    /// True when the short form starts with `<remote>/`, so that a reader
+    /// finds the name of the remote in it.
+    fn short_form_names_the_remote(&self) -> bool {
+        self.short_form()
+            .strip_prefix(self.remote.as_str())
+            .is_some_and(|rest| rest.starts_with('/'))
+    }
+}
+
+impl fmt::Display for RemoteTrackingBranch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.short_form())
+    }
+}
+
+/// The answer of [`find_remote_tracking_branch`].
+///
+/// A remote holds the branch `<name>` when a fetch refspec of that remote maps
+/// `refs/heads/<name>` to a ref that the clone holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RemoteTrackingMatch {
+    /// Exactly one remote holds the branch. Or more than one remote holds it,
+    /// and `checkout.defaultRemote` names one of those remotes.
+    One(RemoteTrackingBranch),
+    /// More than one remote holds the branch, and `checkout.defaultRemote`
+    /// picks none of them. The candidates are in the order of the remotes in
+    /// the git configuration.
+    Ambiguous(Vec<RemoteTrackingBranch>),
+    /// No remote holds the branch.
+    None,
+}
+
+/// Why [`find_remote_tracking_branch`] could not answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RemoteLookupError {
+    /// Git did not start. `command` names the git subcommand, and `error`
+    /// holds the reason that the operating system gave.
+    NotStarted {
+        command: &'static str,
+        error: String,
+    },
+    /// Git exited with a status that tells of a failure, so it did not read
+    /// the fetch refspecs or did not check a mapped ref. `command` names the
+    /// git subcommand, and `stderr` holds what git wrote.
+    Failed {
+        command: &'static str,
+        stderr: String,
+    },
+}
+
+impl fmt::Display for RemoteLookupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotStarted { command, error } => write!(
+                f,
+                "could not run git {command} to look for a remote branch: {error}"
+            ),
+            Self::Failed { command, stderr } => write!(
+                f,
+                "git {command} could not look for a remote branch: {stderr}"
+            ),
+        }
+    }
+}
+
+impl RemoteLookupError {
+    /// The exit code of `nwt -b <name>` for this failure.
+    ///
+    /// A git that does not start exits [`exit_codes::GIT_COMMAND_ERROR`], as it
+    /// does for `git worktree add`. A git that fails exits
+    /// [`exit_codes::WORKTREE_FAILED`], because the run cannot make the
+    /// worktree that the user asked for.
+    fn exit_code(&self) -> i32 {
+        match self {
+            Self::NotStarted { .. } => exit_codes::GIT_COMMAND_ERROR,
+            Self::Failed { .. } => exit_codes::WORKTREE_FAILED,
+        }
+    }
+}
+
+/// The characters that git refuses anywhere in a ref name, other than the
+/// ASCII control characters: a space, `~`, `^`, `:`, `?`, `*`, `[` and `\`
+/// (`git check-ref-format`, rules 4, 5 and 10).
+const REF_NAME_FORBIDDEN_CHARACTERS: [char; 8] = [' ', '~', '^', ':', '?', '*', '[', '\\'];
+
+/// The sequences that git refuses anywhere in a ref name: `..` and `@{`
+/// (`git check-ref-format`, rules 3 and 8).
+const REF_NAME_FORBIDDEN_SEQUENCES: [&str; 2] = ["..", "@{"];
+
+/// True when `name` holds a character or a sequence that git refuses anywhere
+/// in a ref name: an ASCII control character, one of
+/// [`REF_NAME_FORBIDDEN_CHARACTERS`], or one of
+/// [`REF_NAME_FORBIDDEN_SEQUENCES`].
+///
+/// No ref has such a name, so [`find_remote_tracking_branch`] answers
+/// [`RemoteTrackingMatch::None`] for it without git. The lookup has a second
+/// reason not to ask git: it checks each mapped ref with `git rev-parse`, and
+/// `git rev-parse` reads `~`, `^`, `:` and `@{` as revision syntax. For the
+/// name `issue-33~1`, the mapped ref `refs/remotes/origin/issue-33~1` names
+/// the parent of `origin/issue-33`, and not a ref. The rule holds for both
+/// callers of the lookup: `-b <name>` and the `-c <name>` of
+/// [`resolve_checkout_ref`].
+fn git_refuses_in_any_ref_name(name: &str) -> bool {
+    name.chars()
+        .any(|c| c.is_ascii_control() || REF_NAME_FORBIDDEN_CHARACTERS.contains(&c))
+        || REF_NAME_FORBIDDEN_SEQUENCES
+            .iter()
+            .any(|sequence| name.contains(sequence))
+}
+
+/// The exit status of `git config --get-regexp` when no key matches.
+const CONFIG_NO_MATCH_STATUS: i32 = 1;
+
+/// The exit status of `git rev-parse --verify --quiet` for a ref that is not
+/// there.
+const REV_PARSE_MISSING_STATUS: i32 = 1;
+
+/// Find the remote-tracking branch that the checkout DWIM of git takes for
+/// `name`.
+///
+/// This function mirrors steps 2 and 3 of `unique_tracking_name` in
+/// `checkout.c` of git. For each remote, `check_tracking_name` maps
+/// `refs/heads/<name>` through the fetch refspecs of that remote
+/// (`remote_find_tracking`), and it counts the remote only when the mapped ref
+/// exists. [`refspec::RemoteFetchRefspecs`] holds the rules of that mapping.
+/// So with the default refspec the ref is `refs/remotes/<remote>/<name>`, and
+/// with `+refs/heads/*:refs/remotes/mirror/heads/*` it is
+/// `refs/remotes/mirror/heads/<name>`. A ref that no refspec maps any more,
+/// for example after `git remote set-branches`, is stale, and it is no
+/// candidate. The rules:
+///
+/// 1. When exactly one remote maps `name` to a ref that exists, the answer is
+///    [`RemoteTrackingMatch::One`] with that ref.
+/// 2. When more than one remote does, `checkout.defaultRemote` names a remote,
+///    and that remote is one of them, the answer is
+///    [`RemoteTrackingMatch::One`] with the ref of that remote. When
+///    `checkout.defaultRemote` picks none of them, the answer is
+///    [`RemoteTrackingMatch::Ambiguous`] with each candidate.
+/// 3. When no remote does, the answer is [`RemoteTrackingMatch::None`].
+///
+/// The function reads the fetch refspecs with
+/// `git config -z --get-regexp '^remote\..+\.fetch$'`, and it checks each
+/// mapped ref with `git rev-parse --verify --quiet --end-of-options <ref>`, as
+/// git checks it with `repo_get_oid`. It reads only the remotes of the git
+/// configuration. A remote that only a file in the legacy `$GIT_DIR/remotes/`
+/// or `$GIT_DIR/branches/` directory defines is not read. Git 3.0 drops those
+/// files. The function never fetches. It reads only the refs that the clone
+/// already holds.
+///
+/// One rule differs from git on purpose. A negative refspec such as
+/// `^refs/heads/issue-33` keeps its remote from mapping each branch that it
+/// matches, after a pattern refspec too. The checkout DWIM of git 2.55
+/// honors a negative refspec only after an exact refspec. After the default
+/// pattern refspec, it takes a stale `refs/remotes/origin/issue-33` and sets
+/// no upstream. But the tracking setup of git honors the negative refspec,
+/// so `git worktree add --track`, which `-b` runs, refuses that ref as "not a
+/// branch". Only this rule gives a `-b` that works. For `-c <name>` with
+/// `--sparse-exclude`, the rule has one cost: in such a clone,
+/// [`resolve_checkout_ref`] finds no remote branch, `git ls-tree` then reads
+/// the name and refuses it, and the run exits 7, where a plain `-c <name>`
+/// takes the stale ref through the DWIM of git.
+///
+/// A `name` for which [`git_refuses_in_any_ref_name`] is true is not a ref
+/// name. The answer for it is [`RemoteTrackingMatch::None`], and no git child
+/// runs.
+///
+/// Two callers use it. [`resolve_checkout_ref`] runs its own first step
+/// (`git rev-parse`) before it, for `-c <name>`. [`new_branch_start`] runs it
+/// for `-b <name>`, where a local branch `name` makes git refuse the add, so
+/// that caller needs no first step.
+///
+/// Each git child starts from [`production_git_command`].
+///
+/// # Errors
+///
+/// - [`RemoteLookupError::NotStarted`] when git does not start.
+/// - [`RemoteLookupError::Failed`] when `git config` or `git rev-parse` exits
+///   with a status that is neither 0 nor 1. A failed read is not an empty
+///   read, so the function never reports [`RemoteTrackingMatch::None`] for
+///   it.
+fn find_remote_tracking_branch(
+    repo_root: &Path,
+    name: &str,
+) -> Result<RemoteTrackingMatch, RemoteLookupError> {
+    // No ref has such a name, so the answer is known before git runs. And
+    // `git rev-parse` reads some of these characters as revision syntax.
+    if git_refuses_in_any_ref_name(name) {
+        return Ok(RemoteTrackingMatch::None);
+    }
+
+    let refspecs = read_remote_fetch_refspecs(repo_root)?;
+    let mut candidates = Vec::new();
+    for mapped in refspecs.map_branch(name) {
+        if tracking_ref_exists(repo_root, &mapped.tracking_ref)? {
+            candidates.push(RemoteTrackingBranch {
+                remote: mapped.remote,
+                tracking_ref: mapped.tracking_ref,
+            });
+        }
+    }
+
+    match candidates.len() {
+        0 => return Ok(RemoteTrackingMatch::None),
+        1 => return Ok(RemoteTrackingMatch::One(candidates.remove(0))),
+        _ => {}
+    }
+
+    // Git asks for the default remote only when more than one remote holds
+    // the branch, and so does this function.
+    let mut default_remote = production_git_command(repo_root);
+    default_remote.args(["config", "--get", CHECKOUT_DEFAULT_REMOTE_KEY]);
+    let configured = remote_lookup_output(default_remote, "config")?;
+    if configured.status.success() {
+        let remote = String::from_utf8_lossy(&configured.stdout);
+        let remote = remote.trim_end_matches('\n');
+        if let Some(index) = candidates
+            .iter()
+            .position(|candidate| candidate.remote() == remote)
+        {
+            return Ok(RemoteTrackingMatch::One(candidates.remove(index)));
+        }
+    }
+
+    Ok(RemoteTrackingMatch::Ambiguous(candidates))
+}
+
+/// Read the fetch refspecs of every remote of the repository at `repo_root`.
+///
+/// `git config --get-regexp` exits [`CONFIG_NO_MATCH_STATUS`] when no remote
+/// has a fetch refspec. Then no remote maps a branch, and the answer holds no
+/// remote.
+///
+/// # Errors
+///
+/// - [`RemoteLookupError::NotStarted`] when git does not start.
+/// - [`RemoteLookupError::Failed`] when `git config` exits with another
+///   status that is not zero, for example 128 in a directory that git
+///   refuses as a repository.
+fn read_remote_fetch_refspecs(
+    repo_root: &Path,
+) -> Result<refspec::RemoteFetchRefspecs, RemoteLookupError> {
+    let mut list = production_git_command(repo_root);
+    list.args([
+        "config",
+        "-z",
+        "--get-regexp",
+        refspec::REMOTE_FETCH_KEY_PATTERN,
+    ]);
+    let listed = remote_lookup_output(list, "config")?;
+
+    match listed.status.code() {
+        Some(0) => Ok(refspec::RemoteFetchRefspecs::from_config_listing(
+            &listed.stdout,
+        )),
+        Some(CONFIG_NO_MATCH_STATUS) => Ok(refspec::RemoteFetchRefspecs::default()),
+        _ => Err(RemoteLookupError::Failed {
+            command: "config",
+            stderr: String::from_utf8_lossy(&listed.stderr).trim().to_owned(),
+        }),
+    }
+}
+
+/// True when the ref `tracking_ref` exists in the repository at `repo_root`.
+///
+/// `check_tracking_name` of git counts a remote only when `repo_get_oid`
+/// resolves the mapped ref. `git rev-parse --verify --quiet` asks the same
+/// question, and `--end-of-options` keeps a ref that starts with `-` from
+/// being read as an option.
+///
+/// # Errors
+///
+/// - [`RemoteLookupError::NotStarted`] when git does not start.
+/// - [`RemoteLookupError::Failed`] when `git rev-parse` exits with a status
+///   other than 0 or [`REV_PARSE_MISSING_STATUS`].
+fn tracking_ref_exists(repo_root: &Path, tracking_ref: &str) -> Result<bool, RemoteLookupError> {
+    let mut verify = production_git_command(repo_root);
+    verify.args([
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "--end-of-options",
+        tracking_ref,
+    ]);
+    let verified = remote_lookup_output(verify, "rev-parse")?;
+
+    match verified.status.code() {
+        Some(0) => Ok(true),
+        Some(REV_PARSE_MISSING_STATUS) => Ok(false),
+        _ => Err(RemoteLookupError::Failed {
+            command: "rev-parse",
+            stderr: String::from_utf8_lossy(&verified.stderr).trim().to_owned(),
+        }),
+    }
+}
+
+/// Run one git child of [`find_remote_tracking_branch`] to its end, with its
+/// output captured.
+///
+/// # Errors
+///
+/// [`RemoteLookupError::NotStarted`], which names `subcommand`, when git does
+/// not start.
+fn remote_lookup_output(
+    mut command: Command,
+    subcommand: &'static str,
+) -> Result<std::process::Output, RemoteLookupError> {
+    command.output().map_err(|e| RemoteLookupError::NotStarted {
+        command: subcommand,
+        error: e.to_string(),
+    })
+}
+
+/// The ref that `git ls-tree` reads for the `-c <name>` that the user typed.
+///
+/// This function mirrors the checkout DWIM of git (`unique_tracking_name` in
+/// `checkout.c`). `git worktree add <path> <name>` runs that DWIM for a `name`
+/// that names no commit. It finds the remote-tracking branch where the fetch
+/// refspec of a remote puts `refs/heads/<name>`, makes a local branch `name`
+/// that tracks it, and checks that branch out. So `nwt -c foo` works in a
+/// clone that holds `foo` only as `origin/foo`. `git ls-tree foo` does not run
+/// the DWIM, and it cannot read `foo`. Without this function, the check of
+/// `--sparse-exclude` refuses a run that works without the flag.
+///
+/// The steps are the steps of git:
+///
+/// 1. When `name` resolves to a commit
+///    (`git rev-parse --verify --quiet <name>^{commit}`), git takes `name`, and
+///    so does this function.
+/// 2. Else, when exactly one remote maps `refs/heads/<name>` to a ref that
+///    exists, git checks that ref out, and this function returns it.
+/// 3. Else, when more than one remote does, `checkout.defaultRemote` names a
+///    remote, and that remote is one of them, git checks the ref of that
+///    remote out, and this function returns it.
+/// 4. Else git refuses the add with `fatal: invalid reference: <name>`. This
+///    function returns `name`, so `git ls-tree` refuses it too, and the run
+///    exits as a failed add.
+///
+/// This function runs step 1 itself. [`find_remote_tracking_branch`] holds
+/// steps 2 and 3, and [`new_branch_start`] uses the same function for
+/// `-b <name>`. So the two flags find a remote branch with one set of rules.
+/// That function honors each negative refspec, and the DWIM of git does not
+/// always. Its documentation names the one case where the check then refuses
+/// a `-c <name>` that git takes.
+///
+/// # Errors
+///
+/// - [`SparseExcludeError::GitCommand`] when git does not start.
+/// - [`SparseExcludeError::UnreadableRef`], which names `name`, when a git
+///   child of [`find_remote_tracking_branch`] fails.
+fn resolve_checkout_ref(repo_root: &Path, name: &str) -> Result<String, SparseExcludeError> {
+    let mut verify = production_git_command(repo_root);
+    verify.args([
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        &format!("{name}^{{commit}}"),
+    ]);
+    if sparse_check_output(verify, "rev-parse")?.status.success() {
+        return Ok(name.to_owned());
+    }
+
+    let found = find_remote_tracking_branch(repo_root, name).map_err(|e| match e {
+        RemoteLookupError::NotStarted { command, error } => {
+            SparseExcludeError::GitCommand { command, error }
+        }
+        RemoteLookupError::Failed { stderr, .. } => SparseExcludeError::UnreadableRef {
+            at_ref: name.to_owned(),
+            stderr,
+        },
+    })?;
+
+    Ok(match found {
+        RemoteTrackingMatch::One(branch) => branch.full_ref().to_owned(),
+        // Git refuses the add for both, so `git ls-tree` gets the name and
+        // refuses it too.
+        RemoteTrackingMatch::Ambiguous(_) | RemoteTrackingMatch::None => name.to_owned(),
+    })
+}
+
+/// The git configuration key that names the remote whose branch git checks
+/// out when more than one remote holds a branch of the name.
+const CHECKOUT_DEFAULT_REMOTE_KEY: &str = "checkout.defaultRemote";
+
+/// Why [`new_branch_start`] gives no start point for a new branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NewBranchStartError {
+    /// More than one remote holds the branch, and `checkout.defaultRemote`
+    /// picks none of them. `branch` is the name of the new branch.
+    /// `candidates` holds the remote-tracking branch of each remote that holds
+    /// it, in the order of the remotes in the git configuration.
+    AmbiguousRemoteBranch {
+        branch: String,
+        candidates: Vec<RemoteTrackingBranch>,
+    },
+    /// [`find_remote_tracking_branch`] could not answer.
+    Lookup(RemoteLookupError),
+}
+
+impl fmt::Display for NewBranchStartError {
+    /// The message after `Error: `.
+    ///
+    /// For [`NewBranchStartError::AmbiguousRemoteBranch`], the message has
+    /// more than one line. It names each candidate in its short form on a line
+    /// of its own, and it ends with the command that names the remote to
+    /// track. That command needs the name of the remote. So a line whose short
+    /// form does not start with `<remote>/`, for example
+    /// `mirror/heads/issue-33`, adds `(remote <remote>)`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AmbiguousRemoteBranch { branch, candidates } => {
+                writeln!(
+                    f,
+                    "more than one remote holds the branch '{branch}', and \
+                     {CHECKOUT_DEFAULT_REMOTE_KEY} picks none of them:"
+                )?;
+                for candidate in candidates {
+                    write!(f, "  {candidate}")?;
+                    if !candidate.short_form_names_the_remote() {
+                        write!(f, " (remote {})", candidate.remote())?;
+                    }
+                    writeln!(f)?;
+                }
+                writeln!(f, "Name the remote to track, and run nwt again:")?;
+                write!(f, "  git config {CHECKOUT_DEFAULT_REMOTE_KEY} <remote>")
+            }
+            Self::Lookup(e) => e.fmt(f),
+        }
+    }
+}
+
+impl NewBranchStartError {
+    /// The exit code of `nwt -b <name>` for this refusal.
+    ///
+    /// An ambiguous branch exits [`exit_codes::AMBIGUOUS_REMOTE_BRANCH`]. A
+    /// lookup that could not answer exits with the code of
+    /// [`RemoteLookupError::exit_code`].
+    fn exit_code(&self) -> i32 {
+        match self {
+            Self::AmbiguousRemoteBranch { .. } => exit_codes::AMBIGUOUS_REMOTE_BRANCH,
+            Self::Lookup(e) => e.exit_code(),
+        }
+    }
+}
+
+/// The remote-tracking branch where the new branch `name` starts, and that
+/// it tracks. `None` means that the new branch starts at `HEAD` of the main
+/// worktree.
+///
+/// `main` calls this for each run that makes a new branch `name`: `-b <name>`,
+/// the bare-number shorthand, and `branch` in `~/.nwt.toml`.
+///
+/// The lookup runs only when git reports that no local branch `name` exists
+/// ([`branch_known_absent`]). When git does not report the branch as absent,
+/// because the branch exists or because git cannot answer, the answer is
+/// `None`. `git worktree add -b` then refuses a branch that exists with the
+/// error that it gave before the lookup existed. That error names the problem
+/// that the user has, and a refusal of the lookup does not.
+///
+/// When no local branch `name` exists, the rules are the rules of the checkout
+/// DWIM of git, through [`find_remote_tracking_branch`]. A remote holds `name`
+/// when a fetch refspec of that remote maps `refs/heads/<name>` to a ref that
+/// the clone holds:
+///
+/// 1. When exactly one remote holds `name`, or `checkout.defaultRemote` picks
+///    one of the remotes that hold it, the answer is that remote-tracking
+///    branch.
+/// 2. When more than one remote holds `name`, and `checkout.defaultRemote`
+///    picks none of them, the function refuses.
+/// 3. When no remote holds `name`, the answer is `None`.
+///
+/// The function never falls back to `HEAD` in silence, because a silent fall
+/// back hides the mistake. `main` calls it before it makes anything, so a
+/// refusal makes nothing.
+///
+/// # Errors
+///
+/// - [`NewBranchStartError::AmbiguousRemoteBranch`] when more than one remote
+///   holds `name`, and `checkout.defaultRemote` picks none of them.
+/// - [`NewBranchStartError::Lookup`] when [`find_remote_tracking_branch`]
+///   cannot answer.
+fn new_branch_start(
+    repo_root: &Path,
+    name: &str,
+) -> Result<Option<RemoteTrackingBranch>, NewBranchStartError> {
+    if !branch_known_absent(repo_root, name) {
+        return Ok(None);
+    }
+
+    match find_remote_tracking_branch(repo_root, name).map_err(NewBranchStartError::Lookup)? {
+        RemoteTrackingMatch::One(branch) => Ok(Some(branch)),
+        RemoteTrackingMatch::Ambiguous(candidates) => {
+            Err(NewBranchStartError::AmbiguousRemoteBranch {
+                branch: name.to_owned(),
+                candidates,
+            })
+        }
+        RemoteTrackingMatch::None => Ok(None),
+    }
+}
+
+/// What the new worktree checks out.
+///
+/// `main` builds one value, and it gives the same value to
+/// [`resolve_sparse_excludes`] and to [`try_create_worktree`]. So the check of
+/// `--sparse-exclude` reads the ref that the add checks out.
+#[derive(Debug, Clone, Copy)]
+enum WorktreeSource<'a> {
+    /// `-c <ref>`, with the ref as the user typed it. `git worktree add` sends
+    /// a ref that names no commit through the checkout DWIM of git.
+    Checkout(&'a str),
+    /// A new branch that starts at `HEAD` of the main worktree.
+    NewBranchAtHead,
+    /// A new branch that starts at this remote-tracking branch and tracks it.
+    NewBranchTracking(&'a RemoteTrackingBranch),
+}
+
+/// Parse every `--sparse-exclude` value, and make sure that git tracks each
+/// one as a directory at the ref that the new worktree checks out.
+///
+/// `source` gives that ref:
+///
+/// - For [`WorktreeSource::Checkout`], it is the ref of `-c <ref>`. The ref
+///   goes through [`resolve_checkout_ref`] first, because `git worktree add`
+///   sends a name that names no commit through the checkout DWIM of git. Each
+///   message still names the ref as the user typed it.
+/// - For [`WorktreeSource::NewBranchAtHead`], it is [`SPARSE_DEFAULT_REF`].
+/// - For [`WorktreeSource::NewBranchTracking`], it is the full ref of the
+///   remote-tracking branch. Each message names its short form, for example
+///   `origin/issue-33`.
+///
+/// The check reads the ref and not the disk, because the files of the new
+/// worktree come from the ref. Git runs in `repo_root`, the main worktree.
+///
+/// A sparse pattern for a path that is not a tracked directory excludes
+/// nothing, and git gives no error. Without this check, `nwt` reports success
+/// and writes everything.
+///
+/// `main` calls this after it knows the repository and before it makes
+/// anything, so a refused value makes no directory, no branch, and no
+/// `worktrees/<name>`. Every value is parsed before git runs, so a lexical
+/// refusal costs no git child.
+///
+/// # Errors
+///
+/// - The refusal of [`parse_sparse_excludes`], for the first value that the
+///   lexical rules refuse.
+/// - [`SparseExcludeError::NotTrackedDirectory`] for the first directory that
+///   git does not track as a directory at the ref.
+/// - [`SparseExcludeError::UnreadableRef`] when git cannot read the ref.
+/// - [`SparseExcludeError::GitCommand`] when git does not start.
+fn resolve_sparse_excludes(
+    repo_root: &Path,
+    source: WorktreeSource<'_>,
+    raw: &[String],
+) -> Result<Vec<SparseExcludeDir>, SparseExcludeError> {
+    let dirs = parse_sparse_excludes(raw)?;
+    // A run without the flag asks git nothing, so a plain `-c <ref>` runs
+    // exactly the git children it ran before the flag existed.
+    if dirs.is_empty() {
+        return Ok(dirs);
+    }
+
+    let (at_ref, tree_ref) = match source {
+        WorktreeSource::Checkout(name) => (name.to_owned(), resolve_checkout_ref(repo_root, name)?),
+        WorktreeSource::NewBranchAtHead => {
+            (SPARSE_DEFAULT_REF.to_owned(), SPARSE_DEFAULT_REF.to_owned())
+        }
+        WorktreeSource::NewBranchTracking(branch) => {
+            (branch.to_string(), branch.full_ref().to_owned())
+        }
+    };
+
+    for dir in &dirs {
+        if !tracks_directory(repo_root, &at_ref, &tree_ref, dir)? {
+            return Err(SparseExcludeError::NotTrackedDirectory {
+                dir: dir.clone(),
+                at_ref,
+            });
+        }
+    }
+
+    Ok(dirs)
+}
+
+/// The one stderr line after a run that makes a new branch that tracks
+/// `branch`, for example `Tracking origin/issue-33`.
+///
+/// The line tells the user which start point `nwt` used.
+/// [`print_tracking_notice`] prints it.
+fn tracking_notice(branch: &RemoteTrackingBranch) -> String {
+    format!("Tracking {branch}")
+}
+
+/// Print the [`tracking_notice`] to stderr when `source` is a
+/// [`WorktreeSource::NewBranchTracking`] and `quiet` is false. For each other
+/// source, print nothing.
+///
+/// Git reports the upstream that it sets on its stdout, and `nwt` sends that
+/// stream to null. So this line is the one report of the start point. The line
+/// goes to stderr, because the shell wrapper reads the worktree path from
+/// stdout. `--quiet` suppresses it.
+///
+/// `main` calls this function in each place where a run keeps the new branch:
+///
+/// - After the path of a run that works.
+/// - After the error line of a sparse run whose `post-checkout` hook fails
+///   ([`WorktreeResult::PostCheckoutHookFailed`]), or whose `git hook run`
+///   cannot start ([`WorktreeResult::PostCheckoutHookNotStarted`]). The
+///   worktree, the branch, and its upstream stay, and the user must hear
+///   which start point they have.
+fn print_tracking_notice(source: WorktreeSource<'_>, quiet: bool) {
+    if let WorktreeSource::NewBranchTracking(branch) = source {
+        if !quiet {
+            eprintln!("{}", tracking_notice(branch));
+        }
+    }
+}
+
+/// The one stderr line that tells the user which directories the new worktree
+/// does not hold, and how to get them.
+///
+/// Each directory shows as the user reads it, with a trailing `/` and without
+/// the escapes of its pattern. One directory ends with "get it", and more end
+/// with "get them". `main` prints this line to stderr after the path, because
+/// the shell wrapper reads the path from stdout.
+fn sparse_exclude_notice(excluded: &[SparseExcludeDir]) -> String {
+    let names: Vec<String> = excluded
+        .iter()
+        .map(|dir| format!("{}/", dir.as_str()))
+        .collect();
+    let pronoun = if excluded.len() == 1 { "it" } else { "them" };
+
+    format!(
+        "Excluded {} (sparse checkout). Run 'git sparse-checkout disable' in the worktree \
+         to get {pronoun}.",
+        names.join(", ")
+    )
+}
 
 /// Create a new git worktree with a Docker-style random name.
 ///
@@ -478,18 +1521,185 @@ const MAX_ATTEMPTS: u32 = 10;
 #[command(
     long_about = "Creates a git worktree in a '{repo-name}-worktrees' directory alongside \
 the repository. Generates Docker-style random names (adjective-noun) for both the directory \
-and branch unless overridden. Automatically copies untracked .env files from the main \
-worktree to preserve development settings.
+and branch unless overridden. Links each child repository of the main worktree into the new \
+worktree. Automatically copies untracked .env files from the main worktree to preserve \
+development settings.
+
+WHERE WORKTREES GO:
+    By default, a new worktree lands in '{repo-name}-worktrees', beside the main
+    worktree of the repository.
+
+    Some repositories keep the git directory apart from the work tree, which is what
+    yadm does with a directory of dotfiles. Git names the git directory itself as the
+    main worktree of such a repository, so the default becomes 'repo.git-worktrees',
+    beside the git directory.
+
+    A repository states a different answer with the 'nwt.worktreesDir' git
+    configuration key:
+
+        git config nwt.worktreesDir '/data/worktrees'
+        git config nwt.worktreesDir '~/worktrees'
+
+    Git expands a leading '~' or '~user' into a home directory. The quotation marks
+    above keep the tilde for git, because a shell expands one that it sees. A
+    relative value is relative to the main worktree of the repository. nwt reads the
+    key from every scope git reads, so the answer can come from the repository, from
+    ~/.gitconfig, or from the system configuration.
+
+    An empty value names no directory, and git refuses a value it cannot read, such
+    as the home directory of a user who does not exist. nwt then prints an error and
+    stops with exit code 12, and it makes nothing. It never falls back to the
+    default, because a silent fall back hides the mistake.
+
+REMOTE BRANCHES:
+    A run that makes a new branch first looks for a remote branch of that name. The
+    name comes from -b NAME, from the shorthand '-b 33' (branch 'issue-33'), or from
+    'branch' in ~/.nwt.toml. nwt finds it with the rules of 'git checkout'. A remote
+    holds the branch when a fetch refspec of that remote maps 'refs/heads/NAME' to a
+    ref that the clone holds. With the default refspec, that ref is
+    'refs/remotes/REMOTE/NAME'.
+
+      - One remote holds the branch. The new branch starts at that remote branch,
+        and it tracks it.
+      - More than one remote holds the branch, and the git configuration key
+        'checkout.defaultRemote' names the remote of one of them. The new branch
+        starts at the branch of that remote, and it tracks it.
+      - More than one remote holds the branch, and checkout.defaultRemote picks none
+        of them. nwt exits 16, and it makes nothing.
+      - No remote holds the branch. The new branch starts at HEAD, as before.
+
+    The refusal names each candidate and the command that sets the key:
+
+        Error: more than one remote holds the branch 'issue-33', and checkout.defaultRemote picks none of them:
+          origin/issue-33
+          upstream/issue-33
+        Name the remote to track, and run nwt again:
+          git config checkout.defaultRemote <remote>
+
+    After a run that tracks a remote branch, nwt prints this line to stderr:
+
+        Tracking origin/issue-33
+
+    nwt does not show the report of git ('set up to track'), so this line is the
+    only report. --quiet hides it.
+
+    nwt does not fetch. It reads only the remote branches that the clone already
+    holds. Run 'git fetch' first. A fetch needs the network, and it can stop to ask
+    for credentials.
+
+    When a local branch of that name exists, nwt does not look. It refuses with the
+    error that it gave before: the branch already exists. The directory name does
+    not change, so 'nwt -b issue-33' makes the directory 'issue-33'.
+
+    A remote branch that no fetch refspec maps is stale, for example after
+    'git remote set-branches'. nwt ignores it, as git does. A negative refspec such
+    as '^refs/heads/NAME' also keeps its remote from giving the branch.
+
+    nwt names a remote branch without 'refs/remotes/', for example
+    'mirror/heads/issue-33' for '+refs/heads/*:refs/remotes/mirror/heads/*'. It
+    names a ref outside 'refs/remotes/' in full. When the name of a candidate does
+    not start with the name of its remote, the refusal adds the remote:
+
+          mirror/heads/issue-33 (remote origin)
 
 CONFIGURATION:
     Default values can be set in ~/.nwt.toml. CLI arguments override config values.
 
     Example config file:
         branch = \"feature/default\"
-        copy_env = false  # disable .env file copying
+        copy_env = false       # disable .env file copying
+        link_children = true   # link child repositories into new worktrees
+        bootstrap_hooks = true # run package-manager install to set up git hooks
         quiet = false
-        tmux = true
         run = \"pnpm install\"
+
+CHILD REPOSITORY LINKS:
+    Some repositories are containers. A container tracks the map of a workspace. Each
+    real repository sits one level below it, and .gitignore keeps that repository out
+    of the history of the container. Such a repository is a child repository, or a
+    child. cwt calls a container and its children a family.
+
+    'git worktree add' writes only tracked files, so a new worktree of a container
+    holds no child. Thus after 'git worktree add', and before the .env copy, nwt links
+    each child of the main worktree into the new worktree. Each link is a symbolic
+    link:
+
+        <new worktree>/<name> -> <main worktree>/<name>
+
+    The link gives the new worktree the one real checkout of each child. nwt makes no
+    clone, no branch, and no remote.
+
+    A child is a directory one level below the main worktree that holds a .git entry:
+    a .git directory, or the .git file of a linked worktree of another repository. A
+    directory without a .git entry, a file, a child of a child, a worktree of this
+    repository, and a submodule get no link and no line.
+
+    A worktree of this repository is not a child, and 'git worktree list' names each
+    one. 'nwt.worktreesDir' set to '.' puts each worktree one level below the main
+    worktree, the new worktree too. Without this rule, the new worktree gets a link
+    to itself, and a tool that follows links reads that loop without end.
+
+    A submodule is not a child. It holds a .git file, but this repository tracks it,
+    and 'git worktree add' makes an empty directory for it. The index of the main
+    worktree holds each submodule as a gitlink, and 'git ls-files' names each one. A
+    child that git ignores is not in the index, so it stays a child.
+
+    A link that git does not ignore shows as untracked, and 'git add -A' commits it
+    into the container. So nwt asks git in the new worktree if git ignores <name>. Git
+    gives the same answer before the link exists. Thus nwt asks first, and it never
+    makes a link that git does not ignore.
+
+    A pattern with a trailing slash matches only a directory, and git sees a link as
+    a file. Thus 'vial/' ignores the child in the main worktree, but it does not
+    ignore the link. '/vial' and 'vial' ignore both. To link a child, write the
+    pattern as '/<name>'.
+
+    When the new worktree already holds something at <name>, nwt does not change it.
+    The new branch can track that path, or a post-checkout hook can make it. A broken
+    link also counts. nwt prints one line:
+
+        Not linked: vial (the new worktree already holds this path)
+
+    The target of each link is absolute: the main worktree that git names, joined with
+    the name of the child. Thus nwt in a linked worktree links the children of the
+    main worktree. A repository that keeps its git directory apart from the work tree,
+    and a bare repository, get no link. Git names the git directory as the main
+    worktree, and a git directory holds no child.
+
+    nwt prints one line to stderr for each link, and a summary when it makes at least
+    one link:
+
+        Linked vial-qmk -> /Users/me/code/keyboards/vial-qmk
+        Linked zmk-config-corne -> /Users/me/code/keyboards/zmk-config-corne
+        Linked 2 child repositories from the main worktree
+
+    A child that gets no link gets a warning, and the other children still get their
+    links. When the pattern for the child matches only a directory, the warning names
+    that pattern, its file, and its line. When no pattern matches, the warning says
+    so. Both warnings give the fix:
+
+        Warning: not linked: vial (.gitignore:1 has 'vial/', which matches only a directory, and git sees a symlink as a file. Write '/vial' to link it)
+        Warning: not linked: vial (git does not ignore this path. Add '/vial' to .gitignore to link it)
+
+    When git gives no answer, the warning repeats the first line of the error of git.
+    When nwt cannot make the link, the warning gives the error of the operating
+    system.
+
+    When git gives no list of the worktrees or of the submodules, nwt cannot tell a
+    child from an entry that is not a child. nwt then makes no link, and it prints one
+    warning that repeats the first line of the error of git, after 'git worktree list
+    failed:' or 'git ls-files failed:':
+
+        Warning: no child linked, because nwt cannot tell which directories are children (git worktree list failed: fatal: not a git repository)
+
+    --quiet removes the 'Linked' lines, the summary, and the 'Not linked:' lines. It
+    does not remove a warning, because a warning names a defect in the repository.
+
+    'git worktree remove', 'git worktree remove --force', and 'rm -rf' of the worktree
+    each delete the link only. The child and its files stay unchanged.
+
+    To turn the links off for one run, use --no-link-children. To turn them off by
+    default, set link_children = false in ~/.nwt.toml.
 
 ENV FILE COPYING:
     By default, nwt copies untracked .env files from the main worktree to the new worktree,
@@ -505,44 +1715,186 @@ ENV FILE COPYING:
         .environment   - doesn't match the pattern
         Tracked files  - files already in git are never copied
 
+    A destination that already exists is never overwritten. If anything is already at the
+    destination path, nwt leaves it exactly as it found it and prints a line naming it:
+
+        Kept existing: .env.local (already in the new worktree; not overwritten from main worktree)
+
+    A repo's 'post-checkout' hook lives in the shared git directory, so it runs during
+    'git worktree add' — before this copy. A hook that generates a worktree-specific .env
+    (a unique port, a unique database name, a freshly minted secret) would otherwise have
+    its work replaced by the main worktree's version. The worktree's own hook knows more
+    about that worktree than the main repo does, so nwt skips and says so.
+
+    The trade-off: nwt does not parse or merge .env files, so when the hook writes a
+    .env.local, the main worktree's .env.local does not reach the new worktree at all.
+    Keys that exist only in the main worktree's copy (DISABLE_AUTH, a shared API key)
+    will be missing, and you have to copy them over by hand. The per-file 'Kept existing:'
+    line is there so that divergence is discoverable. A trailing summary reports both
+    counts:
+
+        Copied 2 untracked .env files to new worktree
+        Kept 1 existing .env file already in the new worktree
+
+    Both the per-file lines and the summary are suppressed by --quiet.
+
+    On Unix, copied .env files are created at mode 0600 — owner read/write only — no
+    matter what the source file's mode is. A 0644 .env in the main worktree therefore no
+    longer propagates a world-readable secrets file into every worktree. The mode is
+    applied when the file is created, so the copy is never briefly readable by anyone
+    else. Windows has no equivalent mode; everything else behaves the same there.
+
+    Some repositories keep the git directory apart from the work tree, which WHERE
+    WORKTREES GO describes above. Git names the git directory itself as the main
+    worktree of such a repository, and no work tree is below that path. nwt finds no
+    .env file there and copies none. The work tree of such a repository is your home
+    directory, and the .env files there are not the new worktree's to take.
+
+    The copy does not go into a nested repository: a directory below the root that
+    holds a .git entry. The .env files of a child belong to that child, and they reach
+    the new worktree through the link (see CHILD REPOSITORY LINKS). This rule applies
+    with --no-link-children too.
+
     Use --no-copy-env to disable this for a single invocation, or set copy_env = false
     in ~/.nwt.toml to disable it by default.
+
+HOOK BOOTSTRAP:
+    After creating the worktree, if package.json at the worktree root declares a
+    'prepare' script, nwt runs the project's package manager install (pnpm, npm,
+    yarn, or bun — chosen by the 'packageManager' field, then a lockfile, then
+    pnpm) so git-hook managers like husky regenerate their hooks directory.
+
+    This matters because 'core.hooksPath' often points at a gitignored, generated
+    directory (e.g. .husky/_) that a freshly created worktree does not have.
+    Without this install, git finds no hooks directory and silently runs nothing,
+    so every commit bypasses lint/typecheck/test gates.
+
+    Use --no-bootstrap-hooks to skip the install for a single invocation, or set
+    bootstrap_hooks = false in ~/.nwt.toml to disable it by default. Repos without
+    a 'prepare' script are unaffected — no install is run.
+
+    When a --run command already invokes a package manager install (e.g.
+    --run \"pnpm install\"), nwt skips its own bootstrap install so the install
+    runs once, not twice.
+
+    As a safety net, nwt verifies the effective 'core.hooksPath' directory
+    actually exists, and prints a loud warning if it does not — whether bootstrap
+    was skipped, failed, or didn't apply. When you pass a --run command, this
+    check runs AFTER that command finishes, so a --run that installs hooks (e.g.
+    \"pnpm install\") gets the chance to create the directory before the check
+    looks — no false alarm. Git silently runs no hooks when that directory
+    is missing, so this warning is the only signal that commits in the new
+    worktree would otherwise be ungated. Because that signal must never be
+    invisible, this warning is printed to stderr even with --quiet.
+
+SPARSE WORKTREES:
+    --sparse-exclude DIR makes the new worktree a sparse checkout without the tracked
+    directory DIR. Use the flag one time for each directory:
+
+        nwt -b issue-12 --sparse-exclude assets/video --sparse-exclude fixtures/large
+
+    DIR is relative to the root of the repository, and 'heavy' and 'heavy/' are the
+    same directory. Each directory becomes the non-cone pattern '!/DIR/', after '/*'.
+    Thus '!/heavy/' excludes only the top-level directory 'heavy'. It does not exclude
+    the file 'heavy.txt' or the directory 'src/heavy/'. nwt escapes the glob
+    characters of each name, so the pattern matches the name literally.
+
+    nwt checks each value before it makes anything, and a refused value makes no
+    directory and no branch. nwt refuses an absolute path, a path with a '..'
+    component, an empty value, and a value with a control character. It also refuses
+    a path that is not a directory that git tracks at the ref the worktree checks
+    out. Each of these refusals exits 15. A ref that git cannot read exits 7.
+
+    For a '-c BRANCH' that only a remote holds, git makes a local branch that tracks
+    the remote branch. nwt then checks the remote branch that git picks. For a
+    '-b NAME' that tracks a remote branch, nwt checks the remote branch where the new
+    branch starts. In both cases, nwt finds the remote branch through the fetch
+    refspec of each remote, with the rules of REMOTE BRANCHES.
+
+    Only the new worktree is sparse. The main worktree, the other worktrees, and
+    later worktrees that nwt makes without the flag stay full. There is one
+    exception. When the main worktree is sparse, git copies its patterns into each
+    new worktree. Then --sparse-exclude replaces those patterns, and it does not add
+    to them. A directory that only the main worktree excludes comes back.
+
+    The sparse checkout writes 'extensions.worktreeConfig=true' into the shared
+    .git/config. This setting does not make other worktrees sparse. It stays after
+    you remove the worktree.
+
+    To get the excluded directories, run 'git sparse-checkout disable' in the worktree.
+
+    After nwt makes the worktree, it prints this line to stderr:
+
+        Excluded heavy/ (sparse checkout). Run 'git sparse-checkout disable' in the worktree to get it.
+
+    The .env copy does not take an untracked .env under an excluded directory,
+    because a copy writes that directory into the worktree again. nwt prints this
+    line for each such file:
+
+        Skipped: heavy/.env (under excluded heavy/)
+
+    --quiet hides both lines.
+
+    'git worktree add --no-checkout' runs no hook. So nwt runs the post-checkout hook
+    after it writes the files, with the arguments of a plain add. The hook sees the
+    sparse tree. It also sees GIT_DIR and GIT_WORK_TREE set, and a plain add sets
+    neither. A hook that fails keeps the worktree and the branch, and nwt exits 7, as
+    after a plain add. When git cannot start the hook step, the worktree stays and
+    nwt exits 6.
+
+    --sparse-exclude needs git 2.36.0 or later. nwt runs the post-checkout hook with
+    'git hook run', and git 2.36.0 added that command. On an older git, nwt reports
+    that the post-checkout hook failed and exits 7, though the repository has no hook.
+
+    When 'git sparse-checkout set', 'git read-tree -mu HEAD', or 'git rev-parse HEAD'
+    fails, the worktree is broken. nwt then removes the worktree, the branch that the
+    run made, and the empty directories that the run made, and it exits 7.
+
+    Limits:
+      - The flag saves disk space in the worktree only. All worktrees share one object
+        store, so the blobs of the excluded directory stay in .git. Only a partial
+        clone (git clone --filter=blob:none) keeps them out, for the whole clone.
+      - Commits and diffs still include the excluded directory. Git does not write it
+        to disk, but it does not delete it from the branch.
+      - A build or a test that reads the excluded directory fails in that worktree.
+      - When an excluded directory holds a workspace package, the install of HOOK
+        BOOTSTRAP can fail. nwt then warns and continues.
 
 EXAMPLES:
     nwt                              # Random name for both directory and branch
     nwt -b issue-42                  # Branch 'issue-42', directory 'issue-42'
     nwt -b fix login bug             # Branch 'fix-login-bug'
     nwt -b 192 fix pagination        # Branch 'issue-192-fix-pagination'
+    nwt -b 33                        # Branch 'issue-33', which tracks origin/issue-33 if it exists
     nwt -b feature/login             # Branch 'feature/login', directory 'feature_login'
     nwt -b fix --random-directory    # Branch 'fix', random directory name
     nwt -c main                      # Checkout existing 'main' branch
     nwt -c v1.0.0                    # Checkout a tag
     nwt --run \"npm install\"          # Run a command after creation
-    nwt --tmux                       # Open worktree in a new tmux window
-    nwt --tmux --run \"npm install\"   # Run command in a new tmux window
     nwt --no-copy-env                # Skip copying .env files
+    nwt --no-link-children           # Do not link child repositories
+    nwt --no-bootstrap-hooks         # Skip running install to set up git hooks
+    nwt --sparse-exclude assets      # Leave the tracked directory assets/ out
     nwt --shell-setup                # Install shell integration for auto-cd
 
 SHELL INTEGRATION:
     Run 'nwt --shell-setup' to install a shell function that automatically
-    changes to the new worktree directory after creation. The shell function
-    skips the cd when --tmux is used (since the worktree opens in a new window).
+    changes to the new worktree directory after creation.
 
 EXIT CODES:
     0  Success
     1  Not in a git repository
     2  Invalid repository name
     3  Repository has no parent directory
-    4  Failed to create worktrees directory
     5  Could not find available directory name
     6  Git command failed to execute
     7  Git worktree creation failed
     8  Path contains non-UTF8 characters
     9  Command specified with --run failed
-    10 Tmux command failed
     12 Config file error (invalid TOML, validation failed)
-    13 Not running inside tmux (--tmux specified)
-    14 Shell setup failed"
+    14 Shell setup failed
+    15 Invalid --sparse-exclude directory
+    16 More than one remote holds the new branch"
 )]
 struct Cli {
     /// Specify branch name instead of generating a random one.
@@ -557,6 +1909,11 @@ struct Cli {
     /// If the first argument is a bare number, "issue-" is prepended:
     ///   nwt -b 192 fix pagination → branch "issue-192-fix-pagination"
     ///   nwt -b 42                 → branch "issue-42"
+    ///
+    /// When no local branch of that name exists and a remote holds one, the
+    /// new branch starts at the remote branch and tracks it. nwt does not
+    /// fetch, so run `git fetch` first. The REMOTE BRANCHES section of --help
+    /// gives the rules.
     #[arg(short, long, conflicts_with = "checkout", num_args = 1..)]
     branch: Option<Vec<String>>,
 
@@ -581,13 +1938,10 @@ struct Cli {
 
     /// Run a command in the worktree directory after creation.
     ///
-    /// When used alone, executes via `sh -c` on Unix or `cmd /C` on Windows.
-    /// Shell aliases are NOT available in this mode.
+    /// Executes via `sh -c` on Unix or `cmd /C` on Windows.
+    /// Shell aliases are NOT available.
     ///
-    /// When combined with --tmux, the command runs in an interactive shell
-    /// (`$SHELL -ic`), so aliases and shell functions ARE available.
-    ///
-    /// Exit codes: When --run is used without --tmux, the command's exit code is
+    /// Exit codes: When --run is used, the command's exit code is
     /// passed through directly. This means exit codes 1-8 may shadow nwt's own
     /// error codes. Use --quiet if you need to distinguish command failures from
     /// nwt errors (nwt won't print errors in quiet mode, but the command might).
@@ -597,21 +1951,6 @@ struct Cli {
     #[arg(long)]
     run: Option<String>,
 
-    /// Create a new tmux window for the worktree.
-    ///
-    /// Opens a new tmux window with the working directory set to the worktree.
-    /// The window is named after the worktree directory (e.g., "adjective-noun").
-    ///
-    /// When combined with --run, the command runs in an interactive shell
-    /// (`$SHELL -ic`), so aliases and shell functions are available. This assumes
-    /// your shell supports `-i` (interactive) and `-c` (command) flags, which is
-    /// true for bash, zsh, fish, and most POSIX-compatible shells.
-    ///
-    /// Note: tmux is typically only available on Unix systems (Linux, macOS).
-    /// This option will fail on Windows unless tmux is installed via WSL or similar.
-    #[arg(long)]
-    tmux: bool,
-
     /// Disable copying untracked .env files to the new worktree.
     ///
     /// By default, nwt copies untracked .env files (e.g., .env, .env.local,
@@ -619,22 +1958,78 @@ struct Cli {
     /// their relative paths. This is useful for development settings that shouldn't
     /// be committed to git.
     ///
+    /// When copying is enabled, a destination that already exists (typically written
+    /// by a `post-checkout` hook during `git worktree add`) is kept as-is rather than
+    /// overwritten, and each copy is created at mode 0600 on Unix no matter what the
+    /// source file's mode is.
+    ///
+    /// A repository that keeps its git directory apart from the work tree has no
+    /// work tree below the main worktree path. nwt finds no .env file there and
+    /// copies none.
+    ///
     /// Use this flag to disable this behavior for a single invocation, or set
     /// `copy_env = false` in ~/.nwt.toml to disable it by default.
     #[arg(long)]
     no_copy_env: bool,
+
+    /// Disable the links to the child repositories of the main worktree.
+    ///
+    /// A child repository is a directory one level below the main worktree that
+    /// holds a `.git` entry. A worktree of this repository and a submodule are
+    /// not children. By default, nwt links each child into the new worktree, as
+    /// the symlink `<worktree>/<name>` -> `<main worktree>/<name>`.
+    /// The new worktree then uses the one real checkout of each child, and nwt
+    /// makes no clone, no branch, and no remote.
+    ///
+    /// nwt makes a link only when git ignores that path in the new worktree,
+    /// because `git add -A` commits a link that git does not ignore. Write the
+    /// pattern as `/<name>`. A pattern with a trailing slash matches only a
+    /// directory, and git sees a symlink as a file.
+    ///
+    /// Use this flag to disable the links for a single invocation, or set
+    /// `link_children = false` in ~/.nwt.toml to disable them by default. The
+    /// CHILD REPOSITORY LINKS section of --help gives the rules and the output.
+    #[arg(long)]
+    no_link_children: bool,
+
+    /// Disable running the package manager's install to bootstrap git hooks.
+    ///
+    /// By default, after creating the worktree, nwt detects a `prepare` script
+    /// in the worktree's package.json (the husky convention) and runs the
+    /// project's package manager install (pnpm/npm/yarn/bun) so git-hook
+    /// managers regenerate their hook directory. This matters because
+    /// `core.hooksPath` often points at a gitignored, generated directory that
+    /// a fresh worktree lacks — without the install, commits silently bypass
+    /// every hook.
+    ///
+    /// Use this flag to skip the install for a single invocation, or set
+    /// `bootstrap_hooks = false` in ~/.nwt.toml to disable it by default.
+    #[arg(long)]
+    no_bootstrap_hooks: bool,
+
+    /// Make the new worktree a sparse checkout without the tracked directory DIR.
+    ///
+    /// DIR is relative to the root of the repository, and `heavy` and `heavy/`
+    /// are the same directory. Use the flag one time for each directory to
+    /// exclude. Before nwt makes anything, it refuses a DIR that git does not
+    /// track as a directory at the ref that the worktree checks out.
+    ///
+    /// Only the new worktree is sparse. Other worktrees stay full. Run
+    /// `git sparse-checkout disable` in the worktree to write the directories.
+    ///
+    /// The SPARSE WORKTREES section of --help gives the limits, the
+    /// post-checkout hook, and the exception for a sparse main worktree.
+    #[arg(long = "sparse-exclude", value_name = "DIR", action = clap::ArgAction::Append)]
+    sparse_exclude: Vec<String>,
 
     /// Install shell integration to automatically cd into new worktrees.
     ///
     /// Adds a shell function to your ~/.zshrc or ~/.bashrc that wraps nwt
     /// and automatically changes directory to the new worktree after creation.
     ///
-    /// When --tmux is used, the shell function skips the cd (since the worktree
-    /// opens in a new tmux window).
-    ///
     /// To activate after installation, run `source ~/.zshrc` (or `~/.bashrc`)
     /// or open a new terminal.
-    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "tmux", "no_copy_env", "random_directory"])]
+    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "no_copy_env", "no_link_children", "no_bootstrap_hooks", "random_directory", "sparse_exclude"])]
     shell_setup: bool,
 }
 
@@ -700,8 +2095,9 @@ fn sanitize_for_filesystem(name: &str) -> Option<String> {
     }
 
     // Reject names that start with a dot followed by only dots and underscores
-    // (could be attempts to create hidden or traversal paths)
-    if sanitized.starts_with('.') && sanitized[1..].chars().all(|c| c == '.' || c == '_') {
+    // (could be attempts to create hidden or traversal paths). Use chars().skip(1)
+    // instead of byte indexing so the check is safe on any UTF-8 input.
+    if sanitized.starts_with('.') && sanitized.chars().skip(1).all(|c| c == '.' || c == '_') {
         return None;
     }
 
@@ -735,28 +2131,6 @@ fn join_branch_args(args: &[String]) -> String {
     }
 }
 
-/// Shortens a worktree name for use as a tab/window name in terminal multiplexers.
-///
-/// Converts `issue-<digits>` prefixes to `#<digits>` to save space in tab bars.
-/// All other names are returned unchanged.
-///
-/// This shortening is applied to both Zellij tab names and tmux window names.
-/// The worktree directory and branch names are never modified.
-fn shorten_tab_name(name: &str) -> String {
-    if let Some(rest) = name.strip_prefix("issue-") {
-        // Find where the leading digits end. Since ASCII digits are 1 byte each,
-        // the byte index from `find` always lands on a valid UTF-8 boundary.
-        let digit_end = rest
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(rest.len());
-        if digit_end > 0 {
-            let (digits, suffix) = rest.split_at(digit_end);
-            return format!("#{digits}{suffix}");
-        }
-    }
-    name.to_string()
-}
-
 /// Sanitizes a branch name for use as a directory name.
 ///
 /// Branch names commonly contain slashes (e.g., `feature/login`, `bugfix/auth-fix`)
@@ -784,26 +2158,480 @@ enum WorktreeResult {
     GitError(String),
     /// Failed to execute git command
     CommandError(std::io::Error),
+    /// Git made the `--no-checkout` worktree, but a step that writes its files
+    /// through the sparse patterns failed. The run removed the worktree and
+    /// what else it made. The value names the step and holds what git wrote to
+    /// stderr.
+    SparseCheckoutFailed(String),
+    /// Git made the sparse worktree, and the `post-checkout` hook that
+    /// [`run_post_checkout_hook`] ran exited with this status. The worktree and
+    /// the branch stay, as a plain add keeps them when its hook fails.
+    PostCheckoutHookFailed(ExitStatus),
+    /// Git made the sparse worktree, but the `git hook run` of
+    /// [`run_post_checkout_hook`] could not start, with this error. The
+    /// worktree holds its sparse files, so the worktree and the branch stay,
+    /// as they stay when the hook fails.
+    PostCheckoutHookNotStarted(io::Error),
+}
+
+/// True when `branch` is already a branch of the repository at `repo_root`.
+///
+/// `git worktree add -b <branch>` refuses when the branch is already there, and
+/// the user has to hear which of two problems they have: a branch that exists,
+/// which `--checkout` solves, or a directory that exists, which
+/// `--random-directory` solves. Only git can say which.
+///
+/// This is a production spawn, so it takes
+/// [`childenv::command`]. That
+/// sheds the whole inherited `GIT_` prefix and keeps the six names of
+/// [`childenv::USER_INTENT_GIT_ENVIRONMENT`]. An inherited `GIT_DIR` aims the
+/// question at another repository, whose branches say nothing about this one.
+/// The rule is the prefix plus a keep-list, and never a strip-list of names: a
+/// strip-list inherits the variable git invents next year, and a keep-list
+/// sheds it.
+///
+/// None of the six kept names moves this question to another repository. Two of
+/// them name a configuration file, and four name how git authenticates to a
+/// remote, which `show-ref` never reaches.
+///
+/// [`try_create_worktree`] takes the same entrance, so the add and the question
+/// that classifies its failure read one environment. Two answers from one
+/// environment do not disagree.
+fn branch_exists(repo_root: &Path, branch: &str) -> bool {
+    let mut command = childenv::command("git");
+
+    command
+        .args(["show-ref", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{branch}"))
+        .current_dir(repo_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// The exit status of `git show-ref --verify` for a ref that is not there.
+const SHOW_REF_MISSING_STATUS: i32 = 1;
+
+/// True when git answers that `branch` is not a branch of the repository at
+/// `repo_root`.
+///
+/// `git show-ref --verify --quiet refs/heads/<branch>` exits
+/// [`SHOW_REF_MISSING_STATUS`] for a branch that is not there. Each other
+/// answer, a git that does not start included, is not a known absence. So a
+/// cleanup that deletes a branch only when it was absent before the run never
+/// deletes a branch that git did not report on.
+///
+/// [`branch_exists`] asks the same question for another purpose. It takes each
+/// failure as "not there", and that reading is the safe one for a failed add.
+fn branch_known_absent(repo_root: &Path, branch: &str) -> bool {
+    let mut show_ref = production_git_command(repo_root);
+    show_ref
+        .args(["show-ref", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{branch}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    show_ref
+        .status()
+        .is_ok_and(|status| status.code() == Some(SHOW_REF_MISSING_STATUS))
+}
+
+/// A production `git` command that runs in `dir`.
+///
+/// Each git child that the sparse checkout adds starts here, so none of them
+/// can forget the shed. The command takes
+/// [`childenv::command`], which
+/// sheds the whole inherited `GIT_` prefix and keeps the six names of
+/// [`childenv::USER_INTENT_GIT_ENVIRONMENT`]. An inherited `GIT_DIR` or
+/// `GIT_WORK_TREE` otherwise aims the command at the repository that a
+/// launching hook names, and not at `dir`. Stdin is null, so a git that asks a
+/// question gets no answer and does not stop the run.
+///
+/// The caller adds the arguments and decides where the output goes.
+fn production_git_command(dir: &Path) -> Command {
+    let mut command = childenv::command("git");
+    command.current_dir(dir).stdin(Stdio::null());
+    command
+}
+
+/// Run `command` to its end with its output captured, and hand back what it
+/// wrote to stdout.
+///
+/// `step` names the command in the error message. Nothing the command writes
+/// reaches the stdout of `nwt`, because the shell wrapper reads the worktree
+/// path from that stream.
+///
+/// # Errors
+///
+/// Returns a message that names `step` when git cannot start, or when it exits
+/// with a status that is not zero. The message holds what git wrote to stderr.
+fn run_sparse_step(mut command: Command, step: &str) -> Result<String, String> {
+    let output = command
+        .output()
+        .map_err(|e| format!("could not run {step} in the new worktree: {e}"))?;
+
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+
+    Err(format!(
+        "{step} failed in the new worktree ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+/// The names of the steps of [`apply_sparse_checkout`], in the order that it
+/// runs them. [`run_sparse_step`] puts each name into its error message.
+///
+/// A failure of each step breaks the worktree, and the run removes it. The
+/// `--help` text and the README name each step in that failure. A test reads
+/// this array, so a new step must come here, and the documents must name it.
+const SPARSE_STEPS: [&str; 3] = [
+    "git sparse-checkout set",
+    "git read-tree -mu HEAD",
+    "git rev-parse HEAD",
+];
+
+/// Write the files of a `--no-checkout` worktree through sparse patterns that
+/// leave out each directory of `excludes`.
+///
+/// A plain `git worktree add` writes every file before a pattern can apply. So
+/// the add runs with `--no-checkout`, and this function does the rest in the
+/// new worktree:
+///
+/// 1. `git sparse-checkout set --no-cone '/*' '!/<dir>/'...` writes
+///    `core.sparseCheckout` into the `config.worktree` of this worktree and the
+///    patterns into its `info/sparse-checkout`. The main worktree and every
+///    other worktree stay full.
+/// 2. `git read-tree -mu HEAD` fills the index and writes each file that the
+///    patterns include.
+/// 3. `git rev-parse HEAD` gives the commit that the worktree checks out, which
+///    [`run_post_checkout_hook`] hands to the hook.
+///
+/// # Errors
+///
+/// Returns the message of [`run_sparse_step`] for the first step that fails.
+/// The worktree is broken then, and [`try_create_worktree`] calls
+/// [`remove_broken_sparse_worktree`] to remove what the run made.
+fn apply_sparse_checkout(worktree: &Path, excludes: &[SparseExcludeDir]) -> Result<String, String> {
+    let [set_step, read_tree_step, rev_parse_step] = SPARSE_STEPS;
+
+    let mut set = production_git_command(worktree);
+    set.args([
+        "sparse-checkout",
+        "set",
+        "--no-cone",
+        SPARSE_INCLUDE_EVERYTHING,
+    ])
+    .args(excludes.iter().map(SparseExcludeDir::pattern));
+    run_sparse_step(set, set_step)?;
+
+    let mut read_tree = production_git_command(worktree);
+    read_tree.args(["read-tree", "-mu", "HEAD"]);
+    run_sparse_step(read_tree, read_tree_step)?;
+
+    let mut rev_parse = production_git_command(worktree);
+    rev_parse.args(["rev-parse", "HEAD"]);
+    let head = run_sparse_step(rev_parse, rev_parse_step)?;
+    Ok(head.trim_end().to_owned())
+}
+
+/// The name of the hook that git runs after it checks a tree out.
+const POST_CHECKOUT_HOOK: &str = "post-checkout";
+
+/// The variable that tells git where the working tree of a repository is.
+///
+/// [`run_post_checkout_hook`] sets it for the hook, because `git hook run`
+/// exports `GIT_DIR` for the hook and no working tree.
+const GIT_WORK_TREE_VARIABLE: &str = "GIT_WORK_TREE";
+
+/// The third argument of the `post-checkout` hook for a checkout of a branch,
+/// as `git worktree add` gives it. The value `0` is a checkout of files.
+const POST_CHECKOUT_OF_A_BRANCH: &str = "1";
+
+/// The null object id of a repository whose object ids have the length of
+/// `head`.
+///
+/// `git worktree add` gives the null object id to the `post-checkout` hook as
+/// the old `HEAD`. Its length is the length of the hash: 40 zeros for SHA-1,
+/// and 64 zeros for SHA-256.
+fn null_object_id(head: &str) -> String {
+    "0".repeat(head.len())
+}
+
+/// Run the `post-checkout` hook of the repository in the sparse `worktree`, as
+/// a plain `git worktree add` runs it.
+///
+/// `git worktree add --no-checkout` runs no hook. So after the files are
+/// written, this function runs
+/// `git hook run --ignore-missing post-checkout -- <null object id> <head> 1`.
+/// Those are the arguments of a plain add, so a hook that reads the null old
+/// ref to find a new worktree sees no difference. `git hook run` obeys
+/// `core.hooksPath`, and `--ignore-missing` makes a repository without the hook
+/// a success.
+///
+/// Git sends the stdout of the hook to its own stderr, and this function sends
+/// the stdout of git to the stderr of `nwt` too. The shell wrapper reads the
+/// worktree path from stdout, and a word of a hook there breaks it. Stderr is
+/// inherited, so the user sees what the hook says, as with a plain add.
+///
+/// A plain add and `git hook run` both run the hook with the worktree as its
+/// working directory. A plain add exports neither `GIT_DIR` nor `GIT_WORK_TREE` for the hook, so git in the
+/// hook finds the worktree from the directory it runs in. `git hook run`
+/// exports `GIT_DIR` for the hook, with the git directory of the worktree
+/// (`.git/worktrees/<name>`) as its value. When `GIT_DIR` is set and
+/// `GIT_WORK_TREE` is not, git takes the directory it runs in as the top level.
+/// A hook that changes to `sub/` then sees `sub/` as the root, each file of
+/// `sub/` as deleted, and each file of `sub/` again as untracked.
+///
+/// So this function sets [`GIT_WORK_TREE_VARIABLE`] to `worktree` on the
+/// command. `git hook run` passes it to the hook, and git in the hook then
+/// finds the worktree root from each subdirectory, as under a plain add. The
+/// value is set after [`production_git_command`] sheds the inherited
+/// environment, so the value of `nwt` wins over a value that a launching hook
+/// exported. `worktree` is an absolute path: git reads a relative value from
+/// the directory that the hook runs in.
+///
+/// # Errors
+///
+/// Returns the error of the start when git cannot start.
+fn run_post_checkout_hook(worktree: &Path, head: &str) -> io::Result<ExitStatus> {
+    let mut hook = production_git_command(worktree);
+    hook.env(GIT_WORK_TREE_VARIABLE, worktree)
+        .args([
+            "hook",
+            "run",
+            "--ignore-missing",
+            POST_CHECKOUT_HOOK,
+            "--",
+            &null_object_id(head),
+            head,
+            POST_CHECKOUT_OF_A_BRANCH,
+        ])
+        .stdout(Stdio::from(io::stderr()))
+        .stderr(Stdio::inherit());
+
+    hook.status()
+}
+
+/// The nearest ancestor of `path` that exists.
+///
+/// `git worktree add` makes each directory between that ancestor and the new
+/// worktree. [`remove_broken_sparse_worktree`] removes those directories, and
+/// it stops at this ancestor, so a directory that was there before the run
+/// stays. [`try_create_worktree`] asks before the add, because after the add
+/// every ancestor exists.
+fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .skip(1)
+        .find(|ancestor| ancestor.exists())
+        .map(Path::to_path_buf)
+}
+
+/// Remove what a sparse run made, after a sparse step broke the new worktree.
+///
+/// A failure of `git sparse-checkout set`, `git read-tree -mu HEAD`, or
+/// `git rev-parse HEAD` leaves a worktree without the files it must hold. Such
+/// a worktree is of no use, so the run takes back each thing that it made:
+///
+/// 1. `git worktree remove --force <worktree>`, in `repo_root`, removes the
+///    directory and its entry in `.git/worktrees`. A `--no-checkout` worktree
+///    has an empty index, so git sees each file of `HEAD` as deleted, and it
+///    refuses a removal without `--force`.
+/// 2. `git branch -D <made_branch>` deletes the branch that the add made. Only
+///    the add wrote to that branch, so the delete loses no commit.
+/// 3. [`fs::remove_dir`] removes each parent directory of the worktree, from
+///    the nearest parent upward. It stops at `existing_ancestor`, which was
+///    there before the add, and at the first directory that is not empty. It
+///    never removes a directory that holds something.
+///
+/// Each step runs, also when an earlier step failed. A worktree that stays
+/// holds its branch, so git refuses to delete that branch too, and the message
+/// then names both.
+///
+/// Returns one line for each step that failed. Each line names what is left
+/// and the command that removes it by hand. An empty list means that nothing
+/// is left. A directory that is not empty is a stop, and not a failure.
+fn remove_broken_sparse_worktree(
+    repo_root: &Path,
+    worktree: &Path,
+    made_branch: Option<&str>,
+    existing_ancestor: Option<&Path>,
+) -> Vec<String> {
+    let mut left = Vec::new();
+
+    let mut remove = production_git_command(repo_root);
+    remove.args(["worktree", "remove", "--force"]).arg(worktree);
+    if let Err(reason) = run_cleanup_step(remove) {
+        left.push(format!(
+            "nwt could not remove the worktree at '{}': {reason}. Remove it with: git worktree \
+             remove --force {}",
+            worktree.display(),
+            shellquote::shell_quote(&worktree.to_string_lossy())
+        ));
+    }
+
+    if let Some(branch) = made_branch {
+        let mut delete = production_git_command(repo_root);
+        delete.args(["branch", "-D", branch]);
+        if let Err(reason) = run_cleanup_step(delete) {
+            left.push(format!(
+                "nwt could not delete the branch '{branch}': {reason}. Delete it with: git branch \
+                 -D {}",
+                shellquote::shell_quote(branch)
+            ));
+        }
+    }
+
+    let mut parent = worktree.parent();
+    while let Some(dir) = parent {
+        if Some(dir) == existing_ancestor {
+            break;
+        }
+        match fs::remove_dir(dir) {
+            Ok(()) => parent = dir.parent(),
+            Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => break,
+            Err(e) => {
+                left.push(format!(
+                    "nwt could not remove the empty directory '{}': {e}. Remove it by hand.",
+                    dir.display()
+                ));
+                break;
+            }
+        }
+    }
+
+    left
+}
+
+/// Run one git child of the cleanup of a broken sparse worktree to its end,
+/// with its output captured.
+///
+/// # Errors
+///
+/// Returns why the step failed: the error of the start when git cannot start,
+/// or what git wrote to stderr and its exit status.
+fn run_cleanup_step(mut command: Command) -> Result<(), String> {
+    let output = command
+        .output()
+        .map_err(|e| format!("git could not start: {e}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "{} ({})",
+        String::from_utf8_lossy(&output.stderr).trim(),
+        output.status
+    ))
 }
 
 /// Attempts to create a git worktree at the given path.
 ///
 /// Returns a `WorktreeResult` indicating success or the type of failure.
 ///
+/// `source` gives what the add checks out:
+///
+/// - [`WorktreeSource::Checkout`]: `git worktree add <path> <ref>`.
+/// - [`WorktreeSource::NewBranchAtHead`]:
+///   `git worktree add <path> -b <branch_name>`, which starts the branch at
+///   `HEAD`.
+/// - [`WorktreeSource::NewBranchTracking`]:
+///   `git worktree add --track -b <branch_name> <path> <full ref>`, which
+///   starts the branch at the remote-tracking branch and sets it as the
+///   upstream. The full ref, and not the short form, makes sure that a tag or
+///   a local branch with the name of the short form cannot shadow it.
+///
+/// When `sparse_excludes` is not empty, the add runs with `--no-checkout`, and
+/// [`apply_sparse_checkout`] then writes the files without those directories.
+/// When that step fails, [`remove_broken_sparse_worktree`] removes what the run
+/// made, and the result is [`WorktreeResult::SparseCheckoutFailed`].
+/// [`run_post_checkout_hook`] then runs the hook that the add did not run. A
+/// hook that fails keeps the worktree, and the result is
+/// [`WorktreeResult::PostCheckoutHookFailed`]. A `git hook run` that cannot
+/// start keeps the worktree too, and the result is
+/// [`WorktreeResult::PostCheckoutHookNotStarted`].
+///
 /// This function displays git's progress output (e.g., "Updating files: X%") in real-time
 /// while also capturing stderr for error classification. This is done by spawning a thread
 /// that reads stderr and both echoes it to the terminal and captures it for later analysis.
+///
+/// # The inherited git environment
+///
+/// `git worktree add` is the first git child of `nwt` that writes. It makes a
+/// branch ref, a reflog and a whole `worktrees/<name>` directory in the
+/// repository it reaches. The sparse path adds more children that write:
+/// `git sparse-checkout set`, `git read-tree -mu HEAD`, `git hook run`, and the
+/// `git worktree remove --force` and `git branch -D` of the cleanup. Each of
+/// them starts from [`production_git_command`], which takes the same production
+/// entrance as the add. Git obeys the environment before it obeys the
+/// directory a command was pointed at, so an inherited `GIT_DIR` sends all of
+/// that into another repository — the repository being committed to, for a
+/// `nwt` that a git hook started.
+///
+/// So the command takes the production entrance,
+/// [`childenv::command`], before
+/// the arguments are set. It sheds the whole inherited `GIT_` prefix and keeps
+/// the six names of [`childenv::USER_INTENT_GIT_ENVIRONMENT`]. The four
+/// authentication names of that list earn their keep here: the add checks a
+/// tree out, and a smudge filter or a `post-checkout` hook that fetches —
+/// git-lfs installs one — then reaches the network as the user's own shell
+/// reaches it.
+///
+/// **What the shed gives up.** `git worktree add` runs the repository's
+/// `post-checkout` hook, and that hook now reads an environment without the
+/// `GIT_` variables this process inherited. A hook that reads one of them reads
+/// nothing in its place. The loss is bounded: git sets its own variables for
+/// the hook it runs, so what leaves is only what `nwt` inherited, and never
+/// what git states for the hook itself. The gain is the worktree landing in the
+/// repository the user pointed `nwt` at, and that is worth more than a hook's
+/// view of a variable an outer command exported.
 fn try_create_worktree(
     repo_root: &std::path::Path,
     worktree_path: &str,
     branch_name: &str,
-    checkout_ref: Option<&str>,
+    source: WorktreeSource<'_>,
+    sparse_excludes: &[SparseExcludeDir],
 ) -> WorktreeResult {
-    let mut cmd = Command::new("git");
-    if let Some(ref_name) = checkout_ref {
-        cmd.args(["worktree", "add", worktree_path, ref_name]);
+    // A sparse run that breaks removes the directories that the add makes.
+    // After the add every ancestor exists, so the run looks before the add.
+    let existing_ancestor = if sparse_excludes.is_empty() {
+        None
     } else {
-        cmd.args(["worktree", "add", worktree_path, "-b", branch_name]);
+        nearest_existing_ancestor(Path::new(worktree_path))
+    };
+    let checkout_ref = match source {
+        WorktreeSource::Checkout(name) => Some(name),
+        WorktreeSource::NewBranchAtHead | WorktreeSource::NewBranchTracking(_) => None,
+    };
+    // Git's checkout DWIM can make a local branch for `-c <ref>`. The cleanup
+    // deletes that branch only when git said before the add that it was not
+    // there, so a branch that the user had stays.
+    let checkout_branch_absent = !sparse_excludes.is_empty()
+        && checkout_ref.is_some_and(|name| branch_known_absent(repo_root, name));
+
+    let mut cmd = childenv::command("git");
+
+    cmd.args(["worktree", "add"]);
+    if !sparse_excludes.is_empty() {
+        // The files wait until the sparse patterns are in place.
+        cmd.arg("--no-checkout");
+    }
+    match source {
+        WorktreeSource::Checkout(ref_name) => {
+            cmd.args([worktree_path, ref_name]);
+        }
+        WorktreeSource::NewBranchAtHead => {
+            cmd.args([worktree_path, "-b", branch_name]);
+        }
+        WorktreeSource::NewBranchTracking(remote_branch) => {
+            cmd.args(["--track", "-b", branch_name, worktree_path])
+                .arg(remote_branch.full_ref());
+        }
     }
 
     // Spawn the process with piped stderr so we can both display progress and capture errors.
@@ -855,13 +2683,63 @@ fn try_create_worktree(
         .unwrap_or_else(|_| "Error: Failed to capture stderr output from git command".to_string());
 
     if status.success() {
-        WorktreeResult::Success
+        if sparse_excludes.is_empty() {
+            return WorktreeResult::Success;
+        }
+        let worktree = Path::new(worktree_path);
+        let head = match apply_sparse_checkout(worktree, sparse_excludes) {
+            Ok(head) => head,
+            Err(message) => {
+                // `-b <branch>` and a random name make the branch in the add.
+                // `-c <ref>` makes one only through git's checkout DWIM, and
+                // only when no branch of that name was there before the add.
+                let made_branch = match checkout_ref {
+                    None => Some(branch_name),
+                    Some(name) if checkout_branch_absent && branch_exists(repo_root, name) => {
+                        Some(name)
+                    }
+                    Some(_) => None,
+                };
+                let left = remove_broken_sparse_worktree(
+                    repo_root,
+                    worktree,
+                    made_branch,
+                    existing_ancestor.as_deref(),
+                );
+                // Each thing that the cleanup could not remove gets a line of
+                // its own after the failed step.
+                let mut lines = vec![message];
+                lines.extend(left);
+                return WorktreeResult::SparseCheckoutFailed(lines.join("\n"));
+            }
+        };
+        match run_post_checkout_hook(worktree, &head) {
+            Ok(status) if status.success() => WorktreeResult::Success,
+            Ok(status) => WorktreeResult::PostCheckoutHookFailed(status),
+            Err(e) => WorktreeResult::PostCheckoutHookNotStarted(e),
+        }
     } else {
-        // Check for branch already exists first using git's specific error format.
-        // Git says: "fatal: A branch named '<branch>' already exists."
-        // We check for "A branch named" specifically to avoid false positives when
-        // the path contains the word "branch" (e.g., "/path/to/branch-test/").
-        if stderr.contains("A branch named") {
+        // Ask git whether the branch is there. Do not read the reason it gave.
+        //
+        // Git states that reason in prose, and prose is not a contract. The
+        // check here read it for "A branch named" with a capital letter, and
+        // git writes "fatal: a branch named 'x' already exists" in lower case.
+        // The check missed every time. The next check caught the words "already
+        // exists", so every branch collision was reported as a directory
+        // collision, naming a directory that did not exist and advising a new
+        // directory name that could not help. With a random directory name the
+        // miss cost ten attempts against the one branch that could never work.
+        //
+        // `show-ref --verify` answers with its exit status, which git does not
+        // reword. The question is asked only after the add failed, so it costs
+        // nothing on the path that works.
+        //
+        // A checkout run makes a branch only through git's checkout DWIM, and
+        // git does that only when no branch of that name exists. So a checkout
+        // run can have no branch collision. Its `branch_name` is the directory
+        // name, which can name a branch by coincidence, and asking about that
+        // one would report the wrong reason.
+        if checkout_ref.is_none() && branch_exists(repo_root, branch_name) {
             return WorktreeResult::BranchExists(branch_name.to_string());
         }
 
@@ -909,10 +2787,21 @@ fn setup_shell_integration() -> Result<(), shellsetup::ShellSetupError> {
 /// expects it to work. The worst case is redundant copies; the alternative would be
 /// missing critical development configuration.
 fn get_tracked_files(repo_root: &Path) -> HashSet<PathBuf> {
-    let output = Command::new("git")
-        .args(["ls-files"])
-        .current_dir(repo_root)
-        .output();
+    // Shed the inherited `GIT_` family, through
+    // [`childenv::command`], so the
+    // query targets `repo_root` rather than whatever repository a parent git
+    // hook exported. The rule is the prefix and never a list of names: this call
+    // site listed three, and `GIT_OBJECT_DIRECTORY` and `GIT_CONFIG_PARAMETERS`
+    // walked straight through them.
+    //
+    // The six names of `childenv::USER_INTENT_GIT_ENVIRONMENT` stay, because a
+    // person states them on purpose and `nwt` runs for that person. None of them
+    // moves this query to another repository: two name configuration files, and
+    // four name how git authenticates to a remote, which `ls-files` never
+    // reaches.
+    let mut command = childenv::command("git");
+
+    let output = command.args(["ls-files"]).current_dir(repo_root).output();
 
     match output {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
@@ -923,21 +2812,150 @@ fn get_tracked_files(repo_root: &Path) -> HashSet<PathBuf> {
     }
 }
 
+/// Outcome of an env-file copy pass, so callers (and tests) can see what
+/// happened without scraping stderr.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct EnvCopySummary {
+    /// Files copied from the main worktree into the new worktree.
+    copied: usize,
+    /// Destinations that already existed and were deliberately left alone.
+    kept: usize,
+    /// Files under a `--sparse-exclude` directory, which the copy does not
+    /// take. A copy makes the excluded directory in the new worktree again.
+    skipped: usize,
+}
+
+/// The stderr line for an untracked `.env` that the copy does not take,
+/// because it is under the excluded directory `dir`.
+///
+/// The directory shows with a trailing `/`, as the sparse checkout notice
+/// shows it.
+fn skipped_under_excluded_message(relative_path: &Path, dir: &SparseExcludeDir) -> String {
+    format!(
+        "Skipped: {} (under excluded {}/)",
+        relative_path.display(),
+        dir.as_str()
+    )
+}
+
+/// Builds the user-facing line announcing a destination `.env` that was left alone.
+///
+/// The line states only the observed fact — the destination was already there — because
+/// the skip fires for *any* pre-existing file, not just one a post-checkout hook
+/// generated. A `.env.local` that is untracked in the main worktree but committed on the
+/// branch being checked out is placed there by `git worktree add` itself. The hook
+/// rationale is explained in the `--help` text and the README instead.
+fn kept_existing_message(relative_path: &Path) -> String {
+    format!(
+        "Kept existing: {} (already in the new worktree; not overwritten from main worktree)",
+        relative_path.display()
+    )
+}
+
+/// Reports a destination `.env` that already existed and was deliberately left alone.
+///
+/// Both the pre-flight existence check and the lost-the-race `AlreadyExists` path funnel
+/// through here so the two are worded identically — from the user's point of view they
+/// are the same outcome, and the wording lives in exactly one place.
+fn report_kept_existing(relative_path: &Path, quiet: bool) {
+    if !quiet {
+        eprintln!("{}", kept_existing_message(relative_path));
+    }
+}
+
+/// Copies a single `.env` file from `source` to `dest`, creating the destination
+/// exclusively and (on Unix) at mode 0600 — owner read/write only.
+///
+/// This deliberately does *not* use [`fs::copy`], which would both overwrite an existing
+/// destination and stamp the source's permission bits onto it.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::AlreadyExists`] if anything already exists at `dest` — the
+/// destination is never truncated or overwritten. Any other I/O error from opening
+/// `source`, creating `dest`, or streaming the bytes is returned as-is.
+fn copy_env_file(source: &Path, dest: &Path) -> io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+
+    // create_new(true) is load-bearing twice over, and looks like removable ceremony:
+    //
+    // 1. Mode-at-creation. Combined with .mode() below, the file exists with 0600 from
+    //    the very first instant. The obvious alternative — copy, then
+    //    fs::set_permissions — leaves a window in which the secret is already on disk
+    //    wearing the source's bits (typically 0644). For a secrets file that window is
+    //    the entire point; anything scanning or racing the worktree during it wins.
+    //
+    // 2. TOCTOU. The caller checks symlink_metadata() before calling us, but a
+    //    post-checkout hook or a concurrent process can still create the destination
+    //    between that check and this open. create_new makes the open itself the atomic
+    //    test-and-create, so the loser of that race gets AlreadyExists instead of
+    //    silently clobbering a freshly generated worktree-specific .env. Note it also
+    //    refuses to follow a dangling symlink at dest, which would otherwise write
+    //    through to the symlink's target.
+    options.write(true).create_new(true);
+
+    // The mode is the only platform-varying part; everything else behaves identically
+    // on Windows, where the concept does not exist.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(ENV_FILE_MODE);
+    }
+
+    let mut reader = fs::File::open(source)?;
+    let mut writer = options.open(dest)?;
+    io::copy(&mut reader, &mut writer).map(|_| ())
+}
+
 /// Copies untracked .env files from the main worktree to the new worktree.
 ///
 /// This function:
 /// 1. Gets all tracked files from git in a single call (for performance)
 /// 2. Walks the main repo looking for `.env` or `.env.*` files (e.g., `.env.local`)
-/// 3. Skips the `.git` directory, tracked files, and unrelated dotfiles like `.envrc`
-/// 4. Copies untracked .env files to the same relative path in the new worktree
-/// 5. Creates parent directories as needed
-/// 6. Reports copied files unless quiet mode is enabled
+/// 3. Skips the `.git` directory, tracked files, and unrelated dotfiles like `.envrc`.
+///    The walk does not go into a directory below the root that holds a `.git`
+///    entry (see [`repowalker::holds_git_entry`]). Such a directory is a child
+///    repository, and its `.env` files belong to the child. The index of the
+///    parent does not list them, thus without this rule the copy takes each one
+///    as untracked, even one that the child tracks. The copy then makes a real
+///    directory in the worktree that holds only `.env` files. The rule applies
+///    whether or not the child is linked into the worktree, because a directory
+///    that holds only `.env` files is not a usable child.
+///    It also skips each untracked file under a directory of `excluded`, the
+///    `--sparse-exclude` directories of the new worktree, because a copy makes that
+///    directory in the worktree again. Each such skip counts in
+///    [`EnvCopySummary::skipped`] and prints one `Skipped:` line (see
+///    [`skipped_under_excluded_message`]).
+/// 4. Skips any destination that already exists, leaving it completely untouched —
+///    a `post-checkout` hook runs during `git worktree add` (before this copy), so a
+///    worktree-specific .env it generated must win over the main worktree's version
+/// 5. Copies the remaining untracked .env files to the same relative path in the new worktree
+/// 6. Creates parent directories as needed
+/// 7. Creates each copy exclusively and, on Unix, at mode 0600 (see [`copy_env_file`]), so a
+///    world-readable .env in the main worktree never propagates its permissions — and a
+///    destination that appears mid-pass is counted as kept rather than clobbered
+/// 8. Reports copied and kept files unless quiet mode is enabled
+///
+/// `main_repo` is the main worktree of the repository, and git names the git
+/// directory itself as the main worktree of a repository that keeps the two
+/// apart. A git directory holds no `.env` file, so this walk finds nothing and
+/// copies nothing there. That is the answer this repository wants: the work
+/// tree of such a repository is the home directory of the user, and the `.env`
+/// files there are not the new worktree's to take.
 ///
 /// Errors copying individual files are reported but don't stop the process.
-fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) {
+///
+/// Returns an [`EnvCopySummary`] recording how many files were copied and how many
+/// existing destinations were kept.
+fn copy_untracked_env_files(
+    main_repo: &Path,
+    worktree: &Path,
+    excluded: &[SparseExcludeDir],
+    quiet: bool,
+) -> EnvCopySummary {
     // Get all tracked files in a single git call for performance
     let tracked_files = get_tracked_files(main_repo);
-    let mut copied_count = 0;
+    let mut summary = EnvCopySummary::default();
 
     for entry in WalkDir::new(main_repo)
         .follow_links(false) // Don't follow symlinks
@@ -946,7 +2964,14 @@ fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) {
             // Skip directories listed in SKIP_DIRECTORIES for performance.
             // See the constant definition for rationale.
             let name = e.file_name().to_string_lossy();
-            !SKIP_DIRECTORIES.contains(&name.as_ref())
+            if SKIP_DIRECTORIES.contains(&name.as_ref()) {
+                return false;
+            }
+            // Do not go into a child repository. The index of the parent does
+            // not list the files of a child, thus each `.env` of a child looks
+            // untracked here. The root is the main worktree, and it holds its
+            // own `.git`, so the rule starts below the root.
+            !(e.depth() > 0 && e.file_type().is_dir() && repowalker::holds_git_entry(e.path()))
         })
         .filter_map(|e| e.ok())
     {
@@ -974,7 +2999,39 @@ fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) {
             Ok(rel) => rel,
             Err(_) => continue,
         };
+
+        // A sparse worktree does not hold an excluded directory, and a copy
+        // into it makes that directory again. `Path::starts_with` compares
+        // whole components, so `heavy2/.env` is not under `heavy`.
+        if let Some(dir) = excluded
+            .iter()
+            .find(|dir| relative_path.starts_with(Path::new(dir.as_str())))
+        {
+            summary.skipped += 1;
+            if !quiet {
+                eprintln!("{}", skipped_under_excluded_message(relative_path, dir));
+            }
+            continue;
+        }
+
         let dest_path = worktree.join(relative_path);
+
+        // Never clobber something the new worktree already has. Repo
+        // `post-checkout` hooks live in the shared git dir, so they run DURING
+        // `git worktree add` — before this copy — and a hook that generates a
+        // worktree-specific .env (unique port, unique DB name, freshly-minted
+        // secret) would otherwise have its work silently replaced.
+        //
+        // symlink_metadata(), not exists(): exists() follows symlinks and
+        // reports false for a broken one, and fs::copy would then write THROUGH
+        // the dangling symlink to its target — exactly the silent clobber this
+        // guard exists to prevent. symlink_metadata() answers "is there
+        // anything at this path", which is the question we actually mean.
+        if dest_path.symlink_metadata().is_ok() {
+            summary.kept += 1;
+            report_kept_existing(relative_path, quiet);
+            continue;
+        }
 
         // Create parent directories if needed (create_dir_all is idempotent)
         if let Some(parent) = dest_path.parent() {
@@ -991,12 +3048,22 @@ fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) {
         }
 
         // Copy the file
-        match fs::copy(file_path, &dest_path) {
+        match copy_env_file(file_path, &dest_path) {
             Ok(_) => {
-                copied_count += 1;
+                summary.copied += 1;
                 if !quiet {
                     eprintln!("Copied: {}", relative_path.display());
                 }
+            }
+            // The race-loser twin of the symlink_metadata() check above: the
+            // destination did not exist when we looked, but existed by the time
+            // copy_env_file opened it (a post-checkout hook or a concurrent process
+            // got there first). Not dead code — it is the only thing standing
+            // between that race and a clobbered worktree .env. The outcome is
+            // identical to the pre-flight skip, so account for it identically.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                summary.kept += 1;
+                report_kept_existing(relative_path, quiet);
             }
             Err(e) => {
                 if !quiet {
@@ -1010,13 +3077,213 @@ fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) {
         }
     }
 
-    if copied_count > 0 && !quiet {
+    if summary.copied > 0 && !quiet {
         eprintln!(
             "Copied {} untracked .env file{} to new worktree",
-            copied_count,
-            if copied_count == 1 { "" } else { "s" }
+            summary.copied,
+            if summary.copied == 1 { "" } else { "s" }
         );
     }
+
+    if summary.kept > 0 && !quiet {
+        eprintln!(
+            "Kept {} existing .env file{} already in the new worktree",
+            summary.kept,
+            if summary.kept == 1 { "" } else { "s" }
+        );
+    }
+
+    summary
+}
+
+/// The directory that holds every worktree of the repository at `repo_root`.
+///
+/// The repository states the answer with the [`WORKTREES_DIR_KEY`]
+/// configuration key. The default stands when the key says nothing: the name of
+/// the main worktree plus `-worktrees`, beside the main worktree.
+///
+/// # Exits
+///
+/// Exits the process when the answer cannot be built. A stated value that names
+/// no directory, and a value git refuses to read, are both configuration errors
+/// ([`exit_codes::CONFIG_ERROR`]). The default needs a repository name that is
+/// valid UTF-8 ([`exit_codes::INVALID_PATH_ENCODING`]) and survives sanitizing
+/// ([`exit_codes::INVALID_REPO_NAME`]), and it needs a parent directory to sit
+/// in ([`exit_codes::NO_PARENT_DIR`]).
+fn worktrees_dir(repo_root: &Path, quiet: bool) -> PathBuf {
+    match stated_worktrees_dir(repo_root) {
+        StatedWorktreesDir::Value(stated) => {
+            // A value of nothing, and a value of only whitespace, name no
+            // directory. Falling back to the default would hide the mistake,
+            // and taking the value as a path would make a directory named
+            // `-worktrees` at the root of the file system.
+            if stated.trim().is_empty() {
+                error!(
+                    quiet,
+                    "Error: Git configuration '{}' is set to an empty value", WORKTREES_DIR_KEY
+                );
+                error!(
+                    quiet,
+                    "Set it to the directory that holds this repository's worktrees, \
+                     or remove it with 'git config --unset {}'.",
+                    WORKTREES_DIR_KEY
+                );
+                exit(exit_codes::CONFIG_ERROR);
+            }
+
+            // A relative value answers "where, from the main worktree?".
+            // Reading it against the current directory would put the worktrees
+            // of one repository in a different place for every directory nwt
+            // runs in.
+            let stated = PathBuf::from(stated);
+            return if stated.is_absolute() {
+                stated
+            } else {
+                repo_root.join(stated)
+            };
+        }
+        StatedWorktreesDir::Unreadable(complaint) => {
+            // Git read the key and refused it: a home directory that belongs to
+            // nobody, or a configuration file it cannot parse. The default is no
+            // answer here. The user stated a place, and a silent fall back would
+            // put the worktree somewhere else without a word.
+            error!(
+                quiet,
+                "Error: Could not read git configuration '{}'", WORKTREES_DIR_KEY
+            );
+            for line in complaint.lines() {
+                error!(quiet, "  {}", line);
+            }
+            exit(exit_codes::CONFIG_ERROR);
+        }
+        StatedWorktreesDir::Unset => {}
+    }
+
+    // Get repo name from path with sanitization (fail-fast on non-UTF8)
+    let repo_name = match repo_root.file_name() {
+        Some(name) => {
+            let name_str = match name.to_str() {
+                Some(s) => s,
+                None => {
+                    error!(
+                        quiet,
+                        "Error: Repository name contains invalid UTF-8 characters"
+                    );
+                    exit(exit_codes::INVALID_PATH_ENCODING);
+                }
+            };
+            match sanitize_repo_name(name_str) {
+                Some(sanitized) => sanitized,
+                None => {
+                    error!(quiet, "Error: Invalid repository name");
+                    exit(exit_codes::INVALID_REPO_NAME);
+                }
+            }
+        }
+        None => {
+            error!(quiet, "Error: Could not determine repository name");
+            exit(exit_codes::INVALID_REPO_NAME);
+        }
+    };
+
+    // Build worktrees directory path
+    let parent = match repo_root.parent() {
+        Some(p) => p,
+        None => {
+            error!(quiet, "Error: Repository has no parent directory");
+            exit(exit_codes::NO_PARENT_DIR);
+        }
+    };
+    parent.join(format!("{}-worktrees", repo_name))
+}
+
+/// What git says about [`WORKTREES_DIR_KEY`] in the repository nwt runs in.
+enum StatedWorktreesDir {
+    /// The key is set, and this is the value with the home directory expanded.
+    Value(String),
+    /// No scope sets the key, so the default stands.
+    Unset,
+    /// Git read the key and refused it. The text is what git said.
+    Unreadable(String),
+}
+
+/// The exit status `git config --get` gives when no scope sets the key.
+///
+/// Every other failing status carries a complaint on standard error, and means
+/// something other than "the key is not there".
+const GIT_CONFIG_KEY_NOT_FOUND: i32 = 1;
+
+/// Ask git what [`WORKTREES_DIR_KEY`] says in the repository at `repo_root`.
+///
+/// `git config --get` reads every scope, so the answer can come from the
+/// repository's own configuration, from `~/.gitconfig`, or from the system
+/// configuration.
+///
+/// `--type=path` makes git expand a leading `~` or `~user` into a home
+/// directory. A git configuration value gets no shell expansion, and git owns
+/// the rule for what a leading tilde means. A second copy of that rule here
+/// would drift from git's.
+///
+/// Git answers a key it cannot find with exit status
+/// [`GIT_CONFIG_KEY_NOT_FOUND`] and nothing else. It answers a value it cannot
+/// read — a home directory that belongs to nobody, a configuration file it
+/// cannot parse — with another status and a complaint, which becomes
+/// [`StatedWorktreesDir::Unreadable`]. Reading only the status would turn every
+/// such refusal into "the key is not set", and the run would then go somewhere
+/// the user never named.
+///
+/// A git that cannot be started at all is [`StatedWorktreesDir::Unset`]. That is
+/// no configuration error, and the run stops soon after at the `git worktree
+/// add` that says so plainly.
+///
+/// This is a production spawn, so it takes
+/// [`childenv::command`]. That
+/// sheds the whole inherited `GIT_` prefix and keeps the six names of
+/// [`childenv::USER_INTENT_GIT_ENVIRONMENT`]. An inherited `GIT_DIR` aims git
+/// at another repository, and the answer is then that repository's setting.
+/// `GIT_CONFIG_PARAMETERS` leaves with the rest, because git hands it to every
+/// hook: it carries the launching hook's `-c` options, and it answers this
+/// question with a value the user never wrote.
+///
+/// A `GIT_CONFIG_GLOBAL` the user stated stays, and it is part of the
+/// precedence this read exists to honor. The read covers every scope, and
+/// `GIT_CONFIG_GLOBAL` names the file git reads in place of `~/.gitconfig`.
+/// Shed it, and a user who states [`WORKTREES_DIR_KEY`] in the file they chose
+/// gets a worktree in a directory they never named. `GIT_CONFIG_SYSTEM` stays
+/// for the same reason, in place of the system file.
+///
+/// The rule is the prefix plus a keep-list, and never a strip-list of names. A
+/// strip-list inherits the variable git invents next year and still reports a
+/// clean-looking answer; a keep-list sheds it. See
+/// [`childenv::USER_INTENT_GIT_ENVIRONMENT`] for what each kept name buys.
+fn stated_worktrees_dir(repo_root: &Path) -> StatedWorktreesDir {
+    let mut command = childenv::command("git");
+
+    let output = command
+        .args(["config", "--type=path", "--get", WORKTREES_DIR_KEY])
+        .current_dir(repo_root)
+        .output();
+
+    let Ok(output) = output else {
+        return StatedWorktreesDir::Unset;
+    };
+
+    if !output.status.success() {
+        if output.status.code() == Some(GIT_CONFIG_KEY_NOT_FOUND) {
+            return StatedWorktreesDir::Unset;
+        }
+
+        let complaint = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return StatedWorktreesDir::Unreadable(complaint);
+    }
+
+    // Git ends the value with a line break, and the line break is no part of
+    // the path.
+    StatedWorktreesDir::Value(
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end_matches(['\n', '\r'])
+            .to_string(),
+    )
 }
 
 fn main() {
@@ -1058,22 +3325,22 @@ fn main() {
     // Merge CLI args with config file - CLI takes precedence
     let config = merge_config(&cli, file_config);
 
-    // Early check: if tmux option is specified but we're not running in tmux, refuse to proceed
-    if config.tmux && !is_running_in_tmux() {
-        error!(
-            config.quiet,
-            "Error: --tmux option specified but not running inside tmux"
-        );
-        error!(
-            config.quiet,
-            "Please run this command from within a tmux session, or remove the --tmux option."
-        );
-        exit(exit_codes::TMUX_NOT_RUNNING);
-    }
-
-    // Find the main git repo root (resolves to main repo even from worktree)
-    let repo_root = match find_main_repo() {
-        Some(root) => root,
+    // Find the main git repo root (resolves to main repo even from worktree).
+    //
+    // Git answers this, rather than a walk of the file system for a `.git`
+    // entry. A walk cannot read a repository whose git directory is detached
+    // from its work tree, which is how `yadm` keeps a directory of dotfiles:
+    // the git directory is `~/.local/share/yadm/repo.git`, the work tree is
+    // `$HOME`, and no `.git` entry exists anywhere.
+    //
+    // Git names the main worktree of that layout as the git directory itself.
+    // It builds the name from the common git directory with a trailing `/.git`
+    // removed, and this layout carries no such suffix. That path is the right
+    // answer for everything below it: `git worktree add` and `git ls-files`
+    // both work with it as their working directory, and the new worktree lands
+    // in `<git directory>-worktrees`, beside the git directory.
+    let repo_root = match find_repo_context() {
+        Some(context) => context.main_worktree().to_path_buf(),
         None => {
             error!(config.quiet, "Error: Not in a git repository");
             error!(
@@ -1084,53 +3351,53 @@ fn main() {
         }
     };
 
-    // Get repo name from path with sanitization (fail-fast on non-UTF8)
-    let repo_name = match repo_root.file_name() {
-        Some(name) => {
-            let name_str = match name.to_str() {
-                Some(s) => s,
-                None => {
-                    error!(
-                        config.quiet,
-                        "Error: Repository name contains invalid UTF-8 characters"
-                    );
-                    exit(exit_codes::INVALID_PATH_ENCODING);
+    // A new branch `<name>` starts at the remote-tracking branch where a fetch
+    // refspec puts the remote branch `<name>`, and tracks it, when the lookup
+    // finds one. The lookup runs before
+    // anything is made, so a refusal makes nothing. It never falls back to
+    // `HEAD` in silence, because a silent fall back hides the mistake. A run
+    // with `-c <ref>`, or with a random name, does no lookup.
+    let tracked_branch: Option<RemoteTrackingBranch> =
+        match (config.checkout.as_deref(), config.branch.as_deref()) {
+            (None, Some(name)) => match new_branch_start(&repo_root, name) {
+                Ok(start) => start,
+                Err(e) => {
+                    error!(config.quiet, "Error: {e}");
+                    exit(e.exit_code());
                 }
-            };
-            match sanitize_repo_name(name_str) {
-                Some(sanitized) => sanitized,
-                None => {
-                    error!(config.quiet, "Error: Invalid repository name");
-                    exit(exit_codes::INVALID_REPO_NAME);
-                }
-            }
-        }
-        None => {
-            error!(config.quiet, "Error: Could not determine repository name");
-            exit(exit_codes::INVALID_REPO_NAME);
+            },
+            _ => None,
+        };
+    let source = match (config.checkout.as_deref(), tracked_branch.as_ref()) {
+        (Some(reference), _) => WorktreeSource::Checkout(reference),
+        (None, Some(branch)) => WorktreeSource::NewBranchTracking(branch),
+        (None, None) => WorktreeSource::NewBranchAtHead,
+    };
+
+    // Refuse a bad `--sparse-exclude` value before anything is made, so a
+    // refusal leaves no directory, no branch, and no `worktrees/<name>`. Git
+    // checks each directory at the ref that the new worktree checks out. A
+    // ref that git cannot read exits like a failed add, and not like a bad
+    // directory.
+    let sparse_excludes = match resolve_sparse_excludes(&repo_root, source, &cli.sparse_exclude) {
+        Ok(dirs) => dirs,
+        Err(e) => {
+            error!(config.quiet, "Error: {e}");
+            exit(e.exit_code());
         }
     };
 
-    // Build worktrees directory path
-    let parent = match repo_root.parent() {
-        Some(p) => p,
-        None => {
-            error!(config.quiet, "Error: Repository has no parent directory");
-            exit(exit_codes::NO_PARENT_DIR);
-        }
-    };
-    let worktrees_dir = parent.join(format!("{}-worktrees", repo_name));
-
-    // Create worktrees directory if needed
-    if let Err(e) = fs::create_dir_all(&worktrees_dir) {
-        error!(
-            config.quiet,
-            "Error: Could not create worktrees directory '{}': {}",
-            worktrees_dir.display(),
-            e
-        );
-        exit(exit_codes::DIR_CREATE_FAILED);
-    }
+    // Ask where this repository keeps its worktrees. The repository states the
+    // answer with `nwt.worktreesDir`, and the default stands when it says
+    // nothing.
+    //
+    // Nothing makes that directory here. `git worktree add` makes every
+    // directory that leads to the new worktree, and it makes none of them when
+    // it refuses the request. A run that made the directory first left it
+    // behind on every failure after that point, and nothing ever removed it —
+    // issue #439, where the stray directory was
+    // `~/.local/share/yadm-worktrees`.
+    let worktrees_dir = worktrees_dir(&repo_root, config.quiet);
 
     // Determine directory naming strategy:
     // - If branch is specified and --random-directory is not used, use the branch name
@@ -1231,138 +3498,104 @@ fn main() {
             &repo_root,
             worktree_path_str,
             branch_name,
-            config.checkout.as_deref(),
+            source,
+            &sparse_excludes,
         ) {
             WorktreeResult::Success => {
-                // Compute shortened tab name for terminal multiplexers.
-                // This converts "issue-123-fix-bug" to "#123-fix-bug" to save
-                // space in tab bars. The directory/branch names are unaffected.
-                let tab_name = shorten_tab_name(&dir_name);
+                println!("{}", worktree_path.display());
 
-                if config.tmux {
-                    // Directory names are safe for tmux window names because:
-                    // - Random names (from names crate): only lowercase ASCII letters and hyphens
-                    // - Branch-based names: sanitized to only allow alphanumeric, hyphen, underscore, dot
-                    // Control characters cannot appear in either case. This is a debug assertion
-                    // to catch any future regression, not a runtime check.
-                    debug_assert!(
-                        !contains_control_chars(&dir_name),
-                        "Directory name contains control characters: {:?}",
-                        dir_name
-                    );
+                print_tracking_notice(source, config.quiet);
+
+                // The shell wrapper reads the path from stdout, so the notice
+                // goes to stderr.
+                if !sparse_excludes.is_empty() && !config.quiet {
+                    eprintln!("{}", sparse_exclude_notice(&sparse_excludes));
                 }
 
-                println!("{}", worktree_path.display());
+                // Link each child repository of the main worktree into the new
+                // worktree (issue #537). This step comes before the .env copy.
+                // The copy does not go into a child, and the .env files of a
+                // child reach the worktree through the link.
+                if config.link_children {
+                    children::link_children(&repo_root, &worktree_path, config.quiet);
+                }
 
                 // Copy untracked .env files from main worktree to new worktree
                 if config.copy_env {
-                    copy_untracked_env_files(&repo_root, &worktree_path, config.quiet);
+                    copy_untracked_env_files(
+                        &repo_root,
+                        &worktree_path,
+                        &sparse_excludes,
+                        config.quiet,
+                    );
                 }
 
-                // Rename Zellij tab if running inside Zellij
-                if is_running_in_zellij() {
-                    rename_zellij_tab(&tab_name);
-                }
-
-                // Execute tmux and/or run commands
-                if config.tmux {
-                    #[cfg(unix)]
-                    {
-                        // Create a new tmux window.
-                        // Note: tab_name is passed directly to tmux as an argument (not through
-                        // a shell), so it doesn't need shell escaping. Control characters are
-                        // validated above via debug_assert. Directory names are safe because they're
-                        // either random (adjective-noun from names crate) or sanitized branch names.
-                        let mut tmux_args: Vec<String> = vec![
-                            "new-window".into(),
-                            "-c".into(),
-                            worktree_path_str.into(),
-                            "-n".into(),
-                            tab_name,
-                        ];
-
-                        // If --run is specified, wrap the command in an interactive shell
-                        // so that aliases and shell functions are available.
-                        if let Some(ref cmd) = config.run {
-                            // Get the user's shell, defaulting to /bin/sh if SHELL is not set.
-                            // We escape the shell path to prevent injection attacks from
-                            // malicious SHELL environment variables.
-                            //
-                            // # Why /bin/sh fallback is acceptable
-                            //
-                            // When SHELL is unset, we fall back to /bin/sh. While /bin/sh with
-                            // -ic won't load user aliases (since POSIX sh has no ~/.shrc), this
-                            // is acceptable because:
-                            // 1. SHELL is almost always set on Unix systems - it's required by
-                            //    POSIX and set by login(1), sshd, and terminal emulators.
-                            // 2. If SHELL is unset, the user likely doesn't have shell aliases
-                            //    configured anyway, so there's nothing to load.
-                            // 3. The command itself will still execute correctly; only aliases
-                            //    and shell functions won't be available.
-                            // 4. This matches the behavior of tools like `tmux` itself, which
-                            //    also falls back to /bin/sh when SHELL is unset.
-                            let shell =
-                                std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-                            // Use -ic to start an interactive shell that loads rc files.
-                            // This ensures aliases and shell functions are available.
-                            // Note: This assumes $SHELL supports -i (interactive) and -c (command)
-                            // flags, which is true for bash, zsh, fish, and most POSIX shells.
-                            // Exotic shells that don't support these flags will fail with a clear
-                            // error message from the shell itself.
-                            // Both the shell path and command are escaped for safety.
-                            tmux_args.push(format!(
-                                "{} -ic {}",
-                                shell_escape(&shell),
-                                shell_escape(cmd)
-                            ));
-                        }
-
-                        match Command::new("tmux")
-                            .args(&tmux_args)
-                            .stdout(Stdio::inherit())
-                            .stderr(Stdio::inherit())
-                            .status()
-                        {
-                            Ok(status) => {
-                                if !status.success() {
-                                    // Use TMUX_FAILED for consistency. The worktree was created
-                                    // successfully; this exit code indicates tmux itself failed,
-                                    // not the user's --run command (which runs inside tmux).
-                                    error!(
-                                        config.quiet,
-                                        "tmux exited with code {}",
-                                        get_exit_code(status)
-                                    );
-                                    exit(exit_codes::TMUX_FAILED);
-                                }
-                            }
-                            Err(e) => {
-                                error!(config.quiet, "Error running tmux: {}", e);
-                                exit(exit_codes::TMUX_FAILED);
-                            }
-                        }
-                    }
-
-                    // On Windows, --tmux is not supported (tmux is Unix-only)
-                    #[cfg(windows)]
-                    {
+                // Bootstrap git hooks (e.g. husky's gitignored .husky/_) so they
+                // fire in this fresh worktree. Must run AFTER stdout's worktree
+                // path is printed and BEFORE any --run execution. A failure
+                // here never aborts worktree creation — the worktree is valid,
+                // just (possibly) ungated; bootstrap_hooks warns and continues.
+                //
+                // Dedup: skip our own bootstrap install when --run already
+                // invokes a package manager's install, so a user's documented
+                // `--run "pnpm install"` doesn't pay for a full install twice.
+                // The run is synchronous, and the deferred ungated-worktree
+                // safety net re-checks AFTER it, so a run that fails to create
+                // the hooks dir still gets the warning.
+                //
+                // The skip (and its notice) only make sense when a bootstrap was
+                // actually pending: gate on `detect_hook_bootstrap`. In a repo
+                // with no `prepare` script `bootstrap_hooks` is a silent no-op, so
+                // announcing a "skip" there would imply something was skipped when
+                // nothing would have run. When nothing is pending we fall through
+                // to `bootstrap_hooks`, which no-ops silently.
+                let skip_bootstrap_for_run = config
+                    .run
+                    .as_deref()
+                    .is_some_and(run_command_installs_dependencies)
+                    && detect_hook_bootstrap(&worktree_path).is_some();
+                if config.bootstrap_hooks {
+                    if skip_bootstrap_for_run {
                         error!(
                             config.quiet,
-                            "Error: --tmux is not supported on Windows. tmux is a Unix-only terminal multiplexer."
+                            "Skipping hook bootstrap: run command already installs dependencies"
                         );
-                        exit(exit_codes::TMUX_FAILED);
+                    } else {
+                        bootstrap_hooks(&worktree_path, config.quiet);
                     }
-                } else if let Some(ref cmd) = config.run {
-                    // Run command directly (no tmux)
+                }
+
+                // Ungated-worktree safety net (issue #275). The placement of this
+                // check depends on the execution mode below — see
+                // `warn_if_hooks_missing`'s placement contract. A `--run` command
+                // can be the thing that creates the missing hooks directory, so
+                // for that path we defer the check until AFTER the command
+                // finishes; without --run we check here.
+                let defer_hooks_check = config.run.is_some();
+                if !defer_hooks_check {
+                    warn_if_hooks_missing(&worktree_path);
+                }
+
+                // Run the --run command, if any, in the new worktree.
+                if let Some(ref cmd) = config.run {
+                    // The ungated-worktree safety net was deferred above so the
+                    // command gets a chance to create the hooks directory first
+                    // (e.g. `pnpm install` regenerating `.husky/_`). Re-check on
+                    // EVERY outcome before exiting — a failing run command must
+                    // not swallow the warning.
                     match run_shell_command(cmd, &worktree_path) {
-                        ShellCommandResult::Success => {}
+                        ShellCommandResult::Success => {
+                            warn_if_hooks_missing(&worktree_path);
+                        }
                         ShellCommandResult::Failed(code) => {
+                            warn_if_hooks_missing(&worktree_path);
                             // Print error message so users know the exit code is from
                             // the command, not nwt itself (since codes 1-8 overlap).
                             error!(config.quiet, "Command exited with code {}", code);
                             exit(code);
                         }
                         ShellCommandResult::ExecutionError(e) => {
+                            warn_if_hooks_missing(&worktree_path);
                             error!(config.quiet, "Error running command: {}", e);
                             exit(exit_codes::RUN_COMMAND_FAILED);
                         }
@@ -1414,13 +3647,520 @@ fn main() {
                 error!(config.quiet, "Error running git command: {}", e);
                 exit(exit_codes::GIT_COMMAND_ERROR);
             }
+            WorktreeResult::SparseCheckoutFailed(message) => {
+                error!(config.quiet, "Error: {}", message);
+                exit(exit_codes::WORKTREE_FAILED);
+            }
+            WorktreeResult::PostCheckoutHookFailed(status) => {
+                // A plain add keeps the worktree when its hook fails, and so
+                // does this path. No path goes to stdout, so the shell wrapper
+                // stays put, and this line tells the user where the worktree is.
+                // The branch and its upstream stay too, so the tracking notice
+                // follows the error line.
+                error!(
+                    config.quiet,
+                    "Error: the post-checkout hook failed ({}). The new worktree stays at '{}'.",
+                    status,
+                    worktree_path.display()
+                );
+                print_tracking_notice(source, config.quiet);
+                exit(exit_codes::WORKTREE_FAILED);
+            }
+            WorktreeResult::PostCheckoutHookNotStarted(e) => {
+                // A git command that cannot start exits GIT_COMMAND_ERROR. The
+                // worktree holds its sparse files and stays, so this line names
+                // the step and tells the user where the worktree is. The branch
+                // and its upstream stay too, so the tracking notice follows the
+                // error line.
+                error!(
+                    config.quiet,
+                    "Error: git could not start the post-checkout hook step ({}). The new \
+                     worktree stays at '{}'.",
+                    e,
+                    worktree_path.display()
+                );
+                print_tracking_notice(source, config.quiet);
+                exit(exit_codes::GIT_COMMAND_ERROR);
+            }
         }
+    }
+}
+
+/// Package manager detected for bootstrapping git hooks in a new worktree.
+///
+/// When a freshly created worktree's `package.json` declares a `prepare`
+/// script (the husky convention), the install step that wires up
+/// `core.hooksPath` must be run with the project's chosen package manager.
+/// This enum identifies which one to invoke.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageManager {
+    Pnpm,
+    Npm,
+    Yarn,
+    Bun,
+}
+
+impl PackageManager {
+    /// Returns the install invocation as a `(program, args)` pair.
+    ///
+    /// Running `program` with `args` performs a dependency install, which in
+    /// turn triggers the `prepare` lifecycle script that regenerates the
+    /// gitignored hook directory (`.husky/_`) so git hooks fire in the new
+    /// worktree.
+    fn install_command(&self) -> (&'static str, &'static [&'static str]) {
+        match self {
+            PackageManager::Pnpm => ("pnpm", &["install"]),
+            PackageManager::Npm => ("npm", &["install"]),
+            PackageManager::Yarn => ("yarn", &["install"]),
+            PackageManager::Bun => ("bun", &["install"]),
+        }
+    }
+}
+
+/// Detects whether a freshly created worktree needs a package-manager install
+/// to bootstrap its git hooks, and if so which package manager to use.
+///
+/// Returns `Some(pm)` only when `dir/package.json` exists, parses as JSON, and
+/// declares a non-empty string `scripts.prepare`. A `prepare` script is the
+/// husky convention for (re)generating the gitignored hook directory
+/// (`.husky/_`) that `core.hooksPath` points at, so its presence is the signal
+/// that an install is worth running in the new worktree.
+///
+/// The package manager is chosen in priority order:
+/// 1. The corepack `packageManager` field (e.g. `"pnpm@9.1.0"` or
+///    `"yarn@4.0.0+sha256..."`): the name before the first `@` is matched
+///    case-sensitively against pnpm/npm/yarn/bun. An unrecognized name is
+///    ignored and selection falls through to the lockfile check.
+/// 2. A lockfile in `dir`, checked in order: `pnpm-lock.yaml` → Pnpm,
+///    `package-lock.json` → Npm, `yarn.lock` → Yarn, `bun.lockb`/`bun.lock`
+///    → Bun.
+/// 3. Default: Pnpm.
+///
+/// This is fail-safe: a missing, unreadable, or malformed `package.json`, or
+/// any `scripts.prepare` that is absent, non-string, or empty, yields `None`.
+/// `None` means "do nothing" — the function never panics and never errors, so
+/// detection problems can never abort worktree creation.
+fn detect_hook_bootstrap(dir: &Path) -> Option<PackageManager> {
+    // Read and parse package.json; any I/O or JSON error is treated as "no
+    // bootstrap needed" so detection can never abort worktree creation.
+    let contents = fs::read_to_string(dir.join("package.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&contents).ok()?;
+
+    // Require a non-empty string `scripts.prepare` — the husky signal.
+    let prepare = value.get("scripts")?.get("prepare")?.as_str()?;
+    if prepare.is_empty() {
+        return None;
+    }
+
+    // Priority 1: corepack `packageManager` field. Take the name before the
+    // first `@` and match it case-sensitively; an unrecognized name falls
+    // through to lockfile detection rather than failing.
+    if let Some(spec) = value.get("packageManager").and_then(|v| v.as_str()) {
+        let name = spec.split_once('@').map_or(spec, |(name, _)| name);
+        match name {
+            "pnpm" => return Some(PackageManager::Pnpm),
+            "npm" => return Some(PackageManager::Npm),
+            "yarn" => return Some(PackageManager::Yarn),
+            "bun" => return Some(PackageManager::Bun),
+            _ => {}
+        }
+    }
+
+    // Priority 2: lockfile present in the worktree directory.
+    if dir.join("pnpm-lock.yaml").exists() {
+        return Some(PackageManager::Pnpm);
+    }
+    if dir.join("package-lock.json").exists() {
+        return Some(PackageManager::Npm);
+    }
+    if dir.join("yarn.lock").exists() {
+        return Some(PackageManager::Yarn);
+    }
+    if dir.join("bun.lockb").exists() || dir.join("bun.lock").exists() {
+        return Some(PackageManager::Bun);
+    }
+
+    // Priority 3: default to pnpm, this user's standard package manager.
+    Some(PackageManager::Pnpm)
+}
+
+/// Returns `true` when `cmd` already invokes a known package manager's install,
+/// so nwt's own hook-bootstrap install would be redundant and can be skipped.
+///
+/// # Why this exists
+///
+/// In a repo with a `prepare` script, [`bootstrap_hooks`] runs the package
+/// manager's install to regenerate the hooks directory. A user who also passes a
+/// `--run` that *itself* installs (the documented `nwt --run "pnpm install"`)
+/// would then pay for a full install twice per worktree. Detecting that the run
+/// command already installs lets the caller skip the bootstrap install — the
+/// run's install regenerates the hooks directory just the same.
+///
+/// # Matching is token-based, not substring-based
+///
+/// The command is whitespace-tokenized and scanned for an *adjacent* token pair
+/// where a program token (`pnpm`, `npm`, `yarn`, `bun`) is immediately followed
+/// by an install subcommand token. The accepted tokens differ per manager:
+/// `install` or `i` for `pnpm`/`bun`, the same plus `ci` for `npm`, and
+/// `install` only for `yarn` (which has no `i` alias — classic and berry both
+/// reject `yarn i`). This is deliberately stricter than a substring search so it
+/// does NOT misfire on
+/// `pnpm installer`, a script path like `scripts/npm-install.sh`, or a bare
+/// `install`. Matching ANY package manager counts — an `npm install` run still
+/// triggers the `prepare` script even if bootstrap would have chosen pnpm.
+///
+/// # The miss direction is fail-safe
+///
+/// A false negative is harmless: an unrecognized install spelling (e.g.
+/// `make setup`, or `pnpm install&&x` with no surrounding spaces so it does not
+/// tokenize as `pnpm` + `install`) simply means bootstrap runs as it does today
+/// — at worst a redundant install, never a missing one. So when in doubt this
+/// returns `false` and lets the bootstrap proceed.
+fn run_command_installs_dependencies(cmd: &str) -> bool {
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    tokens.windows(2).any(|pair| {
+        let program = pair[0];
+        let arg = pair[1];
+        match program {
+            "pnpm" | "bun" => arg == "install" || arg == "i",
+            "npm" => arg == "install" || arg == "i" || arg == "ci",
+            // yarn has no `i` alias: classic errors with `Command "i" not
+            // found` and berry rejects it too, so only `install` counts.
+            "yarn" => arg == "install",
+            _ => false,
+        }
+    })
+}
+
+/// Bootstraps git hooks in a freshly created worktree by running the project's
+/// package-manager install, returning `true` when nothing was needed or the
+/// install succeeded, and `false` when the install failed.
+///
+/// # Why this exists
+///
+/// Git-hook managers like husky put their hooks in a generated directory
+/// (`.husky/_`) that `core.hooksPath` points at, and that directory is
+/// gitignored — it's regenerated by the `prepare` lifecycle script during a
+/// package-manager install. A freshly created worktree has never run an
+/// install, so the directory is absent and git silently runs *no* hooks: lint,
+/// typecheck, and test gates are bypassed on every commit. Running the install
+/// here regenerates the directory so hooks fire in the new worktree.
+///
+/// # Behavior
+///
+/// - If [`detect_hook_bootstrap`] returns `None` (no `package.json`, or no
+///   non-empty `scripts.prepare`), there is nothing to do — returns `true`
+///   without spawning anything. Such repos are entirely unaffected.
+/// - Otherwise it runs the detected package manager's install in `worktree`.
+///
+/// # stdout must be null
+///
+/// nwt's own stdout is captured by its shell-integration wrapper
+/// (`dir=$(command nwt "$@")`) to `cd` into the new worktree. Any bytes a child
+/// process writes to stdout would corrupt that captured path, so the install's
+/// stdout is routed to `/dev/null`. Its stderr is inherited (so install
+/// progress and errors stay visible) unless `quiet`, in which case stderr is
+/// nulled too.
+///
+/// # Failure is non-fatal
+///
+/// A missing package manager (spawn error) or a non-zero install exit must
+/// never abort worktree creation — the worktree is already valid, just possibly
+/// ungated. On failure this prints a warning (unless `quiet`) and returns
+/// `false`; the caller ignores the value and continues.
+fn bootstrap_hooks(worktree: &Path, quiet: bool) -> bool {
+    let package_manager = match detect_hook_bootstrap(worktree) {
+        Some(pm) => pm,
+        // No prepare script (or no package.json): nothing to bootstrap.
+        None => return true,
+    };
+
+    let (program, args) = package_manager.install_command();
+
+    if !quiet {
+        eprintln!("Bootstrapping git hooks: {} {}", program, args.join(" "));
+    }
+
+    // stderr is inherited so install progress/errors are visible, except in
+    // quiet mode. stdout is ALWAYS nulled — see the function doc for why.
+    let stderr = if quiet {
+        Stdio::null()
+    } else {
+        Stdio::inherit()
+    };
+
+    // Shed the inherited `GIT_` family so the install's lifecycle scripts — a
+    // `prepare` that runs `git config core.hooksPath`, say — operate on
+    // `worktree` rather than on whatever repository a parent git hook exported.
+    // The child is a package manager rather than git, and that changes nothing:
+    // it runs git, and git obeys the environment first.
+    //
+    // The authentication family survives, because this install reaches the
+    // network. `GIT_SSH`, `GIT_SSH_COMMAND` and `GIT_ASKPASS` are how the user
+    // authenticates, so an install that fetches a private git dependency still
+    // authenticates the way the user's own shell does; a user who holds a
+    // non-default key gets an authentication failure without them.
+    // `GIT_TERMINAL_PROMPT` is what keeps a failure fast: set to `0` it makes a
+    // missing credential fail at once, and without it git prompts on
+    // `/dev/tty`. The shell wrapper captures this command's stdout to `cd` with,
+    // so the user reads such a prompt as a command that stalls with nothing on
+    // the screen.
+    let mut command = childenv::command(program);
+
+    let status = command
+        .args(args)
+        .current_dir(worktree)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr)
+        .status();
+
+    match status {
+        Ok(status) if status.success() => true,
+        // Spawn failure (e.g. the package manager isn't installed) or a
+        // non-zero exit: warn and continue. Never abort worktree creation.
+        _ => {
+            if !quiet {
+                eprintln!(
+                    "Warning: hook bootstrap ('{} {}') failed; git hooks may not run in this worktree",
+                    program,
+                    args.join(" ")
+                );
+            }
+            false
+        }
+    }
+}
+
+/// Returns the configured `core.hooksPath` if it is set for this worktree but
+/// the directory it names does not exist — i.e., git will silently run NO hooks.
+///
+/// This is the defense-in-depth half of issue #275. Git has a dangerous quiet
+/// failure mode: when `core.hooksPath` points at a directory that does not
+/// exist, git does not error — it simply finds no hooks and runs nothing, so
+/// EVERY commit silently bypasses the lint/typecheck/test gates the user
+/// believes are protecting them. `bootstrap_hooks` normally regenerates that
+/// directory, but it can be skipped (`--no-bootstrap-hooks`/config), can fail
+/// (e.g. pnpm not installed), or may not apply (a repo whose hooks dir is
+/// generated by something other than a package.json `prepare` script). In all
+/// of those cases we want a loud, visible warning rather than an invisibly
+/// ungated worktree, so this check runs unconditionally after bootstrap.
+///
+/// We shell out to `git config --type=path core.hooksPath` rather than reading
+/// any single config file because that reports the *effective* value git itself
+/// will use, resolving the worktree → repo-local → global → system precedence
+/// exactly the way git does at commit time. The `--type=path` flag additionally
+/// makes git apply its pathname expansion (`~/`, `~user/`) to the value, exactly
+/// as it will when it actually runs hooks — git treats `core.hooksPath` as a
+/// pathname config type, so a common global setup like `core.hooksPath =
+/// ~/.githooks` expands to an absolute home-relative path rather than being
+/// (mis)treated as worktree-relative. Without this, every `nwt` run would
+/// false-positive on such configs. Relative non-tilde values (e.g. `.husky/_`)
+/// are returned unchanged by `--type=path`, so those keep resolving against the
+/// worktree as before.
+///
+/// That precedence is honored in full, and it takes an allowlist to honor it.
+/// The inherited `GIT_` family leaves before the query runs, but
+/// `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` stay — they are two of the six
+/// names in `childenv::USER_INTENT_GIT_ENVIRONMENT`. A user who exports one
+/// of them means it, and the global and system steps of the precedence are two
+/// of the four steps this function exists to predict. `GIT_CONFIG_PARAMETERS`
+/// still leaves, because git hands it to every hook: it carries the launching
+/// hook's `-c` options, and left in place it answers this question with
+/// configuration the user never wrote. The two are told apart by whose intent
+/// each one carries, not by which of git's families each belongs to.
+///
+/// Returns:
+/// - `None` when `core.hooksPath` is unset (git's built-in `.git/hooks` default
+///   always exists "enough" — an empty hooks dir is not our concern), when the
+///   configured directory exists, or on ANY error. This check is purely
+///   advisory and must never block worktree creation or panic.
+/// - `Some(value)` — the path as git printed it after pathname expansion — when
+///   the path is set but the directory it names is missing. For tilde-based
+///   configs this is therefore the expanded absolute path, which is the
+///   actionable thing to show in the warning.
+fn missing_hooks_path(worktree: &Path) -> Option<String> {
+    // Ask git for the effective value, run from inside the worktree so the
+    // worktree → repo-local → global → system precedence matches commit time.
+    // `--type=path` makes git expand `~/` and `~user/` the same way it does at
+    // hook-run time. stdin is nulled so git can never block; stderr is nulled to
+    // avoid noise.
+    // Shed the inherited `GIT_` family so the query targets `worktree` rather
+    // than whatever repository a parent git hook exported. That includes
+    // `GIT_CONFIG_PARAMETERS`, which git hands every hook and which carries the
+    // outer command's `-c` options: left in place it answers this question with
+    // a value the user never configured. `GIT_CONFIG_GLOBAL` and
+    // `GIT_CONFIG_SYSTEM` stay, because a user states those on purpose and this
+    // query predicts what git reads at commit time — see the function doc.
+    let mut command = childenv::command("git");
+
+    let output = command
+        .args(["config", "--type=path", "core.hooksPath"])
+        .current_dir(worktree)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+
+    // Non-zero exit means unset (or outside a repo / git error) → not our
+    // concern. Fail-safe: any failure path returns None, never blocks.
+    if !output.status.success() {
+        return None;
+    }
+
+    // git prints the value with a trailing newline; trim surrounding whitespace.
+    // An empty value (shouldn't normally happen on success) is treated as unset.
+    let configured = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if configured.is_empty() {
+        return None;
+    }
+
+    // git resolves a relative core.hooksPath against the top-level working dir;
+    // absolute paths are used verbatim. Mirror that to decide existence.
+    let candidate = Path::new(&configured);
+    let resolved = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        worktree.join(candidate)
+    };
+
+    // If the directory exists, git will find (and run) hooks there → fine.
+    // If it does NOT exist, git silently runs nothing — report the configured
+    // value (as git printed it) so the warning shows the user exactly what to fix.
+    if resolved.is_dir() {
+        None
+    } else {
+        Some(configured)
+    }
+}
+
+/// Emits the loud ungated-worktree safety-net warning for a missing hooks dir.
+///
+/// Defense-in-depth (issue #275): regardless of whether hook bootstrap ran,
+/// succeeded, or applied, a missing `core.hooksPath` directory means git
+/// silently runs NO hooks and every commit here is ungated. This warning is the
+/// only signal that would otherwise be invisible, so it deliberately:
+///
+/// - bypasses quiet mode (no `error!`/`config.quiet` gate) — an ungated worktree
+///   is error-class, not the ordinary non-error noise `-q` suppresses, so the
+///   safety net must never disappear under `--quiet`; and
+/// - goes to stderr, so it can't corrupt the worktree path captured from stdout
+///   by the shell wrapper.
+///
+/// # Placement contract
+///
+/// Where this is called relative to a `--run` command matters, because a run
+/// command can be the very thing that creates the missing directory (e.g.
+/// `pnpm install` regenerating `.husky/_`):
+///
+/// - Synchronous `--run`: call this AFTER `run_shell_command`
+///   completes, on every outcome (success, failure, execution error) before any
+///   `exit`. Checking before the run would be a false alarm when the run is
+///   about to fix the directory; a failing run must still not swallow the
+///   warning.
+/// - No `--run`: call this right after hook bootstrap; nothing
+///   could fix the directory later.
+fn warn_if_hooks_missing(worktree: &Path) {
+    if let Some(hooks_path) = missing_hooks_path(worktree) {
+        eprintln!(
+            "Warning: core.hooksPath is '{}' but that directory does not exist in this worktree.",
+            hooks_path
+        );
+        eprintln!(
+            "Git will silently run NO hooks here — commits are ungated. Run your package manager's install (or create the directory) to fix this."
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Helper to run a git command in a directory, returning whether it
+    /// succeeded. Shared across child test modules (`env_copy_tests`,
+    /// `bootstrap_hooks_tests`) which both need a real git repo for their
+    /// integration tests. Stdout/stderr are nulled so concurrent test runs
+    /// don't interleave noise.
+    ///
+    /// The whole inherited `GIT_*` family leaves through
+    /// [`childenv::fixture_command`], so `dir` is the
+    /// repository git operates on even when the suite runs from inside the
+    /// pre-commit hook's own `cargo test`. Without that sweep,
+    /// `current_dir(dir)` is not enough: git exports its own variables into the
+    /// environment of a hook, `cargo test` inherits them, and `GIT_DIR` outranks
+    /// discovery from the working directory — so a fixture's `git config` or
+    /// `git commit` lands in the real repository. A config write is sticky, and
+    /// one leak outlives the run that caused it.
+    ///
+    /// This is the entrance a fixture takes, and it keeps nothing, because a
+    /// fixture has no user whose intent to honor. Which variables to shed is
+    /// knowledge that lives in `childenv` rather than being copied here to
+    /// drift, and the rule there is the `GIT_` prefix and never a list of names.
+    fn run_git(dir: &Path, args: &[&str]) -> bool {
+        let mut cmd = childenv::fixture_command("git");
+        cmd.args(args)
+            .current_dir(dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        cmd.status().map(|s| s.success()).unwrap_or(false)
+    }
+
+    /// Make a directory that git refuses as a repository, inside a repository
+    /// that the fixture makes in `temp`, and hand the directory back.
+    ///
+    /// A new temporary directory is not always outside a repository. Git
+    /// searches upward from the directory it starts in, and a `TMPDIR` inside
+    /// a clone puts each new temporary directory inside that clone. So this
+    /// fixture puts the directory inside a repository on purpose, and each
+    /// test that uses it meets that case on every run.
+    ///
+    /// A `.git` file in the directory names a git directory that does not
+    /// exist. Git stops its upward search at that file and exits with the
+    /// status 128 ("not a git repository"), wherever `temp` is. Thus the pass
+    /// of a test that uses the fixture does not depend on `TMPDIR`.
+    ///
+    /// The enclosing repository gives a different answer to each query that
+    /// the tests ask. A search that goes past the `.git` file thus fails each
+    /// test, and does not let it pass for the wrong reason:
+    ///
+    /// - `git config --get-regexp` for the fetch refspecs exits 1 there,
+    ///   because the repository has no remote, and the remote lookup then
+    ///   answers `None`.
+    /// - `git ls-files` lists a file inside the directory.
+    /// - `core.hooksPath` names a directory that is missing from the
+    ///   directory.
+    ///
+    /// Each git child goes through [`run_git`], so it sheds the inherited git
+    /// environment and changes only the fixture repository. The fixture takes
+    /// a `TempDir` and not a path, so it cannot run `git init` in a directory
+    /// that a person owns.
+    fn not_a_repository_inside_a_repository(temp: &tempfile::TempDir) -> PathBuf {
+        const TRACKED_FILE: &str = "tracked.txt";
+
+        let dir = temp.path().join("not-a-repository");
+        let missing_git_dir = temp.path().join("no-such-git-directory");
+
+        assert!(
+            run_git(temp.path(), &["init", "--quiet"]),
+            "git init failed"
+        );
+        fs::create_dir(&dir).expect("create the directory");
+        fs::write(dir.join(TRACKED_FILE), "tracked\n").expect("write the tracked file");
+        assert!(run_git(&dir, &["add", TRACKED_FILE]), "git add failed");
+        assert!(
+            run_git(temp.path(), &["config", "core.hooksPath", ".husky/_"]),
+            "git config failed"
+        );
+
+        fs::write(
+            dir.join(".git"),
+            format!("gitdir: {}\n", missing_git_dir.display()),
+        )
+        .expect("write the .git file");
+
+        dir
+    }
 
     #[test]
     fn test_generate_docker_name_format() {
@@ -1643,9 +4383,10 @@ mod tests {
             branch: Some("feature/test".to_string()),
             checkout: None,
             copy_env: true,
+            bootstrap_hooks: true,
+            link_children: true,
             quiet: false,
             run: None,
-            tmux: false,
         };
         assert_eq!(get_branch_name(&config, "random-name"), "feature/test");
     }
@@ -1656,9 +4397,10 @@ mod tests {
             branch: None,
             checkout: None,
             copy_env: true,
+            bootstrap_hooks: true,
+            link_children: true,
             quiet: false,
             run: None,
-            tmux: false,
         };
         assert_eq!(get_branch_name(&config, "random-name"), "random-name");
     }
@@ -1722,62 +4464,21 @@ mod tests {
         assert_eq!(merged.branch, Some("issue-42".to_string()));
     }
 
-    // shell_escape tests are Unix-only since the function is Unix-only
-    #[cfg(unix)]
-    #[test]
-    fn test_shell_escape_simple() {
-        assert_eq!(shell_escape("hello"), "'hello'");
-        assert_eq!(shell_escape("npm install"), "'npm install'");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_shell_escape_with_single_quotes() {
-        // Single quotes are escaped using the '\'' technique
-        assert_eq!(shell_escape("it's"), "'it'\\''s'");
-        assert_eq!(shell_escape("echo 'hello'"), "'echo '\\''hello'\\'''");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_shell_escape_with_special_chars() {
-        // These should be safely wrapped in single quotes
-        assert_eq!(shell_escape("$HOME"), "'$HOME'");
-        assert_eq!(shell_escape("foo && bar"), "'foo && bar'");
-        assert_eq!(shell_escape("a;b"), "'a;b'");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_shell_escape_empty_string() {
-        // Empty string should still be safely quoted
-        assert_eq!(shell_escape(""), "''");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_shell_escape_shell_path() {
-        // Verify that typical shell paths are properly escaped
-        assert_eq!(shell_escape("/bin/bash"), "'/bin/bash'");
-        assert_eq!(shell_escape("/usr/local/bin/zsh"), "'/usr/local/bin/zsh'");
-    }
-
     #[test]
     fn test_exit_codes_are_unique() {
         let codes = [
             exit_codes::NOT_IN_REPO,
             exit_codes::INVALID_REPO_NAME,
             exit_codes::NO_PARENT_DIR,
-            exit_codes::DIR_CREATE_FAILED,
             exit_codes::NAME_COLLISION,
             exit_codes::GIT_COMMAND_ERROR,
             exit_codes::WORKTREE_FAILED,
             exit_codes::INVALID_PATH_ENCODING,
             exit_codes::RUN_COMMAND_FAILED,
-            exit_codes::TMUX_FAILED,
             exit_codes::CONFIG_ERROR,
-            exit_codes::TMUX_NOT_RUNNING,
             exit_codes::SHELL_SETUP_ERROR,
+            exit_codes::INVALID_SPARSE_EXCLUDE,
+            exit_codes::AMBIGUOUS_REMOTE_BRANCH,
         ];
 
         let mut sorted = codes.to_vec();
@@ -1785,6 +4486,71 @@ mod tests {
         sorted.dedup();
 
         assert_eq!(sorted.len(), codes.len(), "All exit codes should be unique");
+    }
+
+    /// A refused `--sparse-exclude` value exits 15, and `--help` says so.
+    ///
+    /// A script that runs `nwt` reads the EXIT CODES list to tell a bad flag
+    /// from a failed add. The entry is built from the constant, so a change of
+    /// the value without a change of the help text fails here.
+    #[test]
+    fn test_exit_codes_section_lists_invalid_sparse_exclude() {
+        use clap::CommandFactory;
+
+        assert_eq!(
+            exit_codes::INVALID_SPARSE_EXCLUDE,
+            15,
+            "issue #487 gives a refused --sparse-exclude value exit code 15"
+        );
+
+        let long_about = Cli::command()
+            .get_long_about()
+            .expect("nwt sets long_about")
+            .to_string();
+        let (_, section) = long_about
+            .split_once("EXIT CODES:")
+            .expect("--help has an EXIT CODES section");
+        let entry = format!(
+            "{} Invalid --sparse-exclude directory",
+            exit_codes::INVALID_SPARSE_EXCLUDE
+        );
+        assert!(
+            section.lines().any(|line| line.trim() == entry),
+            "the EXIT CODES section of --help must list {entry:?}:\n{section}"
+        );
+    }
+
+    /// A new branch that more than one remote holds, with no default remote
+    /// that picks one, exits 16, and `--help` says so.
+    ///
+    /// A script that runs `nwt` reads the EXIT CODES list to tell this refusal
+    /// from a failed add. The entry is built from the constant, so a change of
+    /// the value without a change of the help text fails here.
+    #[test]
+    fn test_exit_codes_section_lists_ambiguous_remote_branch() {
+        use clap::CommandFactory;
+
+        assert_eq!(
+            exit_codes::AMBIGUOUS_REMOTE_BRANCH,
+            16,
+            "issue #528 gives a new branch that more than one remote holds exit code 16"
+        );
+
+        let long_about = Cli::command()
+            .get_long_about()
+            .expect("nwt sets long_about")
+            .to_string();
+        let (_, section) = long_about
+            .split_once("EXIT CODES:")
+            .expect("--help has an EXIT CODES section");
+        let entry = format!(
+            "{} More than one remote holds the new branch",
+            exit_codes::AMBIGUOUS_REMOTE_BRANCH
+        );
+        assert!(
+            section.lines().any(|line| line.trim() == entry),
+            "the EXIT CODES section of --help must list {entry:?}:\n{section}"
+        );
     }
 
     #[test]
@@ -1875,39 +4641,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_tmux_option_parses() {
-        use clap::CommandFactory;
-        let cmd = Cli::command();
-
-        // Parsing with --tmux should succeed
-        let result = cmd.try_get_matches_from(["nwt", "--tmux"]);
-        assert!(result.is_ok(), "Should accept --tmux option");
-
-        let matches = result.unwrap();
-        assert!(matches.get_flag("tmux"), "Should set tmux flag");
-    }
-
-    #[test]
-    fn test_cli_tmux_with_run() {
-        use clap::CommandFactory;
-        let cmd = Cli::command();
-
-        // --tmux can be combined with --run
-        let result = cmd.try_get_matches_from(["nwt", "--tmux", "--run", "npm install"]);
-        assert!(result.is_ok(), "Should accept --tmux with --run");
-    }
-
-    #[test]
-    fn test_cli_tmux_with_branch() {
-        use clap::CommandFactory;
-        let cmd = Cli::command();
-
-        // --tmux can be combined with --branch
-        let result = cmd.try_get_matches_from(["nwt", "--tmux", "--branch", "feature/test"]);
-        assert!(result.is_ok(), "Should accept --tmux with --branch");
-    }
-
-    #[test]
     fn test_cli_no_copy_env_parses() {
         use clap::CommandFactory;
         let cmd = Cli::command();
@@ -1931,6 +4664,37 @@ mod tests {
         // --no-copy-env can be combined with --branch
         let result = cmd.try_get_matches_from(["nwt", "--no-copy-env", "--branch", "feature/test"]);
         assert!(result.is_ok(), "Should accept --no-copy-env with --branch");
+    }
+
+    /// Issue #537: `--no-link-children` turns the child links off for one run.
+    #[test]
+    fn test_cli_no_link_children_parses() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        let result = cmd.try_get_matches_from(["nwt", "--no-link-children"]);
+        assert!(result.is_ok(), "Should accept --no-link-children option");
+
+        let matches = result.unwrap();
+        assert!(
+            matches.get_flag("no_link_children"),
+            "Should set no_link_children flag"
+        );
+    }
+
+    /// Issue #537: `--no-link-children` goes with `--branch`, as each run that
+    /// makes a worktree does.
+    #[test]
+    fn test_cli_no_link_children_with_branch() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        let result =
+            cmd.try_get_matches_from(["nwt", "--no-link-children", "--branch", "feature/test"]);
+        assert!(
+            result.is_ok(),
+            "Should accept --no-link-children with --branch"
+        );
     }
 
     #[test]
@@ -1963,6 +4727,82 @@ mod tests {
         );
     }
 
+    /// Guardrail against the recurring "flag shipped without README docs" pattern.
+    ///
+    /// nwt has repeatedly grown new CLI flags (`--no-copy-env`,
+    /// `--no-bootstrap-hooks`, `--random-directory`, `--shell-setup`, …) that
+    /// never made it into the repo-root README's `## nwt` section. A user who
+    /// reaches for the README to learn the tool is silently missing capabilities.
+    ///
+    /// This test fails whenever any long flag defined on `Cli` is absent from the
+    /// README's nwt section, listing every missing flag so the failure is
+    /// directly actionable. It is read-only and parallel-safe: it only builds the
+    /// clap command in-memory and reads the README — no temp files, no env or cwd
+    /// mutation, so a concurrent bacon loop can run it safely.
+    #[test]
+    fn readme_documents_all_nwt_cli_flags() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        // Collect every user-facing long flag, skipping clap's auto-generated
+        // `help`/`version` args which the README is not expected to document.
+        let long_flags: Vec<String> = cmd
+            .get_arguments()
+            .filter_map(|arg| arg.get_long())
+            .filter(|name| *name != "help" && *name != "version")
+            .map(|name| format!("--{name}"))
+            .collect();
+
+        // src/nwt is two levels below the repo root, so the workspace-root README
+        // lives at ../../README.md relative to this crate's manifest directory.
+        let readme_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md");
+        let readme = fs::read_to_string(&readme_path).unwrap_or_else(|e| {
+            panic!(
+                "Failed to read workspace README at '{}': {}",
+                readme_path.display(),
+                e
+            )
+        });
+
+        // Extract ONLY the nwt section: from the `## nwt` heading up to (but not
+        // including) the next top-level `## ` heading (the next tool's section).
+        // Fail loudly if the heading can't be found — a renamed heading must not
+        // let this guard silently pass.
+        let all_lines: Vec<&str> = readme.lines().collect();
+        let start = all_lines
+            .iter()
+            .position(|line| line.starts_with("## nwt"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "Could not find the '## nwt' section in {}. Was the heading renamed?",
+                    readme_path.display()
+                )
+            });
+        // Search for the next `## ` heading *after* the nwt heading; the section
+        // runs to that heading, or to end-of-file if nwt is the last section.
+        let end = all_lines[start + 1..]
+            .iter()
+            .position(|line| line.starts_with("## "))
+            .map(|offset| start + 1 + offset)
+            .unwrap_or(all_lines.len());
+        let section = all_lines[start..end].join("\n");
+
+        // Collect ALL missing flags first, then assert once, so the failure
+        // message lists every undocumented flag rather than just the first.
+        let missing: Vec<&String> = long_flags
+            .iter()
+            .filter(|flag| !section.contains(flag.as_str()))
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "The README '## nwt' section is missing documentation for these CLI flags: {:?}. \
+             Document them in {} (under the `### Options` list).",
+            missing,
+            readme_path.display()
+        );
+    }
+
     #[test]
     fn test_cli_shell_setup_conflicts_with_random_directory() {
         use clap::CommandFactory;
@@ -1986,6 +4826,20 @@ mod tests {
         assert!(
             result.is_err(),
             "Should fail when both --shell-setup and --no-copy-env are provided"
+        );
+    }
+
+    /// Issue #537: `--shell-setup` makes no worktree, so it refuses
+    /// `--no-link-children`.
+    #[test]
+    fn test_cli_shell_setup_conflicts_with_no_link_children() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        let result = cmd.try_get_matches_from(["nwt", "--shell-setup", "--no-link-children"]);
+        assert!(
+            result.is_err(),
+            "Should fail when both --shell-setup and --no-link-children are provided"
         );
     }
 
@@ -2018,17 +4872,1014 @@ mod tests {
         );
     }
 
+    /// Values that name one directory parse to one normalized value.
+    ///
+    /// A trailing `/`, a leading `./`, and a doubled `/` do not change the
+    /// directory. Multi-byte names stay intact, because the parse splits on `/`
+    /// and never on a byte offset.
     #[test]
-    fn test_cli_shell_setup_conflicts_with_tmux() {
+    fn sparse_exclude_dir_parse_normalizes_a_relative_path() {
+        let cases = [
+            ("heavy", "heavy"),
+            ("heavy/", "heavy"),
+            ("assets/video/", "assets/video"),
+            ("./heavy", "heavy"),
+            ("a//b", "a/b"),
+            ("日本語/🎉", "日本語/🎉"),
+            ("café", "café"),
+        ];
+
+        for (raw, expected) in cases {
+            let dir = SparseExcludeDir::parse(raw)
+                .unwrap_or_else(|e| panic!("{raw:?} must parse, got {e:?}"));
+            assert_eq!(dir.as_str(), expected, "the normalized value of {raw:?}");
+        }
+
+        assert_eq!(
+            SparseExcludeDir::parse("heavy"),
+            SparseExcludeDir::parse("heavy/"),
+            "'heavy' and 'heavy/' are the same flag"
+        );
+    }
+
+    /// Values that point out of the repository, or at nothing, are refused.
+    ///
+    /// Each case names the variant it gets, so a value refused for the wrong
+    /// reason fails too.
+    #[test]
+    fn sparse_exclude_dir_parse_refuses_a_path_outside_the_repository() {
+        let absolute = |raw: &str| SparseExcludeError::Absolute {
+            raw: raw.to_owned(),
+        };
+        let parent = |raw: &str| SparseExcludeError::ParentComponent {
+            raw: raw.to_owned(),
+        };
+        let empty = |raw: &str| SparseExcludeError::Empty {
+            raw: raw.to_owned(),
+        };
+
+        let cases = [
+            ("/abs", absolute("/abs")),
+            ("..", parent("..")),
+            ("a/../b", parent("a/../b")),
+            ("../x", parent("../x")),
+            ("", empty("")),
+            (".", empty(".")),
+            ("./", empty("./")),
+        ];
+
+        for (raw, expected) in cases {
+            assert_eq!(
+                SparseExcludeDir::parse(raw),
+                Err(expected),
+                "the refusal of {raw:?}"
+            );
+        }
+    }
+
+    /// A value that holds an ASCII control character is refused, wherever the
+    /// character is.
+    ///
+    /// A line break in a value becomes a line break in the sparse pattern file,
+    /// and so two patterns. The control character check comes first, so a
+    /// value that also breaks a different rule still gets this variant.
+    #[test]
+    fn sparse_exclude_dir_parse_refuses_a_control_character() {
+        let cases = ["a\nb", "heavy\r", "\theavy", "a\u{7f}b", "/abs\n"];
+
+        for raw in cases {
+            assert_eq!(
+                SparseExcludeDir::parse(raw),
+                Err(SparseExcludeError::ControlCharacter {
+                    raw: raw.to_owned()
+                }),
+                "the refusal of {raw:?}"
+            );
+        }
+    }
+
+    /// The message of a control character refusal shows the character as an
+    /// escape, so the message stays on one line.
+    #[test]
+    fn sparse_exclude_error_escapes_a_control_character() {
+        let message = SparseExcludeDir::parse("a\nb")
+            .expect_err("the value must be refused")
+            .to_string();
+
+        assert_eq!(
+            message,
+            "--sparse-exclude 'a\\nb' holds a control character. Give a directory name \
+             without control characters."
+        );
+    }
+
+    /// The message of a refusal names the value the user typed and the reason.
+    #[test]
+    fn sparse_exclude_error_names_the_value_and_the_reason() {
+        let cases = [
+            ("/abs", "absolute path"),
+            ("a/../b", "'..' component"),
+            ("./", "names no directory"),
+        ];
+
+        for (raw, reason) in cases {
+            let message = SparseExcludeDir::parse(raw)
+                .expect_err("the value must be refused")
+                .to_string();
+            assert!(
+                message.contains(&format!("--sparse-exclude '{raw}'")),
+                "the message must name the value {raw:?}: {message}"
+            );
+            assert!(
+                message.contains(reason),
+                "the message must give the reason {reason:?}: {message}"
+            );
+        }
+    }
+
+    /// Two flags that name one directory give that directory one time, at the
+    /// position of the first flag. `heavy` and `heavy/` are the same directory,
+    /// so git gets one pattern for it and the notice names it one time.
+    #[test]
+    fn parse_sparse_excludes_drops_a_duplicate_and_keeps_the_first_order() {
+        let raw: Vec<String> = ["heavy", "assets/video", "heavy/", "./assets/video", "docs"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+
+        let dirs = parse_sparse_excludes(&raw).expect("every value must parse");
+        let names: Vec<&str> = dirs.iter().map(SparseExcludeDir::as_str).collect();
+
+        assert_eq!(names, vec!["heavy", "assets/video", "docs"]);
+    }
+
+    /// The first refused value stops the parse, and its refusal comes back.
+    #[test]
+    fn parse_sparse_excludes_returns_the_first_refusal() {
+        let raw: Vec<String> = ["heavy", "/abs", "../up"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+
+        assert_eq!(
+            parse_sparse_excludes(&raw),
+            Err(SparseExcludeError::Absolute {
+                raw: "/abs".to_owned()
+            })
+        );
+    }
+
+    /// A git that does not start is a failed git command, and not a directory
+    /// that git does not track.
+    ///
+    /// A missing working directory makes the start of git fail in the same
+    /// way that a missing `git` program does. The directory is under a new
+    /// temporary directory, so no parallel run can make it.
+    #[test]
+    fn resolve_sparse_excludes_reports_a_git_that_does_not_start() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let missing = temp.path().join("no-such-repository");
+        let raw = vec!["heavy".to_owned()];
+
+        let error = resolve_sparse_excludes(&missing, WorktreeSource::NewBranchAtHead, &raw)
+            .expect_err("a git that does not start must stop the run");
+
+        assert!(
+            matches!(error, SparseExcludeError::GitCommand { .. }),
+            "the refusal must be GitCommand, got {error:?}"
+        );
+        assert_eq!(error.exit_code(), exit_codes::GIT_COMMAND_ERROR);
+        assert!(
+            error
+                .to_string()
+                .starts_with("could not run git ls-tree to check --sparse-exclude: "),
+            "the message must name the git command: {error}"
+        );
+    }
+
+    /// A run without `--sparse-exclude` asks git nothing, also with `-c <ref>`.
+    /// So a plain `nwt -c <ref>` runs the git children it ran before the flag
+    /// existed.
+    ///
+    /// The working directory is missing, so each git child fails to start. An
+    /// answer of `Ok` proves that no child ran.
+    #[test]
+    fn resolve_sparse_excludes_asks_git_nothing_without_a_value() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let missing = temp.path().join("no-such-repository");
+
+        assert_eq!(
+            resolve_sparse_excludes(&missing, WorktreeSource::Checkout("foo"), &[]),
+            Ok(Vec::new())
+        );
+    }
+
+    /// With `-c <ref>`, the first git child of the check is `git rev-parse`,
+    /// and a failure to start it names that subcommand and not `ls-tree`.
+    #[test]
+    fn resolve_sparse_excludes_names_the_git_subcommand_that_does_not_start() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let missing = temp.path().join("no-such-repository");
+        let raw = vec!["heavy".to_owned()];
+
+        let error = resolve_sparse_excludes(&missing, WorktreeSource::Checkout("foo"), &raw)
+            .expect_err("a git that does not start must stop the run");
+
+        assert!(
+            error
+                .to_string()
+                .starts_with("could not run git rev-parse to check --sparse-exclude: "),
+            "the message must name git rev-parse: {error}"
+        );
+        assert_eq!(error.exit_code(), exit_codes::GIT_COMMAND_ERROR);
+    }
+
+    /// The short form is the ref without `refs/remotes/`, so a name with a `/`
+    /// or with multi-byte characters stays intact in it. The full ref stays as
+    /// the fetch refspec mapped it.
+    #[test]
+    fn remote_tracking_branch_keeps_a_slash_and_multi_byte_characters() {
+        for (tracking_ref, remote, short) in [
+            (
+                "refs/remotes/origin/feature/login",
+                "origin",
+                "origin/feature/login",
+            ),
+            ("refs/remotes/upstream/café", "upstream", "upstream/café"),
+        ] {
+            let branch = RemoteTrackingBranch {
+                remote: remote.to_owned(),
+                tracking_ref: tracking_ref.to_owned(),
+            };
+
+            assert_eq!(branch.remote(), remote);
+            assert_eq!(branch.full_ref(), tracking_ref);
+            assert_eq!(branch.to_string(), short);
+        }
+    }
+
+    /// A git that does not start is a lookup that did not start, and not a
+    /// branch that no remote holds. The first git child of the lookup is the
+    /// `git config` that reads the fetch refspecs.
+    #[test]
+    fn find_remote_tracking_branch_reports_a_git_that_does_not_start() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let missing = temp.path().join("no-such-repository");
+
+        let error = find_remote_tracking_branch(&missing, "issue-33")
+            .expect_err("a git that does not start must stop the lookup");
+
+        assert!(
+            matches!(
+                error,
+                RemoteLookupError::NotStarted {
+                    command: "config",
+                    ..
+                }
+            ),
+            "the error must be NotStarted for config, got {error:?}"
+        );
+        assert_eq!(error.exit_code(), exit_codes::GIT_COMMAND_ERROR);
+    }
+
+    /// A read of the fetch refspecs that git refuses is a failed lookup, and
+    /// not a branch that no remote holds. So `-b <name>` does not fall back to
+    /// `HEAD` in silence.
+    ///
+    /// The lookup runs in the directory of
+    /// [`not_a_repository_inside_a_repository`]. Git refuses that directory
+    /// as a repository, so `git config --get-regexp` exits with the status 128
+    /// there. The directory is inside a repository where the same command
+    /// exits 1, because that repository has no remote. So a lookup that
+    /// reached that repository answers `None` and fails the test.
+    #[test]
+    fn find_remote_tracking_branch_reports_a_failed_listing() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let not_a_repository = not_a_repository_inside_a_repository(&temp);
+
+        let error = find_remote_tracking_branch(&not_a_repository, "issue-33")
+            .expect_err("a failed read of the fetch refspecs must stop the lookup");
+
+        assert!(
+            matches!(
+                error,
+                RemoteLookupError::Failed {
+                    command: "config",
+                    ..
+                }
+            ),
+            "the error must be Failed for config, got {error:?}"
+        );
+        assert_eq!(error.exit_code(), exit_codes::WORKTREE_FAILED);
+    }
+
+    /// A git child of the lookup that fails names its subcommand and the
+    /// search. The lookup reads the fetch refspecs with `git config` and
+    /// checks each mapped ref with `git rev-parse`. Neither child lists the
+    /// remote branches, so the message does not say that.
+    #[test]
+    fn a_failed_lookup_child_names_its_subcommand_and_the_search() {
+        for command in ["config", "rev-parse"] {
+            let error = RemoteLookupError::Failed {
+                command,
+                stderr: "fatal: no answer".to_owned(),
+            };
+
+            assert_eq!(
+                error.to_string(),
+                format!("git {command} could not look for a remote branch: fatal: no answer")
+            );
+        }
+    }
+
+    /// The branch that the source of [`clone_holding_remote_branch`] holds.
+    const GLOB_FIXTURE_BRANCH: &str = "issue-33";
+
+    /// One name for each character that `git for-each-ref` reads as a
+    /// wildmatch character: `*`, `?`, `[` and `\`. As a pattern, each name
+    /// matches [`GLOB_FIXTURE_BRANCH`].
+    const GLOB_NAMES: [&str; 4] = ["*", "issue-3?", "issue-3[3]", "issue\\-33"];
+
+    /// Make a source repository that holds [`GLOB_FIXTURE_BRANCH`], and a
+    /// clone of it under `temp`. Hand back the clone, which holds the branch
+    /// only as `origin/<branch>`.
+    ///
+    /// The commit states its identity with `-c`, so the fixture writes no
+    /// configuration.
+    fn clone_holding_remote_branch(temp: &tempfile::TempDir) -> PathBuf {
+        let source = temp.path().join("source");
+        let clone = temp.path().join("clone");
+        let source_arg = source.to_str().expect("utf-8 source path");
+        let clone_arg = clone.to_str().expect("utf-8 clone path");
+
+        assert!(
+            run_git(temp.path(), &["init", "--quiet", source_arg]),
+            "git init failed"
+        );
+        assert!(
+            run_git(
+                &source,
+                &[
+                    "-c",
+                    "user.name=Test User",
+                    "-c",
+                    "user.email=test@example.com",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--quiet",
+                    "--allow-empty",
+                    "-m",
+                    "baseline",
+                ]
+            ),
+            "git commit failed"
+        );
+        assert!(
+            run_git(&source, &["branch", GLOB_FIXTURE_BRANCH]),
+            "git branch failed"
+        );
+        assert!(
+            run_git(temp.path(), &["clone", "--quiet", source_arg, clone_arg]),
+            "git clone failed"
+        );
+
+        clone
+    }
+
+    /// Each ref that `git for-each-ref` lists in `repo` for `pattern`, one on
+    /// each line.
+    ///
+    /// The command sheds the whole inherited `GIT_` prefix, as [`run_git`]
+    /// does, so it reads `repo` and no other repository.
+    fn listed_refs(repo: &Path, pattern: &str) -> Vec<String> {
+        let mut command = childenv::fixture_command("git");
+        let output = command
+            .args(["for-each-ref", "--format=%(refname)", pattern])
+            .current_dir(repo)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run git for-each-ref");
+        assert!(
+            output.status.success(),
+            "git for-each-ref failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// `git for-each-ref` reads `*`, `?`, `[` and `\` in its pattern as
+    /// wildmatch characters. Git refuses each of those characters in a ref
+    /// name, so no remote-tracking branch has such a name, and the lookup
+    /// answers [`RemoteTrackingMatch::None`] for each name that holds one.
+    /// The lookup puts no name into a pattern, but a lookup that lists refs
+    /// with a pattern fails this test.
+    ///
+    /// Each name below matches `refs/remotes/origin/issue-33` as a pattern.
+    /// The test states that first, so a name that matches nothing cannot make
+    /// the test pass for the wrong reason.
+    #[test]
+    fn find_remote_tracking_branch_never_reads_the_name_as_a_glob() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let clone = clone_holding_remote_branch(&temp);
+        let remote_branch = format!("{REMOTE_TRACKING_PREFIX}origin/{GLOB_FIXTURE_BRANCH}");
+
+        for name in GLOB_NAMES {
+            let pattern = format!("{REMOTE_TRACKING_PREFIX}*/{name}");
+            let listed = listed_refs(&clone, &pattern);
+            assert!(
+                listed.contains(&remote_branch),
+                "the pattern {pattern:?} must match {remote_branch}, but it lists {listed:?}"
+            );
+
+            assert_eq!(
+                find_remote_tracking_branch(&clone, name),
+                Ok(RemoteTrackingMatch::None),
+                "no remote-tracking branch has the name {name:?}"
+            );
+        }
+    }
+
+    /// One name for each character that `git rev-parse` reads as revision
+    /// syntax: `~`, `^` and `:`. After `refs/remotes/origin/`, each name
+    /// names an object of `origin/<GLOB_FIXTURE_BRANCH>`: the commit itself
+    /// for `~0` and `^0`, and its tree for a trailing `:`.
+    const REVISION_NAMES: [&str; 3] = ["issue-33~0", "issue-33^0", "issue-33:"];
+
+    /// `git rev-parse` reads `~`, `^` and `:` as revision syntax, and not as
+    /// parts of a ref name. Git refuses each of those characters in a ref
+    /// name, so no remote-tracking branch has such a name, and the lookup
+    /// answers [`RemoteTrackingMatch::None`] for each name that holds one.
+    ///
+    /// After `refs/remotes/origin/`, each name below names an object of
+    /// `origin/issue-33`. The test states that first, so a name that names
+    /// nothing cannot make the test pass for the wrong reason.
+    #[test]
+    fn find_remote_tracking_branch_never_reads_the_name_as_a_revision() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let clone = clone_holding_remote_branch(&temp);
+
+        for name in REVISION_NAMES {
+            let revision = format!("{REMOTE_TRACKING_PREFIX}origin/{name}");
+            assert!(
+                run_git(&clone, &["rev-parse", "--verify", "--quiet", &revision]),
+                "git rev-parse must read {revision:?} as an object of origin/{GLOB_FIXTURE_BRANCH}"
+            );
+
+            assert_eq!(
+                find_remote_tracking_branch(&clone, name),
+                Ok(RemoteTrackingMatch::None),
+                "no remote-tracking branch has the name {name:?}"
+            );
+        }
+    }
+
+    /// One name for each other rule of `git check-ref-format` that holds
+    /// anywhere in a ref name: a space, an ASCII control character (a tab and
+    /// DEL), two dots in a row, and the sequence `@{`.
+    const OTHER_REFUSED_NAMES: [&str; 5] = [
+        "issue 33",
+        "issue\t33",
+        "issue-33\u{7f}",
+        "issue..33",
+        "issue-33@{0}",
+    ];
+
+    /// The answer for a name that git refuses as a ref name is known before
+    /// git runs, so the lookup asks git nothing. A git that cannot answer
+    /// then cannot turn that answer into a failure.
+    ///
+    /// The names cover each character and each sequence that git refuses
+    /// anywhere in a ref name: the glob characters, the characters of revision
+    /// syntax, and [`OTHER_REFUSED_NAMES`].
+    ///
+    /// The working directory is missing, so each git child fails to start. An
+    /// answer of `Ok` proves that no child ran.
+    #[test]
+    fn find_remote_tracking_branch_asks_git_nothing_for_a_name_that_git_refuses() {
+        let temp = tempfile::TempDir::new().expect("create a temporary directory");
+        let missing = temp.path().join("no-such-repository");
+
+        for name in GLOB_NAMES
+            .into_iter()
+            .chain(REVISION_NAMES)
+            .chain(OTHER_REFUSED_NAMES)
+        {
+            assert_eq!(
+                find_remote_tracking_branch(&missing, name),
+                Ok(RemoteTrackingMatch::None),
+                "the lookup must answer for {name:?} without git"
+            );
+        }
+    }
+
+    /// Parse each of `raw` into a directory, or panic.
+    fn sparse_dirs(raw: &[&str]) -> Vec<SparseExcludeDir> {
+        raw.iter()
+            .map(|value| {
+                SparseExcludeDir::parse(value)
+                    .unwrap_or_else(|e| panic!("{value:?} must parse, got {e:?}"))
+            })
+            .collect()
+    }
+
+    /// One directory: the notice names it with a trailing `/`, and says "it".
+    #[test]
+    fn sparse_exclude_notice_names_one_directory_as_it() {
+        assert_eq!(
+            sparse_exclude_notice(&sparse_dirs(&["heavy"])),
+            "Excluded heavy/ (sparse checkout). Run 'git sparse-checkout disable' in the \
+             worktree to get it."
+        );
+    }
+
+    /// Two directories: the notice names both in the order given, and says
+    /// "them".
+    #[test]
+    fn sparse_exclude_notice_names_two_directories_as_them() {
+        assert_eq!(
+            sparse_exclude_notice(&sparse_dirs(&["assets/video", "fixtures/large"])),
+            "Excluded assets/video/, fixtures/large/ (sparse checkout). Run 'git \
+             sparse-checkout disable' in the worktree to get them."
+        );
+    }
+
+    /// The notice shows the name the user reads, not the escaped pattern, and
+    /// multi-byte names stay intact.
+    #[test]
+    fn sparse_exclude_notice_shows_unescaped_multi_byte_names() {
+        assert_eq!(
+            sparse_exclude_notice(&sparse_dirs(&["we[ir]d dir", "日本語", "café 🎉"])),
+            "Excluded we[ir]d dir/, 日本語/, café 🎉/ (sparse checkout). Run 'git \
+             sparse-checkout disable' in the worktree to get them."
+        );
+    }
+
+    /// The text of `document` from the line `heading` to the next line that
+    /// starts with `next_heading`. An empty string when `heading` is not there.
+    fn doc_section<'a>(document: &'a str, heading: &str, next_heading: &str) -> &'a str {
+        document.split_once(heading).map_or("", |(_, rest)| {
+            rest.split_once(next_heading)
+                .map_or(rest, |(section, _)| section)
+        })
+    }
+
+    /// True when one line of `section`, without its indentation, is `sample`.
+    fn has_sample_line(section: &str, sample: &str) -> bool {
+        section.lines().any(|line| line.trim() == sample)
+    }
+
+    /// The two documents of `--sparse-exclude`: the SPARSE WORKTREES section of
+    /// `--help`, and the `### Sparse worktrees` section inside the `## nwt`
+    /// section of the README.
+    ///
+    /// `include_str!` stays in `#[cfg(test)]`, so the README goes into the test
+    /// binary only and not into the `nwt` that ships.
+    fn sparse_doc_sections() -> (String, &'static str) {
+        use clap::CommandFactory;
+
+        let long_about = Cli::command()
+            .get_long_about()
+            .expect("nwt sets long_about")
+            .to_string();
+        let help_section =
+            doc_section(&long_about, "\nSPARSE WORKTREES:\n", "\nEXAMPLES:\n").to_owned();
+        let nwt_section = doc_section(
+            include_str!("../../../README.md"),
+            "\n## nwt (new worktree)\n",
+            "\n## ",
+        );
+        let readme_section = doc_section(nwt_section, "\n### Sparse worktrees\n", "\n### ");
+        (help_section, readme_section)
+    }
+
+    /// `text` with each run of whitespace as one space. A phrase that a line
+    /// break splits in `text` then matches as one phrase.
+    fn join_lines(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// The first paragraph of `section` that holds `phrase`, as one line. An
+    /// empty string when no paragraph holds it. A line that holds only
+    /// whitespace ends a paragraph.
+    fn paragraph_holding(section: &str, phrase: &str) -> String {
+        let mut paragraphs = vec![String::new()];
+        for line in section.lines() {
+            if line.trim().is_empty() {
+                paragraphs.push(String::new());
+            } else if let Some(paragraph) = paragraphs.last_mut() {
+                paragraph.push(' ');
+                paragraph.push_str(line);
+            }
+        }
+        paragraphs
+            .iter()
+            .map(|paragraph| join_lines(paragraph))
+            .find(|paragraph| paragraph.contains(phrase))
+            .unwrap_or_default()
+    }
+
+    /// A failure of each step of [`SPARSE_STEPS`] breaks the worktree, and
+    /// the run removes it. The SPARSE WORKTREES section of `--help` says so,
+    /// and so does the `### Sparse worktrees` section of the README. Each
+    /// document says it in the paragraph that holds "the worktree is broken".
+    ///
+    /// [`apply_sparse_checkout`] passes the names of [`SPARSE_STEPS`] to
+    /// [`run_sparse_step`], and this test reads the same array. Add a step to
+    /// the code alone, and this test fails and names the document that did
+    /// not change.
+    #[test]
+    fn test_help_and_readme_name_each_sparse_step_whose_failure_removes_the_worktree() {
+        const BROKEN_WORKTREE: &str = "the worktree is broken";
+
+        let (help_section, readme_section) = sparse_doc_sections();
+        let help_paragraph = paragraph_holding(&help_section, BROKEN_WORKTREE);
+        let readme_paragraph = paragraph_holding(readme_section, BROKEN_WORKTREE);
+
+        for step in SPARSE_STEPS {
+            assert!(
+                help_paragraph.contains(step),
+                "the SPARSE WORKTREES section of --help must name {step:?} where it says \
+                 {BROKEN_WORKTREE:?}: {help_paragraph:?}"
+            );
+            assert!(
+                readme_paragraph.contains(step),
+                "the ### Sparse worktrees section of README.md must name {step:?} where it \
+                 says {BROKEN_WORKTREE:?}: {readme_paragraph:?}"
+            );
+        }
+    }
+
+    /// The first release of git that has `git hook run --ignore-missing`.
+    ///
+    /// [`run_post_checkout_hook`] runs the `post-checkout` hook with that
+    /// command, so `--sparse-exclude` needs this release or a later one.
+    /// `builtin/hook.c` is not in the git source at `v2.35.0`, and it is there
+    /// at `v2.36.0`. `git sparse-checkout set --no-cone` is older, so it sets
+    /// no higher minimum. On an older git, `git hook run` exits with a status
+    /// that is not zero, and `nwt` reports a failed hook for a repository
+    /// that has no hook.
+    const MINIMUM_SPARSE_GIT_VERSION: &str = "2.36.0";
+
+    /// The SPARSE WORKTREES section of `--help` and the `### Sparse worktrees`
+    /// section of the README both state [`MINIMUM_SPARSE_GIT_VERSION`] as the
+    /// minimum git of `--sparse-exclude`.
+    ///
+    /// Each section is joined to one line first, so a statement that a line
+    /// break splits still matches.
+    #[test]
+    fn test_help_and_readme_state_the_minimum_git_version_of_sparse_exclude() {
+        let statement = format!("git {MINIMUM_SPARSE_GIT_VERSION} or later");
+        let (help_section, readme_section) = sparse_doc_sections();
+
+        assert!(
+            join_lines(&help_section).contains(&statement),
+            "the SPARSE WORKTREES section of --help must say that --sparse-exclude needs \
+             {statement:?}"
+        );
+        assert!(
+            join_lines(readme_section).contains(&statement),
+            "the ### Sparse worktrees section of README.md must say that --sparse-exclude \
+             needs {statement:?}"
+        );
+    }
+
+    /// The sparse notice and the `Skipped:` line of a `.env` under an excluded
+    /// directory show as samples in two documents. The SPARSE WORKTREES section
+    /// of `--help` holds them, and so does the `## nwt` section of the README.
+    ///
+    /// The samples are copies, and only the functions run. So this test builds
+    /// each line with [`sparse_exclude_notice`] and
+    /// [`skipped_under_excluded_message`], and each document must hold that
+    /// line as a line of its own. Change the wording in the code alone, and
+    /// this test fails and names the document that did not change.
+    #[test]
+    fn test_help_and_readme_samples_match_the_sparse_lines() {
+        let heavy = sparse_dirs(&["heavy"]);
+        let notice = sparse_exclude_notice(&heavy);
+        let skipped = skipped_under_excluded_message(Path::new("heavy/.env"), &heavy[0]);
+
+        let (help_section, readme_section) = sparse_doc_sections();
+
+        for sample in [&notice, &skipped] {
+            assert!(
+                has_sample_line(&help_section, sample),
+                "the SPARSE WORKTREES section of --help must hold the runtime line: {sample}"
+            );
+            assert!(
+                has_sample_line(readme_section, sample),
+                "the ### Sparse worktrees section of README.md must hold the runtime line: \
+                 {sample}"
+            );
+        }
+    }
+
+    /// The two documents of the remote lookup of a new branch: the REMOTE
+    /// BRANCHES section of `--help`, and the `### Remote branches` section
+    /// inside the `## nwt` section of the README.
+    ///
+    /// `include_str!` stays in `#[cfg(test)]`, so the README goes into the test
+    /// binary only and not into the `nwt` that ships.
+    fn remote_branch_doc_sections() -> (String, &'static str) {
+        use clap::CommandFactory;
+
+        let long_about = Cli::command()
+            .get_long_about()
+            .expect("nwt sets long_about")
+            .to_string();
+        let help_section =
+            doc_section(&long_about, "\nREMOTE BRANCHES:\n", "\nCONFIGURATION:\n").to_owned();
+        let nwt_section = doc_section(
+            include_str!("../../../README.md"),
+            "\n## nwt (new worktree)\n",
+            "\n## ",
+        );
+        let readme_section = doc_section(nwt_section, "\n### Remote branches\n", "\n### ");
+        (help_section, readme_section)
+    }
+
+    /// The `Tracking` line and the refusal of a branch that more than one
+    /// remote holds show as samples in two documents. The REMOTE BRANCHES
+    /// section of `--help` holds them, and so does the `### Remote branches`
+    /// section of the README. Each document also names `git fetch`, because
+    /// `nwt` reads only the remote-tracking branches that the clone holds.
+    ///
+    /// The samples are copies, and only the functions run. So this test builds
+    /// the `Tracking` line with [`tracking_notice`], and the refusal with the
+    /// [`fmt::Display`] of [`NewBranchStartError::AmbiguousRemoteBranch`]
+    /// after the `Error: ` that `main` puts in front of it. It builds the
+    /// refusal two times: with the default refspec of each remote, and with
+    /// `origin` at `refs/remotes/mirror/heads/issue-33`, whose line adds the
+    /// name of the remote. Each line of each sample, without its indentation,
+    /// must be a line of its own in each document. Change the wording in the
+    /// code alone, and this test fails and names the document that did not
+    /// change.
+    #[test]
+    fn test_help_and_readme_samples_match_the_remote_branch_lines() {
+        const FETCH: &str = "git fetch";
+
+        let remote_branch = |remote: &str| RemoteTrackingBranch {
+            remote: remote.to_owned(),
+            tracking_ref: format!("{REMOTE_TRACKING_PREFIX}{remote}/issue-33"),
+        };
+        let nested_branch = RemoteTrackingBranch {
+            remote: "origin".to_owned(),
+            tracking_ref: format!("{REMOTE_TRACKING_PREFIX}mirror/heads/issue-33"),
+        };
+        let refusal_of = |candidates: Vec<RemoteTrackingBranch>| {
+            let refusal = NewBranchStartError::AmbiguousRemoteBranch {
+                branch: "issue-33".to_owned(),
+                candidates,
+            };
+            format!("Error: {refusal}")
+        };
+        let notice = tracking_notice(&remote_branch("origin"));
+        let refusal = refusal_of(vec![remote_branch("origin"), remote_branch("upstream")]);
+        let nested_refusal = refusal_of(vec![nested_branch, remote_branch("upstream")]);
+
+        let (help_section, readme_section) = remote_branch_doc_sections();
+
+        for sample in std::iter::once(notice.as_str())
+            .chain(refusal.lines())
+            .chain(nested_refusal.lines())
+        {
+            let sample = sample.trim();
+            assert!(
+                has_sample_line(&help_section, sample),
+                "the REMOTE BRANCHES section of --help must hold the runtime line: {sample}"
+            );
+            assert!(
+                has_sample_line(readme_section, sample),
+                "the ### Remote branches section of README.md must hold the runtime line: \
+                 {sample}"
+            );
+        }
+
+        assert!(
+            join_lines(&help_section).contains(FETCH),
+            "the REMOTE BRANCHES section of --help must name {FETCH:?}"
+        );
+        assert!(
+            join_lines(readme_section).contains(FETCH),
+            "the ### Remote branches section of README.md must name {FETCH:?}"
+        );
+    }
+
+    /// The two documents of the child repository links: the CHILD REPOSITORY
+    /// LINKS section of `--help`, and the `### Child Repository Links` section
+    /// inside the `## nwt` section of the README.
+    ///
+    /// `include_str!` stays in `#[cfg(test)]`, so the README goes into the test
+    /// binary only and not into the `nwt` that ships.
+    fn child_link_doc_sections() -> (String, &'static str) {
+        use clap::CommandFactory;
+
+        let long_about = Cli::command()
+            .get_long_about()
+            .expect("nwt sets long_about")
+            .to_string();
+        let help_section = doc_section(
+            &long_about,
+            "\nCHILD REPOSITORY LINKS:\n",
+            "\nENV FILE COPYING:\n",
+        )
+        .to_owned();
+        let nwt_section = doc_section(
+            include_str!("../../../README.md"),
+            "\n## nwt (new worktree)\n",
+            "\n## ",
+        );
+        let readme_section = doc_section(nwt_section, "\n### Child Repository Links\n", "\n### ");
+        (help_section, readme_section)
+    }
+
+    /// The lines that report the child repository links show as samples in two
+    /// documents. The CHILD REPOSITORY LINKS section of `--help` holds them,
+    /// and so does the `### Child Repository Links` section of the README.
+    ///
+    /// The samples are copies, and only the functions run. So this test takes
+    /// each line from [`children::sample_lines`], which builds it with the
+    /// function that prints it. Each document must hold each line as a line of
+    /// its own. Change the wording in the code alone, and this test fails and
+    /// names the document that did not change.
+    ///
+    /// The samples name the main worktree `/Users/me/code/keyboards`. Windows
+    /// joins a path with `\`, so the test runs on Unix only.
+    #[cfg(unix)]
+    #[test]
+    fn test_help_and_readme_samples_match_the_child_link_lines() {
+        let (help_section, readme_section) = child_link_doc_sections();
+
+        for sample in children::sample_lines(Path::new("/Users/me/code/keyboards")) {
+            assert!(
+                has_sample_line(&help_section, &sample),
+                "the CHILD REPOSITORY LINKS section of --help must hold the runtime line: \
+                 {sample}"
+            );
+            assert!(
+                has_sample_line(readme_section, &sample),
+                "the ### Child Repository Links section of README.md must hold the runtime \
+                 line: {sample}"
+            );
+        }
+    }
+
+    // One mutation fixture for each rule of `escape_sparse_pattern`. Remove one
+    // rule from the function, and exactly one of these tests fails. Each input
+    // holds the character two times where it can, so a rule that escapes only
+    // the first occurrence fails too.
+
+    #[test]
+    fn escape_sparse_pattern_escapes_every_backslash() {
+        assert_eq!(escape_sparse_pattern(r"a\b\c"), r"a\\b\\c");
+    }
+
+    #[test]
+    fn escape_sparse_pattern_escapes_every_open_bracket() {
+        assert_eq!(escape_sparse_pattern("a[b[c"), r"a\[b\[c");
+    }
+
+    #[test]
+    fn escape_sparse_pattern_escapes_every_close_bracket() {
+        assert_eq!(escape_sparse_pattern("a]b]c"), r"a\]b\]c");
+    }
+
+    #[test]
+    fn escape_sparse_pattern_escapes_every_star() {
+        assert_eq!(escape_sparse_pattern("a*b*c"), r"a\*b\*c");
+    }
+
+    #[test]
+    fn escape_sparse_pattern_escapes_every_question_mark() {
+        assert_eq!(escape_sparse_pattern("a?b?c"), r"a\?b\?c");
+    }
+
+    #[test]
+    fn escape_sparse_pattern_escapes_a_leading_exclamation_mark() {
+        assert_eq!(escape_sparse_pattern("!heavy"), r"\!heavy");
+    }
+
+    #[test]
+    fn escape_sparse_pattern_escapes_a_leading_number_sign() {
+        assert_eq!(escape_sparse_pattern("#heavy"), r"\#heavy");
+    }
+
+    /// A `!` or a `#` after the first character is literal in gitignore
+    /// syntax, so an escape there is noise.
+    #[test]
+    fn escape_sparse_pattern_keeps_a_later_exclamation_mark_and_number_sign() {
+        assert_eq!(escape_sparse_pattern("a!b#c/!d/#e"), "a!b#c/!d/#e");
+    }
+
+    /// A name without a special character comes back unchanged, spaces and
+    /// multi-byte characters included.
+    #[test]
+    fn escape_sparse_pattern_keeps_a_plain_name() {
+        assert_eq!(
+            escape_sparse_pattern("heavy dir/日本語/café 🎉"),
+            "heavy dir/日本語/café 🎉"
+        );
+    }
+
+    /// The pattern is anchored at the root, matches a directory only, and
+    /// holds the escaped name. An unescaped `we[ir]d dir` excluded nothing.
+    #[test]
+    fn sparse_exclude_dir_pattern_anchors_and_escapes_the_directory() {
+        let dir = SparseExcludeDir::parse("we[ir]d dir/").expect("the value must parse");
+        assert_eq!(dir.pattern(), r"!/we\[ir\]d dir/");
+    }
+
+    /// `--sparse-exclude` takes one directory. A run without the flag excludes
+    /// nothing.
+    #[test]
+    fn test_cli_sparse_exclude_parses_alone() {
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from(["nwt", "--sparse-exclude", "heavy"])
+            .expect("Should accept --sparse-exclude alone");
+        assert_eq!(cli.sparse_exclude, vec!["heavy".to_string()]);
+
+        let plain = Cli::try_parse_from(["nwt"]).expect("Should parse without flags");
+        assert!(
+            plain.sparse_exclude.is_empty(),
+            "A run without --sparse-exclude excludes nothing"
+        );
+    }
+
+    /// Each occurrence adds one directory, in the order the user gave.
+    #[test]
+    fn test_cli_sparse_exclude_is_repeatable() {
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from([
+            "nwt",
+            "--sparse-exclude",
+            "assets/video",
+            "--sparse-exclude",
+            "fixtures/large",
+        ])
+        .expect("Should accept --sparse-exclude two times");
+        assert_eq!(
+            cli.sparse_exclude,
+            vec!["assets/video".to_string(), "fixtures/large".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_cli_sparse_exclude_with_branch() {
+        use clap::Parser;
+
+        // `--branch` takes one or more values, so this also proves that the
+        // flag ends the list of branch words.
+        let cli = Cli::try_parse_from(["nwt", "-b", "issue-12", "--sparse-exclude", "heavy"])
+            .expect("Should accept --sparse-exclude with --branch");
+        assert_eq!(cli.branch, Some(vec!["issue-12".to_string()]));
+        assert_eq!(cli.sparse_exclude, vec!["heavy".to_string()]);
+    }
+
+    #[test]
+    fn test_cli_sparse_exclude_with_checkout() {
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from(["nwt", "-c", "v1", "--sparse-exclude", "heavy"])
+            .expect("Should accept --sparse-exclude with --checkout");
+        assert_eq!(cli.checkout, Some("v1".to_string()));
+        assert_eq!(cli.sparse_exclude, vec!["heavy".to_string()]);
+    }
+
+    /// The help text names the value `DIR`, which is the word the docs use.
+    #[test]
+    fn test_cli_sparse_exclude_value_name_is_dir() {
         use clap::CommandFactory;
         let cmd = Cli::command();
 
-        // --shell-setup conflicts with --tmux
-        let result = cmd.try_get_matches_from(["nwt", "--shell-setup", "--tmux"]);
-        assert!(
-            result.is_err(),
-            "Should fail when both --shell-setup and --tmux are provided"
-        );
+        let arg = cmd
+            .get_arguments()
+            .find(|arg| arg.get_long() == Some("sparse-exclude"))
+            .expect("nwt defines --sparse-exclude");
+        let names: Vec<&str> = arg
+            .get_value_names()
+            .unwrap_or_default()
+            .iter()
+            .map(|name| name.as_str())
+            .collect();
+        assert_eq!(names, ["DIR"]);
+    }
+
+    #[test]
+    fn test_cli_shell_setup_conflicts_with_sparse_exclude() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        // --shell-setup makes no worktree, so a directory to exclude is a mistake
+        let err = cmd
+            .try_get_matches_from(["nwt", "--shell-setup", "--sparse-exclude", "heavy"])
+            .expect_err("Should fail when both --shell-setup and --sparse-exclude are provided");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     // Unix-specific tests for shell command execution.
@@ -2037,7 +5888,6 @@ mod tests {
     mod unix_shell_tests {
         use super::*;
         use std::env;
-        use std::process::Command;
 
         #[test]
         fn test_run_shell_command_success() {
@@ -2091,7 +5941,9 @@ mod tests {
         #[test]
         fn test_get_exit_code_with_success() {
             // Run a command that succeeds
-            let status = Command::new("true").status().expect("Failed to run true");
+            let status = childenv::fixture_command("true")
+                .status()
+                .expect("Failed to run true");
             let code = get_exit_code(status);
             assert_eq!(code, 0, "Successful command should have exit code 0");
         }
@@ -2099,7 +5951,9 @@ mod tests {
         #[test]
         fn test_get_exit_code_with_failure() {
             // Run a command that fails
-            let status = Command::new("false").status().expect("Failed to run false");
+            let status = childenv::fixture_command("false")
+                .status()
+                .expect("Failed to run false");
             let code = get_exit_code(status);
             assert_eq!(code, 1, "false command should have exit code 1");
         }
@@ -2107,7 +5961,7 @@ mod tests {
         #[test]
         fn test_get_exit_code_custom_code() {
             // Run a command with custom exit code
-            let status = Command::new("sh")
+            let status = childenv::fixture_command("sh")
                 .args(["-c", "exit 123"])
                 .status()
                 .expect("Failed to run command");
@@ -2125,12 +5979,10 @@ mod tests {
             let toml = r#"
                 branch = "feature/test"
                 quiet = true
-                tmux = false
             "#;
             let config: NwtConfig = toml::from_str(toml).expect("Should parse valid config");
             assert_eq!(config.branch, Some("feature/test".to_string()));
             assert!(config.quiet);
-            assert!(!config.tmux);
             assert!(config.run.is_none());
             assert!(config.checkout.is_none());
         }
@@ -2140,13 +5992,11 @@ mod tests {
             let toml = r#"
                 branch = "my-branch"
                 quiet = true
-                tmux = true
                 run = "npm install"
             "#;
             let config: NwtConfig = toml::from_str(toml).expect("Should parse valid config");
             assert_eq!(config.branch, Some("my-branch".to_string()));
             assert!(config.quiet);
-            assert!(config.tmux);
             assert_eq!(config.run, Some("npm install".to_string()));
         }
 
@@ -2157,9 +6007,37 @@ mod tests {
             assert!(config.branch.is_none());
             assert!(config.checkout.is_none());
             assert!(config.copy_env); // defaults to true
+            assert!(config.bootstrap_hooks); // defaults to true
             assert!(!config.quiet);
             assert!(config.run.is_none());
-            assert!(!config.tmux);
+        }
+
+        #[test]
+        fn test_parse_config_bootstrap_hooks_false() {
+            // An explicit `bootstrap_hooks = false` must parse and be respected;
+            // an absent field must default to true (covered by the empty-config test).
+            let toml = "bootstrap_hooks = false";
+            let config: NwtConfig = toml::from_str(toml).expect("Should parse valid config");
+            assert!(!config.bootstrap_hooks);
+            assert!(config.copy_env); // unrelated field keeps its default
+        }
+
+        /// Issue #537: a config file without `link_children` keeps the child
+        /// links on.
+        #[test]
+        fn test_parse_config_link_children_defaults_to_true() {
+            let config: NwtConfig = toml::from_str("").expect("Should parse empty config");
+            assert!(config.link_children);
+        }
+
+        /// Issue #537: `link_children = false` parses, and turns the child
+        /// links off.
+        #[test]
+        fn test_parse_config_link_children_false() {
+            let toml = "link_children = false";
+            let config: NwtConfig = toml::from_str(toml).expect("Should parse valid config");
+            assert!(!config.link_children);
+            assert!(config.copy_env); // unrelated field keeps its default
         }
 
         /// Verifies that `NwtConfig::default()` produces the same values as serde defaults.
@@ -2190,6 +6068,14 @@ mod tests {
                 "copy_env default mismatch between impl Default and serde"
             );
             assert_eq!(
+                serde_defaults.bootstrap_hooks, manual_defaults.bootstrap_hooks,
+                "bootstrap_hooks default mismatch between impl Default and serde"
+            );
+            assert_eq!(
+                serde_defaults.link_children, manual_defaults.link_children,
+                "link_children default mismatch between impl Default and serde"
+            );
+            assert_eq!(
                 serde_defaults.quiet, manual_defaults.quiet,
                 "quiet default mismatch between impl Default and serde"
             );
@@ -2198,8 +6084,8 @@ mod tests {
                 "run default mismatch between impl Default and serde"
             );
             assert_eq!(
-                serde_defaults.tmux, manual_defaults.tmux,
-                "tmux default mismatch between impl Default and serde"
+                serde_defaults.removed_tmux, manual_defaults.removed_tmux,
+                "removed_tmux default mismatch between impl Default and serde"
             );
         }
 
@@ -2217,9 +6103,11 @@ mod tests {
                 branch: Some("feat".to_string()),
                 checkout: Some("main".to_string()),
                 copy_env: true,
+                bootstrap_hooks: true,
+                link_children: true,
                 quiet: false,
                 run: None,
-                tmux: false,
+                removed_tmux: None,
             };
             let result = validate_config(&config);
             assert!(result.is_err(), "Should reject branch+checkout conflict");
@@ -2231,9 +6119,11 @@ mod tests {
                 branch: Some("feat".to_string()),
                 checkout: None,
                 copy_env: true,
+                bootstrap_hooks: true,
+                link_children: true,
                 quiet: false,
                 run: None,
-                tmux: false,
+                removed_tmux: None,
             };
             let result = validate_config(&config);
             assert!(result.is_ok(), "Should accept config with only branch");
@@ -2245,9 +6135,11 @@ mod tests {
                 branch: None,
                 checkout: Some("main".to_string()),
                 copy_env: true,
+                bootstrap_hooks: true,
+                link_children: true,
                 quiet: false,
                 run: None,
-                tmux: false,
+                removed_tmux: None,
             };
             let result = validate_config(&config);
             assert!(result.is_ok(), "Should accept config with only checkout");
@@ -2260,18 +6152,22 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_link_children: false,
+                no_bootstrap_hooks: false,
                 quiet: true,
                 run: None,
-                tmux: false,
                 shell_setup: false,
+                sparse_exclude: Vec::new(),
             };
             let config = NwtConfig {
                 branch: Some("config-branch".to_string()),
                 checkout: None,
                 copy_env: true,
+                bootstrap_hooks: true,
+                link_children: true,
                 quiet: false,
                 run: Some("npm install".to_string()),
-                tmux: true,
+                removed_tmux: None,
             };
             let merged = merge_config(&cli, Some(config));
 
@@ -2279,14 +6175,6 @@ mod tests {
             assert_eq!(merged.branch, Some("cli-branch".to_string()));
             assert!(merged.quiet); // CLI --quiet flag was set, so quiet=true
             assert!(merged.copy_env); // config has true, CLI didn't disable
-
-            // Boolean flags use OR logic: cli.tmux || config.tmux
-            // Since CLI didn't specify --tmux (so cli.tmux=false, the default),
-            // the config value (tmux=true) is used via the OR. This is the expected
-            // behavior documented in merge_config(). See that function's doc comment
-            // for the full rationale on why we don't support --no-tmux to override.
-            assert!(merged.tmux);
-
             assert_eq!(merged.run, Some("npm install".to_string())); // Config provides default
         }
 
@@ -2297,18 +6185,22 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_link_children: false,
+                no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
-                tmux: false,
                 shell_setup: false,
+                sparse_exclude: Vec::new(),
             };
             let config = NwtConfig {
                 branch: Some("config-branch".to_string()),
                 checkout: None,
                 copy_env: true,
+                bootstrap_hooks: true,
+                link_children: true,
                 quiet: true,
                 run: Some("make build".to_string()),
-                tmux: true,
+                removed_tmux: None,
             };
             let merged = merge_config(&cli, Some(config));
 
@@ -2316,7 +6208,6 @@ mod tests {
             assert_eq!(merged.branch, Some("config-branch".to_string()));
             assert!(merged.copy_env);
             assert!(merged.quiet);
-            assert!(merged.tmux);
             assert_eq!(merged.run, Some("make build".to_string()));
         }
 
@@ -2327,10 +6218,12 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_link_children: false,
+                no_bootstrap_hooks: false,
                 quiet: true,
                 run: None,
-                tmux: false,
                 shell_setup: false,
+                sparse_exclude: Vec::new(),
             };
             let merged = merge_config(&cli, None);
 
@@ -2338,7 +6231,6 @@ mod tests {
             assert_eq!(merged.branch, Some("my-branch".to_string()));
             assert!(merged.copy_env); // default is true
             assert!(merged.quiet);
-            assert!(!merged.tmux);
             assert!(merged.run.is_none());
         }
 
@@ -2349,18 +6241,22 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: true, // CLI disables
+                no_link_children: false,
+                no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
-                tmux: false,
                 shell_setup: false,
+                sparse_exclude: Vec::new(),
             };
             let config = NwtConfig {
                 branch: None,
                 checkout: None,
                 copy_env: true, // config enables
+                bootstrap_hooks: true,
+                link_children: true,
                 quiet: false,
                 run: None,
-                tmux: false,
+                removed_tmux: None,
             };
             let merged = merge_config(&cli, Some(config));
 
@@ -2375,18 +6271,22 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_link_children: false,
+                no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
-                tmux: false,
                 shell_setup: false,
+                sparse_exclude: Vec::new(),
             };
             let config = NwtConfig {
                 branch: None,
                 checkout: None,
                 copy_env: false, // config disables
+                bootstrap_hooks: true,
+                link_children: true,
                 quiet: false,
                 run: None,
-                tmux: false,
+                removed_tmux: None,
             };
             let merged = merge_config(&cli, Some(config));
 
@@ -2395,21 +6295,173 @@ mod tests {
         }
 
         #[test]
+        fn test_merge_bootstrap_hooks_default_is_true() {
+            // With no CLI flag and no config, bootstrap_hooks defaults to true.
+            let cli = Cli {
+                branch: None,
+                random_directory: false,
+                checkout: None,
+                no_copy_env: false,
+                no_link_children: false,
+                no_bootstrap_hooks: false,
+                quiet: false,
+                run: None,
+                shell_setup: false,
+                sparse_exclude: Vec::new(),
+            };
+            let merged = merge_config(&cli, None);
+            assert!(merged.bootstrap_hooks);
+        }
+
+        #[test]
+        fn test_merge_no_bootstrap_hooks_disables() {
+            // CLI --no-bootstrap-hooks overrides config bootstrap_hooks = true.
+            let cli = Cli {
+                branch: None,
+                random_directory: false,
+                checkout: None,
+                no_copy_env: false,
+                no_link_children: false,
+                no_bootstrap_hooks: true, // CLI disables
+                quiet: false,
+                run: None,
+                shell_setup: false,
+                sparse_exclude: Vec::new(),
+            };
+            let config = NwtConfig {
+                branch: None,
+                checkout: None,
+                copy_env: true,
+                bootstrap_hooks: true, // config enables
+                link_children: true,
+                quiet: false,
+                run: None,
+                removed_tmux: None,
+            };
+            let merged = merge_config(&cli, Some(config));
+            assert!(!merged.bootstrap_hooks);
+        }
+
+        #[test]
+        fn test_merge_config_bootstrap_hooks_false() {
+            // Config bootstrap_hooks = false is respected when CLI doesn't ask for it.
+            let cli = Cli {
+                branch: None,
+                random_directory: false,
+                checkout: None,
+                no_copy_env: false,
+                no_link_children: false,
+                no_bootstrap_hooks: false,
+                quiet: false,
+                run: None,
+                shell_setup: false,
+                sparse_exclude: Vec::new(),
+            };
+            let config = NwtConfig {
+                branch: None,
+                checkout: None,
+                copy_env: true,
+                bootstrap_hooks: false, // config disables
+                link_children: true,
+                quiet: false,
+                run: None,
+                removed_tmux: None,
+            };
+            let merged = merge_config(&cli, Some(config));
+            assert!(!merged.bootstrap_hooks);
+        }
+
+        /// A `Cli` with no flag set, for the merge tests of `link_children`.
+        fn cli_without_flags() -> Cli {
+            Cli {
+                branch: None,
+                random_directory: false,
+                checkout: None,
+                no_copy_env: false,
+                no_link_children: false,
+                no_bootstrap_hooks: false,
+                quiet: false,
+                run: None,
+                shell_setup: false,
+                sparse_exclude: Vec::new(),
+            }
+        }
+
+        /// Issue #537: with no flag and no config file, the child links are on.
+        #[test]
+        fn test_merge_link_children_default_is_true() {
+            let merged = merge_config(&cli_without_flags(), None);
+            assert!(merged.link_children);
+        }
+
+        /// Issue #537: `--no-link-children` overrides `link_children = true`.
+        #[test]
+        fn test_merge_no_link_children_disables() {
+            let cli = Cli {
+                no_link_children: true, // CLI disables
+                ..cli_without_flags()
+            };
+            let config = NwtConfig {
+                link_children: true, // config enables
+                ..NwtConfig::default()
+            };
+            let merged = merge_config(&cli, Some(config));
+            assert!(!merged.link_children);
+        }
+
+        /// Issue #537: `link_children = false` holds when the CLI does not ask
+        /// for the links.
+        #[test]
+        fn test_merge_config_link_children_false() {
+            let config = NwtConfig {
+                link_children: false, // config disables
+                ..NwtConfig::default()
+            };
+            let merged = merge_config(&cli_without_flags(), Some(config));
+            assert!(!merged.link_children);
+        }
+
+        #[test]
+        fn test_cli_no_bootstrap_hooks_parses() {
+            use clap::CommandFactory;
+            let cmd = Cli::command();
+
+            let result = cmd.try_get_matches_from(["nwt", "--no-bootstrap-hooks"]);
+            assert!(result.is_ok(), "Should accept --no-bootstrap-hooks option");
+
+            let matches = result.unwrap();
+            assert!(
+                matches.get_flag("no_bootstrap_hooks"),
+                "Should set no_bootstrap_hooks flag"
+            );
+        }
+
+        #[test]
+        fn test_cli_shell_setup_conflicts_with_no_bootstrap_hooks() {
+            use clap::CommandFactory;
+            let cmd = Cli::command();
+
+            // --shell-setup conflicts with --no-bootstrap-hooks
+            let result = cmd.try_get_matches_from(["nwt", "--shell-setup", "--no-bootstrap-hooks"]);
+            assert!(
+                result.is_err(),
+                "Should fail when both --shell-setup and --no-bootstrap-hooks are provided"
+            );
+        }
+
+        #[test]
         fn test_exit_code_config_error_is_unique() {
-            // Ensure CONFIG_ERROR, TMUX_NOT_RUNNING, and SHELL_SETUP_ERROR don't conflict with other exit codes
+            // Ensure CONFIG_ERROR and SHELL_SETUP_ERROR don't conflict with other exit codes
             let codes = [
                 exit_codes::NOT_IN_REPO,
                 exit_codes::INVALID_REPO_NAME,
                 exit_codes::NO_PARENT_DIR,
-                exit_codes::DIR_CREATE_FAILED,
                 exit_codes::NAME_COLLISION,
                 exit_codes::GIT_COMMAND_ERROR,
                 exit_codes::WORKTREE_FAILED,
                 exit_codes::INVALID_PATH_ENCODING,
                 exit_codes::RUN_COMMAND_FAILED,
-                exit_codes::TMUX_FAILED,
                 exit_codes::CONFIG_ERROR,
-                exit_codes::TMUX_NOT_RUNNING,
                 exit_codes::SHELL_SETUP_ERROR,
             ];
 
@@ -2420,7 +6472,7 @@ mod tests {
             assert_eq!(
                 sorted.len(),
                 codes.len(),
-                "All exit codes including CONFIG_ERROR, TMUX_NOT_RUNNING, and SHELL_SETUP_ERROR should be unique"
+                "All exit codes including CONFIG_ERROR and SHELL_SETUP_ERROR should be unique"
             );
         }
     }
@@ -2438,6 +6490,25 @@ mod tests {
                 fs::create_dir_all(parent).expect("Failed to create parent directories");
             }
             fs::write(&path, content).expect("Failed to write file");
+        }
+
+        /// Helper to read a file's permission bits (Unix only).
+        #[cfg(unix)]
+        fn mode_of(path: &Path) -> u32 {
+            use std::os::unix::fs::PermissionsExt;
+            fs::metadata(path)
+                .expect("file should exist")
+                .permissions()
+                .mode()
+                & 0o777
+        }
+
+        /// Helper to chmod a file during test setup (Unix only).
+        #[cfg(unix)]
+        fn set_mode(path: &Path, mode: u32) {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(mode))
+                .expect("Failed to set permissions");
         }
 
         /// Helper to check if a file exists and has expected content.
@@ -2458,7 +6529,7 @@ mod tests {
             create_file(source.path(), ".env", "SECRET=value");
 
             // Copy env files (no git, so all .env files are "untracked")
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             // Verify the file was copied
             assert!(
@@ -2475,7 +6546,7 @@ mod tests {
             // Create .env.local file
             create_file(source.path(), ".env.local", "LOCAL_SECRET=local");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), ".env.local", "LOCAL_SECRET=local"),
@@ -2491,7 +6562,7 @@ mod tests {
             // Create .env.development file
             create_file(source.path(), ".env.development", "DEV=true");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), ".env.development", "DEV=true"),
@@ -2507,7 +6578,7 @@ mod tests {
             // Create .envrc (direnv file) - should NOT be copied
             create_file(source.path(), ".envrc", "export FOO=bar");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             // Verify .envrc was NOT copied
             assert!(
@@ -2524,7 +6595,7 @@ mod tests {
             // Create .environment file - should NOT be copied
             create_file(source.path(), ".environment", "some config");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 !dest.path().join(".environment").exists(),
@@ -2540,7 +6611,7 @@ mod tests {
             // Create nested .env file
             create_file(source.path(), "packages/api/.env", "API_KEY=secret");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), "packages/api/.env", "API_KEY=secret"),
@@ -2559,7 +6630,7 @@ mod tests {
             create_file(source.path(), "app/.env", "APP=3");
             create_file(source.path(), "app/.env.production", "PROD=4");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(file_has_content(dest.path(), ".env", "ROOT=1"));
             assert!(file_has_content(dest.path(), ".env.local", "LOCAL=2"));
@@ -2581,7 +6652,7 @@ mod tests {
             // Create normal .env (should be copied)
             create_file(source.path(), ".env", "NORMAL=y");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), ".env", "NORMAL=y"),
@@ -2593,12 +6664,19 @@ mod tests {
             );
         }
 
+        /// A directory that git refuses as a repository has no tracked files.
+        ///
+        /// The directory comes from [`not_a_repository_inside_a_repository`],
+        /// so `git ls-files` exits with the status 128 there, and the empty
+        /// set comes from the failure arm. The enclosing repository tracks a
+        /// file inside the directory, so a query that reached it gives a set
+        /// that is not empty and fails the test.
         #[test]
         fn test_get_tracked_files_empty_for_non_git() {
             let temp = TempDir::new().expect("Failed to create temp dir");
+            let not_a_repository = not_a_repository_inside_a_repository(&temp);
 
-            // Non-git directory should return empty set
-            let tracked = get_tracked_files(temp.path());
+            let tracked = get_tracked_files(&not_a_repository);
             assert!(
                 tracked.is_empty(),
                 "Non-git directory should have no tracked files"
@@ -2615,7 +6693,7 @@ mod tests {
             // Create normal .env (should be copied)
             create_file(source.path(), ".env", "NORMAL=y");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), ".env", "NORMAL=y"),
@@ -2637,7 +6715,7 @@ mod tests {
             // Create normal .env (should be copied)
             create_file(source.path(), ".env", "NORMAL=y");
 
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             assert!(
                 file_has_content(dest.path(), ".env", "NORMAL=y"),
@@ -2649,16 +6727,134 @@ mod tests {
             );
         }
 
-        /// Helper to run a git command in a directory.
-        fn run_git(dir: &Path, args: &[&str]) -> bool {
-            Command::new("git")
-                .args(args)
-                .current_dir(dir)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
+        /// Issue #537: the walk does not go into a child repository.
+        ///
+        /// `vial/` holds a `.git` directory, thus it is a child repository, and
+        /// its `.env` belongs to the child. The parent index does not list the
+        /// files of a child, so the copy took that `.env` as untracked and made
+        /// a real `vial/` in the worktree that held only `.env` files.
+        #[test]
+        fn test_skips_child_repository_with_git_directory() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), "vial/.git/HEAD", "ref: refs/heads/main\n");
+            create_file(source.path(), "vial/.env", "CHILD=1");
+
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
+
+            assert!(
+                dest.path().join("vial").symlink_metadata().is_err(),
+                "The copy must not make vial/ in the worktree, because vial/ is a child repository"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 0,
+                    kept: 0,
+                    skipped: 0
+                },
+                "The .env of a child repository is not the parent's to copy"
+            );
+        }
+
+        /// Issue #537: a `.git` file also makes a child repository.
+        ///
+        /// A linked worktree holds a `.git` file, not a `.git` directory. The
+        /// walk does not go into `wt/`, and the copy does not make `wt/` in the
+        /// worktree.
+        #[test]
+        fn test_skips_child_repository_with_git_file() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), "wt/.git", "gitdir: /nowhere\n");
+            create_file(source.path(), "wt/.env.local", "CHILD=1");
+
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
+
+            assert!(
+                dest.path().join("wt").symlink_metadata().is_err(),
+                "The copy must not make wt/ in the worktree, because wt/ is a child repository"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 0,
+                    kept: 0,
+                    skipped: 0
+                },
+                "The .env.local of a linked worktree is not the parent's to copy"
+            );
+        }
+
+        /// Issue #537: the rule applies at each depth below the root.
+        ///
+        /// `packages/lib/` is a child repository two levels down, and the walk
+        /// does not go into it. `packages/api/` is a plain directory of the
+        /// parent, thus its `.env` is copied.
+        #[test]
+        fn test_skips_nested_child_repository() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(
+                source.path(),
+                "packages/lib/.git/HEAD",
+                "ref: refs/heads/main\n",
+            );
+            create_file(source.path(), "packages/lib/.env", "LIB=1");
+            create_file(source.path(), "packages/api/.env", "API=1");
+
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
+
+            assert!(
+                file_has_content(dest.path(), "packages/api/.env", "API=1"),
+                "packages/api/ is not a child repository, thus its .env must be copied"
+            );
+            assert!(
+                dest.path().join("packages/lib").symlink_metadata().is_err(),
+                "The copy must not make packages/lib/ in the worktree, because it is a child repository"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 1,
+                    kept: 0,
+                    skipped: 0
+                },
+                "Only the .env of the plain directory counts as copied"
+            );
+        }
+
+        /// Issue #537: the rule does not apply to the root of the walk.
+        ///
+        /// The root is the main worktree, and it holds its own `.git`. A rule
+        /// that skips the root copies nothing at all. This test passes before
+        /// the fix, and it guards against a fix that is too broad.
+        #[test]
+        fn test_root_with_git_entry_is_still_walked() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), ".git/HEAD", "ref: refs/heads/main\n");
+            create_file(source.path(), ".env", "ROOT=1");
+
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
+
+            assert!(
+                file_has_content(dest.path(), ".env", "ROOT=1"),
+                "The root holds .git, and its .env must still be copied"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 1,
+                    kept: 0,
+                    skipped: 0
+                },
+                "The .env of the root counts as copied"
+            );
         }
 
         #[test]
@@ -2694,7 +6890,7 @@ mod tests {
             create_file(source.path(), ".env.local", "UNTRACKED_SECRET=untracked");
 
             // Copy env files
-            copy_untracked_env_files(source.path(), dest.path(), true);
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
 
             // Verify: tracked file should NOT be copied
             assert!(
@@ -2706,6 +6902,430 @@ mod tests {
             assert!(
                 file_has_content(dest.path(), ".env.local", "UNTRACKED_SECRET=untracked"),
                 "Untracked .env.local should be copied"
+            );
+        }
+
+        #[test]
+        fn test_existing_dest_env_file_is_not_overwritten() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // The main worktree has one version of the file...
+            create_file(source.path(), ".env.local", "MAIN=from-main");
+            // ...and the new worktree already has its own, e.g. generated by a
+            // post-checkout hook during `git worktree add`.
+            create_file(dest.path(), ".env.local", "WORKTREE=generated-by-hook");
+
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
+
+            assert!(
+                file_has_content(dest.path(), ".env.local", "WORKTREE=generated-by-hook"),
+                "Existing worktree .env.local must be left untouched, not overwritten from main"
+            );
+        }
+
+        #[test]
+        fn test_kept_file_is_not_counted_as_copied() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), ".env.local", "MAIN=from-main");
+            create_file(dest.path(), ".env.local", "WORKTREE=generated-by-hook");
+
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
+
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 0,
+                    kept: 1,
+                    skipped: 0
+                },
+                "A skipped destination must count as kept, never as copied"
+            );
+        }
+
+        /// The skip fires for *any* pre-existing destination, not just one a
+        /// post-checkout hook generated. A `.env.local` that is untracked in the main
+        /// worktree but committed on the branch being checked out is placed there by
+        /// `git worktree add` itself, and the line must not tell the user that file was
+        /// "generated in worktree". The per-file line states the observed fact — the file
+        /// was already there — and leaves the hook rationale to the README and --help.
+        ///
+        /// Two assertions, because they fail for different reasons and neither subsumes
+        /// the other. The equality pins the exact user-facing contract, but on its own it
+        /// only enforces this test's *name* by convention: any reword breaks it with a
+        /// plain left/right mismatch, and the reflex repair is to paste the new string
+        /// into the expected value. Should that new wording happen to reintroduce the
+        /// false causal claim — "created by the worktree hook", say — the test would go
+        /// green again having silently re-admitted the exact defect it was written to
+        /// forbid. The `contains` check makes the named invariant mechanical rather than
+        /// advisory, so the bypass fails CI (see CLAUDE.md's enforced-helper rule).
+        ///
+        /// It is stated first deliberately: a reword that smuggles the claim back in
+        /// should fail with the *reason* it is wrong, not with a string diff a reader has
+        /// to decode. A benign reword still trips the equality below, which is where a
+        /// deliberate wording change belongs.
+        #[test]
+        fn test_kept_existing_message_does_not_claim_the_file_was_generated_in_the_worktree() {
+            let message = kept_existing_message(Path::new(".env.local"));
+
+            assert!(
+                !message.contains("generated in worktree"),
+                "The kept-existing line must not attribute the file to a post-checkout hook"
+            );
+
+            assert_eq!(
+                message,
+                "Kept existing: .env.local (already in the new worktree; not overwritten from main worktree)",
+                "The kept-existing line must report only that the destination already existed, not why"
+            );
+        }
+
+        /// The kept-existing line is quoted verbatim in three places: the format string
+        /// in [`kept_existing_message`], the ENV FILE COPYING sample inside `Cli`'s
+        /// `long_about`, and the README's `.env` section. Only the first is executable,
+        /// so only the first is naturally pinned — and the test above reaches it by
+        /// calling the function directly, which means it can never observe the other two.
+        ///
+        /// That gap has already produced a defect once. An earlier revision of the line
+        /// claimed the kept file was "generated in worktree", a causal claim that is false
+        /// whenever `git worktree add` itself checked the file out; fixing it required
+        /// hand-editing all three copies, and nothing but care stopped one from being
+        /// missed. A missed copy is worse than a stale comment: `--help` and the README
+        /// are where users go to understand the behavior, so the superseded wording would
+        /// keep asserting the false cause long after the program stopped printing it.
+        ///
+        /// This test closes that by making the docs assert the *runtime* string rather
+        /// than a hand-copied twin: it renders the line through `kept_existing_message`
+        /// and requires both documents to contain it byte-for-byte. Reword the format
+        /// string alone and this fails, naming which document drifted — the bypass fails
+        /// CI instead of relying on convention (see CLAUDE.md's enforced-helper rule).
+        ///
+        /// `include_str!` deliberately lives here, inside `#[cfg(test)]`, so the README's
+        /// ~100 KB is embedded in the test binary only and never in the shipped `nwt`.
+        #[test]
+        fn test_help_and_readme_samples_match_the_kept_existing_line() {
+            use clap::CommandFactory;
+
+            let sample = kept_existing_message(Path::new(".env.local"));
+
+            assert!(
+                Cli::command()
+                    .get_long_about()
+                    .expect("nwt sets long_about")
+                    .to_string()
+                    .contains(&sample),
+                "--help ENV FILE COPYING sample drifted from the runtime line: {sample}"
+            );
+
+            assert!(
+                include_str!("../../../README.md").contains(&sample),
+                "README sample drifted from the runtime line: {sample}"
+            );
+        }
+
+        #[test]
+        fn test_env_file_only_in_main_worktree_is_still_copied() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Nothing in the destination, so the copy must still happen.
+            create_file(source.path(), ".env.local", "MAIN=from-main");
+
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
+
+            assert!(
+                file_has_content(dest.path(), ".env.local", "MAIN=from-main"),
+                "A .env file with no destination counterpart must still be copied"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 1,
+                    kept: 0,
+                    skipped: 0
+                },
+                "Copying must still be counted when nothing was skipped"
+            );
+        }
+
+        #[test]
+        fn test_mixed_copy_and_keep_counts() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), ".env", "A=1");
+            create_file(source.path(), ".env.local", "B=2");
+            // Only .env.local already exists in the new worktree.
+            create_file(dest.path(), ".env.local", "B=already-here");
+
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
+
+            assert!(
+                file_has_content(dest.path(), ".env", "A=1"),
+                "Missing .env should be copied"
+            );
+            assert!(
+                file_has_content(dest.path(), ".env.local", "B=already-here"),
+                "Pre-existing .env.local should be kept as-is"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 1,
+                    kept: 1,
+                    skipped: 0
+                },
+                "Copy and keep must be accounted separately in a single pass"
+            );
+        }
+
+        /// Parse `raw` into one excluded directory, or panic.
+        fn excluded_dir(raw: &str) -> SparseExcludeDir {
+            SparseExcludeDir::parse(raw).unwrap_or_else(|e| panic!("{raw:?} must parse, got {e:?}"))
+        }
+
+        /// Issue #487 test 9: a `.env` under an excluded directory is not
+        /// copied, and it counts as skipped. A copy makes the excluded
+        /// directory in the new worktree again. The `.env` beside it is copied.
+        #[test]
+        fn test_env_under_an_excluded_directory_is_skipped_and_counted() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), "heavy/.env", "HEAVY=1");
+            create_file(source.path(), ".env", "TOP=1");
+
+            let summary = copy_untracked_env_files(
+                source.path(),
+                dest.path(),
+                &[excluded_dir("heavy")],
+                true,
+            );
+
+            assert!(
+                !dest.path().join("heavy").exists(),
+                "The copy must not make the excluded directory heavy/"
+            );
+            assert!(
+                file_has_content(dest.path(), ".env", "TOP=1"),
+                "A .env that is not under an excluded directory must be copied"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 1,
+                    kept: 0,
+                    skipped: 1
+                },
+                "A .env under an excluded directory counts as skipped, not copied or kept"
+            );
+        }
+
+        /// The stderr line names the file and the excluded directory, with a
+        /// trailing `/` on the directory.
+        #[test]
+        fn test_skipped_under_excluded_message_names_the_file_and_the_directory() {
+            assert_eq!(
+                skipped_under_excluded_message(Path::new("heavy/.env"), &excluded_dir("heavy")),
+                "Skipped: heavy/.env (under excluded heavy/)"
+            );
+        }
+
+        /// A `.env` whose path only starts with the text of an excluded
+        /// directory is not under it. `heavy2/` shares the first five
+        /// characters, and `src/heavy/` shares the last component. Both are
+        /// copied, and nothing counts as skipped.
+        #[test]
+        fn test_env_beside_an_excluded_directory_is_still_copied() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), "heavy2/.env", "SIBLING=1");
+            create_file(source.path(), "src/heavy/.env", "NESTED=1");
+
+            let summary = copy_untracked_env_files(
+                source.path(),
+                dest.path(),
+                &[excluded_dir("heavy")],
+                true,
+            );
+
+            assert!(
+                file_has_content(dest.path(), "heavy2/.env", "SIBLING=1"),
+                "heavy2/.env is not under heavy/ and must be copied"
+            );
+            assert!(
+                file_has_content(dest.path(), "src/heavy/.env", "NESTED=1"),
+                "src/heavy/.env is not under heavy/ and must be copied"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 2,
+                    kept: 0,
+                    skipped: 0
+                },
+                "Nothing beside an excluded directory counts as skipped"
+            );
+        }
+
+        /// A `.env` holds secrets, so the copy in the new worktree must be owner-only
+        /// regardless of how loose the main worktree's permissions are.
+        #[cfg(unix)]
+        #[test]
+        fn test_copied_env_file_lands_at_0600() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), ".env", "SECRET=value");
+            // A world-readable source is the whole point: fs::copy would propagate
+            // these bits into every worktree.
+            set_mode(&source.path().join(".env"), 0o644);
+
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
+
+            assert_eq!(
+                mode_of(&dest.path().join(".env")),
+                0o600,
+                "Copied .env must land at 0600 even when the source is 0644"
+            );
+            assert!(
+                file_has_content(dest.path(), ".env", "SECRET=value"),
+                "Hardening the mode must not break the copy itself"
+            );
+        }
+
+        /// The parent-directory-creating path must harden the mode too.
+        #[cfg(unix)]
+        #[test]
+        fn test_copied_nested_env_file_lands_at_0600() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), "packages/api/.env", "NESTED=secret");
+            set_mode(&source.path().join("packages/api/.env"), 0o644);
+
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
+
+            assert_eq!(
+                mode_of(&dest.path().join("packages/api/.env")),
+                0o600,
+                "Nested .env must also land at 0600"
+            );
+            assert!(
+                file_has_content(dest.path(), "packages/api/.env", "NESTED=secret"),
+                "Nested .env content must still be copied"
+            );
+        }
+
+        /// Regression guard: the skip-existing path must never re-introduce the
+        /// permission downgrade by touching a destination it decided to keep.
+        #[cfg(unix)]
+        #[test]
+        fn test_existing_dest_env_keeps_its_own_mode() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), ".env", "MAIN=from-main");
+            set_mode(&source.path().join(".env"), 0o644);
+            create_file(dest.path(), ".env", "WORKTREE=generated-by-hook");
+            set_mode(&dest.path().join(".env"), 0o600);
+
+            copy_untracked_env_files(source.path(), dest.path(), &[], true);
+
+            assert_eq!(
+                mode_of(&dest.path().join(".env")),
+                0o600,
+                "A kept .env must keep its own 0600 mode, not inherit the source's 0644"
+            );
+            assert!(
+                file_has_content(dest.path(), ".env", "WORKTREE=generated-by-hook"),
+                "A kept .env must keep its own content"
+            );
+        }
+
+        /// Pins the dangling-symlink case: a broken symlink at the destination must
+        /// never be written THROUGH, which would create the symlink's target and fill
+        /// it with the main worktree's secrets at whatever arbitrary path it names.
+        ///
+        /// Two independent layers prevent this, and this test pins their conjunction —
+        /// at least one must always survive:
+        ///
+        /// 1. The pre-flight `symlink_metadata()` guard in [`copy_untracked_env_files`].
+        ///    `exists()` follows symlinks and reports *false* for a broken one, so a
+        ///    guard written that way falls through; `symlink_metadata()` answers "is
+        ///    there anything at this path", which is what the guard actually means.
+        /// 2. `create_new(true)` in [`copy_env_file`]. `O_CREAT | O_EXCL` refuses to
+        ///    follow a symlink at all, dangling or not, and fails with `EEXIST`.
+        ///
+        /// Verified by mutation, all four combinations: degrading *either* layer alone
+        /// still passes (the other catches it), and degrading *both* — `exists()` plus
+        /// `create(true)` — fails on the first assertion below. So this test cannot be
+        /// satisfied vacuously, but it also will not fail on a single-layer regression;
+        /// the redundancy is deliberate defense in depth, not an accident.
+        #[cfg(unix)]
+        #[test]
+        fn test_dangling_symlink_dest_is_never_written_through() {
+            use std::os::unix::fs::symlink;
+
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+            // The symlink's target lives in its own TempDir, so a concurrent copy of
+            // this test can never race us over the same "must not exist" path.
+            let target_dir = TempDir::new().expect("Failed to create temp dir");
+            let target_path = target_dir.path().join("write-through-victim.env");
+
+            create_file(source.path(), ".env", "SECRET=from-main");
+            let dest_path = dest.path().join(".env");
+            symlink(&target_path, &dest_path).expect("Failed to create dangling symlink");
+
+            let summary = copy_untracked_env_files(source.path(), dest.path(), &[], true);
+
+            assert!(
+                !target_path.exists(),
+                "Nothing may be created at a dangling symlink's target — writing through it would leak the main worktree's secrets to an arbitrary path"
+            );
+            assert!(
+                fs::symlink_metadata(&dest_path)
+                    .expect("The destination symlink must still be there")
+                    .file_type()
+                    .is_symlink(),
+                "The destination must still be the untouched symlink, not a regular file that replaced it"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary {
+                    copied: 0,
+                    kept: 1,
+                    skipped: 0
+                },
+                "A dangling symlink at the destination must count as kept, never as copied"
+            );
+        }
+
+        /// Pins the atomicity claim: the destination is created exclusively, so a
+        /// file that appears between the skip check and the open is never clobbered.
+        #[test]
+        fn test_copy_env_file_refuses_to_overwrite_existing_dest() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), ".env", "MAIN=from-main");
+            create_file(dest.path(), ".env", "WORKTREE=generated-by-hook");
+
+            let result = copy_env_file(&source.path().join(".env"), &dest.path().join(".env"));
+
+            let error = result.expect_err("copy_env_file must refuse an existing destination");
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::AlreadyExists,
+                "Refusal must be reported as AlreadyExists so callers can treat it as a keep"
+            );
+            assert!(
+                file_has_content(dest.path(), ".env", "WORKTREE=generated-by-hook"),
+                "The refused destination must be left byte-for-byte intact"
             );
         }
 
@@ -2757,40 +7377,735 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_shorten_tab_name_issue_prefix() {
-        assert_eq!(shorten_tab_name("issue-99"), "#99");
-        assert_eq!(shorten_tab_name("issue-1234"), "#1234");
+    /// Tests for git-hook bootstrap detection (`detect_hook_bootstrap`).
+    ///
+    /// Each test builds its own `TempDir` so concurrent runs (e.g. a
+    /// background bacon loop sharing `./target`) never clobber each other's
+    /// fixtures.
+    mod hook_bootstrap_tests {
+        use super::*;
+        use std::fs;
+        use tempfile::TempDir;
+
+        /// Helper to create a file with content in a directory.
+        fn create_file(dir: &Path, name: &str, content: &str) {
+            let path = dir.join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("Failed to create parent directories");
+            }
+            fs::write(&path, content).expect("Failed to write file");
+        }
+
+        #[test]
+        fn test_no_package_json_returns_none() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            assert_eq!(detect_hook_bootstrap(dir.path()), None);
+        }
+
+        #[test]
+        fn test_package_json_without_scripts_returns_none() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(dir.path(), "package.json", r#"{"name": "demo"}"#);
+            assert_eq!(detect_hook_bootstrap(dir.path()), None);
+        }
+
+        #[test]
+        fn test_scripts_without_prepare_returns_none() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"build": "tsc"}}"#,
+            );
+            assert_eq!(detect_hook_bootstrap(dir.path()), None);
+        }
+
+        #[test]
+        fn test_empty_prepare_returns_none() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": ""}}"#,
+            );
+            assert_eq!(detect_hook_bootstrap(dir.path()), None);
+        }
+
+        #[test]
+        fn test_non_string_prepare_returns_none() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": 42}}"#,
+            );
+            assert_eq!(detect_hook_bootstrap(dir.path()), None);
+        }
+
+        #[test]
+        fn test_malformed_json_returns_none() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(dir.path(), "package.json", "{ this is not json ]");
+            assert_eq!(detect_hook_bootstrap(dir.path()), None);
+        }
+
+        #[test]
+        fn test_prepare_only_defaults_to_pnpm() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}}"#,
+            );
+            assert_eq!(
+                detect_hook_bootstrap(dir.path()),
+                Some(PackageManager::Pnpm)
+            );
+        }
+
+        #[test]
+        fn test_package_manager_npm() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}, "packageManager": "npm@10.2.0"}"#,
+            );
+            assert_eq!(detect_hook_bootstrap(dir.path()), Some(PackageManager::Npm));
+        }
+
+        #[test]
+        fn test_package_manager_yarn_with_hash() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}, "packageManager": "yarn@4.0.0+sha256.abc"}"#,
+            );
+            assert_eq!(
+                detect_hook_bootstrap(dir.path()),
+                Some(PackageManager::Yarn)
+            );
+        }
+
+        #[test]
+        fn test_package_manager_bun() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}, "packageManager": "bun@1.1.0"}"#,
+            );
+            assert_eq!(detect_hook_bootstrap(dir.path()), Some(PackageManager::Bun));
+        }
+
+        #[test]
+        fn test_unrecognized_package_manager_falls_through_to_lockfile() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}, "packageManager": "deno@2.0.0"}"#,
+            );
+            create_file(dir.path(), "pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+            assert_eq!(
+                detect_hook_bootstrap(dir.path()),
+                Some(PackageManager::Pnpm)
+            );
+        }
+
+        #[test]
+        fn test_lockfile_pnpm() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}}"#,
+            );
+            create_file(dir.path(), "pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+            assert_eq!(
+                detect_hook_bootstrap(dir.path()),
+                Some(PackageManager::Pnpm)
+            );
+        }
+
+        #[test]
+        fn test_lockfile_npm() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}}"#,
+            );
+            create_file(dir.path(), "package-lock.json", "{}");
+            assert_eq!(detect_hook_bootstrap(dir.path()), Some(PackageManager::Npm));
+        }
+
+        #[test]
+        fn test_lockfile_yarn() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}}"#,
+            );
+            create_file(dir.path(), "yarn.lock", "# yarn lockfile v1\n");
+            assert_eq!(
+                detect_hook_bootstrap(dir.path()),
+                Some(PackageManager::Yarn)
+            );
+        }
+
+        #[test]
+        fn test_lockfile_bun_binary() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}}"#,
+            );
+            create_file(dir.path(), "bun.lockb", "");
+            assert_eq!(detect_hook_bootstrap(dir.path()), Some(PackageManager::Bun));
+        }
+
+        #[test]
+        fn test_lockfile_bun_text() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}}"#,
+            );
+            create_file(dir.path(), "bun.lock", "");
+            assert_eq!(detect_hook_bootstrap(dir.path()), Some(PackageManager::Bun));
+        }
+
+        #[test]
+        fn test_package_manager_takes_precedence_over_lockfile() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}, "packageManager": "npm@10.2.0"}"#,
+            );
+            // Conflicting lockfile must be ignored in favor of packageManager.
+            create_file(dir.path(), "pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+            assert_eq!(detect_hook_bootstrap(dir.path()), Some(PackageManager::Npm));
+        }
+
+        #[test]
+        fn test_install_command_mapping() {
+            assert_eq!(
+                PackageManager::Pnpm.install_command(),
+                ("pnpm", &["install"][..])
+            );
+            assert_eq!(
+                PackageManager::Npm.install_command(),
+                ("npm", &["install"][..])
+            );
+            assert_eq!(
+                PackageManager::Yarn.install_command(),
+                ("yarn", &["install"][..])
+            );
+            assert_eq!(
+                PackageManager::Bun.install_command(),
+                ("bun", &["install"][..])
+            );
+        }
     }
 
-    #[test]
-    fn test_shorten_tab_name_issue_prefix_with_suffix() {
-        assert_eq!(
-            shorten_tab_name("issue-1234-fix-pagination"),
-            "#1234-fix-pagination"
-        );
-        assert_eq!(shorten_tab_name("issue-42-add-login"), "#42-add-login");
+    /// Tests for `bootstrap_hooks` — the function that runs a package-manager
+    /// install in a freshly created worktree so git-hook managers (husky)
+    /// regenerate the gitignored hook directory `core.hooksPath` points at.
+    ///
+    /// Each test builds its own `TempDir` and unique fixtures so concurrent
+    /// runs (e.g. a background bacon loop sharing `./target`) never clobber
+    /// each other. Tests that need a real `pnpm`/`git` skip gracefully when
+    /// those binaries are unavailable, mirroring `env_copy_tests`.
+    mod bootstrap_hooks_tests {
+        use super::*;
+        use std::fs;
+        use tempfile::TempDir;
+
+        /// Helper to create a file with content in a directory.
+        fn create_file(dir: &Path, name: &str, content: &str) {
+            let path = dir.join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("Failed to create parent directories");
+            }
+            fs::write(&path, content).expect("Failed to write file");
+        }
+
+        /// Returns true if `pnpm --version` runs, i.e. pnpm is installed.
+        fn pnpm_available() -> bool {
+            childenv::fixture_command("pnpm")
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
+
+        #[test]
+        fn test_bootstrap_skips_repo_without_package_json() {
+            // Acceptance criterion: repos with no `prepare` script are entirely
+            // unaffected. With no package.json, detection returns None, so
+            // bootstrap_hooks must report success and touch nothing.
+            let dir = TempDir::new().expect("Failed to create temp dir");
+
+            let result = bootstrap_hooks(dir.path(), true);
+
+            assert!(result, "No package.json should be a no-op success");
+            // No files should have been created.
+            let entries: Vec<_> = fs::read_dir(dir.path())
+                .expect("Failed to read temp dir")
+                .collect();
+            assert!(
+                entries.is_empty(),
+                "bootstrap_hooks must not create files when there's nothing to do"
+            );
+        }
+
+        #[test]
+        fn test_bootstrap_runs_prepare_script_via_install() {
+            if !pnpm_available() {
+                eprintln!("Skipping test: pnpm not available");
+                return;
+            }
+            let dir = TempDir::new().expect("Failed to create temp dir");
+
+            // A prepare script that creates a marker. pnpm runs lifecycle
+            // scripts through a shell, so `sh`-style syntax is fine. Zero
+            // dependencies keeps the install offline-safe.
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"name":"t","private":true,"version":"0.0.0","scripts":{"prepare":"mkdir -p .husky/_ && echo ok > .husky/_/marker"}}"#,
+            );
+
+            let result = bootstrap_hooks(dir.path(), true);
+
+            assert!(
+                result,
+                "Install with a passing prepare script should succeed"
+            );
+            assert!(
+                dir.path().join(".husky/_/marker").exists(),
+                "prepare script should have run and created the marker"
+            );
+        }
+
+        #[test]
+        fn test_bootstrap_failure_returns_false_without_panicking() {
+            if !pnpm_available() {
+                eprintln!("Skipping test: pnpm not available");
+                return;
+            }
+            let dir = TempDir::new().expect("Failed to create temp dir");
+
+            // A prepare script that fails makes the install non-zero. We must
+            // surface that as `false` without panicking or aborting.
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"name":"t","private":true,"version":"0.0.0","scripts":{"prepare":"exit 1"}}"#,
+            );
+
+            let result = bootstrap_hooks(dir.path(), true);
+
+            assert!(!result, "A failing install must return false, not panic");
+        }
+
+        #[test]
+        fn test_bootstrapped_hook_rejects_violation_and_passes_clean() {
+            // End-to-end mutation proof for issue #275: after bootstrap_hooks
+            // runs the install, the husky-style pre-commit hook it regenerates
+            // must actually gate commits. We prove the guard can fail (rejects a
+            // staged `violation.txt`) and can pass (allows a clean file).
+            if !pnpm_available() {
+                eprintln!("Skipping test: pnpm not available");
+                return;
+            }
+            let repo = TempDir::new().expect("Failed to create temp dir");
+            if !run_git(repo.path(), &["init"]) {
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+            run_git(repo.path(), &["config", "user.email", "test@example.com"]);
+            run_git(repo.path(), &["config", "user.name", "Test User"]);
+
+            // The prepare script mimics husky exactly: write an executable
+            // pre-commit hook that blocks `violation.txt`, then point
+            // core.hooksPath at the generated (normally gitignored) dir.
+            create_file(
+                repo.path(),
+                "package.json",
+                r#"{"name":"t","private":true,"version":"0.0.0","scripts":{"prepare":"mkdir -p .husky/_ && printf '#!/bin/sh\nif git diff --cached --name-only | grep -q violation.txt; then exit 1; fi\n' > .husky/_/pre-commit && chmod +x .husky/_/pre-commit && git config core.hooksPath .husky/_"}}"#,
+            );
+
+            // Baseline commit so the repo has a HEAD.
+            create_file(repo.path(), "baseline.txt", "baseline\n");
+            run_git(repo.path(), &["add", "baseline.txt"]);
+            assert!(
+                run_git(repo.path(), &["commit", "-m", "baseline"]),
+                "Baseline commit (before hooks exist) should succeed"
+            );
+
+            // Run the bootstrap: install triggers prepare, which installs the hook.
+            let result = bootstrap_hooks(repo.path(), true);
+            assert!(result, "Bootstrap install should succeed");
+            assert!(
+                repo.path().join(".husky/_/pre-commit").exists(),
+                "prepare should have generated the pre-commit hook"
+            );
+
+            // MUTATION: a staged violation.txt must be rejected by the hook.
+            create_file(repo.path(), "violation.txt", "bad\n");
+            run_git(repo.path(), &["add", "violation.txt"]);
+            assert!(
+                !run_git(repo.path(), &["commit", "-m", "should be blocked"]),
+                "Bootstrapped hook must REJECT a commit staging violation.txt"
+            );
+
+            // CLEAN: unstage the violation, stage a clean file, commit succeeds.
+            run_git(repo.path(), &["reset"]);
+            create_file(repo.path(), "clean.txt", "good\n");
+            run_git(repo.path(), &["add", "clean.txt"]);
+            assert!(
+                run_git(repo.path(), &["commit", "-m", "clean"]),
+                "Bootstrapped hook must ALLOW a clean commit"
+            );
+        }
     }
 
-    #[test]
-    fn test_shorten_tab_name_no_change() {
-        // Random names pass through unchanged
-        assert_eq!(shorten_tab_name("happy-panda"), "happy-panda");
-        // Branch names without issue prefix pass through
-        assert_eq!(shorten_tab_name("fix-login-bug"), "fix-login-bug");
-        // "issue" without digits is not shortened
-        assert_eq!(shorten_tab_name("issue-fix"), "issue-fix");
-        // "issue" alone
-        assert_eq!(shorten_tab_name("issue"), "issue");
+    /// Tests for `run_command_installs_dependencies` — the token-based matcher
+    /// that lets the caller skip nwt's own hook-bootstrap install when a
+    /// synchronous `--run` command already installs dependencies (issue #275).
+    mod run_command_installs_dependencies_tests {
+        use super::*;
+
+        #[test]
+        fn matches_known_install_invocations() {
+            for cmd in [
+                "pnpm install",
+                "pnpm i",
+                "npm install",
+                "npm i",
+                "npm ci",
+                "yarn install",
+                "bun install",
+                "bun i",
+                // A compound command tokenizes fine: `pnpm` and `install` are
+                // still adjacent tokens.
+                "cd x && pnpm install",
+            ] {
+                assert!(
+                    run_command_installs_dependencies(cmd),
+                    "{cmd:?} should be recognized as an install"
+                );
+            }
+        }
+
+        #[test]
+        fn rejects_non_install_commands() {
+            for cmd in [
+                // `installer` is a different token, not `install`.
+                "pnpm installer",
+                // A run that does nothing.
+                "true",
+                // A non-package-manager setup command.
+                "make setup",
+                // A script path, NOT a `npm` + `install` token pair.
+                "scripts/npm-install.sh",
+                // Empty command.
+                "",
+                // `install` with no preceding package-manager program.
+                "install",
+                // No space, so it does not tokenize as `pnpm` + `install`.
+                "pnpm install&&x",
+                // yarn has no `i` alias; classic and berry both reject it, so
+                // matching it would skip bootstrap for a run about to fail.
+                "yarn i",
+            ] {
+                assert!(
+                    !run_command_installs_dependencies(cmd),
+                    "{cmd:?} should NOT be recognized as an install"
+                );
+            }
+        }
+
+        #[test]
+        fn yarn_and_bun_do_not_accept_ci() {
+            // `ci` is an npm-only subcommand; for yarn/bun it is just an
+            // arbitrary token and must not count as an install.
+            assert!(!run_command_installs_dependencies("yarn ci"));
+            assert!(!run_command_installs_dependencies("bun ci"));
+            // npm ci is the documented clean-install and DOES count.
+            assert!(run_command_installs_dependencies("npm ci"));
+        }
     }
 
-    #[test]
-    fn test_shorten_tab_name_edge_cases() {
-        // "issue-" prefix but starts with non-digit
-        assert_eq!(shorten_tab_name("issue-abc"), "issue-abc");
-        // Empty string
-        assert_eq!(shorten_tab_name(""), "");
-        // Only issue- with digits and no suffix
-        assert_eq!(shorten_tab_name("issue-0"), "#0");
+    /// Tests for `missing_hooks_path` — the defense-in-depth check (issue #275)
+    /// that warns when git's effective `core.hooksPath` names a directory that
+    /// does not exist, the condition under which git silently runs NO hooks.
+    ///
+    /// Each test builds its own `TempDir`, runs `git init` inside it, and sets
+    /// `core.hooksPath` *repo-locally* so the "set" cases never depend on the
+    /// machine's global git config. Absolute-path cases keep their target
+    /// directory inside the test's own `TempDir` so concurrent runs (e.g. a
+    /// background bacon loop sharing `./target`) stay isolated. No test ever
+    /// changes the process cwd or touches a fixed shared path.
+    mod missing_hooks_path_tests {
+        use super::*;
+        use std::fs;
+        use tempfile::TempDir;
+
+        /// Initializes a git repo in `dir`, returning false (so the caller can
+        /// skip) if git is unavailable. `git config core.hooksPath` consults the
+        /// effective config, but a fresh `git init` repo inherits only
+        /// global/system settings, and this machine's global config does not set
+        /// core.hooksPath — so the "unset" case is genuinely unset. The "set"
+        /// cases pin the value repo-locally, making them robust regardless.
+        fn git_init(dir: &Path) -> bool {
+            run_git(dir, &["init"])
+        }
+
+        #[test]
+        fn test_unset_hooks_path_returns_none() {
+            // No core.hooksPath configured anywhere relevant → git uses its
+            // built-in default, which we treat as "not our concern" → None.
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            if !git_init(dir.path()) {
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+
+            assert_eq!(
+                missing_hooks_path(dir.path()),
+                None,
+                "An unset core.hooksPath must yield None"
+            );
+        }
+
+        #[test]
+        fn test_missing_relative_hooks_path_detected() {
+            // A relative core.hooksPath whose directory was never created is the
+            // exact silent-no-hooks trap; we must flag it.
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            if !git_init(dir.path()) {
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+            assert!(
+                run_git(dir.path(), &["config", "core.hooksPath", ".husky/_"]),
+                "Setting core.hooksPath should succeed"
+            );
+            // Deliberately do NOT create .husky/_ .
+
+            assert_eq!(
+                missing_hooks_path(dir.path()),
+                Some(".husky/_".to_string()),
+                "A missing relative hooks dir must be reported with git's value"
+            );
+        }
+
+        #[test]
+        fn test_existing_relative_hooks_path_ok() {
+            // Same relative path, but the directory exists → hooks will run → None.
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            if !git_init(dir.path()) {
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+            assert!(
+                run_git(dir.path(), &["config", "core.hooksPath", ".husky/_"]),
+                "Setting core.hooksPath should succeed"
+            );
+            fs::create_dir_all(dir.path().join(".husky/_")).expect("Failed to create hooks dir");
+
+            assert_eq!(
+                missing_hooks_path(dir.path()),
+                None,
+                "An existing relative hooks dir must yield None"
+            );
+        }
+
+        #[test]
+        fn test_missing_absolute_hooks_path_detected() {
+            // Absolute paths are used as-is (not resolved against the worktree).
+            // Keep the target inside this test's own TempDir for parallel safety.
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            if !git_init(dir.path()) {
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+            let absolute = dir.path().join("nonexistent-hooks");
+            let absolute_str = absolute.to_str().expect("temp path must be UTF-8");
+            assert!(
+                run_git(dir.path(), &["config", "core.hooksPath", absolute_str]),
+                "Setting core.hooksPath should succeed"
+            );
+            // Deliberately do NOT create the directory.
+
+            assert_eq!(
+                missing_hooks_path(dir.path()),
+                Some(absolute_str.to_string()),
+                "A missing absolute hooks dir must be reported as-is"
+            );
+        }
+
+        #[test]
+        fn test_existing_absolute_hooks_path_ok() {
+            // Absolute path that exists → None.
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            if !git_init(dir.path()) {
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+            let absolute = dir.path().join("existing-hooks");
+            fs::create_dir_all(&absolute).expect("Failed to create hooks dir");
+            let absolute_str = absolute.to_str().expect("temp path must be UTF-8");
+            assert!(
+                run_git(dir.path(), &["config", "core.hooksPath", absolute_str]),
+                "Setting core.hooksPath should succeed"
+            );
+
+            assert_eq!(
+                missing_hooks_path(dir.path()),
+                None,
+                "An existing absolute hooks dir must yield None"
+            );
+        }
+
+        /// Fail-safe: in a directory that git refuses as a repository,
+        /// `git config` exits with the status 128, and the check answers
+        /// `None`. It never panics or blocks.
+        ///
+        /// The directory comes from [`not_a_repository_inside_a_repository`].
+        /// The enclosing repository sets `core.hooksPath` to a directory that
+        /// is missing, so a query that reached it answers `Some` and fails the
+        /// test.
+        #[test]
+        fn test_non_git_dir_returns_none() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            let not_a_repository = not_a_repository_inside_a_repository(&dir);
+
+            assert_eq!(
+                missing_hooks_path(&not_a_repository),
+                None,
+                "A non-git directory must yield None (fail-safe)"
+            );
+        }
+
+        /// RAII guard that removes a directory on drop, even if the test panics.
+        /// Used for the tilde-expansion tests, which must create a directory
+        /// directly under `$HOME` (the only place `~/` expands to) and therefore
+        /// must guarantee cleanup so we never leak test droppings into the real
+        /// home directory.
+        struct HomeDirGuard(std::path::PathBuf);
+        impl Drop for HomeDirGuard {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        /// Produces a process- and time-unique directory name. Concurrent test
+        /// runs share this machine (a background bacon loop runs the same tests
+        /// in parallel), and these tests touch `$HOME` — a shared resource — so
+        /// the name MUST be unique per run to avoid one run clobbering another.
+        fn unique_name(prefix: &str) -> String {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            format!("{prefix}-{}-{nanos}", std::process::id())
+        }
+
+        #[test]
+        fn test_tilde_hooks_path_existing_dir_ok() {
+            // The false-positive repro for issue #275: a global hooks setup of
+            // `core.hooksPath = ~/.githooks` is common. git expands the leading
+            // `~` to the home directory at hook-run time (it treats
+            // core.hooksPath as a pathname config type), so an existing
+            // `~/<dir>` means hooks WILL run and must not be flagged. The checker
+            // therefore has to perform the same tilde expansion git does;
+            // treating `~/...` as a worktree-relative path is the bug.
+            let home = match dirs::home_dir() {
+                Some(home) => home,
+                None => {
+                    eprintln!("Skipping test: home directory not available");
+                    return;
+                }
+            };
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            if !git_init(dir.path()) {
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+
+            // Create a uniquely named, existing dir directly under $HOME so the
+            // expanded `~/<name>` resolves to a real directory. The RAII guard
+            // removes it even if an assert below panics.
+            let name = unique_name(".nwt-test-hooks");
+            let real_dir = home.join(&name);
+            fs::create_dir_all(&real_dir).expect("Failed to create home test dir");
+            let _guard = HomeDirGuard(real_dir);
+
+            // Pass the literal `~/<name>` as a plain argument (no shell), so the
+            // tilde is stored verbatim in git config exactly like a user's
+            // global `~/.githooks` setting.
+            let tilde_value = format!("~/{name}");
+            assert!(
+                run_git(dir.path(), &["config", "core.hooksPath", &tilde_value]),
+                "Setting core.hooksPath should succeed"
+            );
+
+            assert_eq!(
+                missing_hooks_path(dir.path()),
+                None,
+                "a tilde hooksPath whose expanded dir exists must not be flagged"
+            );
+        }
+
+        #[test]
+        fn test_tilde_hooks_path_missing_reports_expanded_path() {
+            // Pins the reporting contract for tilde paths: when `~/<name>` does
+            // NOT exist, the warning must carry the EXPANDED absolute path the
+            // user can actually act on, not the raw `~/...` string. git itself
+            // expands the tilde (core.hooksPath is a pathname config type), so
+            // the checker must report the same expanded path git would use.
+            let home = match dirs::home_dir() {
+                Some(home) => home,
+                None => {
+                    eprintln!("Skipping test: home directory not available");
+                    return;
+                }
+            };
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            if !git_init(dir.path()) {
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+
+            // A uniquely named dir under $HOME that we deliberately do NOT create.
+            let name = unique_name(".nwt-test-hooks-missing");
+            let tilde_value = format!("~/{name}");
+            assert!(
+                run_git(dir.path(), &["config", "core.hooksPath", &tilde_value]),
+                "Setting core.hooksPath should succeed"
+            );
+
+            let expected = home
+                .join(&name)
+                .to_str()
+                .expect("home test path must be UTF-8")
+                .to_string();
+            assert_eq!(
+                missing_hooks_path(dir.path()),
+                Some(expected),
+                "a missing tilde hooks dir must be reported as the expanded absolute path"
+            );
+        }
     }
 }

@@ -17,6 +17,8 @@
 
 pub use const_format::formatcp;
 
+pub mod rerun;
+
 /// Git commit hash captured at build time (7 characters).
 pub const GIT_HASH: &str = env!("BUILD_GIT_HASH");
 

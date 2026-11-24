@@ -1,0 +1,10 @@
+. export function double(x) {
+.   return x * 2;
+. }
+. 
+T it.each([
+T   [1, 2],
+T   [2, 4],
+T ])("doubles %i", (input, expected) => {
+T   expect(double(input)).toBe(expected);
+T });

@@ -1,0 +1,1454 @@
+//! The reader of the environment that names the terminal a run draws into.
+//!
+//! A terminal that draws an image draws it from an escape sequence, and three
+//! such sequences are in service. Kitty carries the pixels in a protocol of
+//! its own. iTerm2 carries a whole image file in one sequence. Sixel carries a
+//! palette and then a band of pixels at a time. No terminal reads all three.
+//! A tool that wants to draw an image therefore reads the environment
+//! variables that the terminal set, names the terminal from what it finds
+//! there, and then picks the one sequence that terminal reads.
+//!
+//! **A terminal that set no variable is not out of reach.** Two of the three
+//! protocols carry a query, and a terminal answers it. [`crate::probe`] writes
+//! that query, and [`Capabilities::detect_by_asking`] is the entrance that
+//! reads the answer. This module keeps the names, because a name costs no
+//! round trip and answers the question about the protocol, though it says
+//! nothing about the size of a character cell.
+//!
+//! A caller asks [`Capabilities::detect`] once and gets three facts: which
+//! terminal it draws into, whether that terminal draws an image at all, and
+//! whether that terminal takes the raw mode that a key press needs.
+//! [`display_routine_for`] turns the first of those facts into the one routine
+//! that draws, and [`Capabilities::display_routine`] narrows that routine by
+//! what a mosh session states it delivers. See [`crate::session`].
+//!
+//! # What the detection has to get right
+//!
+//! A terminal panel that runs a program of its own leaks the environment of
+//! the terminal that started it. A muxiavelli panel draws through the
+//! `@xterm/addon-image` of xterm.js, and the process in that panel still reads
+//! `KITTY_WINDOW_ID` from the Kitty window that started the muxiavelli server.
+//! A detector that reads the host signal first therefore names the panel a
+//! Kitty window and sends it a sequence that xterm.js does not read. The panel
+//! then prints the escape sequence as text. So the panel's own signal wins
+//! over every host signal, and [`classify_terminal_type`] states that order.
+//!
+//! The same trap holds for the width of the answer. A terminal that leaks
+//! `TERM=screen` from a backing session still draws an image when the panel
+//! draws one, so the terminal type decides first and the `TERM` string only
+//! decides the terminals that carry no better signal.
+
+use std::io;
+
+use termsize::Window;
+
+/// An inline-image protocol that a caller emits into a muxiavelli panel.
+///
+/// muxiavelli panels render through the xterm.js of ttyd with
+/// `@xterm/addon-image`, which supports **Sixel and iTerm2 IIP only**. The
+/// Kitty graphics protocol is deliberately absent from this enum: it is
+/// structurally impossible to pick Kitty for a muxiavelli panel, which is how
+/// the shared contract's "Never Kitty" guarantee is enforced at compile time
+/// rather than by convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageProtocol {
+    /// A palette and then a band of pixels at a time.
+    Sixel,
+    /// A whole image file in one escape sequence.
+    Iterm2,
+}
+
+impl ImageProtocol {
+    /// Parse a single `MUXIAVELLI_IMAGE_PROTOCOLS` token (case- and
+    /// whitespace-insensitive). Returns `None` for anything a caller cannot
+    /// emit into a muxiavelli panel (including `kitty`), so unsupported tokens
+    /// are simply skipped when selecting from the advertised list.
+    fn parse_token(token: &str) -> Option<Self> {
+        let token = token.trim();
+        if token.eq_ignore_ascii_case("sixel") {
+            Some(Self::Sixel)
+        } else if token.eq_ignore_ascii_case("iterm2") {
+            Some(Self::Iterm2)
+        } else {
+            None
+        }
+    }
+}
+
+/// An image protocol that a terminal named in its own answer to a query.
+///
+/// This is not [`ImageProtocol`]. That enum names what a caller emits into a
+/// muxiavelli panel, and it leaves out kitty on purpose. This one names what a
+/// terminal said it draws, and a terminal that draws kitty says so. The two
+/// enums answer two questions, so neither one is the other's alias.
+///
+/// iTerm2 stands on neither side of this enum. The inline image protocol of
+/// iTerm2 carries no query, so no terminal answers for it, and a terminal that
+/// draws it alone reaches this crate through its name as it always did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnsweredProtocol {
+    /// The terminal answered the query action of the kitty graphics protocol.
+    Kitty,
+    /// The terminal named parameter 4 of the primary device attributes.
+    Sixel,
+}
+
+/// The protocol a caller falls back to for a muxiavelli panel when the
+/// advertised preference list is absent, empty, or names nothing supported.
+const DEFAULT_MUXIAVELLI_PROTOCOL: ImageProtocol = ImageProtocol::Sixel;
+
+/// Resolve the ordered `MUXIAVELLI_IMAGE_PROTOCOLS` preference list to the
+/// first protocol a caller can emit, honoring the advertised order rather than
+/// hardcoding a choice. Falls back to Sixel (never Kitty) when the list is
+/// absent, empty, or names nothing supported.
+fn select_muxiavelli_protocol(raw: Option<&str>) -> ImageProtocol {
+    raw.unwrap_or_default()
+        .split(',')
+        .filter_map(ImageProtocol::parse_token)
+        .next()
+        .unwrap_or(DEFAULT_MUXIAVELLI_PROTOCOL)
+}
+
+/// The terminal that a run draws into, as far as the environment says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalType {
+    /// The Kitty terminal.
+    Kitty,
+    /// The Ghostty terminal.
+    Ghostty,
+    /// The iTerm2 terminal.
+    ITerm2,
+    /// The WezTerm terminal.
+    WezTerm,
+    /// The Alacritty terminal, which draws no image.
+    Alacritty,
+    /// A pane of the Zellij multiplexer.
+    Zellij,
+    /// A muxiavelli panel (ttyd/xterm.js). Carries the resolved inline-image
+    /// protocol so the host terminal's leaked env vars cannot override it.
+    Muxiavelli(ImageProtocol),
+    /// A terminal that answered a query about the protocols it draws.
+    ///
+    /// This variant carries a fact where every other one carries a name. See
+    /// [`crate::probe`].
+    Answered(AnsweredProtocol),
+    /// A terminal that set no signal this crate reads.
+    Unknown,
+}
+
+impl TerminalType {
+    /// Whether the answer of a terminal outranks this name.
+    ///
+    /// The environment carries two kinds of name, and the answer of a terminal
+    /// outranks one of them.
+    ///
+    /// * **A multiplexer answers for a pane it does not own.** It owns the
+    ///   pseudo terminal of the pane and it writes every answer itself, so the
+    ///   answer states what that pane really draws. The name states only what
+    ///   this crate assumes about the multiplexer, and an assumption gives way
+    ///   to a fact.
+    /// * **A panel or a terminal carries its own signal.** Its author wrote
+    ///   that signal for this exact process, and a backing session that answers
+    ///   the query must not take it away. A muxiavelli panel over a Zellij
+    ///   session is the case that names the rule, and
+    ///   [`classify_terminal_type`] states the same order for the environment.
+    ///
+    /// [`TerminalType::Unknown`] states no name at all, so there is nothing
+    /// there for an answer to outrank.
+    ///
+    /// The match names every variant, because a variant that fell through a
+    /// wildcard would take whichever answer this arm happened to give.
+    fn the_answer_outranks_this_name(&self) -> bool {
+        match self {
+            // A multiplexer, and a terminal of no name.
+            TerminalType::Zellij | TerminalType::Unknown => true,
+            // A panel, and every terminal that named itself.
+            TerminalType::Muxiavelli(_)
+            | TerminalType::Kitty
+            | TerminalType::Ghostty
+            | TerminalType::ITerm2
+            | TerminalType::WezTerm
+            | TerminalType::Alacritty
+            // An answer of an earlier read is already the answer.
+            | TerminalType::Answered(_) => false,
+        }
+    }
+}
+
+/// What one terminal does, as three facts a caller acts on.
+///
+/// The three facts stand behind methods, and the fields stay private, because
+/// the only honest way to make them is to read the environment of the process.
+/// A caller that held the fields could build a set of capabilities that no
+/// terminal ever has, and the tool would then draw into a terminal that reads
+/// nothing it sends.
+#[derive(Debug, Clone)]
+pub struct Capabilities {
+    terminal_type: TerminalType,
+    draws_images: bool,
+    raw_mode: bool,
+    /// The character cell that the terminal named in its answer, or `None`
+    /// when it named none and when nothing asked it.
+    ///
+    /// **This is the only way the measure reaches the writer.** The read that
+    /// asks for a cell is [`Capabilities::detect_by_asking`], and the writers
+    /// of `draw` are the only callers that need what it found. A writer that
+    /// asked the terminal for itself would read it a second time for every
+    /// picture, and a still picture already holds one round trip.
+    cell: Option<crate::geometry::CellPixels>,
+    /// What the environment of a mosh session says about the images it
+    /// carries, or an empty statement for every session that is no such
+    /// session.
+    ///
+    /// **A query cannot answer this.** Inside a multiplexer the multiplexer
+    /// owns the pseudo terminal of the pane and answers every query itself, so
+    /// the answer states nothing about the transport that carries the bytes on
+    /// to the terminal of the user. See [`crate::session`].
+    session: crate::session::MoshImages,
+}
+
+/// What a caller needs the answer of the terminal for.
+///
+/// The one write of [`crate::probe::IMAGE_QUERY`] carries two questions, and
+/// the two of them have two audiences. A caller that draws a picture converts
+/// character cells to pixels, so it needs the size of a cell as much as it
+/// needs the protocol. A caller that only reports what the terminal is needs
+/// the protocol alone, and a round trip it makes for a cell it never reads
+/// costs the budget of [`crate::probe::QUERY_BUDGET`] and swallows whatever
+/// the user typed while the read held the terminal in raw mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NeededAnswer {
+    /// Which protocol this terminal draws, and nothing else.
+    Protocol,
+    /// Which protocol this terminal draws and how big one character cell is.
+    ProtocolAndCell,
+}
+
+/// The one answer of a run that asked both questions.
+///
+/// One round trip of this question for the whole run. What a terminal draws
+/// does not change while a program runs, and neither does the size of one of
+/// its cells, so a second question costs a second budget on the one terminal
+/// that answers nothing.
+static FULL_ANSWER: std::sync::OnceLock<Capabilities> = std::sync::OnceLock::new();
+
+/// The one answer of a run that asked about the protocol alone.
+///
+/// It stands apart from [`FULL_ANSWER`] because the two answers are not the
+/// same answer: this one holds no cell for a terminal that named itself,
+/// having asked that terminal nothing at all.
+static PROTOCOL_ANSWER: std::sync::OnceLock<Capabilities> = std::sync::OnceLock::new();
+
+impl Capabilities {
+    /// Read the environment of this process and name what the terminal does.
+    ///
+    /// This is the entrance a tool uses. It reads the environment variables
+    /// once, names the terminal from them, and asks the operating system
+    /// whether standard output is a terminal at all.
+    #[must_use]
+    pub fn detect() -> Self {
+        Self::from_env(&TerminalEnv::from_process(), stdout_is_a_terminal())
+    }
+
+    /// Read the environment, ask the terminal, and name what it does.
+    ///
+    /// This is the entrance for a tool that draws a picture and has no second
+    /// way to show it. [`Capabilities::detect`] reads the environment alone,
+    /// and a terminal that set no signal reaches it as
+    /// [`TerminalType::Unknown`]. A session of mosh arrives that way, a pane
+    /// of a multiplexer arrives under the name of the multiplexer, and both of
+    /// them draw pictures.
+    ///
+    /// So this call asks both of them, and it asks a named terminal as well
+    /// whenever the window reports no pixel size: the name of a terminal
+    /// answers the protocol question and says nothing about the size of a
+    /// character cell.
+    /// `asks_the_terminal` holds both triggers, and
+    /// [`Capabilities::detect_by_asking_the_protocol`] is the entrance that
+    /// asks the first alone. The question goes to the controlling terminal,
+    /// which is a descriptor of its own, so a run whose standard output is a
+    /// file still has a terminal to ask. Standard output decides one thing
+    /// here, which is [`Capabilities::raw_mode`].
+    ///
+    /// A run that stands in a background process group asks nothing as well.
+    /// The question needs raw mode, and the call that asks for raw mode stops
+    /// such a run. [`crate::probe::ask_the_terminal`] holds that rule, and a
+    /// run it stops short answers with the name the environment carries.
+    ///
+    /// The answer replaces every name that
+    /// [`TerminalType::the_answer_outranks_this_name`] gives way to, and it
+    /// replaces no other name the environment carried.
+    #[must_use]
+    pub fn detect_by_asking() -> Self {
+        FULL_ANSWER
+            .get_or_init(|| Self::ask_once(NeededAnswer::ProtocolAndCell))
+            .clone()
+    }
+
+    /// Read the environment, ask the terminal which protocol it draws, and
+    /// name what it does.
+    ///
+    /// This is the entrance for a tool that reports what the terminal is and
+    /// draws no picture. `ic --will-display` is the one that asked for it: it
+    /// prints a verdict from the name of the terminal and from whether that
+    /// terminal draws an image at all, and the size of a character cell
+    /// decides nothing it prints.
+    ///
+    /// So this call asks about the protocol alone, and the size of the window
+    /// settles nothing here. It asks every name that
+    /// [`TerminalType::the_answer_outranks_this_name`] gives way to, and it
+    /// asks a terminal that named itself nothing — where
+    /// [`Capabilities::detect_by_asking`] asks that terminal for the cell that
+    /// a picture needs. The round trip this saves costs the budget of
+    /// [`crate::probe::QUERY_BUDGET`] and swallows whatever the user typed
+    /// while the read held the terminal in raw mode, and a named terminal
+    /// under mosh and a ttyd panel report the window that used to trigger it.
+    ///
+    /// A run that asked the whole question already takes that answer instead
+    /// of asking a second time. **The reuse runs one way alone.** An answer of
+    /// this entrance holds no cell for a terminal that named itself, so
+    /// [`Capabilities::detect_by_asking`] still has its own question to ask
+    /// after this one has answered.
+    #[must_use]
+    pub fn detect_by_asking_the_protocol() -> Self {
+        PROTOCOL_ANSWER
+            .get_or_init(|| {
+                FULL_ANSWER
+                    .get()
+                    .cloned()
+                    .unwrap_or_else(|| Self::ask_once(NeededAnswer::Protocol))
+            })
+            .clone()
+    }
+
+    /// The one round trip that each entrance of this type memoizes.
+    ///
+    /// # Arguments
+    /// * `needed` - What the caller needs the answer for, which decides
+    ///   whether the question about a character cell stands open.
+    fn ask_once(needed: NeededAnswer) -> Self {
+        let env = TerminalEnv::from_process();
+        // The question goes to the controlling terminal, which is a different
+        // descriptor from standard output. A run whose standard output is a
+        // file still has a terminal to ask, and `ic --will-display` promises
+        // that a redirected standard output does not change its answer.
+        // One window for this read, measured beside it. The answer of the text
+        // area divides by the cell counts of the window it is about, so the two
+        // arrive from the same measure.
+        let window = termsize::drawing_window();
+        let answered = if asks_the_terminal(&classify_terminal_type(&env), window, needed) {
+            // The cell counts of the window go along whatever the caller needs
+            // the answer for. The query is one fixed string that carries every
+            // question, so a run that asks about the protocol alone still reads
+            // the cell that arrives with the answer, and it reads it at no cost
+            // of its own.
+            crate::probe::ask_the_terminal(
+                crate::probe::QUERY_BUDGET,
+                window.map(|window| {
+                    let (columns, rows) = window.cells();
+                    (u32::from(columns), u32::from(rows))
+                }),
+            )
+        } else {
+            crate::probe::TerminalAnswer::default()
+        };
+        Self::from_env_and_answer(&env, stdout_is_a_terminal(), answered)
+    }
+
+    /// Build a set of capabilities from facts that the caller already holds.
+    ///
+    /// [`Capabilities::detect`] is the entrance for a run, and this
+    /// constructor is the entrance for a test: a test that covers what a tool
+    /// prints for one terminal names that terminal here, where a test that
+    /// called `detect` would answer with the terminal of whoever started the
+    /// test run.
+    #[must_use]
+    pub fn new(terminal_type: TerminalType, draws_images: bool, raw_mode: bool) -> Self {
+        Self {
+            terminal_type,
+            draws_images,
+            raw_mode,
+            // A caller that states the terminal states no answer of it, so the
+            // measure of a cell falls back to the ioctl and then to the
+            // estimate. See [`crate::geometry::cell_pixels_or_estimate_of`].
+            cell: None,
+            // A caller that states the terminal states no session either, and
+            // an empty statement narrows nothing.
+            session: crate::session::MoshImages::default(),
+        }
+    }
+
+    /// State the mosh session that this terminal stands in.
+    ///
+    /// [`Capabilities::detect`] reads the session from the environment, and
+    /// this is the entrance for a caller that states the session. It stands
+    /// beside [`Capabilities::new`], which states the terminal. Both entrances
+    /// exist because the honest way to fill these fields is to read the
+    /// environment, and a test cannot: a test that read the environment would
+    /// answer with the session and the terminal of whoever started the test
+    /// run.
+    #[must_use]
+    pub fn in_session(mut self, session: crate::session::MoshImages) -> Self {
+        self.session = session;
+        self
+    }
+
+    /// Name the terminal that this run draws into.
+    #[must_use]
+    pub fn terminal_type(&self) -> &TerminalType {
+        &self.terminal_type
+    }
+
+    /// Whether this terminal draws an inline image at all.
+    #[must_use]
+    pub fn draws_images(&self) -> bool {
+        self.draws_images
+    }
+
+    /// Whether this terminal draws an inline image and named itself as well.
+    ///
+    /// A terminal that set none of the signals this crate reads is a
+    /// [`TerminalType::Unknown`], and [`display_routine_for`] sends such a
+    /// terminal the sequence of iTerm2. That is a guess at the protocol, and a
+    /// terminal that answered [`crate::probe::IMAGE_QUERY`] is no terminal of
+    /// no name: it arrives as [`TerminalType::Answered`], and the answer is a
+    /// fact. So this method answers no for a terminal that neither named
+    /// itself nor answered, and it answers [`Capabilities::draws_images`] for
+    /// every other one.
+    ///
+    /// This is not [`Capabilities::draws_images`]. That method takes the guess,
+    /// and the guess is right for a tool with no second way to show the
+    /// picture, because an image at a guessed protocol beats no image. It is
+    /// wrong for a tool that has one, because an escape sequence that the
+    /// terminal does not read lands on the screen as text. `ic` is the first
+    /// kind of tool and `krt` is the second, and [`crate::cell_pixels`] splits
+    /// the same two audiences over the size of a character cell.
+    #[must_use]
+    pub fn draws_images_by_name(&self) -> bool {
+        self.draws_images && !matches!(self.terminal_type, TerminalType::Unknown)
+    }
+
+    /// Whether this terminal takes the raw mode that a key press needs.
+    #[must_use]
+    pub fn raw_mode(&self) -> bool {
+        self.raw_mode
+    }
+
+    /// What the environment of a mosh session states about the images it
+    /// carries.
+    ///
+    /// The gate of a caller reads this beside
+    /// [`Capabilities::drawn_protocols`]: one set states what the session
+    /// delivers and the other states what this terminal draws, and a picture
+    /// needs a protocol that stands in both. The two sets come from one value
+    /// of this type, so the gate and the writer never read two sessions.
+    #[must_use]
+    pub fn session(&self) -> crate::session::MoshImages {
+        self.session
+    }
+
+    /// The character cell that this terminal named in its answer.
+    ///
+    /// A writer of `draw` hands this to
+    /// [`crate::geometry::cell_pixels_or_estimate_of`], which holds the order
+    /// of every source of a cell.
+    pub(crate) fn answered_cell(&self) -> Option<crate::geometry::CellPixels> {
+        self.cell
+    }
+
+    /// Name what the terminal does from a captured environment and one answer.
+    ///
+    /// `answered` carries what the terminal said about the protocols it draws
+    /// and the size of one of its character cells. **The protocol is read for
+    /// a terminal that [`TerminalType::the_answer_outranks_this_name`] names**,
+    /// which is a terminal the environment leaves unnamed and a pane of a
+    /// multiplexer. The cell is kept whatever the environment said.
+    ///
+    /// A panel and a named terminal both keep their name. Each of them carries
+    /// a signal its own author wrote, and a backing session that answers for
+    /// the pane it draws into would otherwise overrule the panel signal that
+    /// [`classify_terminal_type`] puts first.
+    fn from_env_and_answer(
+        env: &TerminalEnv,
+        raw_mode: bool,
+        answered: crate::probe::TerminalAnswer,
+    ) -> Self {
+        let named = Self::from_env(env, raw_mode);
+        // The cell the terminal named is kept whatever the environment said.
+        // The name of a terminal carries no size, so there is nothing for it to
+        // overrule, and the ioctl still stands in front of it wherever it
+        // reports a pixel size.
+        let cell = answered.cell;
+        match (named.terminal_type, answered.protocol) {
+            (terminal_type, Some(protocol)) if terminal_type.the_answer_outranks_this_name() => {
+                Self {
+                    terminal_type: TerminalType::Answered(protocol),
+                    draws_images: true,
+                    raw_mode,
+                    cell,
+                    session: named.session,
+                }
+            }
+            (terminal_type, _) => Self {
+                terminal_type,
+                draws_images: named.draws_images,
+                raw_mode,
+                cell,
+                session: named.session,
+            },
+        }
+    }
+
+    /// Name what the terminal does from a captured environment.
+    ///
+    /// The capture stands apart from the reading of it, so that a test names
+    /// the environment it covers and the answer holds no state of the machine
+    /// that runs the test.
+    fn from_env(env: &TerminalEnv, raw_mode: bool) -> Self {
+        let terminal_type = classify_terminal_type(env);
+        let draws_images = terminal_supports_graphics(&terminal_type, &env.term);
+        Self {
+            terminal_type,
+            draws_images,
+            raw_mode,
+            // The environment carries no size of a cell. Only the ioctl and the
+            // answer of a terminal do.
+            cell: None,
+            session: env.mosh,
+        }
+    }
+
+    /// The routine that this run writes the picture with.
+    ///
+    /// [`display_routine_for`] states what the terminal reads, and that is the
+    /// whole answer wherever the environment states no mosh session. A session
+    /// that states what it delivers narrows it, and it narrows the one case
+    /// where the routine is a guess rather than a statement.
+    ///
+    /// * **A terminal of no name states no protocol at all**, so
+    ///   [`display_routine_for`] guesses one for it. A session that states what
+    ///   it delivers knows more than that guess, so the statement wins. The
+    ///   guess still stands where the session delivers it, because a session
+    ///   that delivers every protocol settles nothing between them.
+    /// * **Every other terminal stated its protocol**, by its own name or by
+    ///   its own answer. A session that does not deliver that protocol draws
+    ///   nothing at all, and the gate of the caller refuses such a session
+    ///   before one byte leaves. So the statement of the terminal stands, and
+    ///   this call never sends a terminal a sequence it does not read.
+    pub(crate) fn display_routine(&self) -> DisplayRoutine {
+        let own = display_routine_for(&self.terminal_type);
+        let delivers = self.session.delivers();
+        if self.terminal_type != TerminalType::Unknown || delivers.holds(own) {
+            return own;
+        }
+        delivers.preferred_routine().unwrap_or(own)
+    }
+
+    /// The protocols that this terminal draws, as far as this crate knows.
+    ///
+    /// One routine writes one protocol, so the set holds one member. The gate
+    /// of a caller reads it beside [`crate::MoshImages::delivers`]: a session
+    /// that delivers no protocol this terminal draws draws no picture, and the
+    /// caller says so instead of writing a sequence that lands on the screen
+    /// as text.
+    #[must_use]
+    pub fn drawn_protocols(&self) -> crate::session::ProtocolSet {
+        crate::session::ProtocolSet::of_routine(self.display_routine())
+    }
+}
+
+/// Whether standard output is a terminal, which is what raw mode needs.
+fn stdout_is_a_terminal() -> bool {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: isatty() is a read-only check that only examines whether the file
+    // descriptor refers to a terminal. It has no side effects and cannot cause
+    // memory unsafety. The file descriptor from stdout is always valid.
+    unsafe { libc::isatty(io::stdout().as_raw_fd()) == 1 }
+}
+
+/// Snapshot of the environment variables that influence terminal detection.
+///
+/// Captured once so that [`classify_terminal_type`] is a pure function of its
+/// inputs — testable without mutating process-global env vars (which is `unsafe`
+/// in the 2024 edition and not parallel-safe for the test suite).
+#[derive(Debug, Clone, Default)]
+struct TerminalEnv {
+    term: String,
+    term_program: String,
+    zellij: bool,
+    muxiavelli: bool,
+    muxiavelli_protocols: Option<String>,
+    kitty_window_id: bool,
+    ghostty_resources_dir: bool,
+    iterm_session_id: bool,
+    alacritty_socket: bool,
+    /// What the environment of a mosh session says about the images it
+    /// carries. See [`crate::session`].
+    mosh: crate::session::MoshImages,
+}
+
+impl TerminalEnv {
+    /// Capture the detection-relevant environment variables from the process.
+    fn from_process() -> Self {
+        let is_set = |key: &str| std::env::var(key).is_ok();
+        TerminalEnv {
+            term: std::env::var("TERM").unwrap_or_default(),
+            term_program: std::env::var("TERM_PROGRAM").unwrap_or_default(),
+            zellij: is_set("ZELLIJ"),
+            // The contract pins MUXIAVELLI to the literal "1"; treat any other
+            // value (including "0") as "not a muxiavelli panel".
+            muxiavelli: matches!(std::env::var("MUXIAVELLI").as_deref(), Ok("1")),
+            muxiavelli_protocols: std::env::var("MUXIAVELLI_IMAGE_PROTOCOLS").ok(),
+            kitty_window_id: is_set("KITTY_WINDOW_ID"),
+            ghostty_resources_dir: is_set("GHOSTTY_RESOURCES_DIR"),
+            iterm_session_id: is_set("ITERM_SESSION_ID"),
+            alacritty_socket: is_set("ALACRITTY_SOCKET"),
+            mosh: crate::session::MoshImages::detect(),
+        }
+    }
+}
+
+/// Classify the terminal from a captured [`TerminalEnv`].
+///
+/// `MUXIAVELLI` is checked **first** — before Zellij and every host-terminal
+/// signal — because a muxiavelli panel's PTY inherits (leaks) the env vars of
+/// whatever terminal launched the muxiavelli server. Honoring the panel's own
+/// advertised capability is the only correct signal; the leaked host vars must
+/// not win. (Same reasoning as checking Zellij before the host terminals.)
+fn classify_terminal_type(env: &TerminalEnv) -> TerminalType {
+    if env.muxiavelli {
+        TerminalType::Muxiavelli(select_muxiavelli_protocol(
+            env.muxiavelli_protocols.as_deref(),
+        ))
+    } else if env.zellij {
+        TerminalType::Zellij
+    } else if env.kitty_window_id || env.term.contains("kitty") {
+        TerminalType::Kitty
+    } else if env.term_program == "ghostty"
+        || env.ghostty_resources_dir
+        || env.term.contains("ghostty")
+    {
+        TerminalType::Ghostty
+    } else if env.term_program.contains("iTerm") || env.iterm_session_id {
+        TerminalType::ITerm2
+    } else if env.term_program.contains("WezTerm") {
+        TerminalType::WezTerm
+    } else if env.alacritty_socket || env.term.contains("alacritty") {
+        TerminalType::Alacritty
+    } else {
+        TerminalType::Unknown
+    }
+}
+
+/// Whether a resolved terminal type can render inline graphics at all.
+///
+/// muxiavelli panels always can (xterm.js `@xterm/addon-image`), regardless of
+/// any `TERM` leaked from a backing session.
+fn terminal_supports_graphics(terminal_type: &TerminalType, term: &str) -> bool {
+    match terminal_type {
+        TerminalType::Muxiavelli(_) => true,
+        // The terminal said so itself, which outranks every string below.
+        TerminalType::Answered(_) => true,
+        TerminalType::Alacritty => false,
+        _ => {
+            !term.contains("linux")   // Linux console doesn't support graphics
+                && !term.contains("screen") // Screen doesn't support graphics
+                && !term.starts_with("vt") // VT terminals don't support graphics
+        }
+    }
+}
+
+/// The concrete inline-image routine a resolved terminal type dispatches to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DisplayRoutine {
+    /// A palette and then a band of pixels at a time.
+    Sixel,
+    /// The graphics protocol of Kitty.
+    Kitty,
+    /// A whole image file in one escape sequence.
+    Iterm2,
+}
+
+/// Map a resolved [`TerminalType`] to the display routine a caller uses.
+///
+/// Deliberately exhaustive (no wildcard arm): adding a future `TerminalType`
+/// forces a conscious routing decision here instead of silently falling through
+/// to iTerm2 — the exact failure mode that sent the Kitty protocol into
+/// muxiavelli panels.
+#[must_use]
+pub(crate) fn display_routine_for(terminal_type: &TerminalType) -> DisplayRoutine {
+    match terminal_type {
+        // Zellij and muxiavelli-Sixel both go through the Sixel path.
+        TerminalType::Zellij | TerminalType::Muxiavelli(ImageProtocol::Sixel) => {
+            DisplayRoutine::Sixel
+        }
+        TerminalType::Muxiavelli(ImageProtocol::Iterm2) => DisplayRoutine::Iterm2,
+        TerminalType::Answered(AnsweredProtocol::Sixel) => DisplayRoutine::Sixel,
+        TerminalType::Answered(AnsweredProtocol::Kitty) => DisplayRoutine::Kitty,
+        TerminalType::Kitty | TerminalType::Ghostty | TerminalType::WezTerm => {
+            DisplayRoutine::Kitty
+        }
+        TerminalType::ITerm2 | TerminalType::Alacritty | TerminalType::Unknown => {
+            DisplayRoutine::Iterm2
+        }
+    }
+}
+
+/// Whether this run asks the terminal anything at all.
+///
+/// The round trip costs the budget of [`crate::probe::QUERY_BUDGET`], and it
+/// swallows whatever the user typed while the read held the terminal in raw
+/// mode, so a run that has nothing to learn asks nothing. Two questions ride in
+/// the one write, and a run asks when either one of them stands open.
+///
+/// * **Which protocol does this terminal draw.** Every caller needs that
+///   answer, because a caller that draws the wrong sequence puts base64 on the
+///   screen and a caller that reports the wrong verdict names the wrong
+///   terminal. A panel and a named terminal each answered it already with a
+///   signal their own author wrote, and such a signal costs no round trip. So
+///   this question stands open for every name that
+///   [`TerminalType::the_answer_outranks_this_name`] gives way to, which is a
+///   terminal of no name and a pane of a multiplexer.
+/// * **How big is one character cell.** Only a caller that draws a picture
+///   converts cells to pixels, so this question stands open for
+///   [`NeededAnswer::ProtocolAndCell`] alone, and a caller that reports what
+///   the terminal is asks nothing about a cell it never reads. For such a
+///   caller the `TIOCGWINSZ` ioctl carries the measure, and a mosh session, a
+///   pane of Zellij and a ttyd panel all report none. **The name of the
+///   terminal says nothing about it**: a named terminal reached through a
+///   proxy that strips the pixel size needs the answer as much as an unnamed
+///   one does. So this question stands open for every window that reports no
+///   pixel size.
+///
+/// # Arguments
+/// * `terminal_type` - The terminal that the environment named.
+/// * `window` - The window that the probe measured, or `None` when the probe
+///   measured none.
+/// * `needed` - What the caller needs the answer for.
+///
+/// # Returns
+/// True when either question stands open.
+fn asks_the_terminal(
+    terminal_type: &TerminalType,
+    window: Option<Window>,
+    needed: NeededAnswer,
+) -> bool {
+    let protocol_stands_open = terminal_type.the_answer_outranks_this_name();
+    let cell_stands_open = needed == NeededAnswer::ProtocolAndCell
+        && crate::geometry::cell_pixels_of(window).is_none();
+    protocol_stands_open || cell_stands_open
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The columns and the rows of the window that these tests state.
+    const TEST_CELLS: (u16, u16) = (80, 24);
+
+    /// The pixel size of that same window. 800 over 80 columns and 480 over 24
+    /// rows measure a cell of 10 pixels by 20.
+    const TEST_PIXELS: (u16, u16) = (800, 480);
+
+    /// The window that a terminal of a stated size reports.
+    ///
+    /// # Panics
+    /// Panics for a window of no columns or no rows, which no test here states.
+    fn test_window(pixels: Option<(u16, u16)>) -> Option<Window> {
+        Some(
+            Window::measured(TEST_CELLS.0, TEST_CELLS.1, pixels)
+                .expect("a test that states a window must state one of a real size"),
+        )
+    }
+
+    #[test]
+    fn the_question_about_a_cell_turns_on_the_pixel_size_and_not_on_the_name() {
+        assert!(
+            asks_the_terminal(
+                &TerminalType::Kitty,
+                test_window(None),
+                NeededAnswer::ProtocolAndCell
+            ),
+            "a named terminal reached through a proxy that strips the pixel size still owes a caller that draws its cell, and the name must not stop the question"
+        );
+        assert!(
+            !asks_the_terminal(
+                &TerminalType::Kitty,
+                test_window(Some(TEST_PIXELS)),
+                NeededAnswer::ProtocolAndCell
+            ),
+            "a named terminal that reports a pixel size has both answers already, and a round trip would buy it nothing"
+        );
+        assert!(
+            asks_the_terminal(
+                &TerminalType::Unknown,
+                test_window(Some(TEST_PIXELS)),
+                NeededAnswer::ProtocolAndCell
+            ),
+            "a terminal of no name still owes the answer about the protocol it draws"
+        );
+        assert!(
+            asks_the_terminal(&TerminalType::Unknown, None, NeededAnswer::ProtocolAndCell),
+            "a run that measured no window holds neither answer"
+        );
+    }
+
+    #[test]
+    fn a_caller_that_draws_no_picture_asks_a_named_terminal_nothing() {
+        assert!(
+            !asks_the_terminal(
+                &TerminalType::Kitty,
+                test_window(None),
+                NeededAnswer::Protocol
+            ),
+            "a caller that draws no picture reads no cell, so the pixel size settles nothing for it and a terminal that named itself owes it no answer at all"
+        );
+        assert!(
+            !asks_the_terminal(&TerminalType::Kitty, None, NeededAnswer::Protocol),
+            "and a run that measured no window measured no cell either, which is one more thing such a caller never reads"
+        );
+        assert!(
+            asks_the_terminal(
+                &TerminalType::Unknown,
+                test_window(Some(TEST_PIXELS)),
+                NeededAnswer::Protocol
+            ),
+            "a terminal of no name owes every caller the answer about the protocol it draws, because a verdict about a terminal of no name is a guess"
+        );
+    }
+
+    /// A pane of a multiplexer owes the answer about the protocol it draws.
+    ///
+    /// The answer of a terminal outranks the name of a multiplexer, and a run
+    /// that asks nothing gets no answer for it to outrank. So the question
+    /// stands open for every name that
+    /// [`TerminalType::the_answer_outranks_this_name`] gives way to, and not
+    /// for [`TerminalType::Unknown`] alone.
+    ///
+    /// The pixel size settles nothing here. A pane that reports one closes the
+    /// question about a character cell, and the question about the protocol
+    /// stands open beside it.
+    #[test]
+    fn a_pane_of_a_multiplexer_owes_the_answer_about_the_protocol() {
+        assert!(
+            asks_the_terminal(
+                &TerminalType::Zellij,
+                test_window(Some(TEST_PIXELS)),
+                NeededAnswer::Protocol
+            ),
+            "a multiplexer answers for a pane it does not own, and a run that asks it nothing keeps an assumption where a fact was in reach"
+        );
+        assert!(
+            !asks_the_terminal(
+                &TerminalType::Muxiavelli(ImageProtocol::Sixel),
+                test_window(Some(TEST_PIXELS)),
+                NeededAnswer::Protocol
+            ),
+            "a panel states the protocol it draws, so no answer can outrank it and the round trip buys nothing"
+        );
+    }
+
+    #[test]
+    fn a_muxiavelli_sixel_panel_draws_with_sixel_and_a_kitty_window_draws_with_kitty() {
+        let panel = Capabilities::from_env(
+            &TerminalEnv {
+                muxiavelli: true,
+                muxiavelli_protocols: Some("sixel".to_string()),
+                ..TerminalEnv::default()
+            },
+            false,
+        );
+        assert_eq!(
+            display_routine_for(panel.terminal_type()),
+            DisplayRoutine::Sixel
+        );
+
+        let window = Capabilities::from_env(
+            &TerminalEnv {
+                kitty_window_id: true,
+                ..TerminalEnv::default()
+            },
+            false,
+        );
+        assert_eq!(
+            display_routine_for(window.terminal_type()),
+            DisplayRoutine::Kitty
+        );
+    }
+
+    // =========================================================================
+    // Tests for the answer of a terminal (probe.rs writes the question)
+    // =========================================================================
+
+    /// The answer of a terminal that named one protocol and no cell.
+    ///
+    /// Every test of this section covers the naming of the terminal, and a
+    /// cell names no terminal. `crate::probe` holds the tests of the cell.
+    fn answer_of(protocol: AnsweredProtocol) -> crate::probe::TerminalAnswer {
+        crate::probe::TerminalAnswer {
+            protocol: Some(protocol),
+            cell: None,
+        }
+    }
+
+    #[test]
+    fn an_answer_names_a_terminal_the_environment_left_unnamed() {
+        // A mosh session and a pane of a multiplexer both arrive with no
+        // signal of their own, and both of them draw pictures.
+        let answered = Capabilities::from_env_and_answer(
+            &TerminalEnv::default(),
+            true,
+            answer_of(AnsweredProtocol::Sixel),
+        );
+        assert_eq!(
+            answered.terminal_type(),
+            &TerminalType::Answered(AnsweredProtocol::Sixel)
+        );
+        assert!(answered.draws_images());
+        assert!(
+            answered.draws_images_by_name(),
+            "an answer is stronger than a name, so a tool with a second way to \
+             show the picture takes this one too"
+        );
+    }
+
+    #[test]
+    fn an_answer_never_overrules_a_terminal_that_named_itself() {
+        // A muxiavelli panel draws through xterm.js, which reads no kitty
+        // transmission. The panel's own signal wins, as it always has.
+        let panel = Capabilities::from_env_and_answer(
+            &TerminalEnv {
+                muxiavelli: true,
+                muxiavelli_protocols: Some("sixel".to_string()),
+                ..TerminalEnv::default()
+            },
+            true,
+            answer_of(AnsweredProtocol::Kitty),
+        );
+        assert_eq!(
+            panel.terminal_type(),
+            &TerminalType::Muxiavelli(ImageProtocol::Sixel)
+        );
+    }
+
+    #[test]
+    fn a_terminal_that_answered_nothing_keeps_the_name_it_had() {
+        let unknown = Capabilities::from_env_and_answer(
+            &TerminalEnv::default(),
+            true,
+            crate::probe::TerminalAnswer::default(),
+        );
+        assert_eq!(unknown.terminal_type(), &TerminalType::Unknown);
+    }
+
+    #[test]
+    fn an_answered_terminal_draws_with_the_protocol_it_answered() {
+        assert_eq!(
+            display_routine_for(&TerminalType::Answered(AnsweredProtocol::Sixel)),
+            DisplayRoutine::Sixel
+        );
+        assert_eq!(
+            display_routine_for(&TerminalType::Answered(AnsweredProtocol::Kitty)),
+            DisplayRoutine::Kitty
+        );
+    }
+
+    #[test]
+    fn an_answered_terminal_draws_whatever_the_term_string_says() {
+        // `TERM=screen` reaches this crate from a backing session, and a
+        // terminal that answered draws a picture whatever that string holds.
+        let answered = Capabilities::from_env_and_answer(
+            &TerminalEnv {
+                term: "screen".to_string(),
+                ..TerminalEnv::default()
+            },
+            true,
+            answer_of(AnsweredProtocol::Sixel),
+        );
+        assert!(answered.draws_images());
+    }
+
+    // =========================================================================
+    // Tests for terminal type detection (basic sanity checks)
+    // =========================================================================
+
+    #[test]
+    fn terminal_type_enum_is_exhaustive() {
+        // Ensure we can construct all terminal types (compile-time check)
+        let _kitty = TerminalType::Kitty;
+        let _ghostty = TerminalType::Ghostty;
+        let _iterm2 = TerminalType::ITerm2;
+        let _wezterm = TerminalType::WezTerm;
+        let _alacritty = TerminalType::Alacritty;
+        let _zellij = TerminalType::Zellij;
+        let _muxiavelli = TerminalType::Muxiavelli(ImageProtocol::Sixel);
+        let _unknown = TerminalType::Unknown;
+    }
+
+    // =========================================================================
+    // Tests for muxiavelli image-protocol selection (select_muxiavelli_protocol)
+    // =========================================================================
+
+    #[test]
+    fn muxiavelli_protocol_absent_falls_back_to_sixel() {
+        assert_eq!(select_muxiavelli_protocol(None), ImageProtocol::Sixel);
+    }
+
+    #[test]
+    fn muxiavelli_protocol_empty_falls_back_to_sixel() {
+        assert_eq!(select_muxiavelli_protocol(Some("")), ImageProtocol::Sixel);
+    }
+
+    #[test]
+    fn muxiavelli_protocol_unrecognized_falls_back_to_sixel() {
+        // Kitty (and any other token `ic` cannot emit) must never be selected.
+        assert_eq!(
+            select_muxiavelli_protocol(Some("kitty")),
+            ImageProtocol::Sixel
+        );
+        assert_eq!(
+            select_muxiavelli_protocol(Some("kitty,png,webp")),
+            ImageProtocol::Sixel
+        );
+    }
+
+    #[test]
+    fn muxiavelli_protocol_honors_advertised_order() {
+        // Proves the list is honored in order, not hardcoded to Sixel.
+        assert_eq!(
+            select_muxiavelli_protocol(Some("sixel,iterm2")),
+            ImageProtocol::Sixel
+        );
+        assert_eq!(
+            select_muxiavelli_protocol(Some("iterm2,sixel")),
+            ImageProtocol::Iterm2
+        );
+    }
+
+    #[test]
+    fn muxiavelli_protocol_skips_unsupported_then_picks_supported() {
+        // An unsupported leading token is skipped, not treated as a fallback.
+        assert_eq!(
+            select_muxiavelli_protocol(Some("kitty,iterm2")),
+            ImageProtocol::Iterm2
+        );
+    }
+
+    #[test]
+    fn muxiavelli_protocol_tolerates_whitespace_and_case() {
+        assert_eq!(
+            select_muxiavelli_protocol(Some("  ITERM2 , sixel ")),
+            ImageProtocol::Iterm2
+        );
+    }
+
+    // =========================================================================
+    // Tests for classify_terminal_type (precedence + existing detection)
+    // =========================================================================
+
+    /// A muxiavelli panel whose PTY leaked the host terminal's env vars: Kitty
+    /// **and** Ghostty signals are present simultaneously. MUXIAVELLI must still
+    /// win over both. This is the exact mis-detection the issue describes.
+    fn leaked_muxiavelli_env(protocols: Option<&str>) -> TerminalEnv {
+        TerminalEnv {
+            term: "xterm-ghostty".to_string(),
+            term_program: "ghostty".to_string(),
+            zellij: false,
+            muxiavelli: true,
+            muxiavelli_protocols: protocols.map(str::to_string),
+            kitty_window_id: true,
+            ghostty_resources_dir: true,
+            iterm_session_id: false,
+            alacritty_socket: false,
+            mosh: crate::session::MoshImages::default(),
+        }
+    }
+
+    #[test]
+    fn muxiavelli_wins_over_leaked_host_signals_and_selects_sixel() {
+        let env = leaked_muxiavelli_env(Some("sixel,iterm2"));
+        assert_eq!(
+            classify_terminal_type(&env),
+            TerminalType::Muxiavelli(ImageProtocol::Sixel)
+        );
+    }
+
+    #[test]
+    fn muxiavelli_iterm2_first_selects_iterm2_despite_leak() {
+        let env = leaked_muxiavelli_env(Some("iterm2,sixel"));
+        assert_eq!(
+            classify_terminal_type(&env),
+            TerminalType::Muxiavelli(ImageProtocol::Iterm2)
+        );
+    }
+
+    #[test]
+    fn muxiavelli_absent_protocols_defaults_to_sixel() {
+        let env = leaked_muxiavelli_env(None);
+        assert_eq!(
+            classify_terminal_type(&env),
+            TerminalType::Muxiavelli(ImageProtocol::Sixel)
+        );
+    }
+
+    #[test]
+    fn muxiavelli_wins_over_zellij_backend() {
+        // muxiavelli may run a zellij backing session, so ZELLIJ can also be set
+        // inside a panel; MUXIAVELLI must still win since it is the precise signal.
+        let mut env = leaked_muxiavelli_env(None);
+        env.zellij = true;
+        assert_eq!(
+            classify_terminal_type(&env),
+            TerminalType::Muxiavelli(ImageProtocol::Sixel)
+        );
+    }
+
+    #[test]
+    fn classify_zellij_when_not_muxiavelli() {
+        let env = TerminalEnv {
+            zellij: true,
+            ..TerminalEnv::default()
+        };
+        assert_eq!(classify_terminal_type(&env), TerminalType::Zellij);
+    }
+
+    #[test]
+    fn classify_kitty_from_window_id() {
+        let env = TerminalEnv {
+            kitty_window_id: true,
+            ..TerminalEnv::default()
+        };
+        assert_eq!(classify_terminal_type(&env), TerminalType::Kitty);
+    }
+
+    #[test]
+    fn classify_kitty_from_term() {
+        let env = TerminalEnv {
+            term: "xterm-kitty".to_string(),
+            ..TerminalEnv::default()
+        };
+        assert_eq!(classify_terminal_type(&env), TerminalType::Kitty);
+    }
+
+    #[test]
+    fn classify_ghostty_from_term_program() {
+        let env = TerminalEnv {
+            term_program: "ghostty".to_string(),
+            ..TerminalEnv::default()
+        };
+        assert_eq!(classify_terminal_type(&env), TerminalType::Ghostty);
+    }
+
+    #[test]
+    fn classify_iterm2_from_session_id() {
+        let env = TerminalEnv {
+            iterm_session_id: true,
+            ..TerminalEnv::default()
+        };
+        assert_eq!(classify_terminal_type(&env), TerminalType::ITerm2);
+    }
+
+    #[test]
+    fn classify_iterm2_from_term_program() {
+        let env = TerminalEnv {
+            term_program: "iTerm.app".to_string(),
+            ..TerminalEnv::default()
+        };
+        assert_eq!(classify_terminal_type(&env), TerminalType::ITerm2);
+    }
+
+    #[test]
+    fn classify_wezterm_from_term_program() {
+        let env = TerminalEnv {
+            term_program: "WezTerm".to_string(),
+            ..TerminalEnv::default()
+        };
+        assert_eq!(classify_terminal_type(&env), TerminalType::WezTerm);
+    }
+
+    #[test]
+    fn classify_alacritty_from_socket() {
+        let env = TerminalEnv {
+            alacritty_socket: true,
+            ..TerminalEnv::default()
+        };
+        assert_eq!(classify_terminal_type(&env), TerminalType::Alacritty);
+    }
+
+    #[test]
+    fn classify_unknown_when_no_signals() {
+        assert_eq!(
+            classify_terminal_type(&TerminalEnv::default()),
+            TerminalType::Unknown
+        );
+    }
+
+    // =========================================================================
+    // Tests for terminal_supports_graphics
+    // =========================================================================
+
+    #[test]
+    fn muxiavelli_supports_graphics_regardless_of_term() {
+        // Even if a backing session leaks TERM=screen/vt, muxiavelli renders images.
+        assert!(terminal_supports_graphics(
+            &TerminalType::Muxiavelli(ImageProtocol::Sixel),
+            "screen.xterm-256color"
+        ));
+        assert!(terminal_supports_graphics(
+            &TerminalType::Muxiavelli(ImageProtocol::Iterm2),
+            "vt100"
+        ));
+    }
+
+    #[test]
+    fn alacritty_never_supports_graphics() {
+        assert!(!terminal_supports_graphics(
+            &TerminalType::Alacritty,
+            "xterm-256color"
+        ));
+    }
+
+    #[test]
+    fn kitty_supports_graphics_on_normal_term() {
+        assert!(terminal_supports_graphics(
+            &TerminalType::Kitty,
+            "xterm-kitty"
+        ));
+    }
+
+    #[test]
+    fn linux_console_does_not_support_graphics() {
+        assert!(!terminal_supports_graphics(&TerminalType::Unknown, "linux"));
+    }
+
+    // =========================================================================
+    // Tests for draws_images_by_name
+    // =========================================================================
+
+    #[test]
+    fn a_terminal_that_this_crate_cannot_name_draws_no_image_by_name() {
+        // A terminal that set none of the signals this crate reads carries no
+        // name, so the routine it takes is a guess. `display_routine_for` sends
+        // it the sequence of iTerm2, and xterm, GNOME Terminal and Konsole each
+        // read none of that sequence and print it as text.
+        let no_name = Capabilities::from_env(
+            &TerminalEnv {
+                term: "xterm-256color".to_string(),
+                ..TerminalEnv::default()
+            },
+            false,
+        );
+        assert_eq!(no_name.terminal_type(), &TerminalType::Unknown);
+        assert!(
+            no_name.draws_images(),
+            "the crate takes such a terminal at its word for a caller with no second way to draw"
+        );
+        assert!(
+            !no_name.draws_images_by_name(),
+            "and it draws no image by name, because nothing said which sequence this terminal reads"
+        );
+
+        // A Kitty window named itself, so the routine it takes is the routine
+        // that this terminal reads.
+        let window = Capabilities::from_env(
+            &TerminalEnv {
+                kitty_window_id: true,
+                ..TerminalEnv::default()
+            },
+            false,
+        );
+        assert!(
+            window.draws_images_by_name(),
+            "a terminal that named itself draws the image of the sequence it reads"
+        );
+
+        // An Alacritty window named itself and it draws no image at all, so the
+        // name settles nothing that the protocol left open.
+        let alacritty = Capabilities::from_env(
+            &TerminalEnv {
+                alacritty_socket: true,
+                ..TerminalEnv::default()
+            },
+            false,
+        );
+        assert!(
+            !alacritty.draws_images_by_name(),
+            "a terminal that draws no image draws none under its own name either"
+        );
+    }
+
+    // =========================================================================
+    // Tests for display_routine_for (dispatch routing)
+    // =========================================================================
+
+    #[test]
+    fn dispatch_muxiavelli_sixel_routes_to_sixel() {
+        assert_eq!(
+            display_routine_for(&TerminalType::Muxiavelli(ImageProtocol::Sixel)),
+            DisplayRoutine::Sixel
+        );
+    }
+
+    #[test]
+    fn dispatch_muxiavelli_iterm2_routes_to_iterm2() {
+        assert_eq!(
+            display_routine_for(&TerminalType::Muxiavelli(ImageProtocol::Iterm2)),
+            DisplayRoutine::Iterm2
+        );
+    }
+
+    #[test]
+    fn dispatch_zellij_routes_to_sixel() {
+        assert_eq!(
+            display_routine_for(&TerminalType::Zellij),
+            DisplayRoutine::Sixel
+        );
+    }
+
+    #[test]
+    fn dispatch_kitty_family_routes_to_kitty() {
+        for terminal_type in [
+            TerminalType::Kitty,
+            TerminalType::Ghostty,
+            TerminalType::WezTerm,
+        ] {
+            assert_eq!(display_routine_for(&terminal_type), DisplayRoutine::Kitty);
+        }
+    }
+
+    #[test]
+    fn dispatch_other_terminals_route_to_iterm2() {
+        for terminal_type in [
+            TerminalType::ITerm2,
+            TerminalType::Alacritty,
+            TerminalType::Unknown,
+        ] {
+            assert_eq!(display_routine_for(&terminal_type), DisplayRoutine::Iterm2);
+        }
+    }
+
+    // =========================================================================
+    // Tests for the routine that a mosh session narrows
+    // =========================================================================
+
+    /// A terminal of no name draws the protocol that the session states, and
+    /// not the protocol that this crate guesses for it.
+    ///
+    /// A terminal that set no signal and answered no query states no protocol
+    /// at all, so [`display_routine_for`] guesses iTerm2 for it. A mosh session
+    /// that states what it delivers knows more than that guess, and a picture
+    /// in the guessed protocol lands on the screen as text.
+    ///
+    /// The guess still stands where the session delivers it. A session that
+    /// delivers every protocol settles nothing between the three of them, so a
+    /// run under one draws what a run outside every session draws.
+    #[test]
+    fn a_terminal_of_no_name_draws_what_the_session_states_it_delivers() {
+        assert_eq!(
+            Capabilities::new(TerminalType::Unknown, true, true).display_routine(),
+            DisplayRoutine::Iterm2,
+            "a run that stands in no such session keeps the guess it always made"
+        );
+        assert_eq!(
+            Capabilities::new(TerminalType::Unknown, true, true)
+                .in_session(crate::session::MoshImages::from_env(
+                    Some("sixel"),
+                    None,
+                    None
+                ))
+                .display_routine(),
+            DisplayRoutine::Sixel,
+            "and a session that delivers sixel alone states more than the guess does"
+        );
+        assert_eq!(
+            Capabilities::new(TerminalType::Unknown, true, true)
+                .in_session(crate::session::MoshImages::from_env(
+                    Some("kitty,sixel,iterm2"),
+                    None,
+                    None
+                ))
+                .display_routine(),
+            DisplayRoutine::Iterm2,
+            "a session that delivers every protocol settles nothing, so the guess stands"
+        );
+    }
+
+    /// A terminal that stated its protocol keeps it, whatever a session
+    /// delivers.
+    ///
+    /// A name and an answer are both statements of the terminal itself. A
+    /// session that delivers no protocol such a terminal draws draws no
+    /// picture at all, and the gate of the caller refuses it before one byte
+    /// leaves. So this call never sends a terminal a sequence that terminal
+    /// does not read.
+    #[test]
+    fn a_terminal_that_stated_its_protocol_keeps_it_whatever_the_session_delivers() {
+        let session = crate::session::MoshImages::from_env(Some("sixel"), None, None);
+        assert_eq!(
+            Capabilities::new(TerminalType::Ghostty, true, true)
+                .in_session(session)
+                .display_routine(),
+            DisplayRoutine::Kitty,
+            "a Ghostty window reads the kitty protocol and reads no other one"
+        );
+        assert_eq!(
+            Capabilities::new(TerminalType::Answered(AnsweredProtocol::Kitty), true, true)
+                .in_session(session)
+                .display_routine(),
+            DisplayRoutine::Kitty,
+            "and a terminal that answered kitty stated it as plainly as a name does"
+        );
+    }
+
+    // =========================================================================
+    // Tests for the two kinds of name that the environment carries
+    // =========================================================================
+
+    /// The answer of a terminal outranks the name of a multiplexer, and it
+    /// outranks the name of a panel never.
+    ///
+    /// A multiplexer owns the pseudo terminal of the pane and answers every
+    /// query itself, so the answer states what that pane draws and the name
+    /// states only what this crate assumes about the multiplexer. A panel
+    /// carries a signal that its own author wrote, and a backing session that
+    /// answers must not overrule it. That is the trap that
+    /// [`classify_terminal_type`] states, and this test holds the constructor
+    /// to the same order.
+    #[test]
+    fn the_answer_outranks_the_name_of_a_multiplexer_and_never_the_name_of_a_panel() {
+        let pane = Capabilities::from_env_and_answer(
+            &TerminalEnv {
+                zellij: true,
+                ..TerminalEnv::default()
+            },
+            false,
+            crate::probe::TerminalAnswer {
+                protocol: Some(AnsweredProtocol::Sixel),
+                cell: None,
+            },
+        );
+        assert_eq!(
+            pane.terminal_type(),
+            &TerminalType::Answered(AnsweredProtocol::Sixel),
+            "a multiplexer answers the query for its own pane, so the answer is the fact and the name of the multiplexer is the guess"
+        );
+
+        let panel = Capabilities::from_env_and_answer(
+            &TerminalEnv {
+                muxiavelli: true,
+                muxiavelli_protocols: Some("iterm2".to_string()),
+                ..TerminalEnv::default()
+            },
+            false,
+            crate::probe::TerminalAnswer {
+                protocol: Some(AnsweredProtocol::Sixel),
+                cell: None,
+            },
+        );
+        assert_eq!(
+            display_routine_for(panel.terminal_type()),
+            DisplayRoutine::Iterm2,
+            "a panel states the protocol it draws, and a backing session that answers for the pane must not take that statement away"
+        );
+    }
+}

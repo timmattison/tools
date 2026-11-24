@@ -1,0 +1,17 @@
+[package]
+name = "tsm-jsonl"
+version = "0.1.0"
+edition.workspace = true
+description = "Header-first JSONL append and read for tsm session log files"
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,8 @@
+. pub fn double(n: i32) -> i32 {
+.     n * 2
+. }
+. 
+T #[test]
+T fn double_doubles() {
+T     assert_eq!(double(2), 4);
+T }

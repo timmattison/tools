@@ -1,0 +1,17 @@
+. defmodule Ledger do
+.   def total(entries) do
+.     Enum.sum(entries)
+.   end
+. 
+.   def record(entries, amount) do
+.     [amount | entries]
+.   end
+. end
+. 
+T defmodule LedgerChecks do
+T   use ExUnit.Case, async: true
+T 
+T   test "totals the entries it holds" do
+T     assert Ledger.total([1, 2]) == 3
+T   end
+T end

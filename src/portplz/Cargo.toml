@@ -6,8 +6,10 @@ edition.workspace = true
 [dependencies]
 buildinfo.workspace = true
 clap.workspace = true
-gix.workspace = true
-sha2.workspace = true
+portplz-core.workspace = true
+
+[dev-dependencies]
+childenv.workspace = true
 
 [lints]
 workspace = true

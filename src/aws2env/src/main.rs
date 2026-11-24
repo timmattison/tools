@@ -54,7 +54,14 @@ fn parse_ini_file(content: &str) -> HashMap<String, HashMap<String, String>> {
         }
 
         if line.starts_with('[') && line.ends_with(']') {
-            current_section = line[1..line.len() - 1].to_string();
+            // strip_prefix/strip_suffix work at character boundaries (since the
+            // matched chars are ASCII '[' and ']') and avoid the byte-index
+            // slice that triggers clippy::string_slice on UTF-8 input.
+            current_section = line
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .unwrap_or("")
+                .to_string();
             result
                 .entry(current_section.clone())
                 .or_insert_with(HashMap::new);
@@ -192,47 +199,45 @@ fn list_profiles() -> Result<Vec<String>> {
     Ok(profiles)
 }
 
-/// Escape a string for safe use in shell commands using single quotes
-/// This handles all special characters by wrapping in single quotes and
-/// escaping any embedded single quotes
-fn shell_escape(s: &str) -> String {
-    if s.is_empty() {
-        return "''".to_string();
+/// `s` as one word of an `export` line, with quotes only where a quote does
+/// something.
+///
+/// A person reads this output before they paste it, so a value that the shell
+/// already reads as one plain word prints bare. Every other value goes
+/// through [`shellquote::shell_quote`], which is the one quoter this
+/// workspace shares.
+///
+/// A value is plain when it holds at least one character and every character
+/// of it is a letter, a digit, `_`, `-`, `.` or `/`. The empty string is not
+/// plain, because an unquoted empty string is no word at all.
+fn shell_word(s: &str) -> String {
+    let plain = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/');
+
+    if plain {
+        s.to_string()
+    } else {
+        shellquote::shell_quote(s)
     }
-
-    // Check if the string needs escaping
-    // Safe characters that don't need escaping when not quoted
-    let needs_escaping = s
-        .chars()
-        .any(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '-' && c != '.' && c != '/');
-
-    if !needs_escaping {
-        return s.to_string();
-    }
-
-    // Use single quotes and escape any embedded single quotes
-    // The strategy is: close the quote, add escaped single quote, reopen the quote
-    // For example: 'can'\''t' becomes can't when evaluated by the shell
-    let escaped = s.replace('\'', "'\\''");
-    format!("'{}'", escaped)
 }
 
 fn print_export_commands(credentials: &AwsCredentials) {
     if let Some(access_key) = &credentials.access_key_id {
-        println!("export AWS_ACCESS_KEY_ID={}", shell_escape(access_key));
+        println!("export AWS_ACCESS_KEY_ID={}", shell_word(access_key));
     }
 
     if let Some(secret_key) = &credentials.secret_access_key {
-        println!("export AWS_SECRET_ACCESS_KEY={}", shell_escape(secret_key));
+        println!("export AWS_SECRET_ACCESS_KEY={}", shell_word(secret_key));
     }
 
     if let Some(session_token) = &credentials.session_token {
-        println!("export AWS_SESSION_TOKEN={}", shell_escape(session_token));
+        println!("export AWS_SESSION_TOKEN={}", shell_word(session_token));
     }
 
     if let Some(region) = &credentials.region {
-        println!("export AWS_DEFAULT_REGION={}", shell_escape(region));
-        println!("export AWS_REGION={}", shell_escape(region));
+        println!("export AWS_DEFAULT_REGION={}", shell_word(region));
+        println!("export AWS_REGION={}", shell_word(region));
     }
 }
 

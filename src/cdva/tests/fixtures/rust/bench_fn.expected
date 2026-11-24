@@ -1,0 +1,8 @@
+. pub fn work(n: u64) -> u64 {
+.     n.wrapping_mul(3)
+. }
+. 
+T #[bench]
+T fn bench_work(b: &mut Bencher) {
+T     b.iter(|| work(21));
+T }

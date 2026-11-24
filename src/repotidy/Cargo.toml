@@ -9,7 +9,13 @@ path = "src/main.rs"
 
 [dependencies]
 buildinfo.workspace = true
+childenv.workspace = true
 repowalker.workspace = true
+
+[dev-dependencies]
+# The `testing` feature carries the shared git fixture builders, and
+# `tests/detached-git-dir.rs` builds its repositories with `DetachedGitDirRepo`.
+gitscratch = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

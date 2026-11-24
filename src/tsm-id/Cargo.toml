@@ -1,0 +1,18 @@
+[package]
+name = "tsm-id"
+version = "0.1.0"
+edition.workspace = true
+description = "Session ID type for tsm: 32 lowercase hex chars (128 bits)"
+license.workspace = true
+
+[dependencies]
+hex.workspace = true
+rand.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

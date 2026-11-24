@@ -1,11 +1,9 @@
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result};
 use buildinfo::version_string;
 use clap::Parser;
-use toml;
 use which::which;
 
 /// Rust Cross Compiler helper - simplifies cross-compilation setup
@@ -157,7 +155,7 @@ fn get_target_from_cross_toml() -> Result<String> {
 }
 
 fn execute_cross_build(target: &str, release: bool) -> Result<()> {
-    let mut cmd = Command::new("cross");
+    let mut cmd = childenv::command("cross");
     cmd.arg("build").arg("--target").arg(target);
 
     if release {

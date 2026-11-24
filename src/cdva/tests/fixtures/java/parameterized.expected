@@ -1,0 +1,24 @@
+. package com.example.calc;
+. 
+. import static org.junit.jupiter.api.Assertions.assertTrue;
+. 
+. import org.junit.jupiter.api.RepeatedTest;
+. import org.junit.jupiter.params.ParameterizedTest;
+. import org.junit.jupiter.params.provider.ValueSource;
+. 
+. class Parameterized {
+.     int doubled(int value) {
+.         return value * 2;
+.     }
+. 
+T     @ParameterizedTest
+T     @ValueSource(ints = {1, 2})
+T     void doublesEveryInput(int value) {
+T         assertTrue(doubled(value) > value);
+T     }
+. 
+T     @RepeatedTest(3)
+T     void doublesTheSameWayEveryTime() {
+T         assertTrue(doubled(2) == 4);
+T     }
+. }

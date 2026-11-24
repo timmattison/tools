@@ -8,18 +8,25 @@
 //! which works correctly in both regular repositories and git worktrees.
 
 use std::path::PathBuf;
-use std::process::Command;
+
+// Share the rerun-path selection logic with the library's test suite so it can
+// be unit tested (a build script cannot be tested directly).
+#[path = "src/rerun.rs"]
+mod rerun;
 
 fn main() {
     // Dynamically find the git directory (works in worktrees too)
     if let Some(git_dir) = get_git_dir() {
-        let git_head = git_dir.join("HEAD");
-        let git_index = git_dir.join("index");
+        // Branch refs live in the common dir, which differs from `git_dir` in a
+        // linked worktree; fall back to `git_dir` when they coincide.
+        let git_common_dir = get_git_common_dir().unwrap_or_else(|| git_dir.clone());
+        let head_contents = std::fs::read_to_string(git_dir.join("HEAD")).unwrap_or_default();
 
-        // Tell Cargo to rerun this if HEAD or index changes
-        // This ensures rebuilds when commits change or files are staged
-        println!("cargo:rerun-if-changed={}", git_head.display());
-        println!("cargo:rerun-if-changed={}", git_index.display());
+        // Tell Cargo which git files to watch so a new commit (including a moved
+        // branch) forces this script to rerun and recapture the hash.
+        for path in rerun::rerun_if_changed_paths(&git_dir, &git_common_dir, &head_contents) {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
     }
 
     let git_hash = get_git_hash().unwrap_or_else(|| "unknown".to_string());
@@ -30,7 +37,7 @@ fn main() {
 }
 
 fn get_git_hash() -> Option<String> {
-    let output = Command::new("git")
+    let output = childenv::command("git")
         .args(["rev-parse", "--short=7", "HEAD"])
         .output()
         .ok()?;
@@ -44,7 +51,7 @@ fn get_git_hash() -> Option<String> {
 
 fn get_git_dirty() -> Option<String> {
     // Check for unstaged changes
-    let unstaged = Command::new("git")
+    let unstaged = childenv::command("git")
         .args(["diff", "--quiet"])
         .output()
         .ok()?;
@@ -54,7 +61,7 @@ fn get_git_dirty() -> Option<String> {
     }
 
     // Also check for staged changes
-    let staged = Command::new("git")
+    let staged = childenv::command("git")
         .args(["diff", "--quiet", "--cached"])
         .output()
         .ok()?;
@@ -67,10 +74,15 @@ fn get_git_dirty() -> Option<String> {
 }
 
 fn get_git_dir() -> Option<PathBuf> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .output()
-        .ok()?;
+    git_rev_parse(&["rev-parse", "--git-dir"])
+}
+
+fn get_git_common_dir() -> Option<PathBuf> {
+    git_rev_parse(&["rev-parse", "--git-common-dir"])
+}
+
+fn git_rev_parse(args: &[&str]) -> Option<PathBuf> {
+    let output = childenv::command("git").args(args).output().ok()?;
 
     if output.status.success() {
         let path = String::from_utf8_lossy(&output.stdout).trim().to_string();

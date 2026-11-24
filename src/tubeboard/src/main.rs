@@ -20,7 +20,7 @@ impl Transformer for TubeTransformer {
         let video_id = if url.host_str() == Some("youtu.be") {
             // Short URL format: https://youtu.be/VIDEO_ID
             url.path_segments()
-                .and_then(|segments| segments.last())
+                .and_then(|mut segments| segments.next_back())
                 .filter(|id| !id.is_empty())
                 .ok_or("No video ID in youtu.be URL")?
                 .to_string()

@@ -1,0 +1,944 @@
+//! Guard: every *target* of a crate must declare a position on the lints that
+//! crate raises.
+//!
+//! [`workspace_lints`] proves each member crate opts
+//! into the repo-wide lint set. This module is the same disease one level down,
+//! at the target instead of the crate.
+//!
+//! Cargo refuses to merge a member's own `[lints]` table with
+//! `lints.workspace = true` (`error: cannot override workspace.lints in
+//! lints`). So a crate that wants lints *stricter* than the workspace set has
+//! exactly one place to put them: crate-root inner attributes in its source,
+//! e.g.
+//!
+//! ```ignore
+//! #![deny(unsafe_code)]
+//! #![warn(clippy::pedantic)]
+//! ```
+//!
+//! And that is where the hole opens. A manifest `[lints]` table applies to
+//! **every target of the package**. A crate-root attribute applies to **one
+//! target** — the single file that is that target's root. Moving lints out of
+//! the manifest to satisfy the inheritance guard therefore hands the library
+//! and binary a stricter lint set while the integration tests, benches,
+//! examples, and build script of the same crate quietly keep the workspace
+//! default. Nothing warns. The exemption is spelled as an *absence*, which is
+//! why it is invisible and why it spreads.
+//!
+//! # The rule
+//!
+//! For each workspace member:
+//!
+//! 1. The crate's **baseline** is the union of the lint paths *raised* — `deny`,
+//!    `forbid`, or `warn` — by inner attributes at the roots of its **library
+//!    and binary** targets. Those are the targets that define what the crate
+//!    holds itself to.
+//! 2. Every target root of that crate — library, binary, test, bench, example,
+//!    build script — must **mention** every baseline lint in some inner lint
+//!    attribute: `deny`, `forbid`, `warn`, `allow`, or `expect`.
+//! 3. **Silence is the only violation.**
+//!
+//! # Why a build script mentions but never raises
+//!
+//! `build.rs` is a target cargo compiles and lints like any other, and it is
+//! the target the manifest-to-crate-root migration strands most quietly:
+//! verified on cargo 1.97.1, `[lints.rust] unsafe_code = "deny"` in the
+//! manifest makes an unsafe block in `build.rs` a compile error, while the same
+//! lint written `#![deny(unsafe_code)]` in `src/lib.rs` lets it through. So it
+//! owes the baseline an answer, by rule 2, like every other root.
+//!
+//! It does not *raise*, by rule 1, because nothing links it. A build script is
+//! compiled for the build machine, run once, and never becomes part of the
+//! crate — so a lint it alone raises is a position that one target holds, not
+//! one the crate holds. Were it to raise, a strict build script would go red
+//! across a library and test suite that never asked for the lint.
+//!
+//! # Why "mention", not "match the level"
+//!
+//! This guard deliberately does **not** compare levels. A test root that
+//! `allow`s a baseline lint is *compliant*:
+//!
+//! ```ignore
+//! #![allow(
+//!     clippy::unwrap_used,
+//!     reason = "a test that cannot unwrap is a test written around its harness"
+//! )]
+//! ```
+//!
+//! That is a deliberate, visible, reviewable decision sitting in the file it
+//! applies to. A root that says *nothing* is not a decision at all — it is the
+//! absence this guard exists to convert into a declaration. Demanding equal
+//! levels would be a different guard with a different, worse trade: integration
+//! tests genuinely do need to unwrap, and a rule they cannot satisfy gets
+//! satisfied by deleting the rule.
+//!
+//! That is also why there is **no central exemption file**. The local
+//! `#![allow(lint, reason = "...")]` *is* the opt-out mechanism, and the
+//! workspace's own `clippy::allow_attributes_without_reason` already forces the
+//! reason to be written next to it. An allowlist elsewhere would move the
+//! decision away from the code it exempts, which is how exemptions become
+//! permanent.
+//!
+//! # Parse, never text-match
+//!
+//! "An inner attribute whose path is a lint level and whose arguments are lint
+//! paths" names a syntactic category, so it is answered with [`syn`], not a
+//! regex. Every spelling therefore reduces to the same answer: one lint per
+//! attribute or several, `clippy::pedantic` or bare `unsafe_code`, with or
+//! without a trailing `reason = "..."` (a name-value pair, never a lint name).
+//! A regex would answer only for the spellings someone happened to think of,
+//! and a missed spelling reports *clean* — indistinguishable from a guard doing
+//! real work.
+//!
+//! # `cfg_attr` mentions without raising
+//!
+//! `#![cfg_attr(not(test), warn(lint))]` is an attribute whose path is
+//! `cfg_attr` rather than a lint level, and the two halves of the rule answer
+//! it differently. That split is the point, not an oversight.
+//!
+//! It does **not raise**. A lint that applies only under `not(test)` is not a
+//! position the crate holds in every configuration, so it must not impose a
+//! requirement on sibling targets — least of all on the test targets the
+//! predicate deliberately excludes.
+//!
+//! It **does mention**. The mention bar asks for exactly one thing: that the
+//! root name the lint, so the decision is visible in the file it governs and a
+//! reviewer can see it. A conditional raise names the lint *and* the exact
+//! configuration it holds in, which is strictly more precise than the bare
+//! `#![warn(lint)]` that would satisfy the guard. Reading it as silence would
+//! demand a redundant unconditional mention bolted on top of a more careful
+//! declaration — the guard would punish the crate that stated its position
+//! best. `src/bm/src/lib.rs` is that crate, and it is why this half of the rule
+//! reads the way it does.
+//!
+//! So mention-detection looks *inside* `cfg_attr`, recursively: the form takes
+//! several attributes after its predicate (`#![cfg_attr(unix, warn(a),
+//! allow(b))]`) and it nests (`#![cfg_attr(unix, cfg_attr(test, warn(a)))]`).
+//! Only lint-level attributes found in there count, and the predicate itself is
+//! never read as a lint name — `not`, `test`, and `cfg_attr` are cfg syntax, not
+//! lints. Recursion is bounded so a pathological file cannot exhaust the stack;
+//! past the bound the guard refuses rather than return a verdict it only partly
+//! computed — see
+//! [`CfgAttrTooDeep`](crate::target_lints::TargetLintsError::CfgAttrTooDeep).
+//!
+//! Everything that could shrink the audited set is a hard error rather than a
+//! clean verdict; see [`TargetLintsError`].
+
+use std::collections::BTreeSet;
+use std::fmt;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use syn::punctuated::Punctuated;
+use syn::{AttrStyle, Meta, Token};
+use thiserror::Error;
+use toml::Value;
+
+use crate::workspace_lints::{self, WorkspaceLintsError, CARGO_TOML};
+
+/// Attribute paths that *raise* a lint, and so contribute to a crate's baseline.
+const RAISING_LEVELS: [&str; 3] = ["deny", "forbid", "warn"];
+
+/// Attribute paths that *mention* a lint. A superset of [`RAISING_LEVELS`]:
+/// `allow` and `expect` are positions too, just not raised ones.
+const MENTIONING_LEVELS: [&str; 5] = ["allow", "deny", "expect", "forbid", "warn"];
+
+/// The attribute that applies other attributes conditionally. Its contents
+/// mention but never raise; see the module docs.
+const CFG_ATTR: &str = "cfg_attr";
+
+/// How many `cfg_attr` wrappers the guard will descend through before refusing.
+///
+/// `cfg_attr` nests without limit in the grammar, so the walk over it is
+/// recursive and a hand-written or generated file could otherwise drive it into
+/// the stack. Real code nests once; the bound is set far above anything a human
+/// writes so that hitting it means the file is pathological, not merely careful.
+const MAX_CFG_ATTR_DEPTH: usize = 16;
+
+/// `[package]` keys that turn cargo's target auto-discovery on or off.
+///
+/// This guard models the default discovery rules only. A manifest that changes
+/// them is refused rather than guessed at; see
+/// [`AutoDiscoveryOverride`](TargetLintsError::AutoDiscoveryOverride).
+///
+/// Public so the guard's model of cargo can be *compared* against cargo's own
+/// documented set by a test, rather than restated there. A key this list omits
+/// is a key the guard silently guesses at, and a fixture list copied from this
+/// one could never notice.
+pub const AUTO_DISCOVERY_KEYS: [&str; 5] = [
+    "autobenches",
+    "autobins",
+    "autoexamples",
+    "autolib",
+    "autotests",
+];
+
+/// The manifest table those keys — and `build` — live in.
+const PACKAGE: &str = "package";
+
+/// Rust source extension, used when auto-discovering target roots.
+const RS: &str = "rs";
+
+/// The conventional entry point of a directory-shaped target
+/// (`tests/foo/main.rs`).
+const MAIN_RS: &str = "main.rs";
+
+/// The conventional build script, relative to the member directory. Also what
+/// `build = true` names.
+const BUILD_RS: &str = "build.rs";
+
+/// Everything that can stop the audit from reaching a verdict.
+///
+/// Every variant is a *refusal*. A guard that cannot enumerate a crate's
+/// targets must say so loudly, because "no target is missing a lint" and "I
+/// found no targets" are the same sentence to a CI log and only one of them is
+/// good news.
+#[derive(Debug, Error)]
+pub enum TargetLintsError {
+    /// The workspace members could not be enumerated.
+    #[error("cannot enumerate the workspace members: {0}")]
+    Members(#[from] WorkspaceLintsError),
+
+    /// A target root could not be read from disk.
+    #[error("cannot read the target root {}: {source}", path.display())]
+    ReadRoot {
+        /// The root file that could not be read.
+        path: PathBuf,
+        /// The underlying I/O failure.
+        source: io::Error,
+    },
+
+    /// A target root was read but is not valid Rust.
+    #[error("cannot parse {} as Rust: {source}", path.display())]
+    ParseRoot {
+        /// The root file that failed to parse.
+        path: PathBuf,
+        /// The underlying parse failure.
+        source: syn::Error,
+    },
+
+    /// A target root nests `cfg_attr` deeper than the guard will follow.
+    #[error(
+        "{} nests `cfg_attr` more than {MAX_CFG_ATTR_DEPTH} deep; the guard stops rather than \
+         risk the stack, and a root it only partly read is a root it cannot vouch for",
+        path.display()
+    )]
+    CfgAttrTooDeep {
+        /// The root file whose nesting exceeded the bound.
+        path: PathBuf,
+    },
+
+    /// A directory that should hold target roots could not be listed.
+    #[error("cannot list {} while discovering target roots: {source}", dir.display())]
+    ReadTargetDir {
+        /// The directory that could not be listed.
+        dir: PathBuf,
+        /// The underlying I/O failure.
+        source: io::Error,
+    },
+
+    /// A manifest declares a target that is not on disk: a `path` under
+    /// `[lib]`/`[[bin]]`/`[[test]]`/…, or the `build` key naming a build script.
+    #[error(
+        "{} declares a {kind} target at `{declared}`, which does not exist; \
+         a target this guard cannot open is a target it cannot vouch for",
+        manifest.display()
+    )]
+    MissingDeclaredTarget {
+        /// The manifest carrying the declaration.
+        manifest: PathBuf,
+        /// Which kind of target declared it: `lib`, `bin`, `test`, `build`, …
+        kind: &'static str,
+        /// The declared path. Written verbatim as it appears in the manifest,
+        /// except for `build = true`, which is rendered as the `build.rs` it
+        /// names.
+        declared: String,
+    },
+
+    /// A manifest's `build` key is neither a path nor a bool.
+    #[error(
+        "{} sets `build = {value}`, which is neither a path nor a bool; cargo rejects that \
+         manifest outright, and reading it as `this crate has no build script` would drop a \
+         target from the audit on the strength of a value the guard did not understand",
+        manifest.display()
+    )]
+    MalformedBuildKey {
+        /// The manifest carrying the key.
+        manifest: PathBuf,
+        /// The value, rendered as TOML.
+        value: String,
+    },
+
+    /// A manifest overrides cargo's target auto-discovery.
+    #[error(
+        "{} sets `{key}`; this guard models cargo's default target discovery only, \
+         so it would enumerate the wrong roots and report clean for the wrong reason",
+        manifest.display()
+    )]
+    AutoDiscoveryOverride {
+        /// The manifest carrying the override.
+        manifest: PathBuf,
+        /// The offending key, one of [`AUTO_DISCOVERY_KEYS`].
+        key: &'static str,
+    },
+
+    /// A member crate resolved to no target roots at all.
+    #[error(
+        "workspace member {} resolves to no target roots; refusing to report a crate clean \
+         when nothing in it was examined",
+        dir.display()
+    )]
+    NoTargetRoots {
+        /// The member directory.
+        dir: PathBuf,
+    },
+}
+
+/// One target root that is silent about at least one of its crate's baseline
+/// lints.
+#[derive(Debug, Clone)]
+pub struct Offender {
+    /// The root file, relative to the repo root.
+    path: PathBuf,
+    /// Which kind of target this root is: `library`, `binary`, `test`, …
+    kind: &'static str,
+    /// Baseline lints this root mentions nowhere, sorted.
+    missing: Vec<String>,
+}
+
+impl Offender {
+    /// The offending target root, relative to the repo root.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Which kind of target this root is: `library`, `binary`, `test`, `bench`,
+    /// `example`, or `build script`.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        self.kind
+    }
+
+    /// The baseline lints this root mentions nowhere, sorted.
+    #[must_use]
+    pub fn missing(&self) -> &[String] {
+        &self.missing
+    }
+}
+
+/// The verdict of one audit: how much was examined, and which target roots are
+/// silent about their crate's baseline lints.
+///
+/// The remediation text lives here rather than at the call site, so every
+/// caller — test, CI job, or CLI — reports the same thing.
+#[derive(Debug, Clone)]
+pub struct Report {
+    /// Number of member crates whose targets were resolved.
+    crates_examined: usize,
+    /// Every target root actually opened and parsed, relative to the repo
+    /// root and sorted by path.
+    roots: Vec<PathBuf>,
+    /// Silent roots, sorted by path.
+    offenders: Vec<Offender>,
+}
+
+impl Report {
+    /// True when every examined target root declares a position on every
+    /// baseline lint of its crate.
+    #[must_use]
+    pub fn is_compliant(&self) -> bool {
+        self.offenders.is_empty()
+    }
+
+    /// The target roots that are silent about a baseline lint, sorted by path.
+    #[must_use]
+    pub fn offenders(&self) -> &[Offender] {
+        &self.offenders
+    }
+
+    /// How many member crates the audit resolved targets for.
+    #[must_use]
+    pub fn crates_examined(&self) -> usize {
+        self.crates_examined
+    }
+
+    /// Every target root the audit opened and parsed, relative to the repo
+    /// root and sorted by path.
+    ///
+    /// [`roots_examined`](Self::roots_examined) is the size of this set;
+    /// this is the set itself. The difference matters because this guard
+    /// *models* cargo's target discovery rather than asking cargo, and a model
+    /// only ever disagrees with cargo about *which* roots exist. A count can
+    /// match while the contents do not, so a caller that wants to prove the
+    /// model right compares these paths against another enumeration of the
+    /// same workspace — `cargo metadata`, which needs no model because it is
+    /// the build — and reads off exactly which roots each side has that the
+    /// other lacks.
+    #[must_use]
+    pub fn roots(&self) -> &[PathBuf] {
+        &self.roots
+    }
+
+    /// How many target roots the audit opened and parsed.
+    ///
+    /// A caller should assert this is non-zero: a guard that scans nothing
+    /// reports clean for the wrong reason.
+    #[must_use]
+    pub fn roots_examined(&self) -> usize {
+        self.roots.len()
+    }
+}
+
+impl fmt::Display for Report {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.offenders.is_empty() {
+            return write!(
+                f,
+                "Checked {} target roots across {} workspace members; every one declares a position on its crate's lints.",
+                self.roots.len(), self.crates_examined
+            );
+        }
+
+        writeln!(
+            f,
+            "{} of {} target roots are silent about a lint their crate raises.",
+            self.offenders.len(),
+            self.roots.len()
+        )?;
+        writeln!(
+            f,
+            "A crate-root lint attribute applies to ONE target; the other targets of the same crate keep the workspace default unless they say otherwise."
+        )?;
+
+        for offender in &self.offenders {
+            writeln!(f)?;
+            writeln!(
+                f,
+                "{} ({} target) never mentions: {}",
+                offender.path.display(),
+                offender.kind,
+                offender.missing.join(", ")
+            )?;
+            writeln!(
+                f,
+                "Add an inner attribute at the top of that file taking a position on each — raise it:"
+            )?;
+            writeln!(f)?;
+            for lint in &offender.missing {
+                writeln!(f, "    #![warn({lint})]")?;
+            }
+            writeln!(f)?;
+            writeln!(f, "or opt out of it on purpose, in writing:")?;
+            writeln!(f)?;
+            for lint in &offender.missing {
+                writeln!(f, "    #![allow({lint}, reason = \"...\")]")?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Which cargo target a root file belongs to.
+///
+/// The distinction that matters is [`raises_baseline`](TargetKind::raises_baseline):
+/// libraries and binaries *define* what a crate holds itself to; tests, benches,
+/// examples, and build scripts only have to answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetKind {
+    Lib,
+    Bin,
+    Test,
+    Bench,
+    Example,
+    Build,
+}
+
+impl TargetKind {
+    /// The manifest key that declares this kind of target explicitly.
+    const fn manifest_key(self) -> &'static str {
+        match self {
+            Self::Lib => "lib",
+            Self::Bin => "bin",
+            Self::Test => "test",
+            Self::Bench => "bench",
+            Self::Example => "example",
+            Self::Build => "build",
+        }
+    }
+
+    /// The human-readable name used in [`Report`]'s message.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Lib => "library",
+            Self::Bin => "binary",
+            Self::Test => "test",
+            Self::Bench => "bench",
+            Self::Example => "example",
+            Self::Build => "build script",
+        }
+    }
+
+    /// True for the targets whose raised lints form the crate's baseline.
+    ///
+    /// A build script is deliberately not one of them, even though it is
+    /// compiled from the crate's own source. Nothing links it: it is built for
+    /// the build machine, run once, and never becomes part of the crate. A lint
+    /// it alone raises is a position that one target holds, not one the crate
+    /// holds — so it must answer for the baseline without adding to it.
+    const fn raises_baseline(self) -> bool {
+        matches!(self, Self::Lib | Self::Bin)
+    }
+}
+
+/// One resolved target root: the file, and what kind of target it heads.
+#[derive(Debug, Clone)]
+struct TargetRoot {
+    path: PathBuf,
+    kind: TargetKind,
+}
+
+/// The lint positions taken at one target root.
+#[derive(Debug, Default)]
+struct RootLints {
+    /// Lints raised here (`deny`/`forbid`/`warn`).
+    raised: BTreeSet<String>,
+    /// Lints mentioned here at any level, raised ones included.
+    mentioned: BTreeSet<String>,
+}
+
+/// Audit every target of every member of the workspace rooted at `repo_root`.
+///
+/// Members come from [`workspace_lints::members`], so both guards walk exactly
+/// the same set. For each member the targets are resolved from its manifest
+/// plus cargo's default discovery rules, every root is parsed, and any root that
+/// is silent about a lint its crate's library or binary raises is reported.
+///
+/// # Errors
+///
+/// Returns [`TargetLintsError`] — never a clean [`Report`] — when the targets
+/// cannot be enumerated or read with confidence:
+///
+/// - the workspace members cannot be enumerated
+///   ([`Members`](TargetLintsError::Members));
+/// - a member manifest is unreadable or not valid TOML (also
+///   [`Members`](TargetLintsError::Members), carrying the underlying
+///   [`WorkspaceLintsError`]);
+/// - a manifest declares a target — a target `path`, or a `build` script — that
+///   is not on disk
+///   ([`MissingDeclaredTarget`](TargetLintsError::MissingDeclaredTarget));
+/// - a manifest's `build` key is neither a path nor a bool
+///   ([`MalformedBuildKey`](TargetLintsError::MalformedBuildKey));
+/// - a manifest sets one of [`AUTO_DISCOVERY_KEYS`]
+///   ([`AutoDiscoveryOverride`](TargetLintsError::AutoDiscoveryOverride));
+/// - a directory holding target roots cannot be listed
+///   ([`ReadTargetDir`](TargetLintsError::ReadTargetDir));
+/// - a member resolves to no target roots
+///   ([`NoTargetRoots`](TargetLintsError::NoTargetRoots));
+/// - a root file is unreadable ([`ReadRoot`](TargetLintsError::ReadRoot)) or
+///   does not parse as Rust ([`ParseRoot`](TargetLintsError::ParseRoot));
+/// - a root nests `cfg_attr` past the guard's bound
+///   ([`CfgAttrTooDeep`](TargetLintsError::CfgAttrTooDeep)).
+pub fn audit(repo_root: &Path) -> Result<Report, TargetLintsError> {
+    let member_dirs = workspace_lints::members(repo_root)?;
+
+    let mut examined = Vec::new();
+    let mut offenders = Vec::new();
+
+    for dir in &member_dirs {
+        let manifest_path = dir.join(CARGO_TOML);
+        let manifest = workspace_lints::parse_manifest(&manifest_path)?;
+        let roots = target_roots(dir, &manifest, &manifest_path)?;
+
+        let mut scanned = Vec::with_capacity(roots.len());
+        for root in roots {
+            let lints = root_lints(&root.path)?;
+            scanned.push((root, lints));
+        }
+        examined.extend(
+            scanned
+                .iter()
+                .map(|(root, _)| relative_to(repo_root, &root.path)),
+        );
+
+        let baseline: BTreeSet<&String> = scanned
+            .iter()
+            .filter(|(root, _)| root.kind.raises_baseline())
+            .flat_map(|(_, lints)| lints.raised.iter())
+            .collect();
+        if baseline.is_empty() {
+            continue;
+        }
+
+        for (root, lints) in &scanned {
+            let missing: Vec<String> = baseline
+                .iter()
+                .filter(|lint| !lints.mentioned.contains(**lint))
+                .map(|lint| (*lint).clone())
+                .collect();
+            if missing.is_empty() {
+                continue;
+            }
+            offenders.push(Offender {
+                path: relative_to(repo_root, &root.path),
+                kind: root.kind.label(),
+                missing,
+            });
+        }
+    }
+
+    examined.sort();
+    offenders.sort_by(|a, b| a.path.cmp(&b.path));
+
+    Ok(Report {
+        crates_examined: member_dirs.len(),
+        roots: examined,
+        offenders,
+    })
+}
+
+/// Render one absolute path the way a [`Report`] carries it: relative to
+/// `repo_root` when it lies inside, and verbatim when it does not.
+///
+/// Both the offender list and the examined-root set go through here, so a
+/// caller can join either back onto the same repo root and get the file back.
+fn relative_to(repo_root: &Path, path: &Path) -> PathBuf {
+    path.strip_prefix(repo_root).unwrap_or(path).to_path_buf()
+}
+
+/// Resolve every target root of one member crate.
+///
+/// Mirrors cargo: explicit `path` declarations win, and the conventional
+/// locations are discovered on top of them (`src/lib.rs`, `src/main.rs`,
+/// `src/bin/*.rs`, `tests/*.rs`, `benches/*.rs`, `examples/*.rs`, plus the
+/// directory form `<dir>/<name>/main.rs`). Discovery is deliberately depth-1:
+/// `tests/common/mod.rs` is a module a test root *includes*, not a target root,
+/// and treating it as one would invent a target cargo never builds.
+///
+/// The build script is the exception to every sentence above, because it is
+/// declared by a scalar `build` key inside `[package]` rather than by a table
+/// with a `path`: absent, it is `build.rs` if that file exists; `false`, there
+/// is none even when `build.rs` does exist; `true`, it *is* `build.rs` and the
+/// file must be there; a string, it is that path and the conventional
+/// `build.rs` is not a target at all.
+fn target_roots(
+    dir: &Path,
+    manifest: &Value,
+    manifest_path: &Path,
+) -> Result<Vec<TargetRoot>, TargetLintsError> {
+    for key in AUTO_DISCOVERY_KEYS {
+        if manifest
+            .get(PACKAGE)
+            .and_then(|package| package.get(key))
+            .is_some()
+        {
+            return Err(TargetLintsError::AutoDiscoveryOverride {
+                manifest: manifest_path.to_path_buf(),
+                key,
+            });
+        }
+    }
+
+    let mut roots = Vec::new();
+
+    // Build script: the one target declared by a *scalar* — `build` inside
+    // `[package]`, holding a path or a bool — rather than by a table with a
+    // `path` field, so it is resolved here instead of through `declared_path`.
+    match manifest
+        .get(PACKAGE)
+        .and_then(|package| package.get(TargetKind::Build.manifest_key()))
+    {
+        // No key: the conventional root if it is there, and nothing if it is
+        // not. This is the only form where absence is not a declaration.
+        None => push_if_file(&mut roots, dir.join(BUILD_RS), TargetKind::Build),
+        // `build = false` turns the build script off. Cargo then builds no
+        // build script *even with a `build.rs` on disk*, so discovering one
+        // would invent a target and demand lints in a file cargo never reads.
+        Some(Value::Boolean(false)) => {}
+        // `build = true` names the conventional path, and cargo means it
+        // literally: with no `build.rs` it still reports the target, then fails
+        // to compile it. A declaration, not a search — so a missing file is the
+        // same refusal a typo'd `path` earns.
+        Some(Value::Boolean(true)) => roots.push(declared_root(
+            dir,
+            BUILD_RS,
+            TargetKind::Build,
+            manifest_path,
+        )?),
+        // An explicit path *replaces* the convention: cargo reports exactly one
+        // build script, at this path, and a stray `build.rs` beside it is not a
+        // target at all.
+        Some(Value::String(declared)) => roots.push(declared_root(
+            dir,
+            declared,
+            TargetKind::Build,
+            manifest_path,
+        )?),
+        // Anything else is a manifest cargo itself rejects. Falling through
+        // silently would read it as "no build script" and shrink the audit.
+        Some(other) => {
+            return Err(TargetLintsError::MalformedBuildKey {
+                manifest: manifest_path.to_path_buf(),
+                value: other.to_string(),
+            });
+        }
+    }
+
+    // Library: an explicit `[lib] path` wins, otherwise the conventional root.
+    match declared_path(manifest.get(TargetKind::Lib.manifest_key())) {
+        Some(declared) => roots.push(declared_root(
+            dir,
+            declared,
+            TargetKind::Lib,
+            manifest_path,
+        )?),
+        None => push_if_file(&mut roots, dir.join("src").join("lib.rs"), TargetKind::Lib),
+    }
+
+    // Binaries: every explicit `[[bin]] path`, plus the conventional roots.
+    for declared in declared_paths(manifest.get(TargetKind::Bin.manifest_key())) {
+        roots.push(declared_root(
+            dir,
+            declared,
+            TargetKind::Bin,
+            manifest_path,
+        )?);
+    }
+    push_if_file(&mut roots, dir.join("src").join("main.rs"), TargetKind::Bin);
+    discover(&mut roots, &dir.join("src").join("bin"), TargetKind::Bin)?;
+
+    // Tests, benches, and examples: same shape, different directory.
+    for (kind, subdir) in [
+        (TargetKind::Test, "tests"),
+        (TargetKind::Bench, "benches"),
+        (TargetKind::Example, "examples"),
+    ] {
+        for declared in declared_paths(manifest.get(kind.manifest_key())) {
+            roots.push(declared_root(dir, declared, kind, manifest_path)?);
+        }
+        discover(&mut roots, &dir.join(subdir), kind)?;
+    }
+
+    // An explicit declaration and the conventional location often name the same
+    // file (`[[bin]] path = "src/main.rs"` is the norm in this repo); auditing
+    // it twice would double-count and double-report.
+    roots.sort_by(|a, b| a.path.cmp(&b.path));
+    roots.dedup_by(|a, b| a.path == b.path);
+
+    if roots.is_empty() {
+        return Err(TargetLintsError::NoTargetRoots {
+            dir: dir.to_path_buf(),
+        });
+    }
+    Ok(roots)
+}
+
+/// The `path` of a single-target table such as `[lib]`.
+fn declared_path(table: Option<&Value>) -> Option<&str> {
+    table
+        .and_then(|target| target.get("path"))
+        .and_then(Value::as_str)
+}
+
+/// The `path` of every entry of an array-of-tables such as `[[bin]]`.
+fn declared_paths(array: Option<&Value>) -> Vec<&str> {
+    array
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| declared_path(Some(entry)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Resolve one manifest-declared target path, refusing if it is not on disk.
+fn declared_root(
+    dir: &Path,
+    declared: &str,
+    kind: TargetKind,
+    manifest_path: &Path,
+) -> Result<TargetRoot, TargetLintsError> {
+    let path = dir.join(declared);
+    if !path.is_file() {
+        return Err(TargetLintsError::MissingDeclaredTarget {
+            manifest: manifest_path.to_path_buf(),
+            kind: kind.manifest_key(),
+            declared: declared.to_owned(),
+        });
+    }
+    Ok(TargetRoot { path, kind })
+}
+
+/// Append `path` as a root of `kind` when it exists.
+fn push_if_file(roots: &mut Vec<TargetRoot>, path: PathBuf, kind: TargetKind) {
+    if path.is_file() {
+        roots.push(TargetRoot { path, kind });
+    }
+}
+
+/// Auto-discover the roots cargo would find in `dir`: every depth-1 `*.rs`
+/// file, plus `<subdir>/main.rs` for each immediate subdirectory.
+///
+/// A missing directory is not an error — most crates have no `benches/`. A
+/// directory that exists but cannot be listed *is* one: silently skipping it
+/// would drop targets from the audit and report clean for the wrong reason.
+fn discover(
+    roots: &mut Vec<TargetRoot>,
+    dir: &Path,
+    kind: TargetKind,
+) -> Result<(), TargetLintsError> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+
+    let entries = fs::read_dir(dir).map_err(|source| TargetLintsError::ReadTargetDir {
+        dir: dir.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let path = entry
+            .map_err(|source| TargetLintsError::ReadTargetDir {
+                dir: dir.to_path_buf(),
+                source,
+            })?
+            .path();
+
+        if path.is_dir() {
+            push_if_file(roots, path.join(MAIN_RS), kind);
+        } else if path.extension().is_some_and(|ext| ext == RS) {
+            roots.push(TargetRoot { path, kind });
+        }
+    }
+    Ok(())
+}
+
+/// Read one target root and collect the lint positions its inner attributes
+/// take.
+///
+/// Only [`AttrStyle::Inner`] attributes count: `#![warn(...)]` configures the
+/// whole target, while an outer `#[warn(...)]` on the first item configures only
+/// that item and would be a false positive if counted.
+///
+/// `reason = "..."` is a [`Meta::NameValue`], not a [`Meta::Path`], so it is
+/// skipped rather than collected as a lint named `reason`.
+///
+/// Each inner attribute is handed to [`collect_positions`], which is also what
+/// descends through `cfg_attr`.
+fn root_lints(path: &Path) -> Result<RootLints, TargetLintsError> {
+    let text = fs::read_to_string(path).map_err(|source| TargetLintsError::ReadRoot {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let file = syn::parse_file(&text).map_err(|source| TargetLintsError::ParseRoot {
+        path: path.to_path_buf(),
+        source,
+    })?;
+
+    let mut lints = RootLints::default();
+    for attr in &file.attrs {
+        if !matches!(attr.style, AttrStyle::Inner(_)) {
+            continue;
+        }
+        collect_positions(&attr.meta, 0, path, &mut lints)?;
+    }
+    Ok(lints)
+}
+
+/// Record the lint positions one attribute takes, descending through any
+/// `cfg_attr` wrapping it.
+///
+/// `depth` counts the `cfg_attr` wrappers this attribute sits inside. Depth zero
+/// is unconditional and is the only depth that can *raise*; anything deeper
+/// applies in some configurations and not others, so it mentions without
+/// raising. See the module docs for why those two answers differ.
+///
+/// The first argument of a `cfg_attr` is its cfg predicate — `not(test)`,
+/// `unix`, `feature = "x"` — and is skipped outright, so no part of a predicate
+/// can be mistaken for a lint name. Every argument after it is an attribute the
+/// predicate guards, and each is walked the same way, which is what makes both
+/// the multi-attribute form and the nested form fall out of one rule rather than
+/// a case apiece.
+fn collect_positions(
+    meta: &Meta,
+    depth: usize,
+    path: &Path,
+    lints: &mut RootLints,
+) -> Result<(), TargetLintsError> {
+    let Meta::List(list) = meta else {
+        return Ok(());
+    };
+    let Some(name) = sole_segment(&list.path) else {
+        return Ok(());
+    };
+
+    if name == CFG_ATTR {
+        if depth >= MAX_CFG_ATTR_DEPTH {
+            return Err(TargetLintsError::CfgAttrTooDeep {
+                path: path.to_path_buf(),
+            });
+        }
+        for guarded in meta_args(list, path)?.iter().skip(1) {
+            collect_positions(guarded, depth + 1, path, lints)?;
+        }
+        return Ok(());
+    }
+
+    if !MENTIONING_LEVELS.contains(&name.as_str()) {
+        return Ok(());
+    }
+    let raises = depth == 0 && RAISING_LEVELS.contains(&name.as_str());
+
+    for arg in &meta_args(list, path)? {
+        let Meta::Path(lint) = arg else {
+            continue;
+        };
+        let rendered = render_path(lint);
+        if raises {
+            lints.raised.insert(rendered.clone());
+        }
+        lints.mentioned.insert(rendered);
+    }
+    Ok(())
+}
+
+/// Parse the comma-separated arguments of an attribute list.
+///
+/// A failure here is a refusal, not an empty list: arguments the guard cannot
+/// read are lint positions it cannot see, and "this attribute holds nothing" is
+/// the one conclusion it has no evidence for.
+fn meta_args(
+    list: &syn::MetaList,
+    path: &Path,
+) -> Result<Punctuated<Meta, Token![,]>, TargetLintsError> {
+    list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+        .map_err(|source| TargetLintsError::ParseRoot {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+/// The identifier of a single-segment path, or `None` for anything longer.
+///
+/// Lint *levels* and `cfg_attr` alike are always one segment, which is what
+/// distinguishes them from each other only by name — and from lint *paths* like
+/// `clippy::pedantic` by shape.
+fn sole_segment(path: &syn::Path) -> Option<String> {
+    match path.segments.len() {
+        1 => path.segments.first().map(|seg| seg.ident.to_string()),
+        _ => None,
+    }
+}
+
+/// Render a lint path the way a human writes it: segments joined with `::`, so
+/// `clippy::pedantic` and bare `unsafe_code` both come back verbatim.
+fn render_path(path: &syn::Path) -> String {
+    path.segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::")
+}

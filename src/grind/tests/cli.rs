@@ -1,0 +1,2788 @@
+//! End-to-end coverage of the binary itself, so the wiring between argument
+//! parsing, the replay and the exit code is exercised the way a user runs it.
+//!
+//! The exit code is the load-bearing half of every assertion here. `grind`'s
+//! whole reason to exist is that a scripted caller can tell "conflicts" from
+//! "something went wrong", so a test that only checked the words on stdout
+//! would pass for a binary that answers every question with the same number.
+
+use std::ffi::OsStr;
+use std::path::Path;
+use std::process::{Command, Output, Stdio};
+
+use gitscratch::testing::{
+    contested_region_repo, default_branch_choice_repo, equal_hunks_unequal_stops_repo,
+    independent_branches_repo, modify_delete_repo, multi_byte_names_repo, nested_conflict_repo,
+    not_a_repository, squash_merged_parent_repo, TestRepo, CHOICE_HEAD_BRANCH,
+};
+use gitscratch::DEFAULT_BRANCHES;
+use unicode_width::UnicodeWidthStr;
+
+/// Exit code for a replay that hit no conflicts.
+const CLEAN: i32 = 0;
+
+/// Exit code for a replay that hit conflicts.
+const CONFLICTS: i32 = 1;
+
+/// Exit code for a run that could not answer the question at all.
+///
+/// Deliberately not [`CONFLICTS`]: "the rebase would collide" and "I could not
+/// tell you" are different answers, and conflating them is the defect `grind`
+/// exists to fix.
+const ERROR: i32 = 2;
+
+/// The whole verdict for replaying `one` onto `two` in
+/// [`equal_hunks_unequal_stops_repo`].
+///
+/// A constant because three tests assert it: the verdict itself, and the two
+/// leaked-environment tests, which are only worth anything if the answer they
+/// check is the *same* answer the undisturbed run produces. Two copies of it
+/// could drift into checking two different claims.
+const EQUAL_HUNKS_VERDICT: &str = r"grind: conflicts - replaying HEAD onto two
+       2 hunks across 2 files, 1 stop
+
+  x.txt    1 hunk
+  y.txt    1 hunk";
+
+/// The locale every `grind` this file starts is pinned to, and the two
+/// variables that pin it.
+///
+/// One assertion in this file matches git's own words rather than grind's, and
+/// git wraps its words in gettext. A git built with the translations answers a
+/// developer whose shell carries `LC_ALL=de_DE` in German, and that assertion
+/// then fails for a reason that has nothing to do with the rebase it is about.
+/// `LC_ALL` is the variable that decides. `LANG` stands beside it because it
+/// costs nothing and spares the next reader the precedence rule.
+///
+/// A constant rather than two literals inside the builder, because the test
+/// below reads it back off the command: a pin nothing asserts is a pin the next
+/// person deletes.
+const PINNED_LOCALE: [(&str, &str); 2] = [("LC_ALL", "C"), ("LANG", "C")];
+
+/// The variable that states how many columns wide the terminal is.
+///
+/// `grind` lays its breakdown out for the width it is given, and every run this
+/// file starts states that width rather than measuring one. The measurement is
+/// of the *controlling terminal*, which is the window of the developer who
+/// typed `cargo test`. A golden that depends on it holds in an ordinary window
+/// and breaks in a narrow one, and it breaks on the machine of whoever has the
+/// narrow window rather than on the machine of whoever wrote it.
+const WIDTH_VARIABLE: &str = "COLUMNS";
+
+/// The width every run in this file states.
+///
+/// Wide enough that no breakdown in this file is clamped, so each golden below
+/// is the layout with no right-hand edge in it. `controlling-terminal.rs` is
+/// where a clamped layout is read back, because a test of the clamp has to hold
+/// a terminal of its own.
+const STATED_WIDTH: &str = "200";
+
+/// A `grind` run in `repo`, built and not yet started.
+///
+/// Handed back rather than run, because three call sites below put one more
+/// thing on the command first - a `TMPDIR` of their own, or a stream pointed at
+/// a pipe that nobody reads. Each of them gets the environment of an ordinary
+/// run, which is the reason the command is built in one place.
+///
+/// The scrub is belt to the binary's braces. `grind` reaches git only through
+/// `gitscratch`, which scrubs at the single place it spawns one, so a leak
+/// cannot reach the tool - but a test suite that let one through would be
+/// asserting against a run nobody could reproduce, and the two tests at the
+/// bottom of this file set these variables *deliberately*. Those two build
+/// their command by hand for that reason. Leaving the ambient environment in
+/// play nowhere else is what keeps them the only place the answer depends on
+/// it.
+fn grind_command(repo: &Path, args: &[&str]) -> Command {
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_grind"));
+    command.args(args).current_dir(repo);
+
+    // After the scrub, and for the reason `TestRepo::try_git` applies a
+    // caller's own variables after its own: the rule the scrub applies is the
+    // `GIT_` prefix, so anything set ahead of it that wears that prefix comes
+    // straight back off. No name below wears it, and stating the order here is
+    // what spares the next reader who adds one that does.
+    command.envs(PINNED_LOCALE);
+    command.env(WIDTH_VARIABLE, STATED_WIDTH);
+    // The color of the diff is the choice of the test that reads it, and never
+    // the choice of the developer's shell. A test that needs one of these
+    // variables sets it on the command this function gives back.
+    for name in COLOR_VARIABLES {
+        command.env_remove(name);
+    }
+
+    command
+}
+
+/// Run `grind` in `repo` and hand back everything it left behind.
+fn grind(repo: &Path, args: &[&str]) -> Output {
+    grind_command(repo, args)
+        .output()
+        .expect("failed to run grind")
+}
+
+/// What `command` gives the child for `name`, or `None` when it gives it
+/// nothing of its own.
+///
+/// [`Command::get_envs`] reports a variable the caller removed as a `None`
+/// value against its name, so the two answers this flattens together - never
+/// mentioned, and mentioned to be taken away - are the same answer to the
+/// question asked here.
+fn environment_value(command: &Command, name: &str) -> Option<String> {
+    command
+        .get_envs()
+        .find(|(key, _)| *key == OsStr::new(name))
+        .and_then(|(_, value)| value)
+        .map(|value| value.to_string_lossy().into_owned())
+}
+
+/// Every run in this file is pinned to one locale, and the pin is asserted here
+/// rather than left to the one test that depends on it.
+///
+/// Read off the built command rather than out of a run, because the machine
+/// this suite is written on cannot show the failure: its git ships no
+/// `share/git-core/locale`, so it answers in English whatever the environment
+/// says. The risk is latent here and live on any machine or CI image that
+/// carries git's translations, which is exactly the shape a test has to pin
+/// rather than reproduce.
+#[test]
+fn every_run_is_pinned_to_one_locale_so_gits_own_words_arrive_untranslated() {
+    let command = grind_command(Path::new("."), &["main"]);
+
+    for (name, value) in PINNED_LOCALE {
+        assert_eq!(
+            environment_value(&command, name).as_deref(),
+            Some(value),
+            "a run that takes {name} from the developer's shell reads git's \
+             words in the developer's language, and the assertion that matches \
+             them fails for a reason it is not about"
+        );
+    }
+}
+
+/// Every run in this file states the width of its terminal, and the statement
+/// is asserted here rather than left to the one test that reads a clamped
+/// layout back.
+///
+/// Read off the built command for the reason the locale pin is: the machine
+/// this suite is written on cannot show the failure. Its window is wide, so
+/// every golden below holds whether or not the width is stated. The failure is
+/// live on a narrow window, which is exactly the shape a test has to pin rather
+/// than reproduce.
+#[test]
+fn every_run_states_the_width_of_its_terminal_so_no_golden_reads_the_window() {
+    let command = grind_command(Path::new("."), &["main"]);
+
+    assert_eq!(
+        environment_value(&command, WIDTH_VARIABLE).as_deref(),
+        Some(STATED_WIDTH),
+        "a run that measures the developer's window lays its breakdown out for \
+         a width the test never chose, and every golden here then holds in a \
+         wide window and breaks in a narrow one"
+    );
+}
+
+/// The variables through which the environment decides whether `grind` paints
+/// its diff, and which every run in this file takes away.
+///
+/// `colored` reads all three. `NO_COLOR` turns color off, `CLICOLOR=0` turns it
+/// off, and `CLICOLOR_FORCE` turns it on and wins over `NO_COLOR`. A developer
+/// who exports one of them gives it to every child of `cargo test`, and a test
+/// of the paint then fails on that machine only. So the builder takes all three
+/// away, and a test that needs one sets it on its own run.
+///
+/// A constant, because the test below reads each name back off the built
+/// command.
+const COLOR_VARIABLES: [&str; 3] = [NO_COLOR, CLICOLOR, CLICOLOR_FORCE];
+
+/// The variable that turns color off, whatever value it holds.
+const NO_COLOR: &str = "NO_COLOR";
+
+/// The variable that turns color off when it holds `0`.
+const CLICOLOR: &str = "CLICOLOR";
+
+/// The variable that turns color on when it holds a value other than `0`, also
+/// into a pipe, and whatever `NO_COLOR` says.
+const CLICOLOR_FORCE: &str = "CLICOLOR_FORCE";
+
+/// Whether `command` takes `name` away from the environment that the child
+/// inherits.
+///
+/// [`Command::get_envs`] reports a removed variable as a `None` value against
+/// its name, and it reports nothing for a variable the caller never mentioned.
+/// [`environment_value`] gives `None` for both, so it cannot see a removal.
+fn removes_environment(command: &Command, name: &str) -> bool {
+    command
+        .get_envs()
+        .any(|(key, value)| key == OsStr::new(name) && value.is_none())
+}
+
+/// Every run in this file takes the color variables away, and the removal is
+/// asserted here rather than left to the tests of the paint.
+///
+/// Read off the built command for the reason the locale pin is: the machine
+/// this suite is written on cannot show the failure. It exports none of the
+/// three variables. The failure is live on the machine of a developer who
+/// exports `NO_COLOR`, which is exactly the shape a test has to pin rather than
+/// reproduce.
+#[test]
+fn every_run_takes_the_color_variables_away_so_no_test_reads_the_developers_choice() {
+    let command = grind_command(Path::new("."), &["main"]);
+
+    for name in COLOR_VARIABLES {
+        assert!(
+            removes_environment(&command, name),
+            "a run that takes {name} from the developer's shell paints its diff, \
+             or does not, by a choice that the test never made"
+        );
+    }
+}
+
+/// Everything a test wants to look at, gathered once so an assertion failure
+/// can print the whole picture rather than the one stream it happened to check.
+fn streams(output: &Output) -> (Option<i32>, String, String) {
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_string(),
+        String::from_utf8_lossy(&output.stderr)
+            .trim_end()
+            .to_string(),
+    )
+}
+
+/// Stand on `head` and ask about `onto`, the way a developer would.
+fn run(repo: &TestRepo, head: &str, onto: &str) -> (Option<i32>, String, String) {
+    streams(&run_raw(repo, head, &[onto]))
+}
+
+/// The raw output, for the assertions that care about the difference between
+/// "printed nothing" and "printed only whitespace" - which [`streams`] trims
+/// away and `-q` is judged on.
+fn run_raw(repo: &TestRepo, head: &str, args: &[&str]) -> Output {
+    repo.checkout(head);
+
+    grind(repo.path(), args)
+}
+
+/// Assert `-q` printed nothing whatsoever and still answered with `expected`.
+///
+/// Both streams, because the answer being silent is only useful if the *whole*
+/// run is: a caller redirecting stdout to `/dev/null` and getting a note or an
+/// error message on the terminal anyway has not been given a quiet tool.
+fn assert_silent(output: &Output, expected: i32, path: &str) {
+    let (code, stdout, stderr) = streams(output);
+
+    assert_eq!(
+        code,
+        Some(expected),
+        "-q must not change the answer on the {path} path\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "-q printed to stdout on the {path} path:\n{stdout}"
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "-q printed to stderr on the {path} path:\n{stderr}"
+    );
+}
+
+/// Two branches that each add a file of their own rebase onto each other
+/// without a single collision, and the only useful thing to say about that is
+/// so — in one line, with exit 0 so a script can act on it without parsing
+/// anything.
+#[test]
+fn a_rebase_that_collides_with_nothing_exits_clean_and_says_so_in_one_line() {
+    let repo = independent_branches_repo();
+
+    let (code, stdout, stderr) = run(&repo, "alpha", "beta");
+
+    assert_eq!(
+        code,
+        Some(CLEAN),
+        "a clean rebase must exit {CLEAN}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout, "grind: clean - replaying HEAD onto beta hit no conflicts",
+        "stderr:\n{stderr}"
+    );
+}
+
+/// `one` rewrites the same line of `x.txt` and `y.txt` that `two` already
+/// rewrote, so replaying it collides in both files at once.
+///
+/// Asserted as one block rather than line by line because the shape *is* the
+/// contract - the header, the summary indented under it, the blank line, and
+/// the breakdown that says where the work lands - and a developer comparing
+/// this against `grime` reads all of it together.
+#[test]
+fn a_rebase_that_collides_exits_conflicts_and_says_how_much_work_lands_where() {
+    let repo = equal_hunks_unequal_stops_repo();
+
+    let (code, stdout, stderr) = run(&repo, "one", "two");
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "a conflicting rebase must exit {CONFLICTS}, not be lumped in with clean\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(stdout, EQUAL_HUNKS_VERDICT, "stderr:\n{stderr}");
+}
+
+/// A file name and a branch name that are both outside ASCII, end to end
+/// through the binary.
+///
+/// Three things a developer would notice go wrong here, and the verdict is
+/// asserted as one block because it pins all three together: the header echoes
+/// the branch name back, so `left-左` has to arrive unmangled; the breakdown
+/// names the file, so `日本語.txt` must not come back as the C-quoted octal
+/// escape git hands out by default; and the counts have to be the real ones,
+/// because an escaped name resolves to no file on disk and a conflicted file
+/// that cannot be read is silently floored at one hunk.
+///
+/// The panic check is separate from all of that and cheap to keep: byte-slicing
+/// a path is the classic way this code goes wrong, and a binary that died on a
+/// multi-byte name would otherwise be reported here as a plain assertion
+/// mismatch rather than as the crash it is.
+#[test]
+fn a_conflict_in_a_multi_byte_named_file_on_a_multi_byte_branch_survives_intact() {
+    let repo = multi_byte_names_repo();
+
+    let (code, stdout, stderr) = run(&repo, "right-右", "left-左");
+
+    assert!(
+        !stderr.contains("panicked"),
+        "a multi-byte name must not crash the binary:\n{stderr}"
+    );
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "a conflicting rebase must exit {CONFLICTS}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout,
+        r"grind: conflicts - replaying HEAD onto left-左
+       3 hunks across 2 files, 1 stop
+
+  readme.md     1 hunk
+  日本語.txt    2 hunks",
+        "stderr:\n{stderr}"
+    );
+}
+
+/// Which terminal column `count` starts in on `line`.
+///
+/// Measured in display width, because that is the only one of the three lengths
+/// Rust will hand you for a path that corresponds to what a reader sees. A
+/// helper that used `len` or `chars().count()` would agree with a renderer that
+/// made the same mistake and call a ragged column aligned.
+///
+/// Read from the *last* place `count` appears, because the count is the last
+/// thing on the row. A name can spell the count itself - `11 hunks.txt` is a
+/// legal file name - and the first occurrence is then the name rather than the
+/// count.
+///
+/// # Panics
+///
+/// Panics when `count` is nowhere on `line`, because a count the renderer never
+/// printed is a failure of the renderer rather than of the search.
+fn count_column(line: &str, count: &str) -> usize {
+    let start = line
+        .rfind(count)
+        .unwrap_or_else(|| panic!("no {count:?} on the row {line:?}"));
+    let (prefix, _) = line.split_at(start);
+
+    prefix.width()
+}
+
+/// The count is the last thing on a breakdown row, so [`count_column`] has to
+/// read the last place the count appears and not the first.
+///
+/// A file name holds every byte but NUL, and `11 hunks.txt` is a name a
+/// repository can carry. A helper that stops at the first occurrence answers 2
+/// for the first row below - the column the *name* starts in - and every
+/// alignment assertion built on it then passes or fails for a reason that has
+/// nothing to do with alignment.
+///
+/// The second row is the ordinary one, and it is here as the control: a helper
+/// that answered the last occurrence of something else would satisfy the first
+/// assertion and break every real caller.
+#[test]
+fn the_count_column_is_read_from_the_last_place_the_count_appears() {
+    assert_eq!(
+        count_column("  11 hunks.txt    11 hunks", "11 hunks"),
+        18,
+        "a name that spells the count is not the count"
+    );
+    assert_eq!(
+        count_column("  readme.md    1 hunk", "1 hunk"),
+        15,
+        "an ordinary row still reads as the column its count starts in"
+    );
+}
+
+/// The breakdown lines, which are everything after the blank line that
+/// separates them from the summary.
+fn breakdown(stdout: &str) -> Vec<&str> {
+    stdout
+        .lines()
+        .skip_while(|line| !line.is_empty())
+        .skip(1)
+        .collect()
+}
+
+/// The counts have to start in the same terminal column whether or not a name
+/// is multi-byte, which is a different claim from the block above rather than a
+/// restatement of it.
+///
+/// The block is a golden string: someone who broke the padding and re-ran with
+/// the output pasted back in would leave it green. This measures the property
+/// instead, against a name git itself produced - `日本語.txt` is 13 bytes, 7
+/// characters and 10 columns, so padding by either of the two measures Rust
+/// offers for free lands the two counts in different columns, in opposite
+/// directions.
+#[test]
+fn the_per_file_counts_line_up_by_display_width_when_a_name_is_multi_byte() {
+    let repo = multi_byte_names_repo();
+
+    let (_, stdout, stderr) = run(&repo, "right-右", "left-左");
+
+    let lines = breakdown(&stdout);
+    let ascii = lines
+        .iter()
+        .find(|line| line.contains("readme.md"))
+        .unwrap_or_else(|| panic!("no breakdown line for readme.md in:\n{stdout}\n{stderr}"));
+    let wide = lines
+        .iter()
+        .find(|line| line.contains("日本語.txt"))
+        .unwrap_or_else(|| panic!("no breakdown line for 日本語.txt in:\n{stdout}\n{stderr}"));
+
+    assert_eq!(
+        count_column(ascii, "1 hunk"),
+        count_column(wide, "2 hunks"),
+        "the counts must start in the same terminal column:\n{stdout}"
+    );
+}
+
+/// `grind` takes its repository from the directory it was run in, and that
+/// directory is hardly ever the repository root - so the run this test performs
+/// is the ordinary one and every other test in this file is the special case.
+///
+/// What a subdirectory can quietly change is the *names*. Git will happily report
+/// a path relative to the directory it was asked from, so a breakdown naming
+/// `shared.txt` for a file that is really `sub/nested/shared.txt` reads as
+/// perfectly good output while pointing at the wrong file - and a reader scoped
+/// to the cwd instead drops the root `shared.txt` altogether and reports less
+/// work than there is. Both are asserted here, and
+/// [`nested_conflict_repo`] exists to make the two distinguishable: one
+/// conflicted file inside the subdirectory the run starts in, one outside it.
+///
+/// The final assertion is the strongest form of the claim: the whole answer is
+/// byte-identical to the one the same fixture gives from its root, which is the
+/// only place a developer's mental model of the tool comes from.
+///
+/// Verified by mutation: replacing the conflicted-path reader's names with their
+/// last component - a path that is no longer repository-root-relative - fails
+/// this test and leaves the rest of the suite green, every other fixture's
+/// conflicts living at the repository root where the two spellings coincide.
+#[test]
+fn a_run_from_a_subdirectory_names_conflicts_from_the_repository_root() {
+    let repo = nested_conflict_repo();
+    repo.checkout("left");
+    let nested = repo.path().join("sub").join("nested");
+
+    let (code, stdout, stderr) = streams(&grind(&nested, &["right"]));
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "a subdirectory of a repository is inside one, so the question is \
+         answerable from it\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        breakdown(&stdout),
+        vec![
+            "  shared.txt               1 hunk",
+            "  sub/nested/shared.txt    1 hunk",
+        ],
+        "the breakdown has to name both files by their whole path from the \
+         repository root, including the one that conflicted outside the \
+         directory the run started in\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("../"),
+        "a path climbing out of the directory the run started in is a name \
+         relative to the cwd, not to the repository:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains(&repo.path().display().to_string()),
+        "an absolute path inside a temporary fixture is no name for a \
+         conflicted file:\n{stdout}"
+    );
+
+    let (root_code, root_stdout, root_stderr) = streams(&grind(repo.path(), &["right"]));
+
+    assert_eq!(
+        (code, stdout),
+        (root_code, root_stdout),
+        "the same question about the same repository has one answer, whichever \
+         of its directories it was asked from\nstderr:\n{stderr}\nroot stderr:\n{root_stderr}"
+    );
+}
+
+/// How many stops the summary line reports.
+///
+/// Read back out of the rendered text rather than asserted as a whole block,
+/// because what this test cares about is the *number* - the hunk count that
+/// travels with it is an artefact of how conflict markers accumulate across
+/// three collisions, and pinning it here would make the test fail for a reason
+/// it is not about.
+fn stop_count(stdout: &str) -> usize {
+    let summary = stdout
+        .lines()
+        .find(|line| line.contains(" across "))
+        .unwrap_or_else(|| panic!("no summary line in:\n{stdout}"));
+
+    let clause = summary
+        .rsplit(", ")
+        .next()
+        .expect("rsplit always yields at least one piece");
+    let (count, unit) = clause
+        .split_once(' ')
+        .unwrap_or_else(|| panic!("summary does not end in a counted clause:\n{stdout}"));
+
+    assert!(
+        unit.starts_with("stop"),
+        "the summary should end with the stop count, got {clause:?} in:\n{stdout}"
+    );
+    count
+        .parse()
+        .unwrap_or_else(|_| panic!("stop count {count:?} is not a number in:\n{stdout}"))
+}
+
+/// The asymmetry that makes a stop count worth printing at all: `iterated`
+/// rewrote one line across three commits, so replaying it onto a branch that
+/// already changed that line halts the rebase once per commit.
+///
+/// A tool that reported this as a single collision - the way a merge would, and
+/// the way a rebase measured only at its first stop does - would tell a
+/// developer the cheap and the expensive branch cost the same.
+#[test]
+fn a_branch_that_rewrote_one_region_across_three_commits_stops_more_than_once() {
+    let repo = contested_region_repo();
+
+    let (code, stdout, stderr) = run(&repo, "iterated", "single");
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stop_count(&stdout) > 1,
+        "three commits over one contested line must halt the rebase more than once, got:\n{stdout}"
+    );
+}
+
+/// Run `grind` with the given arguments and nowhere to put a temporary
+/// directory, so creating a scratch worktree is guaranteed to fail and
+/// everything before it is not.
+///
+/// `TMPDIR` is set on the child process only. `std::env::set_var` is
+/// process-global and Rust runs the tests in this binary as threads of one
+/// process, so poisoning it there would sabotage every other test in the file.
+fn grind_with_nowhere_to_put_a_scratch(
+    repo: &TestRepo,
+    args: &[&str],
+) -> (Option<i32>, String, String) {
+    // Under the fixture's own `TempDir`, so two concurrent copies of this test
+    // cannot name the same path - and never created, so it stays missing.
+    let missing = repo.path().join("tmpdir-that-does-not-exist");
+
+    let output = grind_command(repo.path(), args)
+        .env("TMPDIR", missing)
+        .output()
+        .expect("failed to run grind");
+
+    streams(&output)
+}
+
+/// A branch name that does not resolve is a bad argument, not a conflict, and
+/// answering it must not cost a scratch worktree.
+///
+/// Proving *no scratch worktree was created* needs a discriminator that
+/// survives the tool's own cleanup. `git worktree list` is not one: a `Scratch`
+/// removes itself on drop, so the list comes back empty whether one was built
+/// or not, and the assertion would pass for exactly the binary it is supposed
+/// to catch.
+///
+/// `TMPDIR` is that discriminator. Building a scratch worktree - `Repo::scratch`
+/// and, behind it, `Scratch`'s own constructor - calls `TempDir::new`, which
+/// resolves `TMPDIR`. The pre-flight queries beside it (`Repo::open`,
+/// `Repo::resolve`, `Repo::uncommitted_files`) deliberately create no temporary
+/// directory at all, which is what makes them unconditionally cheap. Pointing
+/// `TMPDIR` at a path that does not exist therefore breaks exactly one of the
+/// two - so if resolution still gets its word in, it demonstrably ran first.
+///
+/// The control half is what makes the first half mean anything: it proves the
+/// poisoned `TMPDIR` really does reach the worktree half rather than being
+/// quietly ignored, which would make "no scratch error" vacuously true.
+///
+/// The tree is dirty on purpose, which is what gives the two runs a caveat to
+/// hold back. The uncommitted-work note qualifies a verdict, so neither run
+/// prints one: the first has no verdict because the branch does not resolve,
+/// and the control has none because the scratch worktree cannot be built. The
+/// unborn-HEAD test below states the same rule one step earlier.
+#[test]
+fn a_branch_that_does_not_resolve_is_refused_before_any_scratch_worktree_exists() {
+    let repo = independent_branches_repo();
+    repo.write_file("scratch-notes.txt", "untracked work in progress\n");
+
+    let (code, stdout, stderr) =
+        grind_with_nowhere_to_put_a_scratch(&repo, &["nonexistent-branch"]);
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "an unresolvable branch must exit {ERROR}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("could not resolve 'nonexistent-branch'"),
+        "the message must name the ref that did not resolve, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("scratch directory"),
+        "resolution must happen before a scratch worktree is built, but the run \
+         got as far as needing one:\n{stderr}"
+    );
+    // The live defect this tool was written to kill: the shell function it
+    // replaces ran a bare `git rebase` and announced a typo as a conflict.
+    assert!(
+        !stdout.contains("conflicts") && !stderr.contains("conflicts"),
+        "a typo'd branch name must never be reported as a conflict\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("note:"),
+        "the tree is dirty, but a caveat qualifies a verdict and this run has \
+         no verdict to qualify:\n{stderr}"
+    );
+
+    let (control_code, control_stdout, control_stderr) =
+        grind_with_nowhere_to_put_a_scratch(&repo, &["beta"]);
+
+    assert_eq!(
+        control_code,
+        Some(ERROR),
+        "stdout:\n{control_stdout}\nstderr:\n{control_stderr}"
+    );
+    assert!(
+        control_stderr.contains("could not create a scratch directory"),
+        "a resolvable branch with the same poisoned TMPDIR must fail at the \
+         scratch, or the assertion above proves nothing:\n{control_stderr}"
+    );
+    assert!(
+        !control_stderr.contains("note:"),
+        "the caveat about uncommitted work qualifies the verdict, so a run \
+         that dies before the verdict must not print it:\n{control_stderr}"
+    );
+}
+
+/// A branch name that starts with a dash is a branch name, and the pre-flight
+/// has to read it as one.
+///
+/// `git rev-parse --root^{commit}` prints its argument back and exits 0,
+/// because rev-parse passes an option it does not know through to rev-list
+/// rather than refusing it. The pre-flight read that exit code as "the branch
+/// names a commit" and let the run through. `git rebase --root` then rebased
+/// the whole history onto nothing, hit no conflict, and `grind` printed
+/// `grind: clean - replaying HEAD onto --root hit no conflicts` at exit
+/// [`CLEAN`] - a clean verdict for a branch that does not exist. That is the
+/// exact defect this tool was written to kill, arriving through the one check
+/// that was supposed to stop it.
+///
+/// `--root` is the name that costs the most, because git knows it as an option
+/// of `rebase`. Every other dash-leading name reaches [`ERROR`] through a
+/// rebase that fails, so this one is the only one that answers, and it answers
+/// backwards.
+///
+/// The `--` in the argument list is how a user says "this is the positional".
+/// Without it clap reads `--root` as an option of grind's own and refuses it
+/// before any of the code under test runs, so the test would pass on clap's
+/// refusal and say nothing about the pre-flight.
+///
+/// The control at the end asks the same binary about a branch that does exist.
+/// Without it a `grind` that refused every branch would pass here.
+#[test]
+fn a_branch_name_that_starts_with_a_dash_is_refused_rather_than_reported_clean() {
+    let repo = independent_branches_repo();
+
+    let (code, stdout, stderr) = streams(&run_raw(&repo, "alpha", &["--", "--root"]));
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "a branch name that names no commit must exit {ERROR}, never {CLEAN}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("could not resolve '--root'"),
+        "the message must name the branch that did not resolve, in grind's own words:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("clean") && !stderr.contains("clean"),
+        "a branch that does not exist must never be reported as a clean rebase\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let (control_code, control_stdout, control_stderr) = run(&repo, "alpha", "beta");
+
+    assert_eq!(
+        control_code,
+        Some(CLEAN),
+        "a branch that does exist must still be answered, or the refusal above proves only that \
+         this binary refuses everything\nstdout:\n{control_stdout}\nstderr:\n{control_stderr}"
+    );
+}
+
+/// A run depends on *two* revisions - the branch the user named and the HEAD
+/// being replayed - and only one of them arrives as an argument, so the other is
+/// the one a pre-flight is liable to forget.
+///
+/// An orphan branch is the shape where they disagree: `git checkout --orphan`
+/// leaves HEAD naming a branch that has no commit on it, while every other
+/// branch in the repository resolves as usual. Built inline rather than added to
+/// `gitscratch::testing` because it is one git call on top of an existing
+/// fixture, and *which* revision is unborn is the whole subject of this test
+/// rather than a shape other suites would share.
+///
+/// The exit code was never wrong here, so this is about the message. Before HEAD
+/// was resolved up front, a repository with nothing committed paid for a
+/// `TempDir` and a real `git worktree add` on the way to being told off, and was
+/// then told off in git's words rather than grind's - `fatal: invalid reference:
+/// HEAD`, wrapped around an absolute path inside a temporary directory that no
+/// longer exists by the time anybody reads it. A bad argument has to arrive
+/// looking like a bad argument, which is `repo.rs`'s own stated reason for the
+/// pre-flight existing at all.
+///
+/// `TMPDIR` is pointed somewhere this test knows the name of, which is what makes
+/// the leak assertable rather than merely unlikely: the scratch path is otherwise
+/// a name only the child process ever learns.
+#[test]
+fn a_head_with_no_commit_on_it_is_refused_in_grinds_own_words_and_costs_no_worktree() {
+    let repo = independent_branches_repo();
+    repo.git(&["checkout", "-q", "--orphan", "unborn"]);
+
+    // Under the fixture's own `TempDir`, so two concurrent copies of this test
+    // cannot name the same path, and created rather than missing, so a run that
+    // gets as far as building a scratch worktree succeeds at it and leaks the
+    // path instead of failing earlier for an unrelated reason.
+    let scratch_tmp = repo.path().join("scratch-tmp");
+    std::fs::create_dir(&scratch_tmp).expect("create the scratch TMPDIR");
+
+    let output = grind_command(repo.path(), &["beta"])
+        .env("TMPDIR", &scratch_tmp)
+        .output()
+        .expect("failed to run grind");
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "a HEAD with nothing on it is a state grind cannot answer from, so \
+         {ERROR}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("a replay starts from HEAD") && stderr.contains("no commit at HEAD"),
+        "the message must say in grind's own words that HEAD is what has \
+         nothing on it, since the user named a branch and never mentioned \
+         HEAD:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains(&scratch_tmp.display().to_string()),
+        "an internal temporary path is no part of a bad-argument message, and \
+         the directory it names is gone before anyone reads it:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("worktree add"),
+        "resolving HEAD costs nothing, so it has to happen before a scratch \
+         worktree is built rather than inside one:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("note:"),
+        "a repository with nothing to replay from is refused before there is \
+         anything to qualify with a caveat:\n{stderr}"
+    );
+}
+
+/// The header line of a verdict, which is the line that names the branch a run
+/// measured.
+///
+/// The rest of the block is asserted whole elsewhere in this file. What each
+/// test below is about is *which branch got measured*, and the exit code plus
+/// this one line is the whole of that claim.
+fn header(stdout: &str) -> &str {
+    stdout.lines().next().unwrap_or_default()
+}
+
+/// The name almost every run means, so a repository holding it must not make
+/// the developer type it.
+///
+/// [`default_branch_choice_repo`] holds `main` alone here, and `main` is the
+/// clean candidate. The exit code thus says which branch was measured on its
+/// own. A tool that printed `main` while measuring `master` would answer
+/// [`ERROR`], because the fixture holds no `master` to measure.
+#[test]
+fn no_branch_measures_main_when_the_repository_holds_one() {
+    let repo = default_branch_choice_repo(&["main"]);
+
+    let (code, stdout, stderr) = streams(&run_raw(&repo, CHOICE_HEAD_BRANCH, &[]));
+
+    assert_eq!(
+        code,
+        Some(CLEAN),
+        "replaying work onto main collides with nothing\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout, "grind: clean - replaying HEAD onto main hit no conflicts",
+        "the line that already names the action is what tells the developer \
+         which branch got measured\nstderr:\n{stderr}"
+    );
+}
+
+/// The older name is still the default branch of plenty of repositories, and a
+/// tool that knew only the newer one would refuse every one of them.
+///
+/// `master` is the candidate that collides in the fixture, so [`CONFLICTS`] is
+/// the answer only a run that really measured `master` can give.
+#[test]
+fn no_branch_falls_back_to_master_when_the_repository_holds_no_main() {
+    let repo = default_branch_choice_repo(&["master"]);
+
+    let (code, stdout, stderr) = streams(&run_raw(&repo, CHOICE_HEAD_BRANCH, &[]));
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "replaying work onto master rewrites the line master rewrote\nstdout:\n\
+         {stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        header(&stdout),
+        "grind: conflicts - replaying HEAD onto master",
+        "stderr:\n{stderr}"
+    );
+}
+
+/// A repository carrying both names is the ordinary shape of one that was
+/// renamed, and the new name is the one it is developed on now.
+#[test]
+fn no_branch_measures_main_when_the_repository_holds_both_candidates() {
+    let repo = default_branch_choice_repo(&["main", "master"]);
+
+    let (code, stdout, stderr) = streams(&run_raw(&repo, CHOICE_HEAD_BRANCH, &[]));
+
+    assert_eq!(
+        code,
+        Some(CLEAN),
+        "main outranks master, and only main is clean here\nstdout:\n{stdout}\n\
+         stderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout, "grind: clean - replaying HEAD onto main hit no conflicts",
+        "stderr:\n{stderr}"
+    );
+}
+
+/// The default spares the developer a name they always type. It must never
+/// overrule the one they did type.
+#[test]
+fn a_named_branch_wins_over_the_default_that_would_have_been_picked() {
+    let repo = default_branch_choice_repo(&["main", "master"]);
+
+    let (code, stdout, stderr) = streams(&run_raw(&repo, CHOICE_HEAD_BRANCH, &["master"]));
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "the branch the developer named is the branch that gets measured\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        header(&stdout),
+        "grind: conflicts - replaying HEAD onto master",
+        "stderr:\n{stderr}"
+    );
+}
+
+/// A repository with neither candidate is refused, and the refusal names both
+/// of them so the developer can see which two names were tried.
+///
+/// [`ERROR`] rather than a fall back to `HEAD`: a replay of HEAD onto HEAD is
+/// clean in every repository there is, so the fallback would put a confident
+/// wrong answer where a refusal belongs.
+#[test]
+fn no_branch_and_no_candidate_is_refused_in_words_that_name_both_candidates() {
+    let repo = default_branch_choice_repo(&[]);
+
+    let (code, stdout, stderr) = streams(&run_raw(&repo, CHOICE_HEAD_BRANCH, &[]));
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "a run that cannot tell which branch was meant answers {ERROR}, never \
+         clean\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout, "",
+        "the refusal belongs on stderr, where it cannot contaminate a pipeline"
+    );
+    for candidate in DEFAULT_BRANCHES {
+        assert!(
+            stderr.contains(candidate),
+            "the refusal has to name every candidate it tried, and it does not \
+             name {candidate}:\n{stderr}"
+        );
+    }
+}
+
+/// The refusal is `grind`'s own, so `-q` reaches it - unlike the parser's
+/// refusal below, which answers before `grind` starts.
+#[test]
+fn quiet_prints_nothing_when_no_default_branch_resolves() {
+    let repo = default_branch_choice_repo(&[]);
+
+    assert_silent(
+        &run_raw(&repo, CHOICE_HEAD_BRANCH, &["-q"]),
+        ERROR,
+        "no default branch",
+    );
+}
+
+/// The flag that replays only the commits above an upstream, onto a new base.
+const ONTO_FLAG: &str = "--onto";
+
+/// A stacked branch after a squash merge of its parent replays clean with
+/// `--onto`, although a plain run reports false conflicts.
+///
+/// The control run comes first. It proves the fixture holds the false conflicts
+/// of the commits of `parent`, so the clean verdict below is not vacuous. With
+/// `--onto main parent`, `grind` replays only `parent..HEAD`, which is the
+/// commits of `child` alone, and those commits hit no conflict.
+#[test]
+fn onto_replays_only_the_commits_above_the_upstream_and_reports_clean() {
+    let repo = squash_merged_parent_repo();
+
+    let control = run_raw(&repo, "child", &["main"]);
+    assert_eq!(
+        control.status.code(),
+        Some(CONFLICTS),
+        "a plain run has to report the false conflicts of the commits of parent:\n\
+         stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&control.stdout),
+        String::from_utf8_lossy(&control.stderr)
+    );
+
+    let output = run_raw(&repo, "child", &[ONTO_FLAG, "main", "parent"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(CLEAN),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout, "grind: clean - replaying parent..HEAD onto main hit no conflicts\n",
+        "stderr:\n{stderr}"
+    );
+}
+
+/// `--onto` counts the hunks of the commits above the upstream and no others.
+///
+/// `contested-child` rewrites a line of `stacked.txt` that `main` also
+/// rewrote, so one stop is real. The commits of `parent` are already in `main`
+/// through the squash merge, so `shared.txt` must not appear in the breakdown.
+#[test]
+fn onto_counts_the_hunks_of_the_commits_above_the_upstream_and_no_others() {
+    let repo = squash_merged_parent_repo();
+
+    let output = run_raw(&repo, "contested-child", &[ONTO_FLAG, "main", "parent"]);
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout,
+        r"grind: conflicts - replaying parent..HEAD onto main
+       1 hunk across 1 file, 1 stop
+
+  stacked.txt    1 hunk",
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("shared.txt"),
+        "the commits of parent are already in main and must cost nothing:\n{stdout}"
+    );
+}
+
+/// How many worktrees the repository lists, the main one included.
+///
+/// This is the literal check that the issue asks for. Alone it proves nothing,
+/// because a scratch removes itself on drop, so the count is 1 whether a scratch
+/// was built or not. The poisoned `TMPDIR` of
+/// `grind_with_nowhere_to_put_a_scratch` is the real discriminator.
+fn worktree_count(repo: &TestRepo) -> usize {
+    repo.git(&["worktree", "list", "--porcelain"])
+        .lines()
+        .filter(|line| line.starts_with("worktree "))
+        .count()
+}
+
+/// A NEWBASE that does not resolve is a bad argument, and answering it must not
+/// cost a scratch worktree.
+///
+/// The proof is the poisoned `TMPDIR` of `grind_with_nowhere_to_put_a_scratch`.
+/// If the message names the NEWBASE and not the scratch directory, resolution
+/// ran first. The control run uses a NEWBASE that resolves. It has to fail at
+/// the scratch, or the main assertions prove nothing.
+#[test]
+fn an_onto_that_does_not_resolve_is_refused_before_any_scratch_worktree_exists() {
+    let repo = squash_merged_parent_repo();
+    repo.checkout("child");
+
+    let (code, stdout, stderr) =
+        grind_with_nowhere_to_put_a_scratch(&repo, &[ONTO_FLAG, "nope", "parent"]);
+
+    assert_eq!(code, Some(ERROR), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stderr.contains("could not resolve 'nope'"),
+        "the message must name the NEWBASE that did not resolve\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("scratch directory"),
+        "resolution must happen before a scratch worktree is built\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("clean") && !stderr.contains("clean"),
+        "a bad NEWBASE must not report clean\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("conflicts") && !stderr.contains("conflicts"),
+        "a bad NEWBASE must not report conflicts\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(worktree_count(&repo), 1, "no worktree may remain");
+
+    let (control_code, control_stdout, control_stderr) =
+        grind_with_nowhere_to_put_a_scratch(&repo, &[ONTO_FLAG, "main", "parent"]);
+
+    assert_eq!(
+        control_code,
+        Some(ERROR),
+        "stdout:\n{control_stdout}\nstderr:\n{control_stderr}"
+    );
+    assert!(
+        control_stderr.contains("could not create a scratch directory"),
+        "a NEWBASE that resolves must fail at the scratch under the same poisoned \
+         TMPDIR, or the assertions above prove nothing\nstdout:\n{control_stdout}\nstderr:\n{control_stderr}"
+    );
+}
+
+/// A NEWBASE that starts with a dash is refused, not replayed onto the root.
+///
+/// Git knows `--root` as an option of `rebase`. The one-revision form already
+/// had a defect where `--root` was reported clean, see
+/// `a_branch_name_that_starts_with_a_dash_is_refused_rather_than_reported_clean`.
+/// The joined `--onto=` spelling is how a user passes a dash-leading value to
+/// clap. The second run uses the real `TMPDIR` and pins that `grind` never
+/// replays onto the root and never reports clean.
+#[test]
+fn an_onto_that_starts_with_a_dash_is_refused_rather_than_replayed_onto_the_root() {
+    let repo = squash_merged_parent_repo();
+    repo.checkout("child");
+
+    let (code, stdout, stderr) =
+        grind_with_nowhere_to_put_a_scratch(&repo, &["--onto=--root", "parent"]);
+
+    assert_eq!(code, Some(ERROR), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stderr.contains("could not resolve '--root'"),
+        "the message must name the NEWBASE that did not resolve\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("scratch directory"),
+        "resolution must happen before a scratch worktree is built\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("clean") && !stderr.contains("clean"),
+        "a dash-leading NEWBASE must not report clean\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let output = run_raw(&repo, "child", &["--onto=--root", "parent"]);
+    let (real_code, real_stdout, real_stderr) = streams(&output);
+    assert_eq!(
+        real_code,
+        Some(ERROR),
+        "stdout:\n{real_stdout}\nstderr:\n{real_stderr}"
+    );
+    assert!(
+        !real_stdout.contains("clean") && !real_stderr.contains("clean"),
+        "a dash-leading NEWBASE must never report clean\nstdout:\n{real_stdout}\nstderr:\n{real_stderr}"
+    );
+    assert_eq!(worktree_count(&repo), 1, "no worktree may remain");
+}
+
+/// `--onto` without BRANCH is a usage error from the parser, also under `-q`.
+///
+/// Without this rule, BRANCH gets the default branch. From `child`, the run
+/// then replays `main..HEAD` onto `main`, which is a plain rebase onto `main`.
+/// That run reports the false conflicts of the commits of `parent` under a
+/// verdict that names `--onto`. So the parser refuses the command line before
+/// `grind` starts, and `-q` does not reach the refusal.
+///
+/// The refusal starts with `error:`, which is how clap opens its errors.
+/// `grind` opens its own errors with `grind: error:`, so this prefix shows
+/// that the parser answered.
+#[test]
+fn onto_without_an_upstream_is_a_usage_error_from_the_parser() {
+    let repo = squash_merged_parent_repo();
+
+    for args in [&[ONTO_FLAG, "main"][..], &["-q", ONTO_FLAG, "main"][..]] {
+        let output = run_raw(&repo, "child", args);
+        let (code, stdout, stderr) = streams(&output);
+
+        assert_eq!(
+            code,
+            Some(ERROR),
+            "{args:?} has no upstream to bound the replay, so it is a usage error\n\
+             stdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stderr.starts_with("error:") && stderr.contains("BRANCH"),
+            "{args:?} must get the usage error of the parser, which names the \
+             missing BRANCH:\n{stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{args:?} printed a verdict for a command line it cannot read:\n{stdout}"
+        );
+    }
+}
+
+/// One of the three build-state words `CLAUDE.md` allows after the hash.
+const BUILD_STATES: [&str; 3] = ["clean", "dirty", "unknown"];
+
+/// How many characters of the commit hash the repository's version format
+/// carries.
+const HASH_LENGTH: usize = 7;
+
+/// Assert `line` has every part of the version format this repository requires:
+/// `grind 0.1.0 (abc1234, clean)`.
+///
+/// Checked as a *shape* rather than against a literal, because two of the four
+/// parts move on their own: the hash changes with every commit and the build
+/// state with every unstaged edit, so a golden string would fail on the next
+/// commit for a reason that has nothing to do with the format.
+///
+/// All four parts are checked, because the mistake the repository rule exists
+/// to prevent is dropping one of them — a tool wired up with clap's bare
+/// `version` prints `grind 0.1.0` and nothing else, which tells a developer
+/// holding a binary the release it claims to be but not which build it actually
+/// is. A substring assertion would pass for exactly that binary.
+fn assert_version_line(line: &str) {
+    let (name, rest) = line
+        .split_once(' ')
+        .unwrap_or_else(|| panic!("the version line must name the tool, got {line:?}"));
+    assert_eq!(
+        name, "grind",
+        "the version line must start with the tool's own name, got {line:?}"
+    );
+
+    let (release, build) = rest.split_once(' ').unwrap_or_else(|| {
+        panic!("the version line must carry the build alongside the release, got {line:?}")
+    });
+
+    let components: Vec<&str> = release.split('.').collect();
+    assert_eq!(
+        components.len(),
+        3,
+        "the release must be a semver, got {release:?} in {line:?}"
+    );
+    assert!(
+        components
+            .iter()
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit())),
+        "every semver component must be a number, got {release:?} in {line:?}"
+    );
+
+    let inner = build
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("the build must be parenthesised, got {build:?} in {line:?}"));
+    let (hash, state) = inner
+        .split_once(", ")
+        .unwrap_or_else(|| panic!("the build must be a hash and a state, got {inner:?}"));
+
+    // `unknown` is the documented stand-in for a build made where git could not
+    // be consulted, so it is a legal hash - but nothing else short of a real
+    // abbreviated commit id is.
+    assert!(
+        hash == "unknown"
+            || (hash.chars().count() == HASH_LENGTH && hash.chars().all(|c| c.is_ascii_hexdigit())),
+        "the build must name the commit it came from as a {HASH_LENGTH}-character \
+         hash, got {hash:?} in {line:?}"
+    );
+    assert!(
+        BUILD_STATES.contains(&state),
+        "the build state must be one of {BUILD_STATES:?}, got {state:?} in {line:?}"
+    );
+}
+
+/// A binary that cannot say which build it is cannot be debugged from a bug
+/// report, which is why every tool in this repository owes the same four-part
+/// version line - name, release, commit, and whether the tree was dirty when it
+/// was built.
+///
+/// Run outside every repository on purpose: the version is a fact baked in at
+/// compile time, so asking for it must not depend on where the binary is
+/// standing when you ask.
+///
+/// `-V` is asserted to be byte-identical rather than merely present, because
+/// the documented rule names both spellings and two renderings of the same
+/// fact is precisely the drift a shared format exists to prevent.
+#[test]
+fn version_names_the_tool_the_release_and_the_build_it_came_from() {
+    let elsewhere = not_a_repository();
+
+    let long = streams(&grind(elsewhere.path(), &["--version"]));
+    let short = streams(&grind(elsewhere.path(), &["-V"]));
+
+    assert_eq!(
+        long.0,
+        Some(0),
+        "asking for the version is not a question about conflicts, so it \
+         succeeds\nstdout:\n{}\nstderr:\n{}",
+        long.1,
+        long.2
+    );
+    assert_version_line(&long.1);
+    assert_eq!(
+        short, long,
+        "-V and --version are two spellings of one switch, not two renderings"
+    );
+}
+
+/// The sentence `--help` opens with, which is the doc comment on `Args`.
+///
+/// clap's derive takes the doc comment on the struct as the help text, unless
+/// the attribute names `about`. A bare `about` takes `CARGO_PKG_DESCRIPTION`
+/// instead, and the doc comment then says nothing to anybody who runs the tool.
+/// Two sentences describe `grind`, one of them is dead, and the dead one is the
+/// one sitting where a developer edits the help.
+///
+/// `grind` names no `about`, so the doc comment is the help. The manifest keeps
+/// a sentence of its own for crates.io and `cargo search`, where the reader has
+/// run nothing and `BRANCH` names nothing.
+const HELP_SUMMARY: &str =
+    "Report whether rebasing HEAD onto BRANCH would conflict, and by how much";
+
+/// The help a user reads has to be the help a developer edits.
+///
+/// The first line only, because the lines under it are clap's own layout, and
+/// pinning those makes an assertion about the version of clap.
+///
+/// `-h` is asserted byte for byte against `--help` for the reason the version
+/// test gives about `-V`: two spellings are one switch, and two renderings of
+/// one fact are the drift a shared format exists to stop.
+///
+/// Run outside every repository, because the help is a fact baked in at compile
+/// time and asking for it must not depend on where the binary stands.
+#[test]
+fn help_opens_with_the_summary_the_source_carries_rather_than_the_manifest_one() {
+    assert_ne!(
+        HELP_SUMMARY,
+        env!("CARGO_PKG_DESCRIPTION"),
+        "the two sentences have to differ, or this test cannot tell the help \
+         apart from the manifest wording it exists to keep out of it"
+    );
+
+    let elsewhere = not_a_repository();
+
+    let long = streams(&grind(elsewhere.path(), &["--help"]));
+    let short = streams(&grind(elsewhere.path(), &["-h"]));
+
+    assert_eq!(
+        long.0,
+        Some(0),
+        "asking for the help is not a question about conflicts, so it \
+         succeeds\nstdout:\n{}\nstderr:\n{}",
+        long.1,
+        long.2
+    );
+    assert_eq!(
+        long.1.lines().next(),
+        Some(HELP_SUMMARY),
+        "the help must open with the sentence the source carries\nstdout:\n{}",
+        long.1
+    );
+    assert_eq!(
+        short, long,
+        "-h and --help are two spellings of one switch, not two renderings"
+    );
+}
+
+/// Somewhere outside every repository there is no question to answer, and
+/// saying so has to be distinguishable from answering it.
+///
+/// The exit code is the whole point. A tool that reported this as `1` would be
+/// telling a script "the rebase would conflict" about a directory it never
+/// found a rebase in.
+#[test]
+fn a_directory_that_is_not_a_repository_is_an_error_not_a_conflict() {
+    let elsewhere = not_a_repository();
+
+    let (code, stdout, stderr) = streams(&grind(elsewhere.path(), &["main"]));
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "running outside a repository must exit {ERROR}, never {CONFLICTS}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("is not inside a git repository"),
+        "the message must say what was wrong with the directory, got:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("conflicts") && !stderr.contains("conflicts"),
+        "there was no rebase to conflict\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+/// A rebase can fail outright, leaving no halted rebase and no unmerged paths
+/// to measure - and a replay that measures nothing must not therefore announce
+/// that nothing went wrong.
+///
+/// `@{-1}` looks like an arbitrary choice and is not. It is the trigger because
+/// it is *per-worktree*: it means "the branch checked out before this one", and
+/// git answers it from the HEAD reflog of whichever worktree is asking.
+///
+/// That splits the two places `grind` resolves things. Standing in the
+/// developer's repository - which has switched branches at least once, because
+/// the harness just checked one out - `@{-1}` resolves, so the pre-flight
+/// `Repo::resolve` accepts the argument and the run proceeds. The scratch
+/// worktree, however, was created seconds ago and detached, so its HEAD reflog
+/// holds no previous *branch* at all and `git rebase '@{-1}'` dies with
+/// `fatal: invalid upstream '@{-1}'`, exit 128, having entered no rebase.
+///
+/// That is exactly the shape being pinned - git failed, there is no rebase in
+/// progress, and `git diff --diff-filter=U` is empty - reached without
+/// corrupting a repository or racing a background process to produce it.
+///
+/// This is the one assertion in the file that matches git's own words rather
+/// than grind's, so it is the one that [`PINNED_LOCALE`] exists for: git wraps
+/// `invalid upstream` in gettext, and a git built with the translations answers
+/// in the language of whoever runs the suite.
+#[test]
+fn a_rebase_that_fails_with_nothing_to_measure_is_neither_clean_nor_conflicts() {
+    let repo = independent_branches_repo();
+    // Dirty, so the run has a caveat to hold back. The scratch worktree gets
+    // built here and the replay is what fails, which is the other half of the
+    // rule the poisoned-TMPDIR test above pins.
+    repo.write_file("scratch-notes.txt", "untracked work in progress\n");
+
+    let (code, stdout, stderr) = run(&repo, "alpha", "@{-1}");
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "a rebase that failed outright must exit {ERROR}, not {CLEAN} for \
+         having counted no conflicts\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("invalid upstream"),
+        "git's own explanation is the only part that says what went wrong, so \
+         it has to survive to the user:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("clean") && !stdout.contains("conflicts"),
+        "a run that could not measure anything must claim neither verdict:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("note:"),
+        "a replay that failed leaves no verdict, and a caveat with nothing to \
+         qualify is a wrong sentence:\n{stderr}"
+    );
+}
+
+/// `grind` simulates from HEAD, which is the only thing it *can* simulate from,
+/// so uncommitted work is not an error - but a `clean` verdict must never be
+/// read as covering it.
+///
+/// The clean run is taken first and used as the baseline, which is what makes
+/// this one test rather than three. It pins that a tree with nothing
+/// uncommitted says nothing at all - a note printed unconditionally would be
+/// noise people learn to ignore - and then that dirtying the tree adds the
+/// note and changes literally nothing else, neither the verdict a human reads
+/// nor the number a script acts on.
+///
+/// The note goes to stderr precisely so that last part is true: a caller
+/// piping stdout somewhere gets the same bytes either way.
+#[test]
+fn uncommitted_work_gets_a_note_on_stderr_and_leaves_the_answer_alone() {
+    let repo = independent_branches_repo();
+
+    let (clean_code, clean_stdout, clean_stderr) = run(&repo, "alpha", "beta");
+
+    assert_eq!(
+        clean_stderr, "",
+        "a tree with nothing uncommitted has nothing to warn about"
+    );
+
+    // One tracked file modified and one file never added, because
+    // `uncommitted_files` counts both and a note that missed either would be
+    // undercounting exactly the work it exists to mention.
+    repo.write_file("shared.txt", "locally edited, never committed\n");
+    repo.write_file("scratch-notes.txt", "untracked work in progress\n");
+
+    let (dirty_code, dirty_stdout, dirty_stderr) = run(&repo, "alpha", "beta");
+
+    assert_eq!(
+        dirty_stderr, "grind: note: 2 uncommitted files are not included; simulating from HEAD",
+        "stdout:\n{dirty_stdout}"
+    );
+    assert_eq!(
+        dirty_code, clean_code,
+        "a dirty tree is not an error, so the exit code must not move\nstderr:\n{dirty_stderr}"
+    );
+    assert_eq!(
+        dirty_stdout, clean_stdout,
+        "the note belongs on stderr; stdout must be byte-for-byte what the \
+         clean run produced"
+    );
+}
+
+/// A bare repository is where the cheap pre-flight query turns out to be
+/// *stricter* than the expensive replay it exists to spare you: `git worktree
+/// add --detach HEAD` works against one, so the rebase can be replayed and
+/// measured exactly as usual, while `git status --porcelain` cannot run at all
+/// - there is no working tree to take a status of.
+///
+/// The dirty-tree note is documented as a caveat that qualifies the verdict
+/// without changing it, so a caveat that cannot be computed must cost the
+/// caveat. Failing the run instead trades a right answer - these two branches
+/// genuinely collide - for git's own complaint about a query the user never
+/// asked for, which does not even say what is unsupported.
+///
+/// Asserted against [`EQUAL_HUNKS_VERDICT`], so the claim is the strong one:
+/// the same fixture answers a bare repository with the byte-identical verdict it
+/// gives through its working tree, since a replay never looks at the working
+/// tree in the first place.
+#[test]
+fn a_repository_with_no_working_tree_is_answered_rather_than_refused() {
+    let repo = equal_hunks_unequal_stops_repo();
+    let bare = repo.bare_clone("one");
+
+    let (code, stdout, stderr) = streams(&grind(bare.path(), &["two"]));
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "the replay can run in a bare repository, so the answer is {CONFLICTS} \
+         rather than {ERROR}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(stdout, EQUAL_HUNKS_VERDICT, "stderr:\n{stderr}");
+    assert_eq!(
+        stderr, "",
+        "a note that cannot be computed is a note nobody gets, not an error \
+         message about git internals"
+    );
+}
+
+/// Unlike a tool that prints a value, `grind` has no answer to pipe - the
+/// answer *is* the exit code. So a scripted caller asking for quiet wants
+/// silence, not a terser rendering, and gets it on the happy path first.
+#[test]
+fn quiet_prints_nothing_when_the_replay_is_clean() {
+    let repo = independent_branches_repo();
+
+    let output = run_raw(&repo, "alpha", &["-q", "beta"]);
+
+    assert_silent(&output, CLEAN, "clean");
+}
+
+/// Deliberately measured over a *dirty* tree, because the verdict is not the
+/// only thing `-q` has to swallow. A quiet mode that silences the report and
+/// leaves the uncommitted-work note on stderr would pass a clean-tree test and
+/// still spray output into a script's terminal.
+#[test]
+fn quiet_prints_nothing_when_the_replay_conflicts_over_a_dirty_tree() {
+    let repo = equal_hunks_unequal_stops_repo();
+    repo.write_file("scratch-notes.txt", "untracked work in progress\n");
+
+    let output = run_raw(&repo, "one", &["-q", "two"]);
+
+    assert_silent(&output, CONFLICTS, "conflicts");
+}
+
+/// The error message is the last thing that could leak, and the one most
+/// easily forgotten, because it is printed from `main` rather than from the
+/// code that does the work.
+#[test]
+fn quiet_prints_nothing_when_the_run_cannot_answer_at_all() {
+    let repo = independent_branches_repo();
+
+    let output = run_raw(&repo, "alpha", &["-q", "nonexistent-branch"]);
+
+    assert_silent(&output, ERROR, "error");
+}
+
+/// `-q` and `--quiet` are two spellings of one switch, and the file already
+/// holds that standard: the version test asserts `-V` and `--version` are
+/// byte-identical rather than merely both present.
+///
+/// The three tests above all reach for the short spelling, so the long one runs
+/// nowhere. Asserted byte for byte against the short run rather than against
+/// silence alone, because "both spellings print nothing" is also true of a
+/// binary that refuses the long one - clap prints its refusal to stderr, which
+/// [`assert_silent`] catches, and the comparison catches an exit code that
+/// moved.
+///
+/// The conflict path carries it, because that is the path with the most to
+/// swallow: a verdict on stdout, and an uncommitted-work note on stderr.
+#[test]
+fn the_long_spelling_of_quiet_answers_exactly_as_the_short_one_does() {
+    let repo = equal_hunks_unequal_stops_repo();
+    repo.write_file("scratch-notes.txt", "untracked work in progress\n");
+
+    let short = run_raw(&repo, "one", &["-q", "two"]);
+    let long = run_raw(&repo, "one", &["--quiet", "two"]);
+
+    assert_silent(&long, CONFLICTS, "conflicts");
+    assert_eq!(
+        (long.status.code(), &long.stdout, &long.stderr),
+        (short.status.code(), &short.stdout, &short.stderr),
+        "one switch has one behaviour, whichever way a caller spells it"
+    );
+}
+
+/// `-q` reaches every write `grind` owns, and stops at the argument parser,
+/// which answers before `grind` starts.
+///
+/// `Args::parse` runs ahead of the `Console` that carries the switch, so a
+/// command line clap refuses is answered by clap. That is the right place for
+/// it: silencing the refusal leaves a caller with a bare number and no way to
+/// learn what about the command line was wrong.
+///
+/// The example is a flag `grind` does not have, because a *missing* argument
+/// stopped being one: `BRANCH` is optional, and a run without it picks the
+/// default branch instead of being refused. A refusal `grind` itself owns - no
+/// default branch to pick - is silenced by `-q`, and is asserted above.
+///
+/// The code is [`ERROR`], which already means "I could not tell you". A command
+/// line `grind` cannot read is one more way to get no answer.
+///
+/// Run outside every repository, which is what shows the parser answered first:
+/// there is no repository here to answer from.
+#[test]
+fn quiet_leaves_the_usage_error_to_the_parser_that_answers_before_grind_starts() {
+    const REFUSED_FLAG: &str = "--no-such-flag";
+    let elsewhere = not_a_repository();
+
+    let (code, stdout, stderr) = streams(&grind(elsewhere.path(), &["-q", REFUSED_FLAG, "main"]));
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "a command line grind cannot read is a run that cannot answer, so \
+         {ERROR}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(REFUSED_FLAG),
+        "the refusal has to name the argument it could not read:\n{stderr}"
+    );
+    assert_eq!(
+        stdout, "",
+        "the refusal belongs on stderr, where it cannot contaminate a pipeline"
+    );
+}
+
+/// `--version` answers about the binary rather than about a rebase, so `-q`
+/// leaves it alone.
+///
+/// Asserted byte for byte against the same run without `-q`, because the claim
+/// is that the switch does not reach this path at all.
+///
+/// The exit code is `0` without a rebase behind it, and that is the better
+/// trade. Every script that asks a tool which build it is reads that number, so
+/// moving the version off `0` to keep one table simple costs more than it buys.
+#[test]
+fn quiet_leaves_the_version_alone_because_it_answers_about_the_tool() {
+    let elsewhere = not_a_repository();
+
+    let quiet = streams(&grind(elsewhere.path(), &["-q", "--version"]));
+    let loud = streams(&grind(elsewhere.path(), &["--version"]));
+
+    assert_eq!(
+        quiet.0,
+        Some(0),
+        "asking for the version is not a question about conflicts, so it \
+         succeeds\nstdout:\n{}\nstderr:\n{}",
+        quiet.1,
+        quiet.2
+    );
+    assert_version_line(&quiet.1);
+    assert_eq!(
+        quiet, loud,
+        "-q silences what grind says about a rebase, and the version is not that"
+    );
+}
+
+/// The flag that asks for the diff of each stop after the breakdown.
+///
+/// A constant, because every test of the diff names it, and the closed-pipe
+/// tests below name it too.
+const DIFF_FLAG: &str = "--diff";
+
+/// `--diff` adds the diff of each stop, and a clean replay has no stop. So a
+/// clean run prints the same bytes with the flag and without it, and it answers
+/// with the same code.
+///
+/// The raw bytes are compared, not the trimmed text, because an empty line
+/// after the verdict is the one thing a wrong implementation adds here. The run
+/// without the flag is also held to the clean verdict. Without that control,
+/// two runs that both print nothing agree and prove nothing.
+#[test]
+fn diff_on_a_clean_replay_prints_the_same_bytes_as_a_run_without_it() {
+    let repo = independent_branches_repo();
+
+    let plain = run_raw(&repo, "alpha", &["beta"]);
+    let with_diff = run_raw(&repo, "alpha", &[DIFF_FLAG, "beta"]);
+    let (code, stdout, stderr) = streams(&with_diff);
+
+    assert_eq!(
+        code,
+        Some(CLEAN),
+        "--diff adds words and changes no answer, and this replay is clean\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&plain.stdout),
+        "grind: clean - replaying HEAD onto beta hit no conflicts\n",
+        "the control: the run without --diff gives the clean verdict"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&with_diff.stdout),
+        String::from_utf8_lossy(&plain.stdout),
+        "a clean replay has no stop, so --diff has no diff to add\nstderr:\n{stderr}"
+    );
+}
+
+/// The short id of `revision` in `repo`, at the length that a replay writes.
+///
+/// The runner of `gitscratch` pins `core.abbrev=auto`, so every id that a
+/// replay prints has git's default length. The fixture's own git does not
+/// carry that pin, and a developer whose global config sets `core.abbrev` gets
+/// ids of another length from it. So this call states the pin too, and the
+/// expected text agrees with the run on every machine.
+fn short_id(repo: &TestRepo, revision: &str) -> String {
+    repo.git(&["-c", "core.abbrev=auto", "rev-parse", "--short", revision])
+}
+
+/// Stand on `two` in [`equal_hunks_unequal_stops_repo`] and replay it onto
+/// `one`. The rebase stops twice, once for each commit of `two`, and each stop
+/// conflicts in one file: `x.txt`, then `y.txt`.
+///
+/// `--diff` prints the verdict exactly as a run without the flag prints it,
+/// then an empty line, then one section for each stop, in stop order. A
+/// section is the stop heading, which names the stopped commit, and the diff
+/// that `git diff` shows at that stop. Two sections have one empty line
+/// between them.
+///
+/// The golden is the whole of stdout, byte for byte, with `NO_COLOR` set so
+/// the text is plain. Each commit id and blob id in it comes from the
+/// fixture's own git through [`short_id`]. A commit records the time, so the
+/// ids change each time the fixture is built. The all-zero id is the result,
+/// which is not in the object store yet. The text after the second `@@@` of a
+/// hunk header is the function context that git finds for the hunk.
+///
+/// The exit code is [`CONFLICTS`], the code of the same run without `--diff`.
+/// The diff adds words and changes no answer.
+#[test]
+fn diff_on_a_conflict_prints_the_verdict_then_the_diff_of_each_stop() {
+    let repo = equal_hunks_unequal_stops_repo();
+    repo.checkout("two");
+
+    let x_commit = short_id(&repo, "two~1");
+    let y_commit = short_id(&repo, "two");
+    let x_ours = short_id(&repo, "one:x.txt");
+    let x_theirs = short_id(&repo, "two~1:x.txt");
+    let y_ours = short_id(&repo, "one:y.txt");
+    let y_theirs = short_id(&repo, "two:y.txt");
+
+    let output = grind_command(repo.path(), &[DIFF_FLAG, "one"])
+        .env(NO_COLOR, "1")
+        .output()
+        .expect("failed to run grind");
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "the replay conflicts, so the answer is {CONFLICTS} with the diff as \
+         without it\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            "grind: conflicts - replaying HEAD onto one
+       2 hunks across 2 files, 2 stops
+
+  x.txt    1 hunk
+  y.txt    1 hunk
+
+stop 1 of 2 - {x_commit} two edits x
+diff --cc x.txt
+index {x_ours},{x_theirs}..0000000
+--- a/x.txt
++++ b/x.txt
+@@@ -12,7 -12,7 +12,11 @@@ line1
+  line12
+  line13
+  line14
+++<<<<<<< HEAD
+ +one-x
+++=======
++ two-x
+++>>>>>>> {x_commit} (two edits x)
+  line16
+  line17
+  line18
+
+stop 2 of 2 - {y_commit} two edits y
+diff --cc y.txt
+index {y_ours},{y_theirs}..0000000
+--- a/y.txt
++++ b/y.txt
+@@@ -12,7 -12,7 +12,11 @@@ line1
+  line12
+  line13
+  line14
+++<<<<<<< HEAD
+ +one-y
+++=======
++ two-y
+++>>>>>>> {y_commit} (two edits y)
+  line16
+  line17
+  line18
+"
+        ),
+        "stderr:\n{stderr}"
+    );
+}
+
+/// Stand on `contested-child` in [`squash_merged_parent_repo`] and replay
+/// `parent..HEAD` onto `main` with `--diff`.
+///
+/// `--diff` obeys `--onto`. The replay stops once, on the one commit of
+/// `contested-child`, so the run prints exactly one halt diff, and that diff
+/// is in `stacked.txt`. A run that captured its diffs from a plain rebase
+/// would give a halt diff in `shared.txt` for each commit of `parent`, or no
+/// halt diff at all.
+///
+/// The golden is the whole of stdout, byte for byte, with `NO_COLOR` set so
+/// the text is plain. Each id in it comes from the git of the fixture through
+/// [`short_id`].
+#[test]
+fn diff_with_onto_prints_one_halt_diff_for_the_commit_above_the_upstream() {
+    let repo = squash_merged_parent_repo();
+    repo.checkout("contested-child");
+
+    let stopped = short_id(&repo, "contested-child");
+    let ours = short_id(&repo, "main:stacked.txt");
+    let theirs = short_id(&repo, "contested-child:stacked.txt");
+
+    let output = grind_command(repo.path(), &[DIFF_FLAG, ONTO_FLAG, "main", "parent"])
+        .env(NO_COLOR, "1")
+        .output()
+        .expect("failed to run grind");
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "the commit of contested-child collides with main, with the diff as \
+         without it\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            "grind: conflicts - replaying parent..HEAD onto main
+       1 hunk across 1 file, 1 stop
+
+  stacked.txt    1 hunk
+
+stop 1 of 1 - {stopped} contested-child rewrites line 15 of stacked.txt
+diff --cc stacked.txt
+index {ours},{theirs}..0000000
+--- a/stacked.txt
++++ b/stacked.txt
+@@@ -12,7 -12,7 +12,11 @@@ line1
+  line12
+  line13
+  line14
+++<<<<<<< HEAD
+ +main-edit
+++=======
++ contested-child-edit
+++>>>>>>> {stopped} (contested-child rewrites line 15 of stacked.txt)
+  line16
+  line17
+  line18
+"
+        ),
+        "stderr:\n{stderr}"
+    );
+}
+
+/// A run that cannot answer prints no diff. The diff is part of the answer,
+/// and a run that fails has no answer.
+///
+/// The fixture conflicts, so a replay onto a real branch has a diff to print.
+/// This run names a branch that does not resolve, and the pre-flight refuses
+/// it before any replay. The refusal must be `grind`'s own and not clap's,
+/// because clap refuses an unknown flag with the same exit code and the same
+/// empty stdout.
+///
+/// Stdout is compared raw, so an empty line fails the test too.
+#[test]
+fn diff_on_a_branch_that_does_not_resolve_prints_no_diff() {
+    let repo = equal_hunks_unequal_stops_repo();
+
+    let output = run_raw(&repo, "two", &[DIFF_FLAG, "nonexistent-branch"]);
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "a branch that does not resolve is a run that cannot answer, with the \
+         diff as without it\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("could not resolve 'nonexistent-branch'"),
+        "the control: the refusal is grind's own, so --diff got past the \
+         parser:\n{stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a run with no answer has no diff to print:\n{stdout}"
+    );
+}
+
+/// A replay that fails after a stop prints no diff, and not even the diff of
+/// the stop it already captured.
+///
+/// [`modify_delete_repo`] stops at a modify/delete conflict, and the capture
+/// reads that stop. The object store is sealed, so git then cannot write the
+/// commit of the stop. The replay refuses to answer, because a commit that git
+/// did not write is work that the count leaves out. So the run exits
+/// [`ERROR`], and the halt diff of its one stop goes with the answer.
+///
+/// The error names the commit of the stop, which is the control: it shows that
+/// the replay got as far as the stop, where the capture runs. Without it, a run
+/// that failed before the stop passes this test for the reason the test above
+/// already covers.
+///
+/// Unix only, because [`TestRepo::seal_object_store`] is.
+#[cfg(unix)]
+#[test]
+fn diff_on_a_replay_that_fails_after_a_stop_prints_no_diff() {
+    let repo = modify_delete_repo();
+    repo.checkout("branch");
+
+    // Sealed after the fixture exists, because each commit of the fixture
+    // writes objects. The run writes none until the replay commits its stop,
+    // and that write is the one that fails.
+    let sealed = repo.seal_object_store();
+    let output = grind(repo.path(), &[DIFF_FLAG, "main"]);
+    // Released before any assertion, so a failed assertion leaves no read-only
+    // directory for the removal of the temporary directory to trip over.
+    drop(sealed);
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "git could not write the commit of the stop, so the replay has no \
+         answer\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("branch modifies x"),
+        "the control: the error names the commit of the stop, so the replay \
+         got as far as the capture:\n{stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a run with no answer prints no diff, not even the diff of a stop it \
+         captured:\n{stdout}"
+    );
+}
+
+/// A conflict in a file named `日本語.txt`, replayed from `left-左` onto
+/// `right-右`, comes through the diff intact, in its header and in its body.
+///
+/// Git C-quotes a name outside ASCII unless `core.quotePath` is off. The
+/// runner turns it off, so the header of the file reads
+/// `diff --cc 日本語.txt` and not an octal escape that names no file. The
+/// body holds multi-byte text on each side of each region, and the stopped
+/// commit's subject names a multi-byte branch. A renderer that cut a line by
+/// byte index panics on each of them.
+///
+/// The body is read from the header of `日本語.txt` to the end of stdout, and
+/// that file comes last, so no line of the `readme.md` diff counts. The file
+/// conflicts in two regions, so each line of a region appears twice.
+#[test]
+fn diff_carries_a_multi_byte_file_name_and_multi_byte_content_intact() {
+    let repo = multi_byte_names_repo();
+    repo.checkout("left-左");
+    let commit = short_id(&repo, "left-左");
+
+    let output = grind_command(repo.path(), &[DIFF_FLAG, "right-右"])
+        .env(NO_COLOR, "1")
+        .output()
+        .expect("failed to run grind");
+    let (code, stdout, stderr) = streams(&output);
+
+    assert!(
+        !stderr.contains("panicked"),
+        "a multi-byte name must not crash the binary:\n{stderr}"
+    );
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == format!("stop 1 of 1 - {commit} left-左 rewrites both files")),
+        "the stop heading names the stopped commit, multi-byte subject and \
+         all:\n{stdout}"
+    );
+
+    let (_, body) = stdout
+        .split_once("\ndiff --cc 日本語.txt\n")
+        .unwrap_or_else(|| panic!("no diff of 日本語.txt, with its name intact, in:\n{stdout}"));
+    for header in ["--- a/日本語.txt", "+++ b/日本語.txt"] {
+        assert!(
+            body.lines().any(|line| line == header),
+            "the diff of 日本語.txt names the file intact on {header:?}:\n{body}"
+        );
+    }
+    let label = format!("++>>>>>>> {commit} (left-左 rewrites both files)");
+    for content in [" +右-edit", "+ 左-edit", label.as_str()] {
+        assert_eq!(
+            body.lines().filter(|line| *line == content).count(),
+            2,
+            "each of the two regions of 日本語.txt holds {content:?} intact:\n{body}"
+        );
+    }
+}
+
+/// A run from a subdirectory names each file of the diff from the repository
+/// root, and it shows the file that conflicted outside that subdirectory too.
+///
+/// [`nested_conflict_repo`] conflicts in `shared.txt` at the root and in
+/// `sub/nested/shared.txt`, and the run starts in `sub/nested`. A diff scoped
+/// to the directory of the run leaves the root file out. A diff relative to
+/// that directory names the nested file `shared.txt`, which is the name of the
+/// other file. Either one points the reader at the wrong file.
+///
+/// The whole stdout is also held byte-identical to the run from the root, for
+/// the reason the test of the breakdown gives: the same question about the
+/// same repository has one answer, whichever of its directories asks it.
+#[test]
+fn diff_from_a_subdirectory_names_each_file_from_the_repository_root() {
+    let repo = nested_conflict_repo();
+    repo.checkout("left");
+    let nested = repo.path().join("sub").join("nested");
+
+    let from_nested = grind_command(&nested, &[DIFF_FLAG, "right"])
+        .env(NO_COLOR, "1")
+        .output()
+        .expect("failed to run grind");
+    let (code, stdout, stderr) = streams(&from_nested);
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| line.starts_with("diff --cc "))
+            .collect::<Vec<_>>(),
+        vec!["diff --cc shared.txt", "diff --cc sub/nested/shared.txt"],
+        "the diff names both files by their whole path from the repository \
+         root, the one outside the directory of the run included\nstderr:\n{stderr}"
+    );
+
+    let from_root = grind_command(repo.path(), &[DIFF_FLAG, "right"])
+        .env(NO_COLOR, "1")
+        .output()
+        .expect("failed to run grind");
+
+    assert_eq!(
+        (from_nested.status.code(), stdout),
+        (
+            from_root.status.code(),
+            String::from_utf8_lossy(&from_root.stdout)
+                .trim_end()
+                .to_string()
+        ),
+        "the same question about the same repository has one answer, whichever \
+         of its directories asks it"
+    );
+}
+
+/// `--diff` asks for more words and `-q` asks for none. The two contradict
+/// each other, so clap refuses the pair before `grind` starts, in both
+/// spellings of `-q`.
+///
+/// A tool that obeys one of the two in silence surprises the caller who gave
+/// the other. The run is on a fixture that conflicts, so a `grind` that takes
+/// the pair and lets `-q` win answers [`CONFLICTS`] with no word, and one that
+/// lets `--diff` win prints a diff. Each fails here.
+///
+/// The refusal is clap's usage error, on stderr, and it names both flags, so
+/// the caller learns which part of the command line was wrong. The code is
+/// [`ERROR`], the code of every command line that `grind` cannot read.
+#[test]
+fn quiet_with_diff_is_a_usage_error_in_both_spellings_of_quiet() {
+    let repo = equal_hunks_unequal_stops_repo();
+
+    for quiet in ["-q", "--quiet"] {
+        let output = run_raw(&repo, "two", &[quiet, DIFF_FLAG, "one"]);
+        let (code, stdout, stderr) = streams(&output);
+
+        assert_eq!(
+            code,
+            Some(ERROR),
+            "{quiet} with {DIFF_FLAG} is a command line that contradicts itself, \
+             so {ERROR}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("--quiet") && stderr.contains(DIFF_FLAG),
+            "the usage error names both flags of the pair:\n{stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "the refusal belongs on stderr, and there is no verdict and no \
+             diff:\n{stdout}"
+        );
+    }
+}
+
+/// The byte that opens each ANSI escape sequence, and so each color code.
+///
+/// The renderer escapes each control character of the diff before it paints,
+/// so each raw ESC byte in stdout is a code that the painter wrote.
+const ESC: u8 = 0x1b;
+
+/// A `--diff` run of the two stops of [`equal_hunks_unequal_stops_repo`], from
+/// `two` onto `one`, with stdout on a pipe. Each variable in `environment` is
+/// set to its value, or taken away for `None`.
+///
+/// The builder states `COLUMNS` and takes the color variables away. So a run
+/// with nothing in `environment` is the run of a wrapper such as `viddy(1)`: a
+/// pipe, and a stated width.
+fn diff_through_a_pipe(repo: &TestRepo, environment: &[(&str, Option<&str>)]) -> Output {
+    repo.checkout("two");
+
+    let mut command = grind_command(repo.path(), &[DIFF_FLAG, "one"]);
+    for (name, value) in environment {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+
+    command.output().expect("failed to run grind")
+}
+
+/// A wrapper such as `viddy(1)` gives `grind` a pipe and states `COLUMNS`, and
+/// it shows the bytes that it reads on a terminal. So the diff keeps its color
+/// through that pipe.
+///
+/// The paint changes no character: the painted stdout, less its color codes,
+/// is byte-identical to the stdout of the same run with `NO_COLOR`. And only
+/// the diff is painted. The verdict and the breakdown come out with no code in
+/// them, as a run without `--diff` prints them, so no golden of such a run
+/// changes.
+#[test]
+fn diff_through_a_pipe_with_a_stated_width_is_painted() {
+    let repo = equal_hunks_unequal_stops_repo();
+
+    let painted = diff_through_a_pipe(&repo, &[]);
+    let plain = diff_through_a_pipe(&repo, &[(NO_COLOR, Some("1"))]);
+    let painted_text = String::from_utf8_lossy(&painted.stdout);
+    let plain_text = String::from_utf8_lossy(&plain.stdout);
+
+    assert_eq!(
+        painted.status.code(),
+        Some(CONFLICTS),
+        "the paint changes no answer\nstdout:\n{painted_text}\nstderr:\n{}",
+        String::from_utf8_lossy(&painted.stderr)
+    );
+    assert!(
+        painted.stdout.contains(&ESC),
+        "a wrapper shows the bytes on a terminal, so the diff keeps its color \
+         through the pipe that the wrapper gives:\n{painted_text}"
+    );
+    assert_eq!(
+        testcolor::strip_ansi(&painted_text),
+        plain_text,
+        "the paint is codes around the text of each line, and nothing more"
+    );
+
+    let (verdict, _) = plain_text
+        .split_once("\n\nstop 1 of 2")
+        .unwrap_or_else(|| panic!("the plain run holds a verdict, then the diff:\n{plain_text}"));
+    assert!(
+        painted_text.starts_with(&format!("{verdict}\n")),
+        "only the diff is painted, and the verdict and the breakdown carry no \
+         code:\n{painted_text}"
+    );
+}
+
+/// `CLICOLOR=0` turns color off, and it turns off the color of a wrapper too.
+///
+/// The rule of a wrapper extends the case in which the user set no variable.
+/// `CLICOLOR=0` is a choice that the user made, so the run holds no ESC byte,
+/// with `COLUMNS` stated and stdout on a pipe. That is the shape that the
+/// override paints when no variable refuses it. `colored` reads `CLICOLOR` as
+/// off exactly when its value is the string `0`.
+#[test]
+fn clicolor_zero_refuses_the_color_of_a_wrapper() {
+    let repo = equal_hunks_unequal_stops_repo();
+
+    let output = diff_through_a_pipe(&repo, &[(CLICOLOR, Some("0"))]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        output.status.code(),
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("stop 2 of 2"),
+        "the control: the run printed the diff of both stops:\n{stdout}"
+    );
+    assert!(
+        !output.stdout.contains(&ESC),
+        "CLICOLOR=0 turns color off, also on the pipe of a wrapper:\n{stdout}"
+    );
+}
+
+/// `NO_COLOR` turns color off, also on the pipe of a wrapper.
+///
+/// The run states `COLUMNS` and writes to a pipe, which is the shape that the
+/// override paints when no variable refuses it. `NO_COLOR` is a choice that
+/// the user made, so the run holds no ESC byte.
+#[test]
+fn no_color_refuses_the_color_of_a_wrapper() {
+    let repo = equal_hunks_unequal_stops_repo();
+
+    let output = diff_through_a_pipe(&repo, &[(NO_COLOR, Some("1"))]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        output.status.code(),
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("stop 2 of 2"),
+        "the control: the run printed the diff of both stops:\n{stdout}"
+    );
+    assert!(
+        !output.stdout.contains(&ESC),
+        "NO_COLOR turns color off, also on the pipe of a wrapper:\n{stdout}"
+    );
+}
+
+/// A pipe with no `COLUMNS` goes to a file or to another program, and `grind`
+/// does not paint into it.
+///
+/// The rule of a wrapper needs the width that a wrapper states. With no width
+/// stated and no color variable set, `colored` sees a pipe and writes no code,
+/// and nothing overrides it.
+#[test]
+fn diff_through_a_pipe_with_no_stated_width_is_plain() {
+    let repo = equal_hunks_unequal_stops_repo();
+
+    let output = diff_through_a_pipe(&repo, &[(WIDTH_VARIABLE, None)]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        output.status.code(),
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("stop 2 of 2"),
+        "the control: the run printed the diff of both stops:\n{stdout}"
+    );
+    assert!(
+        !output.stdout.contains(&ESC),
+        "a pipe with no stated width is no wrapper, so the diff is plain:\n{stdout}"
+    );
+}
+
+/// A `COLUMNS` that holds no width states none. So a pipe with such a value is
+/// no wrapper, and the diff through it is plain.
+///
+/// `COLUMNS` states a width when it holds a number above zero that fits in a
+/// `u16`. `termbar::TerminalWidth` lays the breakdown out by that rule, and
+/// the color obeys the same rule. With an empty value, or with a value that is
+/// no number, the breakdown takes the width of the terminal, as with no
+/// `COLUMNS` at all. A run that paints for such a value reads a width in the
+/// variable for the color and no width in it for the layout. That is two
+/// answers to one question.
+#[test]
+fn diff_through_a_pipe_with_a_columns_that_states_no_width_is_plain() {
+    let repo = equal_hunks_unequal_stops_repo();
+
+    for value in ["", "wide"] {
+        let output = diff_through_a_pipe(&repo, &[(WIDTH_VARIABLE, Some(value))]);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        assert_eq!(
+            output.status.code(),
+            Some(CONFLICTS),
+            "{WIDTH_VARIABLE}={value:?}\nstdout:\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains("stop 2 of 2"),
+            "the control: with {WIDTH_VARIABLE}={value:?}, the run printed the diff \
+             of both stops:\n{stdout}"
+        );
+        assert!(
+            !output.stdout.contains(&ESC),
+            "{WIDTH_VARIABLE}={value:?} states no width, so the pipe is no wrapper \
+             and the diff is plain:\n{stdout}"
+        );
+    }
+}
+
+/// `CLICOLOR_FORCE=1` paints the diff into any pipe. That is the rule of
+/// `colored` itself, and the pager recipe of the README rests on it:
+/// `CLICOLOR_FORCE=1 grind --diff main | less -R`.
+///
+/// The run states no width, so the rule of a wrapper does not fire, and the
+/// color comes from `colored` alone. A `grind` that gives the answer of
+/// `should_force_colors_here` to `set_override` directly fails here. That
+/// answer is false for this run, and `set_override(false)` wins over the
+/// variable.
+#[test]
+fn clicolor_force_paints_a_pipe_with_no_stated_width() {
+    let repo = equal_hunks_unequal_stops_repo();
+
+    let output = diff_through_a_pipe(
+        &repo,
+        &[(WIDTH_VARIABLE, None), (CLICOLOR_FORCE, Some("1"))],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        output.status.code(),
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.contains(&ESC),
+        "CLICOLOR_FORCE=1 turns color on, also into a pipe:\n{stdout}"
+    );
+}
+
+/// Stdout on a terminal, with no color variable set, gets the diff in color.
+///
+/// That is the color that `colored` gives a terminal by itself. The rule of a
+/// wrapper does not fire, because stdout is a terminal, so
+/// `should_force_colors_here` answers false. A `grind` that gives that answer
+/// to `set_override` directly turns the color of a terminal off, and it fails
+/// here. No pipe is a terminal, so no other test of the color can show that
+/// failure.
+///
+/// The terminal is a pseudo-terminal from [`Pty`], which is also the
+/// controlling terminal of the run. It gives back each byte as the run wrote
+/// it, so the painted stdout, less its codes, is byte-identical to the stdout
+/// of the same fixture through a pipe with `NO_COLOR`. The builder still
+/// states `COLUMNS`, and that width wins over the width of the terminal, so
+/// both runs lay the breakdown out alike.
+#[cfg(unix)]
+#[test]
+fn diff_on_a_terminal_is_painted_with_no_color_variable_set() {
+    use gitscratch::testing::pty::Pty;
+
+    /// The width of the terminal. Any width serves, because the width that
+    /// the builder states wins.
+    const TERMINAL_COLUMNS: u16 = 80;
+
+    let repo = equal_hunks_unequal_stops_repo();
+    let plain = diff_through_a_pipe(&repo, &[(NO_COLOR, Some("1"))]);
+
+    let output = Pty::open(TERMINAL_COLUMNS)
+        .run_with_stdout_on_terminal(grind_command(repo.path(), &[DIFF_FLAG, "one"]));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        output.status.code(),
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.contains(&ESC),
+        "a terminal gets the color that colored gives it by itself:\n{stdout}"
+    );
+    assert_eq!(
+        testcolor::strip_ansi(&stdout),
+        String::from_utf8_lossy(&plain.stdout),
+        "on a terminal as through a pipe, the paint is codes around the text of \
+         each line, and nothing more"
+    );
+}
+
+/// A run on a terminal draws the progress bar, with its count of commits.
+///
+/// This holds the wiring of the display in the binary: issue #682, criterion 1.
+/// A `grind` that replays with `scratch` in place of `scratch_with_progress`,
+/// or a crate that drops the `progress` feature, draws nothing, and no run
+/// through a pipe can show it. The shim pauses for 1 s before each `rebase`
+/// call, because the display waits for `PROGRESS_DELAY` (500 ms) before it
+/// shows. The pause only lengthens the run, so the test has no upper time bound.
+#[cfg(unix)]
+#[test]
+fn progress_bar_shows_its_count_on_a_terminal() {
+    use gitscratch::testing::git_shim::GitShim;
+    use gitscratch::testing::pty::Pty;
+
+    /// The width of the terminal. Any width serves, because the width that
+    /// the builder states wins.
+    const TERMINAL_COLUMNS: u16 = 80;
+    /// The text that only the display writes: the prefix, then the two spaces
+    /// that part the action from the bar.
+    const DISPLAY_PREFIX: &str = "grind: replaying HEAD onto two  ";
+
+    let repo = equal_hunks_unequal_stops_repo();
+    repo.checkout("one");
+    let plain = String::from_utf8_lossy(&grind(repo.path(), &["two"]).stdout).into_owned();
+    assert!(
+        !plain.contains(DISPLAY_PREFIX) && !plain.contains(" commits"),
+        "the verdict through a pipe must not hold the display:\n{plain}"
+    );
+
+    let shim = GitShim::new(&["rebase"]);
+    let mut command = grind_command(repo.path(), &["two"]);
+    command.env("PATH", shim.path_variable());
+    let output = Pty::open(TERMINAL_COLUMNS).run_with_output_on_terminal(command);
+    let bytes = testcolor::strip_ansi(&String::from_utf8_lossy(&output.stdout));
+
+    assert_eq!(
+        output.status.code(),
+        Some(CONFLICTS),
+        "bytes:\n{bytes}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        bytes.contains(DISPLAY_PREFIX),
+        "the bar names the tool and the action:\n{bytes}"
+    );
+    assert!(
+        holds_a_commit_count(&bytes),
+        "the bar draws a count of the form N/M commits:\n{bytes}"
+    );
+}
+
+/// Whether `text` holds a count of the form `<digits>/<digits> commits`.
+fn holds_a_commit_count(text: &str) -> bool {
+    // Every piece but the last ends where " commits" began.
+    let mut pieces: Vec<&str> = text.split(" commits").collect();
+    pieces.pop();
+    pieces.iter().any(|before| {
+        let chars: Vec<char> = before.chars().collect();
+        let total = chars
+            .iter()
+            .rev()
+            .take_while(|c| c.is_ascii_digit())
+            .count();
+        let position = chars
+            .len()
+            .checked_sub(total + 1)
+            .filter(|slash| chars[*slash] == '/')
+            .map_or(0, |slash| {
+                chars[..slash]
+                    .iter()
+                    .rev()
+                    .take_while(|c| c.is_ascii_digit())
+                    .count()
+            });
+        total > 0 && position > 0
+    })
+}
+
+/// Which of `grind`'s streams is handed a pipe nobody is reading.
+#[derive(Debug, Clone, Copy)]
+enum Unread {
+    Stdout,
+    Stderr,
+}
+
+/// Run `grind` with one stream pointed at a pipe whose read end is already
+/// closed, and hand back the exit code plus whatever the *other* stream said.
+///
+/// Ordinary rather than contrived: `grind main | head -1`, a pipeline whose
+/// reader exits first, a terminal closed mid-run. Every one of them leaves
+/// `grind` writing into a pipe with nobody on the far end.
+///
+/// Deterministic by construction rather than by timing. The read end is dropped
+/// *before* the child is spawned, so there is no window in which a write could
+/// succeed and nothing to race: the first byte `grind` puts on that stream fails
+/// with `EPIPE`, whichever of its three writes gets there first.
+///
+/// Closing the descriptor outright would look simpler and would test something
+/// else entirely. With fd 1 closed it becomes the lowest free descriptor, so the
+/// first file the run opens - the scratch `TempDir`, a git pipe - lands on it and
+/// the verdict is silently written *into that file* rather than failing.
+///
+/// SIGPIPE is why the failure surfaces as a panic rather than as a signal: Rust's
+/// runtime ignores it at startup, so the write returns `EPIPE` instead of killing
+/// the process, and `println!` turns that into a panic and exit `PANICKED`.
+fn grind_into_an_unread_pipe(repo: &Path, args: &[&str], unread: Unread) -> (Option<i32>, String) {
+    let (reader, writer) = std::io::pipe().expect("create a pipe");
+    // Before the child exists, so the stream it is handed has never had a
+    // reader and cannot acquire one.
+    drop(reader);
+
+    let mut command = grind_command(repo, args);
+    match unread {
+        Unread::Stdout => {
+            command.stdout(Stdio::from(writer)).stderr(Stdio::piped());
+        }
+        Unread::Stderr => {
+            command.stderr(Stdio::from(writer)).stdout(Stdio::piped());
+        }
+    }
+
+    let output = command.output().expect("failed to run grind");
+    let surviving = match unread {
+        Unread::Stdout => &output.stderr,
+        Unread::Stderr => &output.stdout,
+    };
+
+    (
+        output.status.code(),
+        String::from_utf8_lossy(surviving).trim_end().to_string(),
+    )
+}
+
+/// The exit code a Rust process leaves behind when it unwound out of a panic -
+/// the fourth, undocumented code `grind` must never produce.
+const PANICKED: i32 = 101;
+
+/// The verdict is the one thing `grind` puts on stdout, and stdout is the stream
+/// a pipeline takes away first.
+///
+/// The exit code *is* the answer here, so a reader that closed early must cost
+/// the verdict and nothing else. Losing the answer to a panic would publish a
+/// fourth exit code nothing documents, on the one path a script is most likely
+/// to be reading.
+#[test]
+fn a_verdict_nobody_is_reading_costs_the_words_and_not_the_answer() {
+    let repo = equal_hunks_unequal_stops_repo();
+    repo.checkout("one");
+
+    let (code, stderr) = grind_into_an_unread_pipe(repo.path(), &["two"], Unread::Stdout);
+
+    assert_ne!(
+        code,
+        Some(PANICKED),
+        "a broken pipe must not turn the answer into a panic\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "the replay conflicted, so the answer is {CONFLICTS} whether or not \
+         anyone read it\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "a broken pipe is not a bug in grind and must not be reported as \
+         one:\n{stderr}"
+    );
+}
+
+/// Both of stderr's writers, on the two paths that reach them: the note, which
+/// is printed before the verdict, and the failure, which is printed from `main`
+/// after `run` has given up.
+///
+/// Neither is the answer, so neither may be able to take it away. `2>/dev/null`
+/// on a pipeline whose reader has gone, a hook whose log is closed - the caller
+/// has said they do not want the caveat, not that they do not want the exit
+/// code.
+#[test]
+fn a_note_or_a_failure_nobody_is_reading_costs_the_words_and_not_the_answer() {
+    let repo = independent_branches_repo();
+    repo.checkout("alpha");
+    // Untracked rather than modified, so the note has something to report
+    // without the checkout above having anything to refuse.
+    repo.write_file("scratch-notes.txt", "untracked work in progress\n");
+
+    let (clean_code, stdout) = grind_into_an_unread_pipe(repo.path(), &["beta"], Unread::Stderr);
+
+    assert_eq!(
+        clean_code,
+        Some(CLEAN),
+        "a note nobody read must not move the verdict off {CLEAN}\nstdout:\n{stdout}"
+    );
+    assert_eq!(
+        stdout, "grind: clean - replaying HEAD onto beta hit no conflicts",
+        "the run has to carry on past the note it could not print"
+    );
+
+    let (error_code, error_stdout) =
+        grind_into_an_unread_pipe(repo.path(), &["nonexistent-branch"], Unread::Stderr);
+
+    assert_eq!(
+        error_code,
+        Some(ERROR),
+        "a failure it could not print is still a failure, and still \
+         {ERROR}\nstdout:\n{error_stdout}"
+    );
+}
+
+/// `--diff` puts a second write on stdout, after the verdict, and that write
+/// meets the same closed pipe. It must cost the words and never the answer.
+///
+/// Two stops, so the diff spans two sections, and the run has more to lose to
+/// a broken pipe than the verdict alone gives it.
+#[test]
+fn a_diff_nobody_is_reading_costs_the_words_and_not_the_answer() {
+    let repo = equal_hunks_unequal_stops_repo();
+    repo.checkout("two");
+
+    let (code, stderr) =
+        grind_into_an_unread_pipe(repo.path(), &[DIFF_FLAG, "one"], Unread::Stdout);
+
+    assert_ne!(
+        code,
+        Some(PANICKED),
+        "a broken pipe must not turn the answer into a panic\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "the replay conflicted, so the answer is {CONFLICTS} whether or not \
+         anyone read the diff\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "a broken pipe is not a bug in grind and must not be reported as \
+         one:\n{stderr}"
+    );
+}
+
+/// The closed stderr of the test above that, run again with `--diff`, on all
+/// three paths. The tree is dirty, so each path has a note to lose.
+///
+/// The conflict path is the one with the most on it. The note fails, and the
+/// run must carry on to print the verdict and the diff on stdout, byte for byte
+/// as the same run prints them when stderr is open.
+#[test]
+fn with_diff_a_note_or_a_failure_nobody_is_reading_costs_the_words_and_not_the_answer() {
+    let clean_repo = independent_branches_repo();
+    clean_repo.checkout("alpha");
+    clean_repo.write_file("scratch-notes.txt", "untracked work in progress\n");
+
+    let (clean_code, clean_stdout) =
+        grind_into_an_unread_pipe(clean_repo.path(), &[DIFF_FLAG, "beta"], Unread::Stderr);
+
+    assert_eq!(
+        clean_code,
+        Some(CLEAN),
+        "a note nobody read must not move the verdict off {CLEAN}\nstdout:\n{clean_stdout}"
+    );
+    assert_eq!(
+        clean_stdout, "grind: clean - replaying HEAD onto beta hit no conflicts",
+        "the run has to carry on past the note it could not print"
+    );
+
+    let (error_code, error_stdout) = grind_into_an_unread_pipe(
+        clean_repo.path(),
+        &[DIFF_FLAG, "nonexistent-branch"],
+        Unread::Stderr,
+    );
+
+    assert_eq!(
+        error_code,
+        Some(ERROR),
+        "a failure it could not print is still a failure, and still \
+         {ERROR}\nstdout:\n{error_stdout}"
+    );
+
+    let conflict_repo = equal_hunks_unequal_stops_repo();
+    conflict_repo.checkout("two");
+    conflict_repo.write_file("scratch-notes.txt", "untracked work in progress\n");
+
+    let (conflict_code, conflict_stdout) =
+        grind_into_an_unread_pipe(conflict_repo.path(), &[DIFF_FLAG, "one"], Unread::Stderr);
+    let (_, heard_stdout, heard_stderr) =
+        streams(&grind(conflict_repo.path(), &[DIFF_FLAG, "one"]));
+
+    assert_eq!(
+        conflict_code,
+        Some(CONFLICTS),
+        "a note nobody read must not move the verdict off {CONFLICTS}\n\
+         stdout:\n{conflict_stdout}"
+    );
+    assert!(
+        heard_stderr.contains("note:") && heard_stdout.contains("stop 2 of 2"),
+        "the control: with stderr open, the same run prints a note and a diff \
+         of two stops\nstdout:\n{heard_stdout}\nstderr:\n{heard_stderr}"
+    );
+    assert_eq!(
+        conflict_stdout, heard_stdout,
+        "the run has to carry on past the note it could not print, to the \
+         verdict and the diff"
+    );
+}
+
+/// Read a file that must come back byte-identical after `grind` has run.
+///
+/// # Panics
+///
+/// Panics if the file cannot be read.
+fn snapshot(path: &Path) -> Vec<u8> {
+    std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// `grind` answering a question about the repository it is standing in, while
+/// its environment insists the repository is somewhere else entirely.
+///
+/// Not a contrived situation: git exports `GIT_DIR`, `GIT_WORK_TREE`,
+/// `GIT_INDEX_FILE` and `GIT_PREFIX` into every hook it runs, and every child
+/// of that hook inherits them. A `pre-push` hook that asks `grind` whether the
+/// branch about to be pushed would rebase cleanly is exactly this shape - and
+/// so is `git bisect run`, `rebase --exec`, and a `cargo test` run from
+/// `.husky/pre-commit`.
+///
+/// The environment is set on the *child* process. `std::env::set_var` is
+/// process-global and Rust runs the tests in this binary as threads of one
+/// process, so poisoning it there would sabotage every other test in the file -
+/// and a whole process whose environment names another repository is the leak
+/// verbatim anyway.
+///
+/// The two branches are named so they cannot exist in the repository the
+/// environment points at, which is what makes the failure unambiguous: a
+/// `grind` that took the environment's word for where it was would be looking
+/// for `two` in a repository that has only `alpha`, `beta` and `main`.
+#[test]
+fn a_leaked_repository_location_does_not_redirect_the_replay() {
+    let repo = equal_hunks_unequal_stops_repo();
+    let hooks_repo = independent_branches_repo();
+    repo.checkout("one");
+
+    let git_dir = hooks_repo.path().join(".git");
+    let config = snapshot(&git_dir.join("config"));
+
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_grind"))
+        .arg("two")
+        .current_dir(repo.path())
+        .env("GIT_DIR", &git_dir)
+        .env("GIT_WORK_TREE", hooks_repo.path())
+        .env("GIT_PREFIX", "")
+        // The verdict below is a golden with a breakdown in it, so this run
+        // states its width for the reason every run built by `grind_command`
+        // does. The command is built by hand here to leave the rest of the
+        // ambient environment in play, and the width is no part of what this
+        // test is about.
+        .env(WIDTH_VARIABLE, STATED_WIDTH)
+        .output()
+        .expect("failed to run grind");
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "the answer is about the directory grind is standing in, not the one \
+         the environment names\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(stdout, EQUAL_HUNKS_VERDICT, "stderr:\n{stderr}");
+    assert_eq!(
+        snapshot(&git_dir.join("config")),
+        config,
+        "grind wrote into the config of the repository the environment named"
+    );
+    assert!(
+        !git_dir.join("worktrees").exists(),
+        "grind built its scratch worktree in the repository the environment named"
+    );
+}
+
+/// The half of the leak that a hook produces on its own: `.husky/pre-commit`
+/// runs `cargo test`, and `GIT_INDEX_FILE` is what that inherits. Repository
+/// discovery still finds the right repository, so the run looks fine - but
+/// every index read and write goes to the hook's repository instead.
+///
+/// Two things give it away. `git status` against a foreign index sees the whole
+/// working tree as uncommitted, so the note appears over a tree with nothing
+/// uncommitted in it; and the index it read is left rewritten, carrying entries
+/// for files that do not exist in that repository at all. The index is
+/// snapshotted rather than re-read through git, because once a phantom entry
+/// points at an object the victim does not have, git's own answers about it
+/// stop being trustworthy.
+#[test]
+fn a_leaked_index_file_is_neither_read_from_nor_written_to() {
+    let repo = equal_hunks_unequal_stops_repo();
+    let hooks_repo = independent_branches_repo();
+    repo.checkout("one");
+
+    let index = hooks_repo.path().join(".git").join("index");
+    let before = snapshot(&index);
+
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_grind"))
+        .arg("two")
+        .current_dir(repo.path())
+        .env("GIT_INDEX_FILE", &index)
+        // Stated for the same reason as the run above: this test asserts a
+        // golden with a breakdown in it, and a breakdown is laid out for a
+        // width.
+        .env(WIDTH_VARIABLE, STATED_WIDTH)
+        .output()
+        .expect("failed to run grind");
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        stderr, "",
+        "the tree has nothing uncommitted in it; a note here means the status \
+         was taken against the index the environment named\nstdout:\n{stdout}"
+    );
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(stdout, EQUAL_HUNKS_VERDICT, "stderr:\n{stderr}");
+    assert_eq!(
+        snapshot(&index),
+        before,
+        "grind wrote into the index the environment named"
+    );
+}

@@ -1,0 +1,27 @@
+. using NUnit.Framework;
+. 
+. namespace Example.Ledger
+. {
+.     public class Ledger
+.     {
+.         public int Total { get; set; }
+.     }
+. 
+T     [TestFixture]
+T     public class LedgerFixture
+T     {
+T         private readonly Ledger ledger = new Ledger();
+T 
+T         [SetUp]
+T         public void Reset()
+T         {
+T             ledger.Total = 0;
+T         }
+T 
+T         [Test]
+T         public void StartsAtZero()
+T         {
+T             Assert.AreEqual(0, ledger.Total);
+T         }
+T     }
+. }

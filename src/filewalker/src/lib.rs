@@ -183,7 +183,7 @@ mod tests {
         assert_eq!(format_count(0), "0");
         assert_eq!(format_count(999), "999");
         assert_eq!(format_count(1000), "1,000");
-        assert_eq!(format_count(1234567), "1,234,567");
+        assert_eq!(format_count(1_234_567), "1,234,567");
     }
 
     #[test]
@@ -192,7 +192,7 @@ mod tests {
         assert_eq!(format_bytes(1023), "1023 B");
         assert_eq!(format_bytes(1024), "1.00 KB");
         assert_eq!(format_bytes(1536), "1.50 KB");
-        assert_eq!(format_bytes(1048576), "1.00 MB");
-        assert_eq!(format_bytes(1073741824), "1.00 GB");
+        assert_eq!(format_bytes(1_048_576), "1.00 MB");
+        assert_eq!(format_bytes(1_073_741_824), "1.00 GB");
     }
 }

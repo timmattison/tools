@@ -1,0 +1,3291 @@
+//! The live display of a run, and the keys that drive it.
+//!
+//! A live run holds the terminal in raw mode, so the terminal sends the bytes
+//! of every key straight to this process. Raw mode clears `ISIG`, which is the
+//! setting that turns Ctrl-C into a `SIGINT`. Ctrl-C therefore arrives here as
+//! a key press, and the signal handler of `main.rs` never sees it. That is the
+//! reason this module classifies the keys itself: it is the one part of the
+//! live run that can stop a run that the user asked to stop.
+
+use crate::graph;
+use crate::record::{NameRecord, RoundRecord};
+use crate::stats::HopTable;
+use crate::ui;
+use crate::ui::render_duration;
+use crate::{counted, HOP, NEVER_REACHED, REACHED, ROUND, ROW, SUMMARY_SEPARATOR};
+use crossterm::cursor::MoveTo;
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::queue;
+use crossterm::terminal::{Clear, ClearType};
+use image::DynamicImage;
+use std::collections::BTreeMap;
+use std::io::Write;
+use std::net::IpAddr;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+/// What one key press asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Command {
+    /// Stop the run.
+    Quit,
+    /// Hold the display where it stands, or let it move again.
+    Pause,
+    /// Show the names of the addresses, or show the addresses.
+    Names,
+    /// Empty the table of the display, and count the rounds again from zero.
+    Reset,
+    /// Show the list of the keys, or hide it.
+    Help,
+    /// Show the page of the rows of the path above the rows that the frame shows.
+    PageUp,
+    /// Show the page of the rows of the path below the rows that the frame shows.
+    PageDown,
+}
+
+/// What one key press means, or nothing.
+///
+/// - A key release means nothing. A kitty terminal and a Windows terminal both
+///   report a release, and only a press acts.
+/// - Ctrl-C stops the run, and `q` stops it too. Raw mode clears `ISIG`, so
+///   Ctrl-C arrives as this key press and the process takes no `SIGINT`. A run
+///   that ignored it would need a second terminal to stop.
+/// - `p` holds the display, `n` turns the names on or off, `r` empties the
+///   table of the display, and `?` shows the list of the keys.
+/// - Page Up and Page Down scroll the rows of the path by one page.
+/// - Every other key means nothing.
+pub(crate) fn classify(key: KeyEvent) -> Option<Command> {
+    let KeyEvent {
+        code,
+        modifiers,
+        kind,
+        ..
+    } = key;
+
+    if kind == KeyEventKind::Release {
+        return None;
+    }
+
+    // Checked in front of the table of the letters, so no mode that a later
+    // display adds can trap the user.
+    if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
+        return Some(Command::Quit);
+    }
+
+    match code {
+        KeyCode::Char('q') => Some(Command::Quit),
+        KeyCode::Char('p') => Some(Command::Pause),
+        KeyCode::Char('n') => Some(Command::Names),
+        KeyCode::Char('r') => Some(Command::Reset),
+        KeyCode::Char('?') => Some(Command::Help),
+        KeyCode::PageUp => Some(Command::PageUp),
+        KeyCode::PageDown => Some(Command::PageDown),
+        _ => None,
+    }
+}
+
+/// The word that a table which holds where it stands writes under itself.
+///
+/// A held table looks like a table of a run that stopped, and a reader who
+/// pressed the key a minute ago does not remember which of the two stands in
+/// front of them. One word answers that.
+const PAUSED: &str = "paused";
+
+/// The number of entries of [`KEYS`].
+///
+/// One entry can name two keys that do one thing, as `q` and Ctrl-C do. This
+/// number thus counts the entries and not the keys.
+const KEY_COUNT: usize = 6;
+
+/// The key that shows the list of the keys, and hides it again.
+///
+/// The long help of `krt` names this key, and it names no other key of the
+/// table, because a doc comment of `clap` is a string literal that reads
+/// [`KEYS`] at no time. This name therefore stands here, beside the one list,
+/// and `the_long_help_names_the_key_that_lists_the_keys` holds the two of them
+/// together.
+const KEY_THAT_LISTS_THE_KEYS: &str = "?";
+
+/// Each key of a live table, and what that key does.
+///
+/// This list is the one place that says what a key does, and the help builds
+/// its lines out of it. A second list would name a key that [`classify`] no
+/// longer holds, and a reader who pressed that key would then read a screen
+/// which says that nothing happened.
+const KEYS: [(&str, &str); KEY_COUNT] = [
+    ("q, Ctrl-C", "stop the run"),
+    ("p", "hold the table, or let it move"),
+    ("n", "show the names, or show the addresses"),
+    ("r", "empty the table"),
+    ("PgUp, PgDn", "scroll the rows of the path"),
+    (KEY_THAT_LISTS_THE_KEYS, "show these keys, or hide them"),
+];
+
+/// The text between a key and what that key does.
+///
+/// Two spaces, so the widest key of the list stands clear of its own text.
+const KEY_GAP: &str = "  ";
+
+/// The lines of the list of the keys.
+///
+/// Every key takes the columns of the widest key, so the text of each of them
+/// starts at one column and the list reads as two columns.
+fn key_lines() -> Vec<String> {
+    let width = KEYS
+        .iter()
+        .map(|(key, _)| ui::display_width(key))
+        .max()
+        .unwrap_or(0);
+    KEYS.iter()
+        .map(|(key, does)| format!("{key:<width$}{KEY_GAP}{does}"))
+        .collect()
+}
+
+/// The mark that opens the line which counts the rows that a frame left out.
+///
+/// The mark reads as "and more of the same". The rows behind it are rows of the
+/// table above it, and the count says how many of them the window does not
+/// hold.
+const MORE_MARK: &str = "+";
+
+/// The first row of the path that each page key asks for.
+///
+/// One page is the number of rows that the frame shows, minus one row, and at
+/// least one row. The last row that the frame shows becomes the first row of
+/// the page below, so the reader keeps one row of context across the move.
+///
+/// The two keys measure different frames. Page Down measures the frame that
+/// shows now. Page Up measures the frame that Page Up shows, so Page Up undoes
+/// Page Down: the first row that the frame shows becomes the last row of the
+/// page above. A frame that fits, or a window too short to hold one row between
+/// two count lines, scrolls nowhere, and both keys then ask for the first row.
+///
+/// A row past the last full window is fine for `down`. The next fit clamps it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Pages {
+    /// The first row of the page that Page Up asks for.
+    up: usize,
+    /// The first row of the page that Page Down asks for.
+    down: usize,
+}
+
+/// The lines of one frame that a window holds, the rows of the path that reached
+/// that frame, and the pages that the page keys ask for.
+///
+/// The range travels with the lines, because a caller that draws an image over
+/// one row of the path must draw no image for a row that went out of the frame.
+/// Such an image would stand over the footer of the frame, or over a line of
+/// another frame, and nothing on the screen would say which row it belongs to.
+/// A caller that counted the rows itself would count the rows of the table and
+/// not the rows of the window. The start of the range is the row that the frame
+/// scrolled to, and a caller keeps it as the place of the next frame.
+struct Fitted {
+    /// The lines of the frame, head first.
+    lines: Vec<String>,
+    /// The rows of the path that the frame holds, as indexes into the body.
+    rows: std::ops::Range<usize>,
+    /// The index in `lines` of the line that holds the first shown row.
+    ///
+    /// An image of that row stands on this line. A caller reads it here so that
+    /// it does not count the lines of the head itself.
+    top: usize,
+    /// The first row of each page that the page keys ask for.
+    pages: Pages,
+}
+
+/// The lines of one frame that fit a window of `rows` rows.
+///
+/// The head and the footer stand at every height. The head names the
+/// destination, the count of the rounds, the size of the recorded file, and
+/// every column of the table, and the footer holds the mark of the pause and
+/// the list of the keys, which are what a key press of the reader asked for.
+/// The rows of the path take the lines that those two leave. One line above
+/// them says how many rows went out of the frame at the top, and one line below
+/// them says how many went out at the foot. A line of a count shows only while
+/// its count is more than zero.
+///
+/// `first` is the first row of the path that the caller asks for. The frame
+/// starts at the nearest row it can hold: a `first` past the last full window
+/// stops at that window, and the top of the path shows the hops that answer
+/// first, which is the end that `traceroute` and `mtr` show. A frame that fits
+/// ignores `first`, because it has no row to scroll.
+///
+/// A window that no probe measured holds every line. Such a run knows no height
+/// to fit a frame to, and the terminal decides what it shows.
+///
+/// The last cut holds a window too short even for the head and the footer
+/// together. A frame that ran past the foot of the window would scroll the
+/// window by the lines that ran past it, and the head of the frame goes off the
+/// top of an alternate screen that keeps no scrollback.
+fn fitted(
+    head: Vec<String>,
+    body: Vec<String>,
+    footer: Vec<String>,
+    rows: Option<u16>,
+    first: usize,
+) -> Fitted {
+    let budget = rows.map_or(usize::MAX, usize::from);
+    let mut lines = head;
+    if lines.len() + body.len() + footer.len() <= budget {
+        let rows = 0..body.len();
+        let top = lines.len();
+        lines.extend(body);
+        lines.extend(footer);
+        return Fitted {
+            lines,
+            rows,
+            top,
+            pages: Pages { up: 0, down: 0 },
+        };
+    }
+    // The head and the footer keep their lines. The rows of the path and the
+    // lines that count the rows take what is left.
+    let room = budget.saturating_sub(lines.len() + footer.len());
+    // A scroll needs room for one row between two count lines. The frame did
+    // not fit, so the body is longer than the room. At the last first row, one
+    // count line stands above and the rows reach the foot of the window.
+    let scrolls = room >= 3;
+    let last = if scrolls {
+        body.len().saturating_sub(room - 1)
+    } else {
+        0
+    };
+    let first = first.min(last);
+    let end = if first == 0 {
+        room.saturating_sub(1).min(body.len())
+    } else if first == last {
+        body.len()
+    } else {
+        first + room - 2
+    };
+    // A table of no row leaves no row out, and a line that counted zero rows
+    // would name a table the reader can already see the whole of.
+    if first > 0 {
+        lines.push(format!("{MORE_MARK}{}", counted(first, ROW)));
+    }
+    let top = lines.len();
+    lines.extend(body[first..end].iter().cloned());
+    if end < body.len() {
+        lines.push(format!("{MORE_MARK}{}", counted(body.len() - end, ROW)));
+    }
+    lines.extend(footer);
+    // The truncate at the foot cuts the head, the count lines, and the footer,
+    // and it reaches no row of the path: a window too short for the head takes
+    // no row of the path at all, because `room` is then zero.
+    lines.truncate(budget);
+    let pages = if scrolls {
+        Pages {
+            // The page above is a middle page of room - 2 rows, or the top
+            // page of room - 1 rows. The first row of this frame becomes the
+            // last row of that page, and the move is one row at least.
+            up: if first < room - 1 {
+                0
+            } else {
+                first - (room - 3).max(1)
+            },
+            down: first + (end - first).saturating_sub(1).max(1),
+        }
+    } else {
+        Pages { up: 0, down: 0 }
+    };
+    Fitted {
+        lines,
+        rows: first..end,
+        top,
+        pages,
+    }
+}
+
+/// The text between two lines that a draw writes.
+///
+/// Raw mode returns no carriage on a bare line feed, so a frame of bare line
+/// feeds walks down the screen one column further to the right for each line
+/// of it.
+const LINE_END: &str = "\r\n";
+
+/// A source of key presses.
+pub(crate) trait Keys {
+    /// The commands of the keys that arrived since the last ask.
+    ///
+    /// The ask never waits. A run that waited for a key would take no round
+    /// while it waited, and the table would then stand still while the path
+    /// moved.
+    fn presses(&mut self) -> Vec<Command>;
+}
+
+/// The key source of a run that reads no key.
+///
+/// No run of the tool builds this source. A run that draws the table holds a
+/// terminal and reads the keys of it, and a run that holds no terminal draws no
+/// table and takes no key source at all. The source is therefore a part of a
+/// test build and no part of a build that ships, and the tests of a turn that
+/// took no key are what read it.
+#[cfg(test)]
+pub(crate) struct NoKeys;
+
+#[cfg(test)]
+impl Keys for NoKeys {
+    fn presses(&mut self) -> Vec<Command> {
+        Vec::new()
+    }
+}
+
+/// The key source of a run that holds a terminal.
+///
+/// The source takes every key event that already arrived, and it waits for
+/// none. The run loop asks ten times each second, and an ask that waited for a
+/// key holds the recording where it stands until the user presses one.
+///
+/// No test of this file builds this source. `crossterm` reads the keys of a
+/// terminal, and `cargo test` hands the test binary a pipe. A source that read
+/// the keys of the terminal of `cargo test` takes the keys of the reader who
+/// started it. The pseudo terminal of `tests/terminal.rs` is what drives this
+/// source.
+pub(crate) struct Keyboard;
+
+impl Keys for Keyboard {
+    fn presses(&mut self) -> Vec<Command> {
+        let mut commands = Vec::new();
+        // A poll of no time answers whether an event stands ready now, and it
+        // waits for no event to arrive.
+        //
+        // A poll that fails, and a read that fails, end the gathering and leave
+        // the commands that the gathering already holds. A terminal that will
+        // not answer is no reason to stop the recording, which is the purpose
+        // of the tool.
+        while event::poll(Duration::ZERO).unwrap_or(false) {
+            let Ok(arrived) = event::read() else {
+                break;
+            };
+            // A resize of the window and a paste of text arrive at this same
+            // reader, and neither of them is a key. The gathering goes on past
+            // each of them, because the events behind one of them still hold
+            // the keys of the user.
+            if let Event::Key(key) = arrived {
+                commands.extend(classify(key));
+            }
+        }
+        commands
+    }
+}
+
+/// What a live run shows.
+pub(crate) trait Screen {
+    /// Takes the key presses that arrived. Answers whether the user asked the
+    /// run to stop.
+    ///
+    /// A turn that took no key draws nothing. The run loop takes ten turns each
+    /// second, and a draw of every turn would clear the screen and paint it
+    /// again at that rate.
+    fn poll(&mut self) -> bool;
+    /// One round arrived.
+    fn round(&mut self, round: &RoundRecord);
+    /// The names that arrived.
+    fn names(&mut self, names: &[NameRecord]);
+}
+
+/// The facts of a run that every frame of that run repeats.
+///
+/// The header line names them, and no round changes any of them, so the table
+/// takes them one time at the start of the run. They travel as one value
+/// because a constructor of eight parameters says nothing about which
+/// parameter is which.
+pub(crate) struct RunFacts {
+    /// The destination as the command line named it.
+    pub(crate) destination: String,
+    /// The address that the destination resolved to.
+    pub(crate) address: IpAddr,
+    /// The source address of the run.
+    pub(crate) source: IpAddr,
+    /// The period of one round.
+    pub(crate) interval: Duration,
+    /// The path of the recorded file.
+    ///
+    /// The header line names the size of that file, and the file grows with
+    /// every round, so each draw reads the size again.
+    pub(crate) path: PathBuf,
+}
+
+/// The window that a live table draws its frames in.
+///
+/// The two numbers travel as one value, because the table reads both of them
+/// for one purpose: a frame stands in the window of the terminal, and a frame
+/// that ran past either edge of that window would lose the part that ran past
+/// it.
+pub(crate) struct Window {
+    /// The number of terminal columns that a frame draws in.
+    columns: u16,
+    /// The number of rows that the window holds, and `None` for a window that
+    /// no probe measured.
+    rows: Option<u16>,
+}
+
+impl Window {
+    /// A window of these columns, and of these rows.
+    ///
+    /// `rows` is `None` for a window that no probe measured. Such a window
+    /// holds every line of a frame, which is the rule of the columns applied to
+    /// the height: a run that cannot measure the terminal draws the whole frame
+    /// and lets the terminal decide what it shows.
+    pub(crate) fn new(columns: u16, rows: Option<u16>) -> Self {
+        Self { columns, rows }
+    }
+}
+
+/// What the frames of a live table look like.
+///
+/// The two answers travel as one value, because both of them are decisions that
+/// the caller took off the terminal and off the command line at the start of
+/// the run. A constructor that took one parameter for each of them would grow a
+/// parameter every time the run learns a new question about its terminal, and a
+/// caller of five positional parameters says nothing about which one is which.
+pub(crate) struct Look {
+    /// Whether the frames carry the color of a terminal.
+    ///
+    /// The reader of the terminal decides, and the caller reads that answer off
+    /// the environment of the run. A reader who set `NO_COLOR` gets the frames
+    /// with glyphs alone.
+    pub(crate) paint: ui::Paint,
+    /// The image path of the Recent column, when the run draws one.
+    ///
+    /// `None` is every run that draws the block elements: a run that asked for
+    /// no image, a terminal that reads no image protocol or names none, and a
+    /// terminal that reports no pixel size. `main::graphics_of` states the four
+    /// questions.
+    pub(crate) graphics: Option<Graphics>,
+}
+
+/// What a live run needs to draw the Recent column as an image.
+pub(crate) struct Graphics {
+    /// The terminal, and the protocol that it draws images with.
+    pub(crate) capabilities: termgfx::Capabilities,
+    /// The pixel size of one character cell.
+    ///
+    /// The image draws in pixels and the terminal lays the table out in cells,
+    /// so a frame that puts an image over the Recent column measures that
+    /// column in cells and draws it in pixels.
+    pub(crate) cell: (u32, u32),
+}
+
+/// One frame of a live table, ready for the terminal.
+///
+/// The lines and the place of the images travel together, because both of them
+/// come out of one walk of the table. A draw that asked for the lines and then
+/// asked a second time for the rows of the path could read a table that a round
+/// changed between the two asks, and an image of a row of one walk would then
+/// stand over a row of the other.
+struct Drawn {
+    /// The lines of the frame, head first.
+    lines: Vec<String>,
+    /// The number of lines of the frame that stand above the first row of the
+    /// path that the frame shows. The count line above those rows is one of
+    /// them, when the frame scrolled.
+    ///
+    /// The count comes off `fitted`, which names the line of the first shown
+    /// row, and not off a constant of this file. A narrow window takes the
+    /// header of a frame onto more than one line, and an image that stood on a
+    /// line this file counted itself would then cover the heading of the Recent
+    /// column.
+    head: u16,
+    /// The Recent column of the frame, and the history of every row of the path
+    /// that reached it.
+    ///
+    /// `None` for two reasons. A run that draws the block elements asks the
+    /// render for no such column, because it draws every history in the lines
+    /// and reads nothing else. And a narrow terminal that dropped the column
+    /// names no place for an image to stand.
+    recent: Option<ui::RecentColumn>,
+    /// The rows of the path that the frame shows, as indexes into the rows of
+    /// the table.
+    ///
+    /// The start of the range is the row that the frame scrolled to. The table
+    /// keeps it as the place of the next frame.
+    rows: std::ops::Range<usize>,
+    /// The first row of each page that the page keys ask for.
+    pages: Pages,
+}
+
+/// Writes one image for each row of the path of a frame.
+///
+/// The image of the row at `index` among the shown rows stands over the Recent
+/// column of the line that the row draws in, which is `head` plus that index.
+/// When the frame scrolled, `head` counts the line that counts the rows above,
+/// so the image of the first shown row stands under that line. The cursor moves
+/// there first.
+///
+/// Each image carries the id of its line among the shown rows, so no two images
+/// of one frame share an id. One id for every row would put the last row of the
+/// frame over the first one. After a scroll, an id thus names a line of the
+/// frame and not a hop.
+///
+/// The image is as wide as the Recent column and as tall as one line of the
+/// table, in the pixels that the terminal reports for one character cell.
+///
+/// A draw that answers a fault stops the images of that frame and leaves the
+/// lines that already stand in the buffer. [`Table::draw`] states the rule that
+/// a frame which does not print stops nothing: the recording is the purpose of
+/// the tool.
+///
+/// # Arguments
+/// * `frame` - The buffer of the frame, which already holds the lines.
+/// * `graphics` - The terminal, and the pixel size of one character cell.
+/// * `recent` - Where the Recent column stands, and the history of every row of
+///   the path that reached the frame.
+/// * `head` - The number of lines of the frame that stand above the first row
+///   of the path that the frame shows. `fitted` names that line, and the count
+///   line above the rows is one of the lines above it when it shows.
+/// * `window_rows` - The number of rows that the window of the terminal holds,
+///   and `None` for a window that no probe measured. A line at or past that
+///   count stands under the foot of the window, and an image there would scroll
+///   the frame that stands.
+///
+/// # Errors
+///
+/// Answers the fault of a write to the buffer. A write to a vector never fails,
+/// so no run reaches that answer today, and the rule stays here because this is
+/// where the buffer of a frame takes its bytes.
+fn write_images(
+    frame: &mut Vec<u8>,
+    graphics: &Graphics,
+    recent: &ui::RecentColumn,
+    head: u16,
+    window_rows: Option<u16>,
+) -> std::io::Result<()> {
+    let (cell_width, cell_height) = graphics.cell;
+    let columns = u32::from(ui::RECENT_WIDTH);
+    let width = columns.saturating_mul(cell_width);
+    for (index, history) in recent.rows.iter().enumerate() {
+        // A window of a terminal holds far fewer rows than a `u16` counts, and
+        // a path holds 255 TTLs at most, so no run reaches either bound. The
+        // frame stops there anyway, because a line that no terminal can name is
+        // a line that no image can stand on.
+        let Ok(offset) = u16::try_from(index) else {
+            break;
+        };
+        let Some(line) = head.checked_add(offset) else {
+            break;
+        };
+        // A line at or past the rows of the window stands under the foot of
+        // that window. The rows above already stopped at the count that the
+        // frame kept, so no run reaches this bound today, and it stays because
+        // this is where the frame says which line an image can stand on.
+        if window_rows.is_some_and(|rows| line >= rows) {
+            break;
+        }
+        queue!(frame, MoveTo(recent.column, line))?;
+        let image = DynamicImage::ImageRgba8(graph::plot(history, width, cell_height));
+        let request = termgfx::Request {
+            budget: termgfx::Budget {
+                columns: Some(columns),
+                rows: Some(1),
+            },
+            // The graph is drawn here, hop by hop, and it comes out of no file
+            // at all, so there are no source bytes for the writer to pass on.
+            source: None,
+            // A hop graph is `ui::RECENT_WIDTH` cells by one row, which is
+            // nine by one. A cell of 20 pixels by 40 makes that 7200 pixels,
+            // or 28800 characters of raw payload, so it stands far under the
+            // smallest cap that a transport states.
+            payload: termgfx::ProtocolBudgets::UNLIMITED,
+            picture: termgfx::Picture::Frame {
+                id: u32::try_from(index).unwrap_or(u32::MAX).saturating_add(1),
+            },
+            cursor: termgfx::Cursor::Held,
+            preserve_aspect: false,
+        };
+        if graphics.capabilities.draw(frame, &image, &request).is_err() {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// The live table of a run.
+///
+/// The table folds every round that arrives, and it draws the frame of that
+/// fold. It also draws one frame at the moment it is built, in front of every
+/// round, for the reason that [`Table::new`] states. A run that draws this
+/// table holds the terminal in raw mode on the alternate screen, so each draw
+/// clears the screen and moves the cursor to the origin first, and one carriage
+/// return with one line feed stands between two lines of a frame. Raw mode
+/// returns no carriage on a bare line feed, and a frame of bare line feeds
+/// walks down the screen one column further to the right for each line of it.
+///
+/// The frame fits the window of the terminal. A frame of more lines than that
+/// window holds keeps its head and its footer and shows a part of the rows of
+/// the path, because a frame that ran past the foot of the window scrolls its
+/// own header line off the top of an alternate screen that keeps no scrollback.
+/// The part starts at the nearest TTLs, and Page Down and Page Up move it. A
+/// count line above and below the rows says how many rows the frame left out.
+pub(crate) struct Table<W: Write, K: Keys> {
+    /// The facts of the run that the header line names.
+    facts: RunFacts,
+    /// The name of the recorded file, without its directory.
+    file: String,
+    /// The fold of every round that arrived.
+    fold: HopTable,
+    /// The host name of each address that a name record named.
+    names: BTreeMap<IpAddr, String>,
+    /// The map that a table of the raw addresses hands the frame.
+    ///
+    /// One empty map that stands beside the names, and not a map that a draw
+    /// builds: a run draws one frame for each round, and each of those draws
+    /// would build the same empty map and drop it again.
+    nameless: BTreeMap<IpAddr, String>,
+    /// The number of rounds that the table folded.
+    ///
+    /// This is the counter of the display, and not the counter of the run. The
+    /// `end` record counts what the file holds, and a reader of the table asks
+    /// how many rounds the picture in front of them stands on. The reset
+    /// command therefore zeroes this counter and touches no file.
+    rounds: usize,
+    /// Whether the table holds where it stands.
+    paused: bool,
+    /// Whether the hosts read as names.
+    named: bool,
+    /// Whether the list of the keys stands under the table.
+    help: bool,
+    /// The first row of the path that the frame shows.
+    ///
+    /// The page keys move it. Each draw stores back the row that the frame
+    /// really started at, so a key on a frame that fits leaves nothing behind,
+    /// and the reset of the table goes back to the first row without a line of
+    /// its own.
+    first: usize,
+    /// Where the frames go.
+    sink: W,
+    /// Where the commands come from.
+    keys: K,
+    /// The window that the frames draw in.
+    window: Window,
+    /// What the frames of this table look like.
+    look: Look,
+}
+
+impl<W: Write, K: Keys> Table<W, K> {
+    /// A table of one run, which draws into `sink` and reads `keys`.
+    ///
+    /// The names start on. A reader who wants the raw addresses asks for them
+    /// with a key, and a run that resolves no name shows the addresses anyway,
+    /// because the map of the names then stays empty.
+    ///
+    /// The table draws its opening frame here, and not at the first round. The
+    /// caller takes the terminal in front of this call, so the alternate screen
+    /// of the run already stands in front of the reader, and that screen hides
+    /// every line which the run printed under it. A table that drew at the
+    /// first round alone therefore leaves an empty screen for one whole
+    /// period, and `--interval 2m` makes that two minutes with nothing on the
+    /// screen that says the run started. The frame of no round answers it: the
+    /// header line of such a frame names the destination, the address, the
+    /// source, the period of one round, and the recorded file, and the column
+    /// header stands under it.
+    ///
+    /// A table that exists holds a frame, and no caller can forget to ask for
+    /// one.
+    ///
+    /// `look` says what the frames of the table look like: whether they carry
+    /// the color of a terminal, and whether they draw the Recent column as an
+    /// image. The caller reads both answers off the terminal and the command
+    /// line at the start of the run.
+    pub(crate) fn new(facts: RunFacts, sink: W, keys: K, window: Window, look: Look) -> Self {
+        let mut table = Self {
+            file: crate::file_name(&facts.path),
+            facts,
+            fold: HopTable::new(),
+            names: BTreeMap::new(),
+            nameless: BTreeMap::new(),
+            rounds: 0,
+            paused: false,
+            named: true,
+            help: false,
+            first: 0,
+            sink,
+            keys,
+            window,
+            look,
+        };
+        table.draw();
+        table
+    }
+
+    /// The lines of one frame of this table.
+    ///
+    /// The frame stands apart from the draw that puts it on the screen, so a
+    /// reader of the lines reads the glyphs of the table and no control
+    /// sequence of a terminal.
+    ///
+    /// A table of the raw addresses hands the frame the empty map that stands
+    /// beside the names. The frame names an address that its map holds none of
+    /// by the address itself, so one empty map turns every host of the table
+    /// back into the number that answered.
+    ///
+    /// The footer stands under the table, and one blank line holds it off the
+    /// last row of the path: a word directly under the numbers of a hop reads
+    /// as a part of the table.
+    ///
+    /// The lines then fit the window, in the three parts that [`fitted`] takes:
+    /// the head of the frame, the rows of the path, and that footer. The first
+    /// row of the path that the frame shows is the row that the page keys last
+    /// moved to.
+    ///
+    /// A run that draws the Recent column as an image asks the render for blank
+    /// body cells in that column. The block elements are one picture of a hop
+    /// and the image is a second one, and a reader who sees both has two answers
+    /// to one question.
+    ///
+    /// That one ask is what brings the Recent column back with the lines. A run
+    /// of the block elements asks for neither, and [`Drawn::recent`] is then
+    /// `None`: such a run draws every history in the lines and reads nothing
+    /// else, so a copy of those histories beside the lines is a copy that this
+    /// file never looks at.
+    fn drawn(&self) -> Drawn {
+        let frame = ui::Frame {
+            header: ui::Header {
+                destination: Some(&self.facts.destination),
+                address: Some(self.facts.address),
+                source: Some(self.facts.source),
+                rounds: self.rounds,
+                interval: Some(self.facts.interval),
+                file: &self.file,
+                // The file grows with every round, so the size comes off the
+                // file at the moment of the draw. A file that the run cannot
+                // measure still folds, and the header then names the file and
+                // no size.
+                bytes: std::fs::metadata(&self.facts.path)
+                    .ok()
+                    .map(|data| data.len()),
+            },
+            table: &self.fold,
+            names: if self.named {
+                &self.names
+            } else {
+                &self.nameless
+            },
+            destination: Some(self.facts.address),
+        };
+        let picture = if self.look.graphics.is_some() {
+            ui::RecentPicture::Image
+        } else {
+            ui::RecentPicture::Bars
+        };
+        let rendered = frame.render(self.window.columns, self.look.paint, picture);
+        let mut body = rendered.lines;
+        // The head comes off the front of the frame, because a frame that the
+        // window does not hold keeps the head and drops rows of the path. A
+        // frame holds those lines at every width, and the `min` says so anyway.
+        let head: Vec<String> = body
+            .drain(..usize::from(rendered.head).min(body.len()))
+            .collect();
+        let fitted = fitted(head, body, self.footer(), self.window.rows, self.first);
+        Drawn {
+            lines: fitted.lines,
+            // The head of the images is the line that `fitted` names for the
+            // first shown row. Any line above that row, a count line included,
+            // is a line of the head for an image.
+            head: u16::try_from(fitted.top).unwrap_or(u16::MAX),
+            // A row that went out of the frame draws no image. Such an image
+            // would stand over the line that counts the rows which went out, or
+            // over a line of another frame, and nothing on the screen would say
+            // which row it belongs to.
+            recent: rendered.recent.map(|mut recent| {
+                recent.rows.truncate(fitted.rows.end);
+                recent
+                    .rows
+                    .drain(..fitted.rows.start.min(recent.rows.len()));
+                recent
+            }),
+            rows: fitted.rows,
+            pages: fitted.pages,
+        }
+    }
+
+    /// The lines that stand under the rows of the path.
+    ///
+    /// The mark of the pause comes first, and the list of the keys comes under
+    /// it. One blank line holds each of them off the lines above.
+    fn footer(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if self.paused {
+            lines.push(String::new());
+            lines.push(PAUSED.to_owned());
+        }
+        if self.help {
+            lines.push(String::new());
+            lines.extend(key_lines());
+        }
+        lines
+    }
+
+    /// Acts on one command, and answers whether that command stops the run.
+    ///
+    /// A page key reads the pages of the frame that the fold gives at the
+    /// current first row, and not a copy of an older frame. Two page keys of
+    /// one turn therefore move two pages. The draw that follows the turn stores
+    /// back the row that the frame really starts at.
+    fn apply(&mut self, command: Command) -> bool {
+        match command {
+            Command::Pause => self.paused = !self.paused,
+            Command::Names => self.named = !self.named,
+            Command::Reset => {
+                // A new table, because the fold keeps no way back to the empty
+                // one. The names stay: a name belongs to an address and not to
+                // a round, and a reader who emptied the table did not ask to
+                // resolve every address of the path again.
+                self.fold = HopTable::new();
+                self.rounds = 0;
+            }
+            Command::Help => self.help = !self.help,
+            // The frame of the fold at the current first row names the pages,
+            // so two presses of one turn move two pages.
+            Command::PageUp => self.first = self.drawn().pages.up,
+            Command::PageDown => self.first = self.drawn().pages.down,
+            // No field of the table holds the stop. The run loop owns it,
+            // because the loop is what closes the recorded file with its `end`
+            // record, and a display that stopped the process itself would
+            // leave the file without that record.
+            Command::Quit => return true,
+        }
+        false
+    }
+
+    /// Puts one frame on the screen, over the frame that stands there.
+    ///
+    /// The table keeps the first row of the path that this frame shows. A page
+    /// key on a frame that fits leaves no scroll behind, a reset goes back to
+    /// the first row because the empty table fits, and a frame that clamped a
+    /// row past the last full window holds the last full window.
+    ///
+    /// A frame that does not print stops nothing. The recording is the purpose
+    /// of the tool, and the frame is one view of it, so a run whose terminal
+    /// goes away loses the display and keeps the recording.
+    fn draw(&mut self) {
+        let drawn = self.drawn();
+        self.first = drawn.rows.start;
+        drop(self.paint(&drawn));
+    }
+
+    /// Writes the lines of one frame.
+    ///
+    /// The order inside the buffer is the order that a reader of the screen
+    /// needs. The command that takes the images of the frame before it off the
+    /// screen comes first, because a Kitty placement outlives a clear of the
+    /// screen: a frame that did not delete would stack a thousand images over a
+    /// run of a thousand rounds. The Sixel protocol and the iTerm2 protocol
+    /// paint into the screen instead, and `termgfx` writes nothing for them,
+    /// because the clear below takes what they painted.
+    ///
+    /// The clear comes next, so a frame of fewer lines than the frame before
+    /// it leaves none of the older lines on the screen.
+    ///
+    /// The lines follow, and the images stand over them. Both answers have to
+    /// hold for one image to reach the buffer: the terminal reads a picture,
+    /// and the frame carries the Recent column that the image stands in. A run
+    /// of the block elements gives up the first, and it asks the render for
+    /// none of the second, so [`Drawn::recent`] is `None` there. A terminal too
+    /// narrow for the Recent column gives up the second on its own, and the
+    /// frame of such a terminal draws its lines and no image.
+    ///
+    /// The whole frame stands in one buffer, and that buffer reaches the sink
+    /// in one call. The sink of a live run is `std::io::Stdout`, which is a
+    /// `LineWriter`, and such a writer flushes at every line feed. One call for
+    /// each line of the frame is therefore one `write(2)` for each line of it,
+    /// and the terminal draws what arrives, so the reader sees a half-drawn
+    /// frame between two of those writes.
+    ///
+    /// One line end stands between two lines, and no line end closes the last
+    /// line. A line end on the last row of the window scrolls the window by one
+    /// line, so a frame of as many lines as the window holds would push its own
+    /// header line off the top of a screen that keeps no scrollback. The
+    /// position of the cursor between two draws says nothing, because every
+    /// draw clears the screen and moves the cursor to the origin first.
+    ///
+    /// # Errors
+    ///
+    /// Answers the fault that the sink raised. The caller of this function
+    /// drops that fault, for the reason that [`Table::draw`] states.
+    fn paint(&mut self, drawn: &Drawn) -> std::io::Result<()> {
+        let mut frame: Vec<u8> = Vec::new();
+        if let Some(graphics) = self.look.graphics.as_ref() {
+            graphics.capabilities.clear_images(&mut frame)?;
+        }
+        queue!(frame, Clear(ClearType::All), MoveTo(0, 0))?;
+        write!(frame, "{}", drawn.lines.join(LINE_END))?;
+        if let (Some(graphics), Some(recent)) = (self.look.graphics.as_ref(), drawn.recent.as_ref())
+        {
+            write_images(&mut frame, graphics, recent, drawn.head, self.window.rows)?;
+            // The images move the cursor across the frame, so the last of them
+            // leaves it at the Recent column of the last row of the path. The
+            // origin is where a reader expects it, and it is where the draw of
+            // the next frame starts.
+            queue!(frame, MoveTo(0, 0))?;
+        }
+        self.sink.write_all(&frame)?;
+        self.sink.flush()
+    }
+}
+
+impl<W: Write, K: Keys> Screen for Table<W, K> {
+    fn poll(&mut self) -> bool {
+        let commands = self.keys.presses();
+        // A turn of no key leaves the frame that stands. The run loop polls
+        // ten times each second, and a draw of every turn would clear the
+        // screen and paint it again at that rate. The table would flicker, and
+        // no key of the reader asked for anything.
+        if commands.is_empty() {
+            return false;
+        }
+        let mut quit = false;
+        for command in commands {
+            // Every command of the turn acts, and the loop does not stop at
+            // the stop: a turn that took `p` and then `q` holds the table and
+            // stops the run.
+            quit = self.apply(command) || quit;
+        }
+        // The draw stands outside the loop, and it draws while the table holds
+        // as well: a table that took the key of the pause must put the mark of
+        // that pause on the screen, and no round draws it while the table
+        // holds.
+        self.draw();
+        quit
+    }
+
+    fn round(&mut self, round: &RoundRecord) {
+        self.fold.observe(round);
+        self.rounds += 1;
+        if !self.paused {
+            self.draw();
+        }
+    }
+
+    fn names(&mut self, names: &[NameRecord]) {
+        for name in names {
+            // The map is keyed by the address, and not by the hop, because one
+            // address answers at any number of TTLs.
+            self.names.insert(name.addr, name.host.clone());
+        }
+        if !self.paused {
+            self.draw();
+        }
+    }
+}
+
+/// Writes the one line that a run of no live table prints for one round.
+///
+/// The line holds the number of the round, the number of hops that answered,
+/// whether the round reached the target, and the time that the round took. Two
+/// spaces separate the fields, as they do in the closing line of the run.
+///
+/// A hop that did not answer is absent from the record, so the count is the
+/// number of hops that answered and not the length of the path.
+///
+/// This line is the whole picture that a headless run gives of one round. A run
+/// that holds a terminal draws the table above in the place of it.
+pub(crate) fn status_line(round: &RoundRecord) -> String {
+    let reached = if round.reached {
+        REACHED
+    } else {
+        NEVER_REACHED
+    };
+    [
+        format!("{ROUND} {}", round.seq),
+        counted(round.hops.len(), HOP),
+        reached.to_owned(),
+        render_duration(Duration::from_millis(round.dur_ms)),
+    ]
+    .join(SUMMARY_SEPARATOR)
+}
+
+/// The clock that times the lines of a run which draws no table.
+///
+/// Such a run writes one line each minute. A test of that minute must not wait
+/// one, so the clock comes from the caller and a test hands the screen a clock
+/// that it moves by hand.
+pub(crate) trait Clock {
+    /// The moment now.
+    fn now(&self) -> Instant;
+}
+
+/// The clock of a run, which reads the clock of the machine.
+pub(crate) struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
+
+/// The time between two lines of a run that draws no table.
+///
+/// A run of one round each second writes one line each second, and an hour of
+/// such a run fills a terminal with 3600 lines that say almost the same thing.
+/// One line for each minute of the run says the same thing and leaves the
+/// window of the terminal to the work of the reader.
+const LINE_PERIOD: Duration = Duration::from_mins(1);
+
+/// The display of a run that draws no table.
+///
+/// A run whose standard output is a pipe or a file holds no terminal. Such a
+/// run clears no screen and reads no key. It writes one status line at its
+/// first round, and one more each time a whole [`LINE_PERIOD`] passed since the
+/// line before it. The first round stands on its own reason: a run that printed
+/// nothing for a whole minute reads as a run that died.
+pub(crate) struct Headless<W: Write, C: Clock> {
+    /// Where the lines go.
+    sink: W,
+    /// The clock that times the lines.
+    clock: C,
+    /// The moment of the last line, and nothing before the first one.
+    last: Option<Instant>,
+}
+
+impl<W: Write, C: Clock> Headless<W, C> {
+    /// A headless screen that writes into `sink` and times its lines by
+    /// `clock`.
+    pub(crate) fn new(sink: W, clock: C) -> Self {
+        Self {
+            sink,
+            clock,
+            last: None,
+        }
+    }
+
+    /// Whether the line of a round that arrives at `now` reaches the sink.
+    ///
+    /// The first round of a run prints, and every round after it prints when a
+    /// whole [`LINE_PERIOD`] passed since the last line.
+    fn due(&self, now: Instant) -> bool {
+        self.last
+            .is_none_or(|last| now.duration_since(last) >= LINE_PERIOD)
+    }
+}
+
+impl<W: Write, C: Clock> Screen for Headless<W, C> {
+    fn poll(&mut self) -> bool {
+        // A headless run holds no terminal, so no key of it reaches this
+        // process. The signal handler that `main.rs` registers stops such a
+        // run, and the limits of the command line stop it too.
+        false
+    }
+
+    fn round(&mut self, round: &RoundRecord) {
+        let now = self.clock.now();
+        if !self.due(now) {
+            return;
+        }
+        self.last = Some(now);
+        // A line that does not print stops nothing. The recording is the
+        // purpose of the tool, and the line is one view of it, so a reader who
+        // closes the pipe of the display loses the display and keeps the
+        // recording.
+        drop(writeln!(self.sink, "{}", status_line(round)));
+    }
+
+    fn names(&mut self, _names: &[NameRecord]) {
+        // A name belongs to a row of a table, and this screen draws no table.
+        // The run writes every name record to the recorded file before it
+        // reaches this call, so a replay of that file names each address that
+        // a lookup answered.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        classify, status_line, Clock, Command, Graphics, Headless, Keys, Look, NoKeys, RunFacts,
+        Screen, SystemClock, Table, Window, KEY_THAT_LISTS_THE_KEYS,
+    };
+    use crate::record::{NameRecord, RoundRecord, RunId};
+    use crate::testing::{address, round, FakeClock, FakeKeys};
+    use crate::ui::Paint;
+    use chrono::Utc;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use std::fs;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::rc::Rc;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    /// Builds the press of a key that no modifier holds.
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// The number of terminal columns that every table below draws in.
+    ///
+    /// The nominal frame is 97 columns wide: every column of the table, with a
+    /// Host column of 30. The rows of `tests/replay.rs` stand at that same
+    /// width, so a row of this file reads as a row of that one.
+    const WIDTH: u16 = 97;
+
+    /// The rows of a window that no probe measured.
+    ///
+    /// Such a window fits a frame to no height, so the table draws every line
+    /// of it. Every table below takes this window, and the tests of the height
+    /// name a window of their own.
+    const NO_ROWS: Option<u16> = None;
+
+    /// The destination of every table below.
+    const DESTINATION: &str = "example.com";
+
+    /// The address that the destination resolved to.
+    const DESTINATION_ADDRESS: &str = "93.184.216.34";
+
+    /// The source address of every run below.
+    const SOURCE: &str = "1.2.3.4";
+
+    /// The period of one round of every run below.
+    const INTERVAL: Duration = Duration::from_secs(1);
+
+    /// The address of the one router that answers the rounds below.
+    const ROUTER: &str = "10.0.0.1";
+
+    /// The name that a name record gives that router.
+    const ROUTER_NAME: &str = "router.lan";
+
+    /// The host of the row of that router, while the names stand.
+    ///
+    /// The address stays beside the name, because a name is what a resolver
+    /// said and an address is what answered.
+    const NAMED_ROUTER: &str = "router.lan (10.0.0.1)";
+
+    /// The round-trip time of the answer of that router, in milliseconds.
+    const RTT: f64 = 0.87;
+
+    /// The first TTL of every round below, which is also the last one.
+    const TTL: u8 = 1;
+
+    /// The identifier of the run that every name record below belongs to.
+    const RUN: &str = "2026-08-18T12:00:00.000Z";
+
+    /// The number of bytes of the recorded file at the first draw of the test
+    /// of the size.
+    const FIRST_BYTES: usize = 100;
+
+    /// The number of bytes of that same file at the second draw.
+    const SECOND_BYTES: usize = 142;
+
+    /// The byte that fills that file.
+    ///
+    /// The header names the size of the recorded file and reads no line of it,
+    /// so one byte serves as well as a record.
+    const FILLER: u8 = b'x';
+
+    /// The start of the header line of a table that folded one round.
+    ///
+    /// The name of the recorded file ends that line, and each test builds a
+    /// path of its own, so the assertion reads the start of the line and not
+    /// the whole of it.
+    const ONE_ROUND_HEADER: &str =
+        " krt  example.com → 93.184.216.34   src 1.2.3.4   round 1   1s   ";
+
+    /// The start of the header line of a table that folded no round.
+    const NO_ROUND_HEADER: &str =
+        " krt  example.com → 93.184.216.34   src 1.2.3.4   round 0   1s   ";
+
+    /// The row of a table that folded one round of one TTL.
+    ///
+    /// The round answers at TTL 1 from 10.0.0.1 at 0.87, which one decimal
+    /// place writes as 0.9. One answer is its own last, smallest, mean, and
+    /// largest time, and the population standard deviation of one sample is
+    /// 0.0. The TTL answered the one probe it took, so it loses nothing. One
+    /// sample draws one bar, and a window of one sample varies by nothing, so
+    /// that bar is the lowest one.
+    const ONE_ROUND_ROW: &str =
+        "   1  10.0.0.1                          0.0%      1    0.9    0.9    0.9    0.9    0.0  ▁";
+
+    /// The escape character that starts every control sequence of a draw.
+    const ESCAPE: char = '\u{1b}';
+
+    /// The mark that the Recent column draws for a probe that no hop answered.
+    ///
+    /// The test spells the glyph, and `ui.rs` spells it again. That is on
+    /// purpose, as the word of the pause is: a test that read the constant of
+    /// that module would agree with every mark the module ever holds, and this
+    /// mark is what a reader of the table sees.
+    const NO_ANSWER: &str = "╳";
+
+    /// The control sequence that paints what follows it red.
+    const RED: &str = "\u{1b}[31m";
+
+    /// The control sequence that gives the foreground of the terminal back.
+    const PLAIN: &str = "\u{1b}[39m";
+
+    /// Builds a path under the temporary directory that no other run reaches.
+    ///
+    /// Two runs of one test can overlap, because `cargo test` runs on many
+    /// threads and more than one `cargo test` can run at once. The process
+    /// identifier and the nanosecond keep the two runs apart.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a clock that stands before the epoch. Such a clock is a fault
+    /// of the machine, not an answer of the code under test.
+    fn temp_path(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("the clock must stand after the epoch")
+            .as_nanos();
+        let process = std::process::id();
+        std::env::temp_dir().join(format!("krt-live-{label}-{process}-{nanos}.jsonl"))
+    }
+
+    /// A file that one test makes. The file goes away when the test ends, and
+    /// also when the test panics.
+    struct TempFile {
+        /// The path of the file.
+        path: PathBuf,
+    }
+
+    impl TempFile {
+        /// Holds a path that no file uses yet, and that no other run reaches.
+        fn absent(label: &str) -> Self {
+            Self {
+                path: temp_path(label),
+            }
+        }
+
+        /// The path of the file.
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        /// Writes a file of `bytes` bytes at that path.
+        ///
+        /// # Panics
+        ///
+        /// Panics on a write that fails. Such a fault is a fault of the
+        /// machine, not an answer of the code under test.
+        fn of(&self, bytes: usize) {
+            fs::write(&self.path, vec![FILLER; bytes]).expect("the test file must write");
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
+    /// The facts of a run whose recorded file stands at `path`.
+    ///
+    /// Every table below heads its frames with these facts, and each of those
+    /// tables holds a sink of its own, so the facts stand apart from the sink.
+    fn facts_at(path: PathBuf) -> RunFacts {
+        RunFacts {
+            destination: DESTINATION.to_owned(),
+            address: address(DESTINATION_ADDRESS),
+            source: address(SOURCE),
+            interval: INTERVAL,
+            path,
+        }
+    }
+
+    /// The look of a table that draws the block elements of the Recent column.
+    ///
+    /// Every table below but the tables of the image path takes this look, so a
+    /// frame of one of them reads as the frame of a run on a terminal that
+    /// draws no image.
+    fn bars(paint: Paint) -> Look {
+        Look {
+            paint,
+            graphics: None,
+        }
+    }
+
+    /// A table that draws into bytes, reads `keys`, and heads its frames with
+    /// the recorded file at `path`.
+    ///
+    /// The sink comes back empty. A table draws its opening frame at the moment
+    /// it is built, and every test below reads the frames that its own calls
+    /// drew.
+    fn table_at<K: Keys>(path: PathBuf, keys: K) -> Table<Vec<u8>, K> {
+        let mut table = Table::new(
+            facts_at(path),
+            Vec::new(),
+            keys,
+            Window::new(WIDTH, NO_ROWS),
+            bars(Paint::Colored),
+        );
+        table.sink.clear();
+        table
+    }
+
+    /// A sink that counts the calls of [`Write::write`] that reach it.
+    ///
+    /// A test holds no terminal, so it reads nothing of how many times a draw
+    /// crossed into the kernel. This count is what such a test reads in the
+    /// place of that. The sink keeps none of the bytes, because the tests that
+    /// read the glyphs of a frame draw into bytes above.
+    struct Counted {
+        /// The number of calls that reached this sink.
+        writes: usize,
+    }
+
+    impl Write for Counted {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            // The whole buffer counts as taken, so `write_all` hands one
+            // buffer over in one call. A sink that took less of it would count
+            // the calls of its own refusal.
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A table that draws into a sink which counts the calls, and that takes
+    /// the keys of an empty script.
+    ///
+    /// The count comes back at zero. A table draws its opening frame at the
+    /// moment it is built, and the test below counts the calls of one draw.
+    fn counted_table() -> Table<Counted, FakeKeys> {
+        let mut table = Table::new(
+            facts_at(temp_path("writes")),
+            Counted { writes: 0 },
+            FakeKeys::of(&[]),
+            Window::new(WIDTH, NO_ROWS),
+            bars(Paint::Colored),
+        );
+        table.sink.writes = 0;
+        table
+    }
+
+    /// A table that draws into bytes and takes the keys of a script.
+    ///
+    /// The path of its recorded file names no file, so the header line of it
+    /// names no size. The one test that reads a size writes a file of its own.
+    fn table(script: &[&[Command]]) -> Table<Vec<u8>, FakeKeys> {
+        table_at(temp_path("frame"), FakeKeys::of(script))
+    }
+
+    /// A table that draws into bytes with no color at all, and that reads no
+    /// key.
+    ///
+    /// This is the table of a reader who set `NO_COLOR`. It folds the same
+    /// rounds as the table above, and it writes the glyphs of them alone.
+    ///
+    /// The sink comes back empty, for the reason that [`table_at`] states.
+    fn plain_table() -> Table<Vec<u8>, FakeKeys> {
+        let mut table = Table::new(
+            facts_at(temp_path("plain")),
+            Vec::new(),
+            FakeKeys::of(&[]),
+            Window::new(WIDTH, NO_ROWS),
+            bars(Paint::Plain),
+        );
+        table.sink.clear();
+        table
+    }
+
+    /// The character that opens an application program command, which is how
+    /// the Kitty graphics protocol carries an image.
+    const APC: char = '_';
+
+    /// The character that opens an operating system command, which is how the
+    /// iTerm2 protocol carries an image.
+    const OSC: char = ']';
+
+    /// The character that opens a device control string, which is how the Sixel
+    /// protocol carries an image.
+    const DCS: char = 'P';
+
+    /// The character that closes an operating system command of iTerm2.
+    const BELL: char = '\u{7}';
+
+    /// The character that closes a string of one of the three openers above,
+    /// behind the escape character.
+    const STRING_END: char = '\\';
+
+    /// The text that a terminal prints for what the draws wrote, with the
+    /// control sequences taken out.
+    ///
+    /// A sequence that moves the cursor or clears the screen starts with the
+    /// escape character and ends with a letter: the clear of the screen ends
+    /// `J`, and the move of the cursor ends `H`. The reader drops from one
+    /// escape to the letter that closes it.
+    ///
+    /// A sequence that carries an image is a string, and it ends where the
+    /// string ends and not at the first letter it holds: the payload of an
+    /// image is base64 or a Sixel band, and both of them are full of letters.
+    /// Three characters open such a string, one for each protocol, and the
+    /// reader then drops to the terminator of the string. A reader that stopped
+    /// at the first letter would leave the whole payload of the image on the
+    /// screen as text.
+    ///
+    /// What stays is what a reader of the terminal sees.
+    fn glyphs(painted: &[u8]) -> String {
+        let text = String::from_utf8_lossy(painted);
+        let mut kept = String::new();
+        let mut characters = text.chars();
+        while let Some(character) = characters.next() {
+            if character != ESCAPE {
+                kept.push(character);
+                continue;
+            }
+            if matches!(characters.next(), Some(APC | OSC | DCS)) {
+                let mut escaped = false;
+                for inside in characters.by_ref() {
+                    if inside == BELL || (escaped && inside == STRING_END) {
+                        break;
+                    }
+                    escaped = inside == ESCAPE;
+                }
+                continue;
+            }
+            for inside in characters.by_ref() {
+                if inside.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+        kept
+    }
+
+    /// The lines that the draws wrote into a sink, in the order they arrived.
+    fn painted(sink: &[u8]) -> Vec<String> {
+        glyphs(sink)
+            .split_terminator(super::LINE_END)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The text that ends a header line whose file holds this many bytes.
+    ///
+    /// A size below one kilobyte reads as whole bytes, so the text names the
+    /// count of the bytes itself and no unit above the byte.
+    fn size_of(bytes: usize) -> String {
+        format!("({bytes} B)")
+    }
+
+    /// One round of one TTL, which the router answered.
+    fn one_round() -> RoundRecord {
+        round(TTL, TTL, &[(TTL, ROUTER, RTT)])
+    }
+
+    /// One round of the same TTL that no hop answered.
+    fn one_lost_round() -> RoundRecord {
+        round(TTL, TTL, &[])
+    }
+
+    /// The number of lines of the head that the tests of [`super::fitted`]
+    /// build.
+    ///
+    /// Three: a header line, the blank line under it, and a column header. That
+    /// is the head of a frame whose header takes one line, and the fit of a
+    /// frame reads the head it is given, so these tests need no head of a
+    /// render at all.
+    const A_HEAD_LINES: usize = 3;
+
+    /// The number of lines of a rendered frame that stand above the rows of the
+    /// path.
+    ///
+    /// The head ends with the column header, so the count reads the frame that
+    /// the test holds. A test that spelled the number would read the wrong line
+    /// of every frame whose header took a second line, and the header of a
+    /// frame takes as many lines as the window leaves it: `ui::Header::lines`
+    /// states that rule.
+    fn head_lines(lines: &[String]) -> usize {
+        lines
+            .iter()
+            .position(|line| line.starts_with(COLUMN_HEADER_START))
+            .map_or(0, |line| line + 1)
+    }
+
+    /// The start of the column header of every frame.
+    ///
+    /// The TTL column and the Host column never drop, so this text starts the
+    /// column header at every width.
+    const COLUMN_HEADER_START: &str = " TTL  Host";
+
+    /// The number of columns that the TTL of a row takes, with the one column
+    /// that stands to the left of it.
+    const TTL_COLUMNS: usize = 4;
+
+    /// The text between two columns of a frame.
+    const COLUMN_GAP: &str = "  ";
+
+    /// The number of TTLs of the path that the tall table below folds.
+    ///
+    /// The head takes three lines and this path takes twenty, so the frame of
+    /// it stands inside a window of [`WINDOW_ROWS`] rows on its own, and it
+    /// runs past the foot of that window the moment a key asks for the pause
+    /// and the list of the keys.
+    const TALL_PATH: u8 = 20;
+
+    /// The network of the address that answers at each TTL of that path.
+    const TALL_NETWORK: &str = "10.0.0";
+
+    /// The number of rows of a window too short for that path.
+    ///
+    /// The head takes four of these rows, and the line that counts the rows
+    /// which went out of the frame takes one, so five rows of the path stand.
+    ///
+    /// The head takes four rows and not three because the header of such a
+    /// table names a recorded file whose name no window of [`WIDTH`] columns
+    /// holds beside the four fields in front of it. The header therefore takes
+    /// two lines, and the blank line and the column header take one each.
+    const SHORT_ROWS: u16 = 10;
+
+    /// The last TTL of the tall path that a window of [`SHORT_ROWS`] rows
+    /// holds.
+    const LAST_KEPT_TTL: u8 = 5;
+
+    /// The first TTL of that path that such a window leaves out.
+    const FIRST_DROPPED_TTL: u8 = 6;
+
+    /// The line that closes the rows of a frame in a window of [`SHORT_ROWS`]
+    /// rows.
+    ///
+    /// Five of the twenty rows of the path stand, so fifteen of them go out of
+    /// the frame.
+    ///
+    /// The test spells the line, and the module builds the same line out of a
+    /// count and the name of a row. That is on purpose, as the word of the
+    /// pause is: this line is what a reader of the screen sees.
+    const DROPPED_LINE: &str = "+15 rows";
+
+    /// The number of rows of the window of a common terminal.
+    ///
+    /// The head and the tall path take every one of these 24 rows. The pause
+    /// and the list of the keys take nine lines more, so a frame that carries
+    /// both of them runs past the foot of this window.
+    const WINDOW_ROWS: u16 = 24;
+
+    /// The line that closes the rows of that crowded frame.
+    ///
+    /// The head takes four rows, the pause and the list of the keys take nine,
+    /// and this line takes one, so ten of the twenty rows of the path stand
+    /// and ten go out of the frame.
+    const CROWDED_LINE: &str = "+10 rows";
+
+    /// The mark that opens the line which counts the rows that a frame left
+    /// out.
+    ///
+    /// No other line of a frame opens with it: the header line opens with the
+    /// name of the tool, and a row of the path opens with the number of a TTL.
+    const MORE_MARK: char = '+';
+
+    /// The address that answers at one TTL of the tall path.
+    fn tall_host(ttl: u8) -> String {
+        format!("{TALL_NETWORK}.{ttl}")
+    }
+
+    /// The start of the row of one TTL of that path: the number of the TTL, and
+    /// the address that answered at it.
+    fn tall_row(ttl: u8) -> String {
+        format!("{ttl:>TTL_COLUMNS$}{COLUMN_GAP}{}", tall_host(ttl))
+    }
+
+    /// One round that answered at every TTL of the tall path.
+    fn a_tall_round() -> RoundRecord {
+        let hosts: Vec<String> = (TTL..=TALL_PATH).map(tall_host).collect();
+        let hops: Vec<(u8, &str, f64)> = (TTL..=TALL_PATH)
+            .zip(hosts.iter())
+            .map(|(ttl, host)| (ttl, host.as_str(), RTT))
+            .collect();
+        round(TTL, TALL_PATH, &hops)
+    }
+
+    /// A table that draws into bytes in a window of `rows` rows, and that takes
+    /// the keys of a script.
+    ///
+    /// The sink comes back empty, for the reason that [`table_at`] states.
+    fn table_in(rows: Option<u16>, script: &[&[Command]]) -> Table<Vec<u8>, FakeKeys> {
+        let mut table = Table::new(
+            facts_at(temp_path("window")),
+            Vec::new(),
+            FakeKeys::of(script),
+            Window::new(WIDTH, rows),
+            bars(Paint::Colored),
+        );
+        table.sink.clear();
+        table
+    }
+
+    /// A table of the tall path in a window of `rows` rows, which drew the
+    /// frame of that path already.
+    fn tall_table(rows: Option<u16>, script: &[&[Command]]) -> Table<Vec<u8>, FakeKeys> {
+        let mut screen = table_in(rows, script);
+        screen.round(&a_tall_round());
+        screen
+    }
+
+    /// The number of rows of a window that the scroll tests use.
+    ///
+    /// The head takes four rows (see [`SHORT_ROWS`] for why four), so seven
+    /// lines remain for the rows of the path and their count lines.
+    const SCROLL_ROWS: u16 = 11;
+
+    /// The lines of a frame under its head, in a form that one `assert_eq!`
+    /// compares.
+    ///
+    /// A count line stays as its text. A row of the tall path becomes `row N`
+    /// for its TTL `N`. Any other line, such as the blank line of a footer,
+    /// stays as it is. A test then reads the rows that a frame shows without
+    /// the width of the columns in the way.
+    fn under_the_head(lines: &[String]) -> Vec<String> {
+        lines[head_lines(lines)..]
+            .iter()
+            .map(|line| {
+                (TTL..=TALL_PATH)
+                    .find(|ttl| line.starts_with(&tall_row(*ttl)))
+                    .map_or_else(|| line.clone(), |ttl| format!("row {ttl}"))
+            })
+            .collect()
+    }
+
+    /// The lines that [`under_the_head`] gives for a frame that shows the rows
+    /// `from` to `to` of the tall path, with an optional count line on each
+    /// side.
+    fn shown(above: Option<&str>, from: u8, to: u8, below: Option<&str>) -> Vec<String> {
+        above
+            .map(str::to_owned)
+            .into_iter()
+            .chain((from..=to).map(|ttl| format!("row {ttl}")))
+            .chain(below.map(str::to_owned))
+            .collect()
+    }
+
+    /// The number of rows of a window with no room for a scroll.
+    ///
+    /// The head takes four rows, so two lines remain for the rows of the path.
+    /// A scroll needs three: one row between two count lines.
+    const TINY_ROWS: u16 = 6;
+
+    /// The number of rows of a window where the list of the keys changes the
+    /// room of the scroll.
+    ///
+    /// Without the list, fourteen lines remain for the rows of the path and
+    /// their count lines. The list takes seven lines, and seven remain.
+    const HELP_SCROLL_ROWS: u16 = 18;
+
+    /// The TTL that the destination answered at.
+    const TARGET_TTL: u8 = 2;
+
+    /// The round-trip time of the answer of the destination, in milliseconds.
+    const TARGET_RTT: f64 = 4.56;
+
+    /// The number of a round that answered one hop and reached nothing.
+    const LOST_ROUND_SEQ: u64 = 2;
+
+    /// The time that such a round took, in milliseconds.
+    const LOST_ROUND_MS: u64 = 1004;
+
+    /// The status line of the first round of a run that answered the whole
+    /// path.
+    const A_WHOLE_PATH_LINE: &str = "round 1  2 hops  reached  1s";
+
+    /// The status line of a round that answered one hop and reached nothing.
+    const A_LOST_ROUND_LINE: &str = "round 2  1 hop  never reached  1004ms";
+
+    /// One round that answered two hops and reached the target.
+    fn a_whole_path_round() -> RoundRecord {
+        let mut record = round(
+            TTL,
+            TARGET_TTL,
+            &[
+                (TTL, ROUTER, RTT),
+                (TARGET_TTL, DESTINATION_ADDRESS, TARGET_RTT),
+            ],
+        );
+        record.reached = true;
+        record
+    }
+
+    /// One round that answered one hop and reached nothing.
+    fn a_lost_round() -> RoundRecord {
+        let mut record = round(TTL, TARGET_TTL, &[(TTL, ROUTER, RTT)]);
+        record.seq = LOST_ROUND_SEQ;
+        record.dur_ms = LOST_ROUND_MS;
+        record
+    }
+
+    /// A headless screen that writes into bytes and reads the clock of the
+    /// test.
+    fn headless(clock: &Rc<FakeClock>) -> Headless<Vec<u8>, Rc<FakeClock>> {
+        Headless::new(Vec::new(), Rc::clone(clock))
+    }
+
+    /// The step that the clock of the test takes between two rounds.
+    ///
+    /// The rounds of [`ROUNDS_INSIDE_A_MINUTE`] at this step stand inside one
+    /// minute, so a screen that holds to the minute prints one line for the
+    /// whole of them.
+    const ROUND_STEP: Duration = Duration::from_secs(10);
+
+    /// The number of rounds that arrive inside one minute of the test.
+    const ROUNDS_INSIDE_A_MINUTE: usize = 4;
+
+    /// One whole minute.
+    ///
+    /// The test spells the minute, and the module spells it again. That is on
+    /// purpose, as the word of the pause is: a test that read the constant of
+    /// the module would agree with every period the module ever holds, and one
+    /// line each minute is what a reader of a headless run gets.
+    const ONE_MINUTE: Duration = Duration::from_mins(1);
+
+    /// The lines that a headless screen wrote, in the order they arrived.
+    fn printed(sink: &[u8]) -> Vec<String> {
+        String::from_utf8_lossy(sink)
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The record of one name that a lookup answered.
+    ///
+    /// The identifier of the run and the moment of the record take the values
+    /// of the moment of the test. No frame reads either of them: the map of the
+    /// names is keyed by the address, because one address answers at any number
+    /// of TTLs.
+    fn name(addr: &str, host: &str) -> NameRecord {
+        NameRecord {
+            run: RunId::from(RUN),
+            ts: Utc::now(),
+            addr: address(addr),
+            host: host.to_owned(),
+        }
+    }
+
+    /// The word that a table which holds where it stands writes under its
+    /// table.
+    ///
+    /// The test spells the word, and the module spells it again. That is on
+    /// purpose: a test that read the constant of the module would agree with
+    /// every word the module ever holds, and this word is what a reader of the
+    /// screen sees.
+    const PAUSED: &str = "paused";
+
+    /// The list of the keys, one line for each key.
+    ///
+    /// The test spells every line, and the module builds the same lines out of
+    /// one table of pairs. That is on purpose, as the word of the pause is: a
+    /// test that read the table of the module would agree with every list the
+    /// module ever holds, and this list is what a reader of the screen sees.
+    const HELP_LINES: [&str; 6] = [
+        "q, Ctrl-C   stop the run",
+        "p           hold the table, or let it move",
+        "n           show the names, or show the addresses",
+        "r           empty the table",
+        "PgUp, PgDn  scroll the rows of the path",
+        "?           show these keys, or hide them",
+    ];
+
+    /// The pixel size of one character cell of the terminal that the tests of
+    /// the image path draw into.
+    ///
+    /// Ten pixels by twenty is about the cell of a modern terminal at its
+    /// default font. The image of the Recent column is then 90 pixels wide and
+    /// 20 pixels tall.
+    const CELL: (u32, u32) = (10, 20);
+
+    /// The Kitty graphics command that takes every image off the screen.
+    ///
+    /// The test spells the bytes, and `termgfx` spells them again. That is on
+    /// purpose, as the word of the pause is: a Kitty placement outlives a clear
+    /// of the screen, so a frame that did not delete would stack the images of
+    /// a whole run on top of each other.
+    const KITTY_DELETE_ALL: &str = "\x1b_Ga=d,d=A\x1b\\";
+
+    /// The start of one Kitty graphics command that carries an image.
+    ///
+    /// `a=T` is the transmit-and-display action, which is the action that puts
+    /// an image on the screen. The delete command above carries `a=d` instead,
+    /// so a count of these names the images of a frame and never the delete.
+    const KITTY_IMAGE: &str = "\x1b_Ga=T";
+
+    /// The start of an iTerm2 inline image command.
+    const ITERM2_IMAGE: &str = "\x1b]1337;File=";
+
+    /// The start of a Sixel payload, which is a device control string.
+    const SIXEL_IMAGE: &str = "\x1bP";
+
+    /// The look of a table that draws the Recent column as an image on one
+    /// terminal.
+    fn image_look(capabilities: termgfx::Capabilities) -> Look {
+        Look {
+            paint: Paint::Colored,
+            graphics: Some(Graphics {
+                capabilities,
+                cell: CELL,
+            }),
+        }
+    }
+
+    /// A table that draws into bytes on a terminal that draws images, in a
+    /// window of `rows` rows and `columns` columns.
+    ///
+    /// The terminal is a Kitty terminal, because the Kitty protocol is the one
+    /// of the three that a test can read: it writes a delete command and it
+    /// names every image with a placement id. `termgfx::Capabilities::new`
+    /// builds the terminal, so this table needs no terminal of its own.
+    ///
+    /// The sink comes back empty, for the reason that [`table_at`] states.
+    fn graphics_table(
+        columns: u16,
+        rows: Option<u16>,
+        script: &[&[Command]],
+    ) -> Table<Vec<u8>, FakeKeys> {
+        let mut table = Table::new(
+            facts_at(temp_path("graphics")),
+            Vec::new(),
+            FakeKeys::of(script),
+            Window::new(columns, rows),
+            image_look(termgfx::Capabilities::new(
+                termgfx::TerminalType::Kitty,
+                true,
+                true,
+            )),
+        );
+        table.sink.clear();
+        table
+    }
+
+    /// A table whose terminal refuses every image of its frames.
+    ///
+    /// No run of the tool builds this look. `main::graphics_of` hands an image
+    /// path back only for a terminal that draws images under a name of its own,
+    /// so a live run never asks a terminal of this kind for an image. The refusal that a live run
+    /// does reach comes out of the encoder of the Sixel protocol, which answers
+    /// a fault for an image it will not encode, and a test that draws into a
+    /// vector cannot make that encoder refuse. This table names the refusal
+    /// that a test can name, and the rule it covers is the rule of both.
+    ///
+    /// The sink comes back empty, for the reason that [`table_at`] states.
+    fn refusing_table() -> Table<Vec<u8>, FakeKeys> {
+        let mut table = Table::new(
+            facts_at(temp_path("refused")),
+            Vec::new(),
+            FakeKeys::of(&[]),
+            Window::new(WIDTH, NO_ROWS),
+            image_look(termgfx::Capabilities::new(
+                termgfx::TerminalType::Alacritty,
+                false,
+                true,
+            )),
+        );
+        table.sink.clear();
+        table
+    }
+
+    /// The number of images that a frame wrote.
+    fn image_count(sink: &[u8]) -> usize {
+        String::from_utf8_lossy(sink).matches(KITTY_IMAGE).count()
+    }
+
+    #[test]
+    fn a_table_of_no_graphics_draws_the_block_elements_and_no_escape_of_an_image() {
+        // The flag of the image path is off by default, and a run that took no
+        // flag draws what it always drew, byte for byte. Every protocol carries
+        // its image in an escape sequence, and a terminal that reads none of
+        // them puts that sequence on the screen as text.
+        let mut screen = table(&[]);
+        screen.round(&one_round());
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+        let lines = painted(&screen.sink);
+
+        assert!(
+            lines.iter().any(|line| line == ONE_ROUND_ROW),
+            "the row of the TTL ends with the block elements of its history: {lines:?}"
+        );
+        for escape in [KITTY_DELETE_ALL, KITTY_IMAGE, ITERM2_IMAGE, SIXEL_IMAGE] {
+            assert!(
+                !drawn.contains(escape),
+                "no escape of an image protocol reaches the frame: {drawn:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_table_of_graphics_takes_the_images_of_the_frame_before_it_off_the_screen() {
+        // A Kitty placement outlives a clear of the screen, so a frame that did
+        // not delete would stack a thousand images over a run of a thousand
+        // rounds. The delete stands at the head of the frame, in front of the
+        // clear, so nothing of the frame that follows it goes away with it.
+        let mut screen = graphics_table(WIDTH, NO_ROWS, &[]);
+        screen.round(&one_round());
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+
+        assert!(
+            drawn.starts_with(KITTY_DELETE_ALL),
+            "the frame opens with the command that takes every image off the screen: {drawn:?}"
+        );
+    }
+
+    /// The seven block elements of the Recent column, lowest first.
+    ///
+    /// The test spells them, and `ui.rs` spells them again. That is on purpose,
+    /// as the word of the pause is: these glyphs are the picture of a hop that
+    /// a reader of the text table sees, and a frame that draws an image draws
+    /// none of them.
+    const BARS: &str = "▁▂▃▄▅▆▇";
+
+    /// The heading of the Recent column.
+    const RECENT_HEADING: &str = "Recent";
+
+    /// The row of a table of graphics that folded one round of one TTL.
+    ///
+    /// The row of [`ONE_ROUND_ROW`] without its block element and without the
+    /// two spaces in front of that element, because a line of a frame drops its
+    /// trailing spaces and the Recent column is the last column of the table.
+    const ONE_ROUND_ROW_OF_GRAPHICS: &str =
+        "   1  10.0.0.1                          0.0%      1    0.9    0.9    0.9    0.9    0.0";
+
+    #[test]
+    fn a_table_of_graphics_draws_no_block_element_in_the_body_of_its_recent_column() {
+        // The block elements are one picture of a hop and the image is a second
+        // one. A reader who sees both has two answers to one question, so the
+        // body cells of the column go blank and the image stands over them.
+        //
+        // The heading stays, because it names the column and it is no picture of
+        // a hop.
+        let mut screen = graphics_table(WIDTH, NO_ROWS, &[]);
+        screen.round(&one_round());
+        let lines = painted(&screen.sink);
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.ends_with(&format!("{COLUMN_GAP}{RECENT_HEADING}"))),
+            "the heading of the Recent column stands: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line == ONE_ROUND_ROW_OF_GRAPHICS),
+            "the row of the TTL keeps every number and gives up its block element: {lines:?}"
+        );
+        for line in lines.iter().skip(head_lines(&lines)) {
+            for glyph in BARS.chars().chain(NO_ANSWER.chars()) {
+                assert!(
+                    !line.contains(glyph),
+                    "no row of the path draws a block element or a mark of a loss: {line:?}"
+                );
+            }
+        }
+    }
+
+    /// The terminal column that the Recent column of a frame of [`WIDTH`]
+    /// columns starts in.
+    ///
+    /// The nominal frame is 97 columns wide and the Recent column is the last
+    /// one of it, 9 columns wide, so it starts in column 88. The test spells
+    /// the number, and `ui.rs` sums it out of the list of columns that the
+    /// render draws: a column that changes width must move the image with it,
+    /// and this number is what says the sum still lands where the heading does.
+    const RECENT_COLUMN: u16 = 88;
+
+    /// The text between two fields of the head of a frame.
+    ///
+    /// The test spells the three spaces, and `ui.rs` spells them again. That is
+    /// on purpose, as the word of the pause is: this gap is what a reader of the
+    /// head reads the fields by.
+    const FIELD_SEPARATOR: &str = "   ";
+
+    /// The number of lines of a head that carry no field: the blank line and the
+    /// column header.
+    const LINES_UNDER_THE_HEADER: usize = 2;
+
+    /// The head of a frame, as the one line that a wide window draws it in.
+    ///
+    /// A window that holds no whole head takes the fields that are left onto
+    /// the lines under it, so a test that read the first line alone would read
+    /// the first fields and none of the rest. The join puts the fields back in
+    /// the order the head names them.
+    fn header_text(lines: &[String]) -> String {
+        let count = head_lines(lines).saturating_sub(LINES_UNDER_THE_HEADER);
+        let mut text = String::new();
+        for line in lines.iter().take(count) {
+            if text.is_empty() {
+                text.push_str(line);
+            } else {
+                text.push_str(FIELD_SEPARATOR);
+                text.push_str(line.trim_start());
+            }
+        }
+        text
+    }
+
+    /// The bytes that move the cursor to the row of the path at `row` of a
+    /// frame that holds these lines.
+    ///
+    /// A terminal counts its rows and its columns from one, and `crossterm`
+    /// counts from zero, so both numbers gain one on the way out.
+    fn moved_to(lines: &[String], row: usize) -> String {
+        format!(
+            "\x1b[{};{}H",
+            head_lines(lines) + row + 1,
+            RECENT_COLUMN + 1
+        )
+    }
+
+    /// The keys that name the placement of the image of one row.
+    ///
+    /// Every image of one frame carries an id of its own, so a later frame
+    /// replaces each of them where it stands. One id for every row would put
+    /// the last row of the frame over the first one.
+    fn placement(id: usize) -> String {
+        format!(",i={id},p={id},")
+    }
+
+    #[test]
+    fn a_table_of_graphics_draws_one_image_for_each_row_of_the_path() {
+        // The image of a row stands over the Recent column of that row, and the
+        // row at index `i` stands on the line under the head of the frame plus
+        // `i`.
+        let mut screen = graphics_table(WIDTH, NO_ROWS, &[]);
+        screen.round(&a_tall_round());
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            image_count(&screen.sink),
+            usize::from(TALL_PATH),
+            "one image stands for each row of the path: {drawn:?}"
+        );
+        for ttl in TTL..=TALL_PATH {
+            let row = usize::from(ttl - TTL);
+            assert!(
+                drawn.contains(&format!("{}{KITTY_IMAGE}", moved_to(&lines, row))),
+                "the cursor moves to the Recent column of the row of TTL {ttl}, and the image of that row follows it: {drawn:?}"
+            );
+            assert!(
+                drawn.contains(&placement(row + 1)),
+                "and the image of that row carries a placement id of its own: {drawn:?}"
+            );
+        }
+    }
+
+    /// The number of terminal rows that one line of a frame takes in a window
+    /// of `columns` columns.
+    ///
+    /// A terminal wraps a line wider than its window onto the row under it, so
+    /// such a line takes two rows or more. A line of no glyph still takes one.
+    fn rows_of(line: &str, columns: u16) -> usize {
+        crate::ui::display_width(line)
+            .div_ceil(usize::from(columns))
+            .max(1)
+    }
+
+    /// The terminal row that the line at `index` stands on, in a window of
+    /// `columns` columns.
+    ///
+    /// A terminal counts its rows from one, and a line that wrapped moves every
+    /// line under it down by the rows it took.
+    fn row_of(lines: &[String], index: usize, columns: u16) -> usize {
+        lines
+            .iter()
+            .take(index)
+            .map(|line| rows_of(line, columns))
+            .sum::<usize>()
+            + 1
+    }
+
+    #[test]
+    fn the_image_of_a_row_stands_on_the_terminal_row_that_the_row_draws_in() {
+        // The head of a frame holds the recorded file, and a reader who names a
+        // long file gets a head that no window holds on one line. A terminal
+        // wraps such a line, every line under it stands one row lower, and an
+        // image that counted the lines of the frame then stands over the
+        // heading of the Recent column and never over the last row of the path.
+        let mut screen = graphics_table(WIDTH, NO_ROWS, &[]);
+        screen.round(&one_round());
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+        let lines = painted(&screen.sink);
+
+        let index = lines
+            .iter()
+            .position(|line| line == ONE_ROUND_ROW_OF_GRAPHICS)
+            .unwrap_or_else(|| panic!("the frame holds the row of the TTL: {lines:?}"));
+        let row = row_of(&lines, index, WIDTH);
+        assert!(
+            drawn.contains(&format!(
+                "\x1b[{row};{}H{KITTY_IMAGE}",
+                RECENT_COLUMN + 1
+            )),
+            "the image of the row stands on row {row}, which is the row that the frame draws it in: {drawn:?}"
+        );
+    }
+
+    /// The number of columns of a terminal that dropped the Recent column.
+    ///
+    /// Sixty-seven columns hold every column of the table but the Recent one
+    /// and the deviation. The test spells the number, and `ui.rs` drops the
+    /// columns out of its own list: a terminal of this width holds no place for
+    /// an image of a history.
+    const NO_RECENT_COLUMN: u16 = 67;
+
+    #[test]
+    fn a_table_of_graphics_draws_no_image_for_a_row_that_went_out_of_the_frame() {
+        // A frame of more lines than the window holds drops the rows of the
+        // highest TTLs. An image of one of those rows would stand over the line
+        // that counts them, or over a line of another frame, and nothing on the
+        // screen would say which row it belongs to.
+        let mut screen = graphics_table(WIDTH, Some(SHORT_ROWS), &[]);
+        screen.round(&a_tall_round());
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            image_count(&screen.sink),
+            usize::from(LAST_KEPT_TTL),
+            "one image stands for each row of the path that reached the frame: {drawn:?}"
+        );
+        assert!(
+            !drawn.contains(&moved_to(&lines, usize::from(LAST_KEPT_TTL))),
+            "and no image stands on the line under the last row that the window held: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn a_scrolled_frame_draws_each_image_on_the_line_of_its_row_and_none_on_a_count_line() {
+        // A scrolled frame shows a count line above the first row of the path.
+        // An image on that line, or on the line of the row above, would show a
+        // history beside the wrong hop, and the reader would trust it.
+        let mut screen = graphics_table(WIDTH, Some(SCROLL_ROWS), &[&[Command::PageDown]]);
+        screen.round(&a_tall_round());
+        screen.sink.clear();
+        screen.poll();
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            image_count(&screen.sink),
+            5,
+            "one image stands for each row that the frame shows: {drawn:?}"
+        );
+        for index in 0..5 {
+            assert!(
+                drawn.contains(&format!("{}{KITTY_IMAGE}", moved_to(&lines, index + 1))),
+                "the image of the row at index {index} stands under the count line: {drawn:?}"
+            );
+        }
+        assert!(
+            !drawn.contains(&moved_to(&lines, 0)),
+            "no image stands on the line that counts the rows above: {drawn:?}"
+        );
+        assert!(
+            !drawn.contains(&moved_to(&lines, 6)),
+            "and no image stands on the line that counts the rows below: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn the_last_full_window_draws_an_image_on_each_of_its_rows() {
+        // The last full window has a count line above and none below. A head
+        // that counted the wrong number of lines there would put the images
+        // of the far hops of the path beside the wrong rows.
+        let mut screen = graphics_table(
+            WIDTH,
+            Some(SCROLL_ROWS),
+            &[&[
+                Command::PageDown,
+                Command::PageDown,
+                Command::PageDown,
+                Command::PageDown,
+            ]],
+        );
+        screen.round(&a_tall_round());
+        screen.sink.clear();
+        screen.poll();
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            image_count(&screen.sink),
+            6,
+            "one image stands for each of the six rows that the frame shows: {drawn:?}"
+        );
+        for index in 1..=6 {
+            assert!(
+                drawn.contains(&format!("{}{KITTY_IMAGE}", moved_to(&lines, index))),
+                "the image of the row at line {index} under the head stands there: {drawn:?}"
+            );
+        }
+        assert!(
+            !drawn.contains(&moved_to(&lines, 0)),
+            "no image stands on the line that counts the rows above: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn a_frame_whose_terminal_refuses_an_image_prints_its_lines_anyway() {
+        // A frame that does not print stops nothing, and one image of a frame
+        // is a smaller thing than a frame. The recording is the purpose of the
+        // tool, so a terminal that refuses an image costs the reader that
+        // picture and costs the run nothing.
+        let mut screen = refusing_table();
+        screen.round(&a_tall_round());
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            image_count(&screen.sink),
+            0,
+            "the terminal that refused the image took none of them: {lines:?}"
+        );
+        for ttl in TTL..=TALL_PATH {
+            assert!(
+                lines.iter().any(|line| line.starts_with(&tall_row(ttl))),
+                "and every row of the path still stands in the frame: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_table_of_graphics_whose_terminal_dropped_the_recent_column_draws_no_image() {
+        // A narrow terminal drops the Recent column, and a column that no line
+        // of the frame holds is a column that no image can stand over. The
+        // render says so: it names no place for a column that went away.
+        let mut screen = graphics_table(NO_RECENT_COLUMN, NO_ROWS, &[]);
+        screen.round(&one_round());
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+
+        assert_eq!(
+            image_count(&screen.sink),
+            0,
+            "a frame that holds no Recent column holds no image of a history: {drawn:?}"
+        );
+    }
+
+    /// The last `count` lines of a frame, or every line of a frame that holds
+    /// fewer than that.
+    ///
+    /// A frame of too few lines must fail the assertion of the test that reads
+    /// the end of it, and must not stop that test with an index.
+    fn last_lines(lines: &[String], count: usize) -> Vec<&str> {
+        lines
+            .iter()
+            .skip(lines.len().saturating_sub(count))
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// The lines that stand above the rows of the path of a fitted frame.
+    fn a_head() -> Vec<String> {
+        (0..A_HEAD_LINES)
+            .map(|line| format!("head {line}"))
+            .collect()
+    }
+
+    /// One row of the path for each of `count` TTLs.
+    fn a_body(count: usize) -> Vec<String> {
+        (0..count).map(|row| format!("row {row}")).collect()
+    }
+
+    /// The number of rows of the path that the frames below hold.
+    const A_PATH: usize = 8;
+
+    /// The number of rows of a window that holds the whole of that path.
+    const A_TALL_WINDOW: u16 = 24;
+
+    /// The number of rows of a window too short for that path.
+    ///
+    /// The head takes three of these rows and the line that counts the rows
+    /// which went out of the frame takes one, so two rows of the path stand.
+    const A_SHORT_WINDOW: u16 = 6;
+
+    /// The number of rows of the path that a window of [`A_SHORT_WINDOW`] rows
+    /// holds.
+    const KEPT_ROWS: usize = 2;
+
+    #[test]
+    fn a_frame_that_its_window_holds_whole_keeps_every_row_of_the_path() {
+        let fitted = super::fitted(a_head(), a_body(A_PATH), Vec::new(), Some(A_TALL_WINDOW), 0);
+
+        assert_eq!(
+            fitted.lines.len(),
+            A_HEAD_LINES + A_PATH,
+            "the frame holds its head and every row of the path: {:?}",
+            fitted.lines
+        );
+        assert_eq!(
+            fitted.rows,
+            0..A_PATH,
+            "and it says that every row of the path reached it"
+        );
+    }
+
+    #[test]
+    fn the_top_of_a_fit_is_the_line_of_the_first_shown_row() {
+        // A frame that fits, a frame at the first row that scrolls, and a frame
+        // scrolled past the first row with a count line above it.
+        for (window, first) in [
+            (A_TALL_WINDOW, 0),
+            (A_SHORT_WINDOW, 0),
+            (A_SHORT_WINDOW, 3),
+            (A_SHORT_WINDOW, A_PATH),
+        ] {
+            let body = a_body(A_PATH);
+            let fitted = super::fitted(a_head(), body.clone(), Vec::new(), Some(window), first);
+
+            assert_eq!(
+                fitted.lines[fitted.top],
+                body[fitted.rows.start],
+                "the line at top is the first shown row of {:?} at window {window}, first {first}: {:?}",
+                fitted.rows,
+                fitted.lines
+            );
+        }
+    }
+
+    #[test]
+    fn a_frame_that_dropped_rows_counts_the_rows_that_reached_it() {
+        // A caller that draws an image over one row of the path must draw no
+        // image for a row that went out of the frame. Such an image would stand
+        // over the footer of the frame, and nothing on the screen would say
+        // which row it belongs to.
+        let fitted = super::fitted(
+            a_head(),
+            a_body(A_PATH),
+            Vec::new(),
+            Some(A_SHORT_WINDOW),
+            0,
+        );
+
+        assert_eq!(
+            fitted.rows,
+            0..KEPT_ROWS,
+            "the count names the rows of the path that the window held: {:?}",
+            fitted.lines
+        );
+    }
+
+    #[test]
+    fn a_table_draws_a_frame_of_no_round_at_the_moment_it_is_built() {
+        // The run takes the terminal in front of this call, so the alternate
+        // screen of that run already stands in front of the reader, and it
+        // hides every line which the run printed under it. A table that drew at
+        // the first round alone leaves an empty screen for one whole period,
+        // and a period of two minutes is two minutes of nothing that says the
+        // run started.
+        let screen = Table::new(
+            facts_at(temp_path("opening")),
+            Vec::new(),
+            FakeKeys::of(&[]),
+            Window::new(WIDTH, NO_ROWS),
+            bars(Paint::Colored),
+        );
+        let lines = painted(&screen.sink);
+
+        assert!(
+            header_text(&lines).starts_with(NO_ROUND_HEADER),
+            "the header line names the target, the source, the interval, and the round that no probe took yet: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with(COLUMN_HEADER_START)),
+            "and the column header stands under it: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_lost_probe_reaches_the_terminal_in_red() {
+        // A live table draws on a terminal: the run holds that terminal in raw
+        // mode on the alternate screen in front of the first draw. The loss of
+        // a probe is the one thing the table paints, and the color says at a
+        // glance which row of the path drops its probes. The table below takes
+        // the color, as the table of a reader who set nothing does.
+        //
+        // The test reads the bytes of the sink and not the glyphs of them,
+        // because the codes of the color are what it is about.
+        let mut screen = table(&[]);
+        screen.round(&one_lost_round());
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+        assert!(
+            drawn.contains(&format!("{RED}{NO_ANSWER}")),
+            "the mark of the lost probe carries the code that paints it red: {drawn:?}"
+        );
+        assert!(
+            drawn.contains(&format!("{NO_ANSWER}{PLAIN}")),
+            "and the code that gives the foreground of the terminal back stands behind that mark: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn a_table_of_no_color_paints_a_lost_probe_with_no_code_at_all() {
+        // A reader who set `NO_COLOR` asks every tool for the glyphs alone,
+        // and this table is what such a reader gets. The mark of the loss
+        // stays, because the mark is no bar of a time, and the codes that
+        // paint it red go away.
+        //
+        // The test reads the bytes of the sink and not the glyphs of them,
+        // because the codes of the color are what it is about.
+        let mut screen = plain_table();
+        screen.round(&one_lost_round());
+        let drawn = String::from_utf8_lossy(&screen.sink).into_owned();
+        assert!(
+            !drawn.contains(RED),
+            "no code of the red reaches a table that the reader asked for no color in: {drawn:?}"
+        );
+        assert!(
+            drawn.contains(NO_ANSWER),
+            "and the mark of the lost probe stands in that table anyway: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn one_round_reaches_the_sink_as_a_row_of_the_table() {
+        let mut screen = table(&[]);
+        screen.round(&one_round());
+        let lines = painted(&screen.sink);
+        assert!(
+            header_text(&lines).starts_with(ONE_ROUND_HEADER),
+            "the header line names the target, the source, the one round, and the interval: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line == ONE_ROUND_ROW),
+            "the row of the TTL stands under that header: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_frame_taller_than_the_window_keeps_the_near_hops_and_counts_the_rest() {
+        // The alternate screen keeps no scrollback. A frame of more lines than
+        // the window holds scrolls its own header line off the top of that
+        // window at every draw, and nothing brings the line back.
+        let screen = tall_table(Some(SHORT_ROWS), &[]);
+        let lines = painted(&screen.sink);
+
+        assert!(
+            lines.len() <= usize::from(SHORT_ROWS),
+            "the frame stands inside the {SHORT_ROWS} rows of the window: {lines:?}"
+        );
+        assert!(
+            header_text(&lines).starts_with(ONE_ROUND_HEADER),
+            "the header line stands, so the reader keeps the destination, the round, and the file: {lines:?}"
+        );
+        assert!(
+            lines
+                .get(head_lines(&lines) - 1)
+                .is_some_and(|line| line.starts_with(COLUMN_HEADER_START)),
+            "the column header stands under it, so every row that is left reads: {lines:?}"
+        );
+        for (index, ttl) in (TTL..=LAST_KEPT_TTL).enumerate() {
+            assert!(
+                lines
+                    .get(head_lines(&lines) + index)
+                    .is_some_and(|line| line.starts_with(&tall_row(ttl))),
+                "the hops nearest the source stand under that header, in TTL order: {lines:?}"
+            );
+        }
+        for ttl in FIRST_DROPPED_TTL..=TALL_PATH {
+            assert!(
+                !lines.iter().any(|line| line.starts_with(&tall_row(ttl))),
+                "the TTLs that the window does not hold go out of the frame: {lines:?}"
+            );
+        }
+        assert_eq!(
+            last_lines(&lines, 1),
+            [DROPPED_LINE],
+            "and one line says how many rows the frame left out: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn page_down_scrolls_the_rows_of_the_path_by_one_page() {
+        // A path that is longer than the window hides its far hops. The reader
+        // has to reach them with a key, and the rows that stood above must
+        // stay counted so the reader knows where in the path the frame is.
+        let mut screen = tall_table(Some(SCROLL_ROWS), &[&[Command::PageDown]]);
+        screen.sink.clear();
+        screen.poll();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            under_the_head(&lines),
+            shown(Some("+5 rows"), 6, 10, Some("+10 rows")),
+            "one page down shows rows 6 to 10: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn two_page_down_keys_of_one_turn_scroll_two_pages() {
+        // A reader who holds the key sends several presses in one turn. Each
+        // press has to move one page, and not the same page twice.
+        let mut screen = tall_table(
+            Some(SCROLL_ROWS),
+            &[&[Command::PageDown, Command::PageDown]],
+        );
+        screen.sink.clear();
+        screen.poll();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            under_the_head(&lines),
+            shown(Some("+9 rows"), 10, 14, Some("+6 rows")),
+            "two pages down show rows 10 to 14: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn page_down_stops_at_the_last_full_window() {
+        // The reader must see the far hops of the path. Past the last full
+        // window the frame would show less than it can, so the scroll stops
+        // there and the count line under the rows goes away.
+        let mut screen = tall_table(
+            Some(SCROLL_ROWS),
+            &[
+                &[
+                    Command::PageDown,
+                    Command::PageDown,
+                    Command::PageDown,
+                    Command::PageDown,
+                ],
+                &[Command::PageDown],
+            ],
+        );
+        screen.sink.clear();
+        screen.poll();
+        let first = under_the_head(&painted(&screen.sink));
+        screen.sink.clear();
+        screen.poll();
+        let second = under_the_head(&painted(&screen.sink));
+
+        assert_eq!(
+            first,
+            shown(Some("+14 rows"), 15, 20, None),
+            "four pages down reach the last full window"
+        );
+        assert_eq!(second, first, "and one more page down holds that window");
+    }
+
+    #[test]
+    fn page_up_scrolls_back_by_the_page_that_page_down_took() {
+        // A reader who went too far must come back to the rows they passed.
+        // Page Up undoes Page Down, so the first row of the frame becomes the
+        // last row of the frame above.
+        let mut screen = tall_table(
+            Some(SCROLL_ROWS),
+            &[
+                &[
+                    Command::PageDown,
+                    Command::PageDown,
+                    Command::PageDown,
+                    Command::PageDown,
+                ],
+                &[Command::PageUp],
+            ],
+        );
+        screen.poll();
+        screen.sink.clear();
+        screen.poll();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            under_the_head(&lines),
+            shown(Some("+10 rows"), 11, 15, Some("+5 rows")),
+            "one page up from the last window shows rows 11 to 15: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn page_up_after_page_down_shows_the_first_frame_again() {
+        // The top of the path is where a reader starts. One page up from the
+        // second page must land there, with no count line above the rows.
+        let mut screen = tall_table(
+            Some(SCROLL_ROWS),
+            &[&[Command::PageDown], &[Command::PageUp]],
+        );
+        screen.poll();
+        screen.sink.clear();
+        screen.poll();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            under_the_head(&lines),
+            shown(None, 1, 6, Some("+14 rows")),
+            "the first frame stands again: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn page_up_on_the_first_frame_changes_nothing() {
+        // There is no page above the first rows. The key must leave the frame
+        // as it is and not scroll to a row that does not exist.
+        let mut screen = tall_table(Some(SCROLL_ROWS), &[&[Command::PageUp]]);
+        screen.sink.clear();
+        screen.poll();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            under_the_head(&lines),
+            shown(None, 1, 6, Some("+14 rows")),
+            "the first frame stays: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_reset_key_takes_the_scroll_back_to_the_first_row() {
+        // A reset empties the table. The next rounds must show the top of the
+        // path, and a scroll that survived would hide the near hops of a path
+        // that the reader just started to watch again.
+        let mut screen = tall_table(
+            Some(SCROLL_ROWS),
+            &[&[Command::PageDown], &[Command::Reset]],
+        );
+        screen.poll();
+        screen.poll();
+        screen.sink.clear();
+        screen.round(&a_tall_round());
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            under_the_head(&lines),
+            shown(None, 1, 6, Some("+14 rows")),
+            "the first frame stands after the reset: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_page_key_on_a_frame_that_fits_leaves_no_scroll_behind() {
+        // A key that did nothing must also leave nothing. A scroll that waited
+        // inside the table would jump the frame the moment the path grew past
+        // the window.
+        let mut screen = table_in(Some(SCROLL_ROWS), &[&[Command::PageDown]]);
+        screen.round(&one_round());
+        let before = painted(&screen.sink);
+        screen.sink.clear();
+        screen.poll();
+        let after = painted(&screen.sink);
+        screen.sink.clear();
+        screen.round(&a_tall_round());
+        let lines = painted(&screen.sink);
+
+        assert_eq!(after, before, "the frame that fits does not move");
+        assert_eq!(
+            under_the_head(&lines),
+            shown(None, 1, 6, Some("+14 rows")),
+            "and the longer path starts at its first row: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_page_key_does_nothing_in_a_window_that_no_probe_measured() {
+        // Such a run draws every line and lets the terminal scroll. A page key
+        // has no frame to move.
+        let mut screen = tall_table(NO_ROWS, &[&[Command::PageDown]]);
+        let before = painted(&screen.sink);
+        screen.sink.clear();
+        screen.poll();
+        let after = painted(&screen.sink);
+
+        assert_eq!(after, before, "the frame does not move");
+    }
+
+    #[test]
+    fn the_names_key_keeps_the_scroll() {
+        // The key changes the text of the hosts and not the rows. The reader
+        // must stay on the rows they scrolled to.
+        let mut screen = tall_table(
+            Some(SCROLL_ROWS),
+            &[&[Command::PageDown], &[Command::Names]],
+        );
+        screen.poll();
+        screen.sink.clear();
+        screen.poll();
+        let lines = painted(&screen.sink);
+
+        assert_eq!(
+            under_the_head(&lines),
+            shown(Some("+5 rows"), 6, 10, Some("+10 rows")),
+            "the same rows stand: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_window_too_short_for_a_scroll_ignores_the_page_keys() {
+        // A scroll needs one row between two count lines. A window that has
+        // less room than that must keep its frame inside the window, and not
+        // draw count lines that cover the head.
+        let mut screen = tall_table(Some(TINY_ROWS), &[&[Command::PageDown]]);
+        let before = painted(&screen.sink);
+        screen.sink.clear();
+        screen.poll();
+        let after = painted(&screen.sink);
+
+        assert_eq!(after, before, "the frame does not move: {after:?}");
+        assert!(
+            after.len() <= usize::from(TINY_ROWS),
+            "and it stands inside the {TINY_ROWS} rows of the window: {after:?}"
+        );
+        assert_eq!(
+            under_the_head(&after),
+            shown(None, 1, 1, Some("+19 rows")),
+            "one row and one count line stand: {after:?}"
+        );
+    }
+
+    #[test]
+    fn a_page_key_while_the_table_holds_scrolls_the_frame_of_the_fold() {
+        // The pause holds the screen, and a page key still has to draw. The
+        // frame it draws reads the fold, so it names the round that arrived
+        // during the pause.
+        let mut screen = tall_table(
+            Some(SCROLL_ROWS),
+            &[&[Command::Pause], &[Command::PageDown]],
+        );
+        screen.poll();
+        screen.round(&a_tall_round());
+        screen.sink.clear();
+        screen.poll();
+        let lines = painted(&screen.sink);
+
+        let mut wanted = shown(Some("+3 rows"), 4, 6, Some("+14 rows"));
+        wanted.extend(["", PAUSED].map(str::to_owned));
+        assert_eq!(
+            under_the_head(&lines),
+            wanted,
+            "the pause takes two lines, so three rows stand: {lines:?}"
+        );
+        assert!(
+            header_text(&lines).contains("round 2"),
+            "and the header counts the round of the pause: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_help_key_keeps_the_first_row_of_the_scroll() {
+        // The list of the keys takes lines from the rows of the path. The
+        // reader must stay on the rows they scrolled to, and not jump to the
+        // top of the path.
+        let mut screen = tall_table(
+            Some(HELP_SCROLL_ROWS),
+            &[&[Command::PageDown], &[Command::Help]],
+        );
+        screen.sink.clear();
+        screen.poll();
+        let first = under_the_head(&painted(&screen.sink));
+        screen.sink.clear();
+        screen.poll();
+        let second = under_the_head(&painted(&screen.sink));
+
+        assert_eq!(
+            first,
+            shown(Some("+7 rows"), 8, 20, None),
+            "the page down reaches the last full window"
+        );
+        let mut wanted = shown(Some("+7 rows"), 8, 12, Some("+8 rows"));
+        wanted.push(String::new());
+        wanted.extend(HELP_LINES.map(str::to_owned));
+        assert_eq!(
+            second, wanted,
+            "and the list of the keys keeps the first row"
+        );
+    }
+
+    #[test]
+    fn hiding_the_list_of_the_keys_stops_the_scroll_at_the_last_full_window() {
+        // The list of the keys gave the scroll a longer reach. When it goes
+        // away, the first row can lie past the last full window, and the frame
+        // must not show a half-empty window.
+        let mut screen = tall_table(
+            Some(HELP_SCROLL_ROWS),
+            &[
+                &[Command::Help],
+                &[
+                    Command::PageDown,
+                    Command::PageDown,
+                    Command::PageDown,
+                    Command::PageDown,
+                ],
+                &[Command::Help],
+            ],
+        );
+        screen.poll();
+        screen.sink.clear();
+        screen.poll();
+        let before = under_the_head(&painted(&screen.sink));
+        screen.sink.clear();
+        screen.poll();
+        let after = under_the_head(&painted(&screen.sink));
+
+        let mut held = shown(Some("+14 rows"), 15, 20, None);
+        held.push(String::new());
+        held.extend(HELP_LINES.map(str::to_owned));
+        assert_eq!(before, held, "four pages down reach the last window");
+        assert_eq!(
+            after,
+            shown(Some("+7 rows"), 8, 20, None),
+            "the new last full window stands"
+        );
+    }
+
+    #[test]
+    fn a_window_that_no_probe_measured_leaves_every_row_standing() {
+        // A run that cannot measure the terminal knows no height to fit a
+        // frame to. It draws the whole frame and lets the terminal decide what
+        // it shows, which is the rule of the columns applied to the height.
+        let screen = tall_table(NO_ROWS, &[]);
+        let lines = painted(&screen.sink);
+
+        for ttl in TTL..=TALL_PATH {
+            assert!(
+                lines.iter().any(|line| line.starts_with(&tall_row(ttl))),
+                "the row of TTL {ttl} stands: {lines:?}"
+            );
+        }
+        assert!(
+            !lines.iter().any(|line| line.starts_with(MORE_MARK)),
+            "and no line counts a row that went out of the frame: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_frame_that_fits_its_window_counts_no_row() {
+        let mut screen = table_in(Some(WINDOW_ROWS), &[]);
+        screen.round(&one_round());
+        let lines = painted(&screen.sink);
+
+        assert!(
+            lines.iter().any(|line| line == ONE_ROUND_ROW),
+            "the one row of the path stands: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.starts_with(MORE_MARK)),
+            "and a frame that the window holds whole leaves nothing out: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_clamped_frame_keeps_the_pause_and_the_list_of_the_keys() {
+        // The two of them are what the reader asked for with a key. A frame
+        // that dropped them answers that key press with nothing.
+        let mut screen = tall_table(Some(WINDOW_ROWS), &[&[Command::Pause, Command::Help]]);
+        screen.sink.clear();
+
+        screen.poll();
+        let lines = painted(&screen.sink);
+        let mut wanted = vec!["", PAUSED, ""];
+        wanted.extend(HELP_LINES);
+        assert_eq!(
+            last_lines(&lines, wanted.len()),
+            wanted,
+            "the mark of the pause and the list of the keys close the frame: {lines:?}"
+        );
+        assert!(
+            lines.len() <= usize::from(WINDOW_ROWS),
+            "the frame stands inside the {WINDOW_ROWS} rows of the window: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line == CROWDED_LINE),
+            "and the rows of the path give up the lines that those two take: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_frame_writes_no_line_end_under_its_last_line() {
+        // A frame of as many lines as the window holds ends with a line feed
+        // on the last row of that window, and the terminal then scrolls the
+        // whole window by one line. The header line goes off the top of an
+        // alternate screen that keeps no scrollback.
+        let mut screen = table(&[]);
+        screen.round(&one_round());
+        let text = glyphs(&screen.sink);
+        let lines = painted(&screen.sink);
+
+        assert!(
+            !text.ends_with(super::LINE_END),
+            "no line end closes the last line of a frame: {text:?}"
+        );
+        assert_eq!(
+            text.matches(super::LINE_END).count(),
+            lines.len().saturating_sub(1),
+            "and one line end stands between two lines of it: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn one_frame_of_the_live_table_reaches_the_sink_in_one_write() {
+        // The sink of a live run is `std::io::Stdout`, which is a
+        // `LineWriter`. Such a writer flushes at every line feed, so one call
+        // for each line of a frame is one `write(2)` for each line of it. The
+        // terminal draws what arrives, and the reader then sees a half-drawn
+        // frame between two of those writes.
+        let mut screen = counted_table();
+        screen.round(&one_round());
+        assert_eq!(
+            screen.sink.writes, 1,
+            "the whole frame reaches the sink in one call"
+        );
+    }
+
+    #[test]
+    fn the_pause_holds_the_table_and_the_frame_of_it_names_the_pause() {
+        let mut screen = table(&[&[Command::Pause]]);
+        screen.round(&one_round());
+        screen.sink.clear();
+
+        // A poll draws while the table holds as well, so the mark of the pause
+        // reaches the screen of a run that no round moves.
+        screen.poll();
+        let held = painted(&screen.sink);
+        assert_eq!(
+            last_lines(&held, 2),
+            ["", PAUSED],
+            "one blank line and the word of the pause close the frame: {held:?}"
+        );
+
+        screen.sink.clear();
+        screen.round(&one_round());
+        assert!(
+            screen.sink.is_empty(),
+            "a round of a table that holds draws nothing: {:?}",
+            painted(&screen.sink)
+        );
+    }
+
+    #[test]
+    fn the_names_key_swaps_a_name_for_the_address_of_it_and_back() {
+        let mut screen = table(&[&[Command::Names], &[Command::Names]]);
+        screen.round(&one_round());
+        screen.names(&[name(ROUTER, ROUTER_NAME)]);
+        let named = painted(&screen.sink);
+        assert!(
+            named.iter().any(|line| line.contains(NAMED_ROUTER)),
+            "the name that arrived stands in the host of the row: {named:?}"
+        );
+
+        screen.sink.clear();
+        screen.poll();
+        let raw = painted(&screen.sink);
+        assert!(
+            !raw.iter().any(|line| line.contains(ROUTER_NAME)),
+            "the key takes the names off the table: {raw:?}"
+        );
+        assert!(
+            raw.iter().any(|line| line.contains(ROUTER)),
+            "the host of the row then reads as the address that answered: {raw:?}"
+        );
+
+        screen.sink.clear();
+        screen.poll();
+        let again = painted(&screen.sink);
+        assert!(
+            again.iter().any(|line| line.contains(NAMED_ROUTER)),
+            "a second press puts the names back, so the table keeps them: {again:?}"
+        );
+    }
+
+    #[test]
+    fn the_reset_key_empties_the_table_and_zeroes_the_counter_of_the_display() {
+        let mut screen = table(&[&[Command::Reset]]);
+        screen.round(&one_round());
+
+        screen.sink.clear();
+        screen.poll();
+        let empty = painted(&screen.sink);
+        assert!(
+            header_text(&empty).starts_with(NO_ROUND_HEADER),
+            "the header line then counts no round: {empty:?}"
+        );
+        assert!(
+            !empty.iter().any(|line| line.contains(ROUTER)),
+            "and no row of the path stands under it: {empty:?}"
+        );
+
+        screen.sink.clear();
+        screen.round(&one_round());
+        let first = painted(&screen.sink);
+        assert!(
+            first.iter().any(|line| line == ONE_ROUND_ROW),
+            "the round that follows the reset counts as the first round: {first:?}"
+        );
+    }
+
+    #[test]
+    fn the_help_key_shows_the_list_of_the_keys_and_hides_it_again() {
+        let mut screen = table(&[&[Command::Help], &[Command::Help]]);
+        screen.poll();
+        let shown = painted(&screen.sink);
+        let mut wanted = vec![""];
+        wanted.extend(HELP_LINES);
+        assert_eq!(
+            last_lines(&shown, wanted.len()),
+            wanted,
+            "one blank line and the list of the keys close the frame: {shown:?}"
+        );
+
+        screen.sink.clear();
+        screen.poll();
+        let hidden = painted(&screen.sink);
+        assert!(
+            !hidden
+                .iter()
+                .any(|line| HELP_LINES.contains(&line.as_str())),
+            "a second press takes the list back off the screen: {hidden:?}"
+        );
+    }
+
+    /// The long help of `krt` names the key that opens the list of the keys.
+    ///
+    /// [`KEYS`] is the one list that says what a key does, and a doc comment
+    /// of `clap` is a string literal that reads that list at no time. The long
+    /// help therefore writes the name of one key by hand. This test holds that
+    /// name and the list together: a list that gives the work to another key
+    /// fails here, and no reader of the help then presses a key which does
+    /// nothing.
+    #[test]
+    fn the_long_help_names_the_key_that_lists_the_keys() {
+        use clap::CommandFactory;
+
+        let help = crate::Cli::command().render_long_help().to_string();
+        let name = format!("`{KEY_THAT_LISTS_THE_KEYS}`");
+        assert!(
+            help.contains(&name),
+            "the long help names the {name} key, which opens the list of the keys: {help}"
+        );
+    }
+
+    #[test]
+    fn the_quit_key_stops_the_run_and_a_turn_of_no_key_stops_nothing() {
+        let mut screen = table(&[&[], &[Command::Quit]]);
+        assert!(
+            !screen.poll(),
+            "a turn that took no key asks for no stop of the run"
+        );
+        assert!(screen.poll(), "the quit key asks for the stop of the run");
+    }
+
+    #[test]
+    fn a_turn_that_took_no_key_draws_nothing() {
+        // The run loop polls ten times each second. A poll that drew every
+        // turn would clear the screen and paint it again ten times each
+        // second, and the table would flicker for nothing.
+        let mut screen = table_at(temp_path("no-key"), NoKeys);
+        screen.round(&one_round());
+        let drawn = screen.sink.len();
+
+        screen.poll();
+        assert_eq!(
+            screen.sink.len(),
+            drawn,
+            "a turn of no key leaves the frame that stands: {:?}",
+            painted(&screen.sink)
+        );
+    }
+
+    #[test]
+    fn the_header_names_the_size_of_the_recorded_file_at_the_moment_of_the_draw() {
+        let file = TempFile::absent("size");
+        file.of(FIRST_BYTES);
+        let mut screen = table_at(file.path().to_owned(), FakeKeys::of(&[]));
+
+        screen.round(&one_round());
+        let first = painted(&screen.sink);
+        assert!(
+            header_text(&first).ends_with(&size_of(FIRST_BYTES)),
+            "the header line names the size that the file holds: {first:?}"
+        );
+
+        // The run appends one record for each round, so the file grows while
+        // the table stands. A header that measured the file one time would
+        // name the size of an empty file for the whole of a long run.
+        file.of(SECOND_BYTES);
+        screen.sink.clear();
+        screen.round(&one_round());
+        let second = painted(&screen.sink);
+        assert!(
+            header_text(&second).ends_with(&size_of(SECOND_BYTES)),
+            "and the next draw names the size that the file holds then: {second:?}"
+        );
+    }
+
+    #[test]
+    fn the_clock_of_a_run_reads_the_moment_now() {
+        let before = Instant::now();
+        let read = SystemClock.now();
+        let after = Instant::now();
+        assert!(
+            read >= before && read <= after,
+            "the clock of a run reads the clock of the machine"
+        );
+    }
+
+    #[test]
+    fn a_round_that_answered_two_hops_and_reached_the_target_prints_one_line() {
+        assert_eq!(status_line(&a_whole_path_round()), A_WHOLE_PATH_LINE);
+    }
+
+    /// One hop keeps the singular name, and a round that reached nothing says
+    /// so.
+    #[test]
+    fn a_round_that_answered_one_hop_and_reached_nothing_prints_the_singular_name() {
+        assert_eq!(status_line(&a_lost_round()), A_LOST_ROUND_LINE);
+    }
+
+    #[test]
+    fn a_headless_screen_prints_a_line_at_its_first_round() {
+        // A run that printed nothing for its first minute reads as a run that
+        // died, so the first round always prints.
+        let clock = FakeClock::new();
+        let mut screen = headless(&clock);
+
+        screen.round(&a_whole_path_round());
+        assert_eq!(
+            printed(&screen.sink),
+            [A_WHOLE_PATH_LINE],
+            "the first round of a run puts its status line on the screen"
+        );
+    }
+
+    #[test]
+    fn a_headless_screen_prints_no_second_line_inside_one_minute() {
+        // A run of one round each second prints one line each second, and an
+        // hour of such a run fills a terminal with the same line 3600 times.
+        let clock = FakeClock::new();
+        let mut screen = headless(&clock);
+
+        for _ in 0..ROUNDS_INSIDE_A_MINUTE {
+            screen.round(&a_whole_path_round());
+            clock.advance(ROUND_STEP);
+        }
+        assert_eq!(
+            printed(&screen.sink),
+            [A_WHOLE_PATH_LINE],
+            "the rounds that follow the first one inside the minute print nothing"
+        );
+    }
+
+    #[test]
+    fn a_headless_screen_prints_a_second_line_after_a_minute() {
+        // The line of each minute is what says that the run still stands, and
+        // it names the round that the file holds now.
+        let clock = FakeClock::new();
+        let mut screen = headless(&clock);
+
+        screen.round(&a_whole_path_round());
+        clock.advance(ONE_MINUTE);
+        screen.round(&a_lost_round());
+        assert_eq!(
+            printed(&screen.sink),
+            [A_WHOLE_PATH_LINE, A_LOST_ROUND_LINE],
+            "the first round of the next minute puts its own line on the screen"
+        );
+    }
+
+    #[test]
+    fn a_headless_screen_reads_no_key_and_stops_nothing() {
+        // A headless run holds no terminal, so no key of it reaches this
+        // process. The signal handler of `main.rs` stops such a run, and the
+        // limits of the command line stop it too.
+        let clock = FakeClock::new();
+        let mut screen = headless(&clock);
+
+        assert!(
+            !screen.poll(),
+            "a turn of a headless screen asks for no stop of the run"
+        );
+    }
+
+    #[test]
+    fn a_headless_screen_shows_no_name() {
+        // A name belongs to a row of a table, and a headless run draws no
+        // table. The name record reaches the recorded file whatever the screen
+        // does, so a replay of that file names every address that a lookup
+        // answered.
+        let clock = FakeClock::new();
+        let mut screen = headless(&clock);
+        screen.round(&a_whole_path_round());
+        screen.sink.clear();
+
+        screen.names(&[name(ROUTER, ROUTER_NAME)]);
+        assert!(
+            screen.sink.is_empty(),
+            "the names that arrived print nothing: {:?}",
+            printed(&screen.sink)
+        );
+    }
+
+    #[test]
+    fn the_q_key_asks_for_a_quit() {
+        assert_eq!(classify(press(KeyCode::Char('q'))), Some(Command::Quit));
+    }
+
+    #[test]
+    fn ctrl_c_asks_for_a_quit() {
+        // Raw mode clears `ISIG`, so Ctrl-C arrives as a key press and not as a
+        // signal. A run that ignored it would need a second terminal to stop.
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(classify(ctrl_c), Some(Command::Quit));
+    }
+
+    #[test]
+    fn the_p_key_asks_for_a_pause() {
+        assert_eq!(classify(press(KeyCode::Char('p'))), Some(Command::Pause));
+    }
+
+    #[test]
+    fn the_n_key_asks_for_the_names() {
+        assert_eq!(classify(press(KeyCode::Char('n'))), Some(Command::Names));
+    }
+
+    #[test]
+    fn the_r_key_asks_for_a_reset() {
+        assert_eq!(classify(press(KeyCode::Char('r'))), Some(Command::Reset));
+    }
+
+    #[test]
+    fn the_question_mark_asks_for_the_help() {
+        assert_eq!(classify(press(KeyCode::Char('?'))), Some(Command::Help));
+    }
+
+    #[test]
+    fn the_page_up_key_asks_for_the_page_above() {
+        // A reader of a short window sees only some rows of the path. This key
+        // is how that reader asks for the rows above them.
+        assert_eq!(classify(press(KeyCode::PageUp)), Some(Command::PageUp));
+    }
+
+    #[test]
+    fn the_page_down_key_asks_for_the_page_below() {
+        // The reader who went up needs a key to come back down to the rows
+        // that the frame cut off at its foot.
+        assert_eq!(classify(press(KeyCode::PageDown)), Some(Command::PageDown));
+    }
+
+    #[test]
+    fn a_release_of_a_page_key_asks_for_nothing() {
+        // A kitty terminal and a Windows terminal both report a release. Only a
+        // press acts, or one press of a page key scrolls two pages.
+        for code in [KeyCode::PageUp, KeyCode::PageDown] {
+            let release = KeyEvent {
+                kind: KeyEventKind::Release,
+                ..press(code)
+            };
+            assert_eq!(classify(release), None);
+        }
+    }
+
+    #[test]
+    fn a_release_of_a_mapped_key_asks_for_nothing() {
+        // A kitty terminal and a Windows terminal both report a release. Only a
+        // press acts, or one press of `q` stops the run two times.
+        let release = KeyEvent {
+            kind: KeyEventKind::Release,
+            ..press(KeyCode::Char('q'))
+        };
+        assert_eq!(classify(release), None);
+    }
+
+    #[test]
+    fn a_release_of_ctrl_c_asks_for_nothing() {
+        // The check of the release stands in front of the check of Ctrl-C, so
+        // the escape that no table can trap also obeys the rule of the press.
+        let release = KeyEvent {
+            kind: KeyEventKind::Release,
+            ..KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        };
+        assert_eq!(classify(release), None);
+    }
+
+    #[test]
+    fn a_letter_that_the_table_does_not_hold_asks_for_nothing() {
+        assert_eq!(classify(press(KeyCode::Char('x'))), None);
+    }
+
+    #[test]
+    fn a_key_that_carries_no_letter_asks_for_nothing() {
+        assert_eq!(classify(press(KeyCode::Enter)), None);
+    }
+}

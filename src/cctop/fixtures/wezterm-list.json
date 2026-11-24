@@ -1,0 +1,80 @@
+[
+  {
+    "window_id": 0,
+    "tab_id": 378,
+    "pane_id": 378,
+    "workspace": "default",
+    "size": {
+      "rows": 52,
+      "cols": 223,
+      "pixel_width": 3791,
+      "pixel_height": 1924,
+      "dpi": 144
+    },
+    "title": "example",
+    "cwd": "file://example.local/Users/example",
+    "cursor_x": 114,
+    "cursor_y": 47,
+    "cursor_shape": "Default",
+    "cursor_visibility": "Visible",
+    "left_col": 0,
+    "top_row": 0,
+    "tab_title": "",
+    "window_title": "example",
+    "is_active": true,
+    "is_zoomed": false,
+    "tty_name": "/dev/ttys354"
+  },
+  {
+    "window_id": 0,
+    "tab_id": 239,
+    "pane_id": 239,
+    "workspace": "default",
+    "size": {
+      "rows": 52,
+      "cols": 223,
+      "pixel_width": 3791,
+      "pixel_height": 1924,
+      "dpi": 144
+    },
+    "title": "example",
+    "cwd": "file://example.local/Users/example",
+    "cursor_x": 114,
+    "cursor_y": 47,
+    "cursor_shape": "Default",
+    "cursor_visibility": "Visible",
+    "left_col": 0,
+    "top_row": 0,
+    "tab_title": "",
+    "window_title": "example",
+    "is_active": true,
+    "is_zoomed": false,
+    "tty_name": "/dev/ttys231"
+  },
+  {
+    "window_id": 0,
+    "tab_id": 235,
+    "pane_id": 235,
+    "workspace": "default",
+    "size": {
+      "rows": 52,
+      "cols": 223,
+      "pixel_width": 3791,
+      "pixel_height": 1924,
+      "dpi": 144
+    },
+    "title": "example",
+    "cwd": "file://example.local/Users/example",
+    "cursor_x": 0,
+    "cursor_y": 8,
+    "cursor_shape": "Default",
+    "cursor_visibility": "Visible",
+    "left_col": 0,
+    "top_row": 0,
+    "tab_title": "",
+    "window_title": "example",
+    "is_active": true,
+    "is_zoomed": false,
+    "tty_name": "/dev/ttys097"
+  }
+]

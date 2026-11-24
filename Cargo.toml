@@ -19,6 +19,7 @@ clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
+toml_edit = "0.22"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -28,7 +29,13 @@ futures = "0.3"
 # AWS SDK
 aws-config = "1.8"
 aws-credential-types = "1.2"
-aws-sdk-sts = "1.80"
+aws-sdk-iot = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["sigv4a", "http-1x", "default-https-client", "rt-tokio"] }
+aws-sdk-sts = { version = "1.80", default-features = false, features = ["sigv4a", "default-https-client", "rt-tokio"] }
+aws-sigv4 = "1.5"
+
+# MQTT
+rumqttc = { version = "0.25", default-features = false, features = ["use-rustls", "websocket"] }
 
 # File system
 walkdir = "2.5"
@@ -38,8 +45,13 @@ glob = "0.3"
 notify = "8.2"
 
 # Git
-git2 = "0.20"
-gix = "0.78"
+# vendored-libgit2 compiles the bundled libgit2 and links it statically. A
+# system libgit2 puts its version-pinned Homebrew Cellar path in the build
+# cache, and each Homebrew upgrade then stops the link. The default ssh and
+# https transports are off, because no crate clones or fetches, and ssh links
+# the Homebrew OpenSSL dylib. Held by src/gitrdun/tests/vendored-libgit2.rs.
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
+gix = "0.83"
 
 # Hashing
 blake3 = "1.8"
@@ -47,6 +59,9 @@ sha2 = "0.10"
 sha1 = "0.10"
 md-5 = "0.10"
 hex = "0.4"
+
+# Compression
+flate2 = "1.1"
 
 # Terminal UI
 crossterm = "0.29"
@@ -57,13 +72,25 @@ indicatif = "0.18"
 dialoguer = "0.11"
 terminal_size = "0.4"
 termion = "4.0"
+portable-pty = "0.9.0"
 
 # Clipboard
 arboard = "3.6"
 
 # Networking
 reqwest = { version = "0.12", features = ["json", "stream"] }
+tiny_http = "0.12"
 url = "2.5"
+percent-encoding = "2.3"
+
+# Network tracing
+# The documentation of `trippy-core` says that its public API is not stable and
+# is highly likely to change, so the version is pinned exactly. `src/krt` holds
+# every mention of a trippy type in one module, and `repo_guards::trippy_wall`
+# keeps it there, so an upgrade breaks one file.
+trippy-core = "=0.13.0"
+trippy-dns = "0.13.0"
+trippy-privilege = "0.13.0"
 
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }
@@ -76,6 +103,7 @@ parking_lot = "0.12"
 
 # Image processing
 image = "0.25"
+png = "0.18"
 qrcode = "0.14"
 base64 = "0.22"
 icy_sixel = "0.5"
@@ -83,10 +111,12 @@ icy_sixel = "0.5"
 # Random
 rand = "0.9"
 names = { version = "0.14", default-features = false }
+uuid = { version = "1", features = ["v4", "v5"] }
 
 # System info
 sysinfo = "0.36"
 libc = "0.2"
+signal-hook = "0.3"
 which = "8.0"
 listeners = "0.2"
 get_if_addrs = "0.5"
@@ -101,19 +131,88 @@ rodio = { version = "0.20", default-features = false, features = ["wav"] }
 log = "0.4"
 env_logger = "0.11"
 
+# Browser
+open = "5.4"
+# Splits a command line into words by the rules of a POSIX shell.
+shlex = "2"
+
 # Misc
+syn = { version = "2", default-features = false, features = ["full", "parsing", "visit"] }
+proc-macro2 = "1"
+# CommonMark parser. Default features off: only the parser is wanted, not the
+# `getopts` binary or the `html` renderer.
+pulldown-cmark = { version = "0.13", default-features = false }
 tiktoken-rs = "0.5"
 num-format = "0.4"
 human_bytes = "0.4"
 unicode-width = "0.2"
+unicode-segmentation = "1.13"
 regex = "1.12"
+rust_decimal = { version = "1.43", default-features = false, features = ["std"] }
+wait-timeout = "0.2"
+memchr = "2.8"
+# Multi-pattern substring search; the crap fork scan
+aho-corasick = "1.1"
+globset = "0.4"
+csv = "1.4"
+
+# Source parsing
+#
+# `src/cdva` asks each file "does this line belong to a test?". That question
+# names a syntactic category, so it needs a parser and not a regular
+# expression. Every grammar below is a C crate, and every one of them was
+# measured against `tree-sitter` 0.26: the ABI versions differ between
+# grammars, and the runtime accepts both 14 and 15.
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+tree-sitter-go = "0.25"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-kotlin-ng = "1.1"
+tree-sitter-c-sharp = "0.23"
+tree-sitter-ruby = "0.23"
+tree-sitter-swift = "0.7"
+tree-sitter-elixir = "0.3"
+tree-sitter-zig = "1.1"
+#
+# The shell parser of `wdid`. `wdid` asks which word of a command line is in
+# command position, and that question names a syntactic category, so it needs a
+# parser. Measured on 2026-10-14 against 347,081 rows of a real atuin history:
+# `brush-parser` 0.4.0 refused 27 rows, and `yash-syntax` 0.25.0 refused 185
+# rows (it has no process substitution). `yash-syntax` is also GPL-3.0, and this
+# workspace is MIT.
+brush-parser = "0.4"
 
 # Dev dependencies
 tempfile = "3"
 mockito = "1.7"
+tokio-tungstenite = "0.30"
+# The MQTT packet reader and writer of `rumqttc` take a `bytes::BytesMut`, and
+# `rumqttc` re-exports neither the type nor the crate. A test that speaks MQTT
+# to the code under test therefore names `bytes` itself.
+bytes = "1"
 
 # Platform-specific
 procfs = "0.17"
+core-foundation = "0.10"
+core-foundation-sys = "0.8"
+io-kit-sys = "0.5"
+# objc2 bindings to the frameworks of Apple. They ship generated bindings, so
+# the build needs no bindgen and no libclang. A member turns on only the
+# features that it uses.
+#
+# Core Audio bindings for popstop.
+objc2-audio-toolbox = { version = "0.3.2", default-features = false }
+objc2-core-audio = { version = "0.3.2", default-features = false }
+objc2-core-audio-types = { version = "0.3.2", default-features = false }
+# Core Foundation bindings for popstop and glance.
+objc2-core-foundation = { version = "0.3.2", default-features = false }
+# The runtime, AppKit, and Foundation bindings for glance.
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false }
+objc2-foundation = { version = "0.3.2", default-features = false }
 windows-sys = { version = "0.60", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_Foundation",
@@ -123,12 +222,30 @@ windows-sys = { version = "0.60", features = [
 
 # Internal crates
 buildinfo = { path = "src/buildinfo" }
+childenv = { path = "src/childenv" }
+sysclip = { path = "src/sysclip" }
+claude-transcript = { path = "src/claude-transcript" }
 op-cache = { path = "src/op-cache" }
 clipboardmon = { path = "src/clipboardmon" }
+faulte = { path = "src/faulte" }
 filewalker = { path = "src/filewalker" }
+altscreen = { path = "src/altscreen" }
+ghrest = { path = "src/ghrest" }
+gitscratch = { path = "src/gitscratch" }
+httpfile = { path = "src/httpfile" }
+occ = { path = "src/occ" }
+portplz-core = { path = "src/portplz-core" }
+proctree = { path = "src/proctree" }
 repowalker = { path = "src/repowalker" }
+runlimit = { path = "src/runlimit" }
+shellquote = { path = "src/shellquote" }
 shellsetup = { path = "src/shellsetup" }
 termbar = { path = "src/termbar" }
+termgfx = { path = "src/termgfx" }
+termsize = { path = "src/termsize" }
+termwindow = { path = "src/termwindow" }
+testcolor = { path = "src/testcolor" }
+textfit = { path = "src/textfit" }
 
 [workspace.lints.rust]
 # Require explicit handling of must-use values
@@ -156,7 +273,14 @@ unseparated_literal_suffix = "warn"
 await_holding_lock = "warn"
 # Prevent suppressing warnings without explanation
 allow_attributes_without_reason = "warn"
+# Make each allowance check itself. An #[expect] warns when its lint stops firing, so a stale allowance fails clippy. Inner #![allow] attributes are not affected.
+allow_attributes = "warn"
 # Catch clones that can be replaced by moves (nursery lint, may have false positives)
 redundant_clone = "warn"
 # Warn on byte-level string indexing (&s[..n]) which can panic on multi-byte UTF-8
 string_slice = "warn"
+# A banned method is a hard error, not a warning. The ban is how the workspace
+# makes a helper mandatory, and a warning is something a plain `cargo clippy`
+# run prints and a reader skips. The banned methods are listed in the
+# clippy.toml beside this manifest, which covers every member.
+disallowed_methods = "deny"

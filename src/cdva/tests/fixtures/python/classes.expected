@@ -1,0 +1,8 @@
+. class Widget:
+.     def render(self):
+.         return "widget"
+. 
+. 
+T class TestWidget:
+T     def test_render(self):
+T         assert Widget().render() == "widget"

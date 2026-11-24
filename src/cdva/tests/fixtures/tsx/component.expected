@@ -1,0 +1,9 @@
+. export function Badge({ label }: { label: string }) {
+.   return <span className="badge">{label}</span>;
+. }
+. 
+T describe("Badge", (): void => {
+T   it("renders the label it was given", (): void => {
+T     expect(Badge({ label: "ok" })).toBeTruthy();
+T   });
+T });
