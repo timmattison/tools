@@ -514,7 +514,7 @@ mod tests {
     }
 
     /// `Left` and `h` select the entry before the selected one, a gap
-    /// included. The live view counts from the newest entry.
+    /// included. The live view counts from the newest frame.
     #[test]
     fn left_and_h_select_the_previous_entry() {
         let (mut app, ids) = five();
