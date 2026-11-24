@@ -114,6 +114,33 @@ describe("conversation list scrolling", () => {
     expect(document.querySelectorAll(".conversation-item")).toHaveLength(0);
   });
 
+  it("drops the late reply of a page that a search made stale", async () => {
+    const invoke = await mockInvoke();
+    const oldPage = deferred<Conversation[]>();
+    invoke.mockResolvedValueOnce(page(1, PAGE_SIZE));
+    const { initConversations } = await import("./conversations");
+    await initConversations();
+
+    invoke.mockReturnValueOnce(oldPage.promise);
+    const el = list();
+    scrollToBottom(el);
+    el.dispatchEvent(new Event("scroll"));
+    await flush();
+    expect(invoke).toHaveBeenLastCalledWith("list_conversations", {
+      offset: PAGE_SIZE,
+      limit: PAGE_SIZE,
+    });
+
+    // The search module paints its results while the page is in flight.
+    el.dataset.mode = "search";
+    el.innerHTML = '<div class="search-result">hit</div>';
+    oldPage.resolve(page(51, PAGE_SIZE));
+    await flush();
+
+    expect(document.querySelectorAll(".conversation-item")).toHaveLength(0);
+    expect(document.querySelectorAll(".search-result")).toHaveLength(1);
+  });
+
   it("drops the late reply of a page that a reset made stale", async () => {
     const invoke = await mockInvoke();
     const first = page(1, PAGE_SIZE);
