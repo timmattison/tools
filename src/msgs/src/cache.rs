@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use rusqlite::Connection;
 
 use crate::error::MsgsError;
@@ -29,8 +31,16 @@ impl TextCache {
             ))
         })?;
 
-        let db_path = cache_dir.join(CACHE_DB_NAME);
-        let conn = Connection::open(&db_path)
+        Self::open_at(&cache_dir.join(CACHE_DB_NAME))
+    }
+
+    /// Open or create the text cache database file at `db_path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MsgsError::CacheError` on database errors.
+    pub fn open_at(db_path: &Path) -> Result<Self, MsgsError> {
+        let conn = Connection::open(db_path)
             .map_err(|e| MsgsError::CacheError(format!("Cannot open cache db: {e}")))?;
 
         conn.execute_batch(
@@ -226,5 +236,39 @@ impl TextCache {
         };
 
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_fixture::{apple_ns, ChatDbFixture, MessageSpec};
+
+    #[test]
+    fn rebuild_stores_the_joined_row_count() {
+        let fx = ChatDbFixture::new();
+        let chat_a = fx.add_chat("a", None, 45);
+        let chat_b = fx.add_chat("b", None, 45);
+        // One message in two chats makes two joined rows; the count is of
+        // joined rows, and a message with no text still counts.
+        fx.add_message(MessageSpec {
+            text: Some("shared".to_string()),
+            date: apple_ns(1_700_000_010, 0),
+            chats: vec![chat_a, chat_b],
+            ..MessageSpec::default()
+        });
+        fx.add_message(MessageSpec {
+            date: apple_ns(1_700_000_020, 0),
+            chats: vec![chat_a],
+            ..MessageSpec::default()
+        });
+        let db = fx.open_db();
+        let cache_path = fx.dir().join("text-cache.db");
+        let cache = TextCache::open_at(&cache_path).expect("open cache");
+
+        assert!(cache.needs_rebuild(3).expect("needs before"));
+        cache.rebuild(db.connection()).expect("rebuild");
+        assert!(!cache.needs_rebuild(3).expect("needs after"));
+        assert!(cache.needs_rebuild(2).expect("needs with other count"));
     }
 }

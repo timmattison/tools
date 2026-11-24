@@ -105,3 +105,68 @@ pub fn export_conversation_range(
         attachment_count,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_fixture::{apple_ns, ChatDbFixture, MessageSpec};
+
+    const BASE: i64 = 1_700_000_000;
+
+    #[test]
+    fn export_without_attachments_writes_messages_json() {
+        let fx = ChatDbFixture::new();
+        let alice = fx.add_handle("alice@example.com");
+        let chat = fx.add_chat("chat-export", Some("Export me"), 43);
+        let other = fx.add_chat("other", None, 45);
+        fx.link_handle(chat, alice);
+        for (text, secs, chats) in [
+            ("too early", 5, vec![chat]),
+            ("first", 10, vec![chat]),
+            ("second", 20, vec![chat]),
+            ("elsewhere", 15, vec![other]),
+            ("too late", 40, vec![chat]),
+        ] {
+            fx.add_message(MessageSpec {
+                text: Some(text.to_string()),
+                handle: alice,
+                date: apple_ns(BASE + secs, 0),
+                chats,
+                ..MessageSpec::default()
+            });
+        }
+        let db = fx.open_db();
+        let export_dir = fx.dir().join("export").join("nested");
+
+        let result = export_conversation_range(
+            &db,
+            chat,
+            apple_ns(BASE + 10, 0),
+            apple_ns(BASE + 20, 0),
+            false,
+            &export_dir,
+        )
+        .expect("export");
+
+        assert_eq!(result.message_count, 2);
+        assert_eq!(result.attachment_count, 0);
+        assert_eq!(result.export_path, export_dir.display().to_string());
+        assert!(!export_dir.join("attachments").exists());
+
+        let json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(export_dir.join("messages.json")).expect("read json"),
+        )
+        .expect("parse json");
+        assert_eq!(json["conversation"]["chat_identifier"], "chat-export");
+        assert_eq!(json["conversation"]["display_name"], "Export me");
+        assert_eq!(json["conversation"]["is_group"], true);
+        assert_eq!(json["export_range"]["message_count"], 2);
+        let texts: Vec<_> = json["messages"]
+            .as_array()
+            .expect("messages array")
+            .iter()
+            .map(|m| m["text"].as_str().expect("text"))
+            .collect();
+        assert_eq!(texts, vec!["first", "second"]);
+    }
+}

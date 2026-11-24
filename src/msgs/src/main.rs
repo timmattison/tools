@@ -6,6 +6,8 @@ mod db;
 mod error;
 mod export;
 mod parser;
+#[cfg(test)]
+mod test_fixture;
 mod types;
 mod util;
 
