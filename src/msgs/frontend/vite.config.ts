@@ -1,15 +1,15 @@
 import { defineConfig } from "vite";
 
 const host = process.env.TAURI_DEV_HOST;
-const port = parseInt(process.env.VITE_PORT || "1420", 10);
-const hmrPort = parseInt(process.env.VITE_HMR_PORT || String(port + 1), 10);
 
+// The port comes from the `--port` flag of `beforeDevCommand`. `strictPort`
+// makes Vite fail instead of moving to another port.
 export default defineConfig({
   clearScreen: false,
   server: {
-    port,
+    port: 1420,
     strictPort: true,
     host: host || false,
-    hmr: host ? { protocol: "ws", host, port: hmrPort } : undefined,
+    hmr: host ? { protocol: "ws", host } : undefined,
   },
 });

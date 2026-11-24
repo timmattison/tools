@@ -6025,7 +6025,7 @@ The search index is a copy of the text of each message, in `~/Library/Applicatio
 src/msgs/scripts/dev.ts
 ```
 
-The script installs the frontend dependencies, gets a free port from `portplz`, and starts Vite and the app on that port.
+The script installs the frontend dependencies, gets a free port from `portplz`, and starts the app on that port. Tauri starts Vite on the same port through `beforeDevCommand`, and the script does not change `tauri.conf.json`. A plain `cargo tauri dev` from the root of the repository starts Vite on port 1420.
 
 ### Build it
 

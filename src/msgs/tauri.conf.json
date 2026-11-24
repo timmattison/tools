@@ -6,7 +6,7 @@
   "build": {
     "frontendDist": "./frontend/dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "",
+    "beforeDevCommand": "cd src/msgs/frontend && pnpm exec vite --port 1420 --strictPort",
     "beforeBuildCommand": "cd src/msgs/frontend && pnpm build"
   },
   "app": {

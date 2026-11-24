@@ -20,6 +20,14 @@ export function parsePort(output: string): Port | null {
  * The port goes in a `--config` merge, so `tauri.conf.json` stays unchanged.
  * Extra arguments go to the app after `--`.
  */
-export function buildTauriDevArgs(_port: Port, _extraArgs: readonly string[]): string[] {
-  return ["tauri", "dev"];
+export function buildTauriDevArgs(port: Port, extraArgs: readonly string[]): string[] {
+  const config = {
+    build: {
+      devUrl: `http://localhost:${port}`,
+      beforeDevCommand: `cd src/msgs/frontend && pnpm exec vite --port ${port} --strictPort`,
+    },
+  };
+  const args = ["tauri", "dev", "--config", JSON.stringify(config)];
+  if (extraArgs.length > 0) args.push("--", ...extraArgs);
+  return args;
 }
