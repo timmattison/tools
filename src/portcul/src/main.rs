@@ -195,28 +195,26 @@ fn run_app(
         if event::poll(tick_rate)? {
             if let Event::Key(key) = event::read()? {
                 // Handle kill confirmation mode separately
-                if let KillConfirm::Pending { pid, name, .. } = &state.kill_confirm {
+                if let KillConfirm::Pending { pid, .. } = &state.kill_confirm {
                     let pid = *pid;
-                    let name = name.clone();
                     match key.code {
-                        KeyCode::Char('y') | KeyCode::Char('Y') => {
-                            match kill_process(pid) {
-                                Ok(()) => {
-                                    state.kill_confirm = KillConfirm::Result {
-                                        message: format!("Sent SIGTERM to {name} (PID {pid})"),
-                                        is_error: false,
-                                    };
-                                    // Refresh after kill
+                        // Read the list again, so the signal goes only to the
+                        // process that the user confirmed.
+                        KeyCode::Char('y') | KeyCode::Char('Y') => match collect_listeners() {
+                            Ok(fresh) => {
+                                if state.confirm_kill(fresh, kill_process) {
                                     refresh_listeners(&mut state);
                                 }
-                                Err(e) => {
-                                    state.kill_confirm = KillConfirm::Result {
-                                        message: format!("Failed to kill PID {pid}: {e}"),
-                                        is_error: true,
-                                    };
-                                }
                             }
-                        }
+                            Err(e) => {
+                                state.kill_confirm = KillConfirm::Result {
+                                    message: format!(
+                                        "Cannot read the listeners, so nothing was sent to PID {pid}: {e}"
+                                    ),
+                                    is_error: true,
+                                };
+                            }
+                        },
                         // Ctrl+C exits the app even during confirmation
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             break

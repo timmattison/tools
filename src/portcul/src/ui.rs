@@ -104,11 +104,23 @@ impl AppState {
         fresh: Vec<ListeningProcess>,
         kill: impl FnOnce(Pid) -> anyhow::Result<()>,
     ) -> bool {
-        let KillConfirm::Pending { pid, name, .. } = &self.kill_confirm else {
+        let KillConfirm::Pending { pid, name, port } = &self.kill_confirm else {
             return false;
         };
-        let (pid, name) = (*pid, name.clone());
-        let _ = fresh;
+        let (pid, name, port) = (*pid, name.clone(), *port);
+        let still_listening = fresh
+            .iter()
+            .any(|l| l.pid == pid && l.port == port && l.name == name);
+        self.refresh(fresh);
+        if !still_listening {
+            self.kill_confirm = KillConfirm::Result {
+                message: format!(
+                    "{name} (PID {pid}) no longer listens on port {port}. Nothing was sent."
+                ),
+                is_error: true,
+            };
+            return false;
+        }
         match kill(pid) {
             Ok(()) => {
                 self.kill_confirm = KillConfirm::Result {
