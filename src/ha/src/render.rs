@@ -3485,6 +3485,96 @@ mod tests {
         }
     }
 
+    /// A board of `timmattison/megarepo` with one finished run whose job
+    /// `TypeScript` on `m1-ts` passed in 300 s, and one active run whose job
+    /// `TypeScript` on `m1-ts` runs since `running_started`. The active run
+    /// is expanded and stands first.
+    fn estimate_board(running_started: &str) -> Board {
+        let runner = || RunnerName::new("m1-ts".to_owned());
+        let mut board = Board::new(Duration::from_hours(8));
+        board.replace(
+            repo("timmattison/megarepo"),
+            vec![
+                run(
+                    9_001,
+                    "timmattison/megarepo",
+                    "CI",
+                    "main",
+                    "done",
+                    RunState::Passed,
+                    "2026-10-14T11:00:00Z",
+                    "2026-10-14T11:10:00Z",
+                ),
+                run(
+                    9_002,
+                    "timmattison/megarepo",
+                    "CI",
+                    "main",
+                    "live",
+                    RunState::Running,
+                    running_started,
+                    "2026-10-14T11:59:00Z",
+                ),
+            ],
+            now(),
+        );
+        board.set_jobs(
+            RunId(9_001),
+            vec![Job {
+                runner: runner(),
+                ..job(
+                    501,
+                    "TypeScript",
+                    RunState::Passed,
+                    Some("2026-10-14T11:00:00Z"),
+                    Some("2026-10-14T11:05:00Z"),
+                )
+            }],
+        );
+        board.set_jobs(
+            RunId(9_002),
+            vec![Job {
+                runner: runner(),
+                ..job(
+                    502,
+                    "TypeScript",
+                    RunState::Running,
+                    Some(running_started),
+                    None,
+                )
+            }],
+        );
+        board.expand(now());
+        board
+    }
+
+    #[test]
+    fn a_running_job_row_shows_its_time_left_under_the_job_sum_header() {
+        for width in [80_u16, 120, 200] {
+            let mut board = estimate_board("2026-10-14T11:58:00Z");
+            let text = lines(&render_with(width, 12, &mut board, &loaded()));
+            let y = row_holding(&text, "502");
+            assert!(
+                text[y].contains('├') || text[y].contains('└'),
+                "width {width}: {:?}",
+                text[y]
+            );
+            assert_eq!(job_sum_cells(&text, y), "~3m 00s", "width {width}");
+            let run_y = row_holding(&text, "9002");
+            assert_eq!(job_sum_cells(&text, run_y), "2m 00s", "width {width}");
+        }
+    }
+
+    #[test]
+    fn a_running_job_row_past_its_estimate_shows_the_time_over() {
+        for width in [80_u16, 120, 200] {
+            let mut board = estimate_board("2026-10-14T11:53:50Z");
+            let text = lines(&render_with(width, 12, &mut board, &loaded()));
+            let y = row_holding(&text, "502");
+            assert_eq!(job_sum_cells(&text, y), "+1m 10s", "width {width}");
+        }
+    }
+
     #[test]
     fn the_job_sum_of_a_finished_run_row_fades_as_its_time_cell_does() {
         let mut board = job_sum_board();
