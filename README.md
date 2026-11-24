@@ -1609,8 +1609,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     is a second checkout of packages the repository already holds — where the search path itself
     sits is never matched, so a run from inside a worktree still finds every package under it, and
     a run that found packages and then filtered every one of them out says so and names
-    `--include-worktrees`. A package under a nested repository of its own is not a second checkout
-    and stays in. An exclusion names a whole directory below the search path, so
+    `--include-worktrees`. A package under a nested repository of its own, a submodule included, is
+    not a second checkout and stays in. An exclusion names a whole directory below the search path, so
     `targets` and `node_modules_backup` stay in, and the search path itself is never matched
     against the list — `workit --path ~/code/target/myproj` searches that tree like any other. An
     entry it cannot use — a directory whose mode keeps it out, a `Cargo.toml` nobody can parse, a

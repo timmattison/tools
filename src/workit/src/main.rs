@@ -185,7 +185,8 @@ impl OutputManifest {
 /// A `.git` *directory* is a repository of its own rather than a worktree. A
 /// package under one is a package nothing else holds, so it is listed, and the
 /// walk stops there: what lies above a repository says nothing about what is
-/// inside it.
+/// inside it. A submodule is one too, although its `.git` is a file, and the
+/// walk stops at it in the same way (see [`links_a_worktree`]).
 fn is_in_worktree(manifest: &Path, root: &SearchRoot) -> bool {
     let Some(package) = manifest.parent() else {
         return false;
@@ -211,11 +212,7 @@ fn is_in_worktree(manifest: &Path, root: &SearchRoot) -> bool {
 
         let git_path = directory.join(".git");
         if git_path.is_file() {
-            // A linked worktree keeps a file naming the directory it borrows.
-            if let Ok(content) = fs::read_to_string(&git_path) {
-                return content.trim().starts_with("gitdir:");
-            }
-            return false;
+            return links_a_worktree(&git_path);
         }
         if git_path.is_dir() {
             return false; // A repository of its own, not a worktree.
@@ -223,6 +220,32 @@ fn is_in_worktree(manifest: &Path, root: &SearchRoot) -> bool {
     }
 
     false
+}
+
+/// Whether the `.git` file at `git_file` links a linked worktree.
+///
+/// A `.git` file names a git directory kept elsewhere. A linked worktree's lies
+/// under `.git/worktrees/<name>` and holds a `commondir` file that names the
+/// repository it borrows. A submodule's lies under `.git/modules/<name>`, holds
+/// no `commondir`, and is a repository of its own. A package in a submodule is
+/// thus no second checkout, and stays in.
+///
+/// A relative git directory is resolved against the directory that holds the
+/// `.git` file. A file that cannot be read, or that does not start with
+/// `gitdir:`, links nothing.
+fn links_a_worktree(git_file: &Path) -> bool {
+    let Ok(content) = fs::read_to_string(git_file) else {
+        return false;
+    };
+    let Some(named) = content.trim().strip_prefix("gitdir:") else {
+        return false;
+    };
+    let named = Path::new(named.trim());
+    let gitdir = match git_file.parent() {
+        Some(holder) => holder.join(named),
+        None => named.to_path_buf(),
+    };
+    gitdir.join("commondir").is_file()
 }
 
 /// What one walk of the tree found.
