@@ -46,8 +46,9 @@ const TIME_WIDTH: usize = 7;
 /// The header word of the job-sum column.
 const JOB_SUM_HEADER: &str = "JOB SUM";
 /// The width of the job-sum column. It is the width of the time column. The
-/// cell holds a `format_elapsed` text on a run row and a `format_remaining`
-/// text on a job row, and neither is wider than 7 columns. The header word
+/// cell holds a `format_remaining` text on a job row. A run row holds the same
+/// text when it has an estimate, and a `format_elapsed` text of its job sum
+/// when it has none. Neither text is wider than 7 columns. The header word
 /// fills the cell.
 const JOB_SUM_WIDTH: usize = TIME_WIDTH;
 /// The header word of the cost column.
@@ -563,8 +564,9 @@ where
 /// the end, or to `now` for an active run.
 /// A stale run has the [`STALE_MARK`] before its repository name. `cells`
 /// puts the mark there and cuts the name at its start when the name does not
-/// fit. The job-sum cell shows `job_sum`, or it is blank when `job_sum` is
-/// `None`. The cost cell shows `cost`, or it is blank when `cost` is `None`,
+/// fit. The job-sum cell shows `remaining`, the estimate of the time until the
+/// run finishes, when it is `Some`. Otherwise it shows `job_sum`, or it is
+/// blank when `job_sum` is `None`. The cost cell shows `cost`, or it is blank when `cost` is `None`,
 /// which is the case until the jobs of the run load. The line holds the spans of `cells`: the two marker cells keep
 /// `Color::Reset`, and the text cells take the style that the caller gives
 /// the line.
@@ -578,7 +580,7 @@ fn run_line<Tz: TimeZone>(
     ended: Option<DateTime<Utc>>,
     is_stale: bool,
     job_sum: Option<Duration>,
-    _remaining: Option<Remaining>,
+    remaining: Option<Remaining>,
     cost: Option<RunCost>,
     now: DateTime<Utc>,
     tz: &Tz,
@@ -603,7 +605,10 @@ where
         EndCells {
             started: &format_clock(clock_instant, now, tz),
             time: &time,
-            job_sum: &job_sum.map(format_elapsed).unwrap_or_default(),
+            job_sum: &remaining
+                .map(format_remaining)
+                .or_else(|| job_sum.map(format_elapsed))
+                .unwrap_or_default(),
             cost: &cost.map(|cost| cost.to_string()).unwrap_or_default(),
         },
     )
@@ -1494,7 +1499,8 @@ fn draw_row<Tz: TimeZone>(
 /// rows show when each pull request left the queue. With no merge history, the
 /// recent header holds the word, because its rows show when each run finished.
 /// The job-sum column stands after the right marker cell. A run row shows its
-/// `job_sum` there (see [`run_line`]), a job row shows the time left of its job
+/// estimate there when it has one, and its `job_sum` when it has none (see
+/// [`run_line`]), a job row shows the time left of its job
 /// (see [`job_line`]), and the other rows leave it blank. The cost column
 /// stands after the job-sum column, at the right edge. A run row and a job row
 /// show their `cost` there (see [`run_line`] and [`job_line`]),
@@ -6806,6 +6812,10 @@ mod tests {
     /// each row. It repeats the left marker, one blank column follows the time
     /// cell, and the header leaves the right marker cell blank.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the test checks each column at each width in one pass"
+    )]
     fn the_id_started_and_time_columns_stay_put_at_every_width() {
         let first_width = u16::try_from(FIXED_COLUMNS).expect("the fixed columns fit in u16");
         for w in first_width..=200 {
@@ -6880,8 +6890,19 @@ mod tests {
                     "2026-10-14T11:00:00Z",
                     "2026-10-14T11:30:00Z",
                 );
-                let line = run_line(&run, state, None, false, None, None, None, now(), &utc(), widths)
-                    .to_string();
+                let line = run_line(
+                    &run,
+                    state,
+                    None,
+                    false,
+                    None,
+                    None,
+                    None,
+                    now(),
+                    &utc(),
+                    widths,
+                )
+                .to_string();
                 assert_eq!(display_width(&line), usize::from(w), "{state:?}: {line:?}");
             }
             for (id, state) in MARKER_JOB_STATES {
