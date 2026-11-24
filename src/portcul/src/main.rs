@@ -35,9 +35,35 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Refresh interval in seconds (TUI mode only)
-    #[arg(short, long, default_value = "2.0", global = true)]
-    refresh: f64,
+    /// Refresh interval in seconds, 0.1 or more (TUI mode only)
+    #[arg(short, long, default_value = "2.0", global = true, value_parser = parse_refresh)]
+    refresh: Duration,
+}
+
+/// The shortest refresh interval that the TUI accepts.
+///
+/// A shorter interval makes the loop read the sockets and redraw with almost
+/// no pause, and a zero interval keeps one CPU busy.
+const MIN_REFRESH: Duration = Duration::from_millis(100);
+
+/// Parses the value of `--refresh`, a count of seconds, into a `Duration`.
+///
+/// # Errors
+///
+/// Returns a message when the text is not a number, when the interval is
+/// shorter than [`MIN_REFRESH`], or when it is too large for a `Duration`.
+fn parse_refresh(text: &str) -> Result<Duration, String> {
+    let seconds: f64 = text
+        .parse()
+        .map_err(|e| format!("{text:?} is not a number of seconds: {e}"))?;
+    if seconds.is_nan() || seconds < MIN_REFRESH.as_secs_f64() {
+        return Err(format!(
+            "the interval must be at least {} s, got {text}",
+            MIN_REFRESH.as_secs_f64()
+        ));
+    }
+    Duration::try_from_secs_f64(seconds)
+        .map_err(|e| format!("the interval {text} is too large: {e}"))
 }
 
 #[derive(Subcommand)]
@@ -68,13 +94,7 @@ fn main() -> Result<()> {
 }
 
 /// Runs the TUI (default when no subcommand given).
-fn cmd_tui(refresh: f64) -> Result<()> {
-    anyhow::ensure!(
-        refresh > 0.0 && refresh.is_finite(),
-        "refresh interval must be a positive finite number, got {}",
-        refresh
-    );
-
+fn cmd_tui(refresh: Duration) -> Result<()> {
     // Collect initial data before entering TUI
     let listeners = match collect_listeners() {
         Ok(l) => l,
@@ -164,10 +184,9 @@ fn cmd_list(port: Option<u16>) -> Result<()> {
 /// Returns an error if terminal drawing or event polling fails.
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    refresh: f64,
+    tick_rate: Duration,
     initial_listeners: Vec<process::ListeningProcess>,
 ) -> Result<()> {
-    let tick_rate = Duration::from_secs_f64(refresh);
     let mut state = AppState::new(initial_listeners);
 
     loop {
@@ -263,6 +282,8 @@ fn refresh_listeners(state: &mut AppState) {
 #[cfg(test)]
 mod tests {
     use buildinfo::version_string;
+    use std::time::Duration;
+
     use clap::Parser;
 
     use super::Cli;
@@ -295,6 +316,8 @@ mod tests {
     fn test_refresh_accepts_the_floor_and_the_default() {
         assert!(Cli::try_parse_from(["portcul", "--refresh", "0.1"]).is_ok());
         assert!(Cli::try_parse_from(["portcul"]).is_ok());
+        let cli = Cli::try_parse_from(["portcul"]).unwrap();
+        assert_eq!(cli.refresh, Duration::from_secs(2));
     }
 
     #[test]

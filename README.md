@@ -2832,7 +2832,7 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
 - portcul (portcullis)
   - Shows each process that listens on a port in a table in the terminal. Move with the arrow keys or `j`/`k`.
     Press `d` or Enter to send SIGTERM to the selected process after a confirmation, and press `r` to read the
-    table again. The table refreshes each 2 s, and `--refresh <seconds>` changes the interval.
+    table again. The table refreshes each 2 s, and `--refresh <seconds>` changes the interval (0.1 s or more).
   - `portcul list [port]` prints one line for each process and address. `portcul kill <port>` sends SIGTERM to
     each process on the port after a confirmation, and `--yes` skips the confirmation. Both exit with status 1
     when no process listens on the port, and `kill` also exits with status 1 when a kill fails.
