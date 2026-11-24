@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::Result;
 use buildinfo::version_string;
 use clap::{Parser, Subcommand};
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 mod process;
@@ -193,7 +193,7 @@ fn run_app(
         terminal.draw(|f| ui::render(f, &mut state))?;
 
         if event::poll(tick_rate)? {
-            if let Event::Key(key) = event::read()? {
+            if let Some(key) = pressed_key(event::read()?) {
                 // Handle kill confirmation mode separately
                 if let KillConfirm::Pending { pid, .. } = &state.kill_confirm {
                     let pid = *pid;
@@ -262,6 +262,18 @@ fn run_app(
     Ok(())
 }
 
+/// Returns the key of `event` when the event is a key press.
+///
+/// On Windows, crossterm reports a press and a release for each key. Only the
+/// press counts, so one key moves the selection one row, and the release of
+/// `d` does not cancel the dialog that its press opened.
+fn pressed_key(event: Event) -> Option<KeyEvent> {
+    match event {
+        Event::Key(key) => Some(key),
+        _ => None,
+    }
+}
+
 /// Refreshes the listener list in the app state.
 fn refresh_listeners(state: &mut AppState) {
     match collect_listeners() {
@@ -281,8 +293,23 @@ mod tests {
     use std::time::Duration;
 
     use clap::Parser;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-    use super::Cli;
+    use super::{pressed_key, Cli};
+
+    #[test]
+    fn test_pressed_key_ignores_a_key_release() {
+        let release =
+            KeyEvent::new_with_kind(KeyCode::Char('j'), KeyModifiers::NONE, KeyEventKind::Release);
+        assert_eq!(pressed_key(Event::Key(release)), None);
+    }
+
+    #[test]
+    fn test_pressed_key_gives_a_key_press() {
+        let press =
+            KeyEvent::new_with_kind(KeyCode::Char('j'), KeyModifiers::NONE, KeyEventKind::Press);
+        assert_eq!(pressed_key(Event::Key(press)), Some(press));
+    }
 
     #[test]
     fn test_refresh_refuses_an_interval_too_large_for_a_duration() {
