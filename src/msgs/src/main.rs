@@ -6,13 +6,13 @@ mod db;
 mod error;
 mod export;
 mod parser;
+mod state;
 #[cfg(test)]
 mod test_fixture;
 mod types;
 mod util;
 
-use commands::{AppState, AppStateInner};
-use std::sync::Mutex;
+use state::{AppState, DataPaths};
 
 fn main() {
     if std::env::args()
@@ -27,19 +27,15 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(AppState {
-            inner: Mutex::new(AppStateInner {
-                db: None,
-                cache: None,
-            }),
-        })
+        .manage(AppState::new(
+            DataPaths::default_paths().map_err(|e| e.to_string()),
+        ))
         .invoke_handler(tauri::generate_handler![
             commands::check_db_access,
             commands::list_conversations,
             commands::get_messages,
             commands::get_version,
             commands::search_messages,
-            commands::rebuild_text_cache,
             commands::export_messages,
         ])
         .run(tauri::generate_context!())

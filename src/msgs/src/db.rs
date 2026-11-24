@@ -10,7 +10,6 @@ use crate::types::{
 };
 use crate::util::page_bounds;
 
-const CHAT_DB_PATH: &str = "Library/Messages/chat.db";
 const PREVIEW_MAX_CHARS: usize = 100;
 /// Messages that a search hit shows before and after itself.
 const CONTEXT_BEFORE_COUNT: i64 = 3;
@@ -106,19 +105,6 @@ fn classify_open_error(e: rusqlite::Error) -> MsgsError {
 }
 
 impl MessageDb {
-    /// Open chat.db in read-only mode.
-    ///
-    /// # Errors
-    ///
-    /// Returns `MsgsError::DatabaseNotFound` if the file doesn't exist.
-    /// Returns `MsgsError::NoFullDiskAccess` if permission is denied.
-    pub fn open() -> Result<Self, MsgsError> {
-        let home = dirs::home_dir().ok_or(MsgsError::DatabaseError(
-            "Cannot determine home directory".to_string(),
-        ))?;
-        Self::open_at(&home.join(CHAT_DB_PATH))
-    }
-
     /// Open a chat.db file at `db_path` in read-only mode.
     ///
     /// # Errors

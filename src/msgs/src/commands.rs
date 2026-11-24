@@ -1,52 +1,13 @@
-use std::sync::Mutex;
-
 use tauri::State;
 
-use crate::cache::TextCache;
-use crate::db::MessageDb;
 use crate::error::MsgsError;
-use crate::export::export_conversation_range;
+use crate::state::AppState;
 use crate::types::{Conversation, DbStatus, ExportResult, Message, SearchResult};
-
-pub struct AppStateInner {
-    pub db: Option<MessageDb>,
-    pub cache: Option<TextCache>,
-}
-
-pub struct AppState {
-    pub inner: Mutex<AppStateInner>,
-}
 
 #[tauri::command]
 #[specta::specta]
 pub fn check_db_access(state: State<'_, AppState>) -> Result<DbStatus, MsgsError> {
-    let mut lock = state
-        .inner
-        .lock()
-        .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
-    match lock.db.as_ref() {
-        Some(db) => db.check_access(),
-        None => match MessageDb::open() {
-            Ok(db) => {
-                let status = db.check_access()?;
-
-                // Auto-initialize the text cache so search works immediately
-                let cache = TextCache::open()?;
-                if cache.needs_rebuild(db.connection())? {
-                    cache.rebuild(db.connection())?;
-                }
-
-                lock.cache = Some(cache);
-                lock.db = Some(db);
-                Ok(status)
-            }
-            Err(e) => Ok(DbStatus {
-                accessible: false,
-                message_count: None,
-                error: Some(e.to_string()),
-            }),
-        },
-    }
+    state.open(|_status| {})
 }
 
 #[tauri::command]
@@ -56,14 +17,7 @@ pub fn list_conversations(
     offset: i64,
     limit: i64,
 ) -> Result<Vec<Conversation>, MsgsError> {
-    let lock = state
-        .inner
-        .lock()
-        .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
-    let db = lock.db.as_ref().ok_or(MsgsError::DatabaseError(
-        "Database not initialized".to_string(),
-    ))?;
-    db.list_conversations(offset, limit)
+    state.list_conversations(offset, limit)
 }
 
 #[tauri::command]
@@ -74,14 +28,7 @@ pub fn get_messages(
     offset: i64,
     limit: i64,
 ) -> Result<Vec<Message>, MsgsError> {
-    let lock = state
-        .inner
-        .lock()
-        .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
-    let db = lock.db.as_ref().ok_or(MsgsError::DatabaseError(
-        "Database not initialized".to_string(),
-    ))?;
-    db.get_messages(chat_id, offset, limit)
+    state.get_messages(chat_id, offset, limit)
 }
 
 #[tauri::command]
@@ -99,45 +46,7 @@ pub fn search_messages(
     offset: i64,
     limit: i64,
 ) -> Result<Vec<SearchResult>, MsgsError> {
-    let lock = state
-        .inner
-        .lock()
-        .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
-    let cache = lock.cache.as_ref().ok_or(MsgsError::CacheError(
-        "Text cache not initialized".to_string(),
-    ))?;
-    let db = lock.db.as_ref().ok_or(MsgsError::DatabaseError(
-        "Database not initialized".to_string(),
-    ))?;
-
-    let hits = cache.search(&query, chat_id, limit, offset)?;
-
-    let mut results = Vec::new();
-    for (message_id, hit_chat_id) in hits {
-        if let Ok(context) = db.get_message_with_context(message_id, hit_chat_id) {
-            results.push(context);
-        }
-    }
-
-    Ok(results)
-}
-
-#[tauri::command]
-#[specta::specta]
-pub fn rebuild_text_cache(state: State<'_, AppState>) -> Result<(), MsgsError> {
-    let mut lock = state
-        .inner
-        .lock()
-        .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
-    let db = lock.db.as_ref().ok_or(MsgsError::DatabaseError(
-        "Database not initialized".to_string(),
-    ))?;
-
-    let cache = TextCache::open()?;
-    cache.rebuild(db.connection())?;
-    lock.cache = Some(cache);
-
-    Ok(())
+    state.search(&query, chat_id, offset, limit)
 }
 
 #[tauri::command]
@@ -150,24 +59,11 @@ pub fn export_messages(
     include_attachments: bool,
     export_path: String,
 ) -> Result<ExportResult, MsgsError> {
-    let lock = state
-        .inner
-        .lock()
-        .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
-    let db = lock.db.as_ref().ok_or(MsgsError::DatabaseError(
-        "Database not initialized".to_string(),
-    ))?;
-
-    let export_dir = std::path::Path::new(&export_path);
-    // Without a home directory there is no root, and the export copies no attachment.
-    let attachments_root = crate::util::default_attachments_root().unwrap_or_default();
-    export_conversation_range(
-        db,
+    state.export(
         chat_id,
         start_message_id,
         end_message_id,
         include_attachments,
-        export_dir,
-        &attachments_root,
+        &export_path,
     )
 }

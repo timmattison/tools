@@ -6,9 +6,6 @@ use crate::error::MsgsError;
 use crate::parser::extract_text_from_attributed_body;
 use crate::util::page_bounds;
 
-const CACHE_DB_NAME: &str = "text-cache.db";
-const CACHE_DIR_NAME: &str = "msgs";
-
 /// The version of the cache schema, kept in `PRAGMA user_version`. A cache
 /// file with a different version is dropped and made again.
 const CACHE_SCHEMA_VERSION: i64 = 1;
@@ -60,26 +57,6 @@ pub struct TextCache {
 }
 
 impl TextCache {
-    /// Open or create the text cache database.
-    ///
-    /// # Errors
-    ///
-    /// Returns `MsgsError::CacheError` on filesystem or database errors.
-    pub fn open() -> Result<Self, MsgsError> {
-        let cache_dir = dirs::data_local_dir()
-            .ok_or_else(|| MsgsError::CacheError("Cannot determine local data dir".to_string()))?
-            .join(CACHE_DIR_NAME);
-
-        std::fs::create_dir_all(&cache_dir).map_err(|e| {
-            MsgsError::CacheError(format!(
-                "Cannot create cache dir {}: {e}",
-                cache_dir.display()
-            ))
-        })?;
-
-        Self::open_at(&cache_dir.join(CACHE_DB_NAME))
-    }
-
     /// Open or create the text cache database file at `db_path`.
     ///
     /// # Errors
