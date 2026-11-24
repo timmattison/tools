@@ -36,6 +36,13 @@ const STORED_TEXT_BYTES: usize = 1024;
 /// of the budget in text, and the rest of the frame fits beside it.
 const TEXT_SHARE_DIVISOR: usize = 2;
 
+/// The share of the budget that the entries may use, as a divisor. A history
+/// keeps at most `budget / (ENTRY_SHARE_DIVISOR * size_of::<Entry>())`
+/// entries. The deque of the entries doubles its capacity as it grows and
+/// never gives it back, so its capacity stays under twice that count: an
+/// eighth of the budget. The rows of the frames get the rest.
+const ENTRY_SHARE_DIVISOR: usize = 16;
+
 /// The value of `rss_kib` of a compact row that means "no value".
 const NO_RSS: u32 = u32::MAX;
 
@@ -788,8 +795,10 @@ impl History {
 
     /// Adds an update, and gives its name.
     ///
-    /// The oldest entries leave while the history holds more than its budget
-    /// and more than one entry. The entry that arrived always stays.
+    /// The oldest entry leaves first when the history holds the most entries
+    /// that its budget lets it keep. Then the oldest entries leave while the
+    /// history holds more than its budget and more than one entry. The entry
+    /// that arrived always stays.
     pub fn add(&mut self, update: Update) -> EntryId {
         let entry = match update {
             Update::Frame(sampled) => Entry::Frame(self.compact(*sampled)),
@@ -801,6 +810,9 @@ impl History {
         };
         let id = EntryId(self.next_id);
         self.next_id += 1;
+        if self.entries.len() >= self.entry_limit() {
+            self.evict_oldest();
+        }
         self.entries.push_back(entry);
         while self.bytes_used() > self.budget && self.entries.len() > 1 {
             self.evict_oldest();
@@ -1002,18 +1014,18 @@ impl History {
             .map(|later| self.id_at(later))
     }
 
+    /// Gives the most entries that the history keeps. See
+    /// [`ENTRY_SHARE_DIVISOR`].
+    fn entry_limit(&self) -> usize {
+        self.budget / (ENTRY_SHARE_DIVISOR * size_of::<Entry>())
+    }
+
     /// Gives the bytes that the history holds. It counts the real sizes: the
     /// entries and the rows, the text of the identities and of the gaps, and
-    /// each container of the identities by its capacity.
-    ///
-    /// The entries count by their number, not by the capacity of their deque.
-    /// The deque doubles its capacity as it grows, and it never gives the
-    /// capacity back. With a count by capacity, one doubling alone can pass
-    /// the budget, and from then on each add makes every entry but the newest
-    /// leave. The spare capacity of the deque is thus not in this count.
+    /// each container by its capacity.
     #[must_use]
     pub fn bytes_used(&self) -> usize {
-        self.entries.len() * size_of::<Entry>()
+        self.entries.capacity() * size_of::<Entry>()
             + self.stored_rows * size_of::<CompactRow>()
             + self.gap_text_bytes
             + self.identities.bytes()
@@ -2275,10 +2287,10 @@ mod tests {
         );
     }
 
-    /// A frame with no row is small, so the entries alone fill the budget of
-    /// 64 MiB. The deque of the entries doubles its capacity as it grows, and
-    /// its capacity never gets smaller. One doubling must not make every
-    /// frame but the newest leave: each add to a full history makes one
+    /// A frame with no row is small, so a long run of them fills the history
+    /// with entries alone. The deque of the entries doubles its capacity as it
+    /// grows, and its capacity never gets smaller. One doubling must not make
+    /// every frame but the newest leave: each add to a full history makes one
     /// frame leave.
     #[test]
     fn a_full_history_of_small_frames_keeps_more_than_one_frame() {

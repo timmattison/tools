@@ -5338,7 +5338,7 @@ The view marks the rows of `faulte`, `top`, and `ps` that it started. Those rows
 
 #### The memory budget
 
-The history lives in memory and ends with the process. A Mac that is short of memory must not lose more memory to its own diagnostic tool. The budget is 64 MiB, and it counts the frames and the command text. At one frame each 5 s, the budget holds about 8 hours. The oldest frames leave first. If the selected frame leaves, the selection moves to the oldest frame, and the banner says so. The 8 hours is an estimate from one Mac. The budget test holds the limit.
+The history lives in memory and ends with the process. A Mac that is short of memory must not lose more memory to its own diagnostic tool. The budget is 64 MiB, and it counts the frames and the command text. The count of frames also has a limit, so the list of the frames takes at most an eighth of the budget. At one frame each 5 s, the budget holds about 8 hours. The oldest frames leave first. If the selected frame leaves, the selection moves to the oldest frame, and the banner says so. The 8 hours is an estimate from one Mac. The budget test holds the limit.
 
 A frame keeps one compact row for each process that made at least one fault. On 2026-11-08, one sample of this Mac had 1,415 rows, and 495 of them had at least one fault. The command lines took 238,203 bytes. A history of full values at one frame each 5 s needs about 340 MB of text each hour.
 
