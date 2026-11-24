@@ -2425,8 +2425,7 @@ impl TextCache {
                  message_id UNINDEXED,
                  chat_id UNINDEXED,
                  sender UNINDEXED,
-                 text,
-                 content=''
+                 text
              );",
         )
         .map_err(|e| MsgsError::CacheError(format!("Cannot create cache tables: {e}")))?;

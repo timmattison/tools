@@ -8,6 +8,10 @@ use crate::parser::extract_text_from_attributed_body;
 const CACHE_DB_NAME: &str = "text-cache.db";
 const CACHE_DIR_NAME: &str = "msgs";
 
+/// The version of the cache schema, kept in `PRAGMA user_version`. A cache
+/// file with a different version is dropped and made again.
+const CACHE_SCHEMA_VERSION: i64 = 1;
+
 /// FTS5 text cache for searchable message text.
 pub struct TextCache {
     conn: Connection,
@@ -43,16 +47,30 @@ impl TextCache {
         let conn = Connection::open(db_path)
             .map_err(|e| MsgsError::CacheError(format!("Cannot open cache db: {e}")))?;
 
-        conn.execute_batch(
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(|e| MsgsError::CacheError(format!("Cannot read cache version: {e}")))?;
+        if version != CACHE_SCHEMA_VERSION {
+            // A cache of a different schema holds nothing that the rebuild cannot
+            // make again. The first release wrote a contentless table, which
+            // returns NULL for each column and refuses each DELETE.
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS message_text;
+                 DROP TABLE IF EXISTS metadata;",
+            )
+            .map_err(|e| MsgsError::CacheError(format!("Cannot drop old cache tables: {e}")))?;
+        }
+
+        conn.execute_batch(&format!(
             "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT);
              CREATE VIRTUAL TABLE IF NOT EXISTS message_text USING fts5(
                  message_id UNINDEXED,
                  chat_id UNINDEXED,
                  sender UNINDEXED,
-                 text,
-                 content=''
-             );",
-        )
+                 text
+             );
+             PRAGMA user_version = {CACHE_SCHEMA_VERSION};"
+        ))
         .map_err(|e| MsgsError::CacheError(format!("Cannot create cache tables: {e}")))?;
 
         Ok(Self { conn })
@@ -84,40 +102,36 @@ impl TextCache {
 
     /// Rebuild the cache from chat.db.
     ///
+    /// The rebuild runs in one transaction. A failure rolls it back, thus the
+    /// cache keeps its earlier rows and no transaction stays open.
+    ///
     /// # Errors
     ///
     /// Returns `MsgsError::CacheError` or `MsgsError::DatabaseError` on failure.
     pub fn rebuild(&self, chat_db: &Connection) -> Result<(), MsgsError> {
         log::info!("Rebuilding text cache...");
 
-        // Start transaction first so DELETE is inside it (rollback restores data on failure)
-        self.conn
-            .execute_batch("BEGIN; DELETE FROM message_text;")
+        // A transaction that drops without a commit rolls back.
+        let tx = self
+            .conn
+            .unchecked_transaction()
             .map_err(|e| MsgsError::CacheError(format!("Cannot begin rebuild: {e}")))?;
+        let count = Self::fill(&tx, chat_db)?;
+        tx.commit()
+            .map_err(|e| MsgsError::CacheError(format!("Cannot commit cache: {e}")))?;
 
-        match self.rebuild_inner(chat_db) {
-            Ok(count) => {
-                // Store the count for staleness check (after commit, separate concern)
-                self.conn
-                    .execute(
-                        "INSERT OR REPLACE INTO metadata (key, value) VALUES ('message_count', ?1)",
-                        [count.to_string()],
-                    )
-                    .map_err(|e| MsgsError::CacheError(format!("Cannot update metadata: {e}")))?;
-
-                log::info!("Text cache rebuilt with {count} messages");
-                Ok(())
-            }
-            Err(e) => {
-                let _ = self.conn.execute_batch("ROLLBACK;");
-                Err(e)
-            }
-        }
+        log::info!("Text cache rebuilt with {count} messages");
+        Ok(())
     }
 
-    /// Inner rebuild logic that runs inside a transaction.
-    /// Returns the total message count on success (after committing).
-    fn rebuild_inner(&self, chat_db: &Connection) -> Result<i64, MsgsError> {
+    /// Replace the rows of the cache with the text of each message in
+    /// `chat_db`, and store the count for the staleness check. The caller
+    /// holds the transaction.
+    fn fill(cache: &Connection, chat_db: &Connection) -> Result<i64, MsgsError> {
+        cache
+            .execute_batch("DELETE FROM message_text;")
+            .map_err(|e| MsgsError::CacheError(format!("Cannot clear cache: {e}")))?;
+
         // Query all messages with their chat_id
         let mut stmt = chat_db
             .prepare(
@@ -129,8 +143,7 @@ impl TextCache {
             )
             .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
 
-        let mut insert = self
-            .conn
+        let mut insert = cache
             .prepare("INSERT INTO message_text (message_id, chat_id, sender, text) VALUES (?1, ?2, ?3, ?4)")
             .map_err(|e| MsgsError::CacheError(format!("Cannot prepare insert: {e}")))?;
 
@@ -172,10 +185,12 @@ impl TextCache {
             count += 1;
         }
 
-        // Commit the transaction
-        self.conn
-            .execute_batch("COMMIT;")
-            .map_err(|e| MsgsError::CacheError(format!("Cannot commit cache: {e}")))?;
+        cache
+            .execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES ('message_count', ?1)",
+                [count.to_string()],
+            )
+            .map_err(|e| MsgsError::CacheError(format!("Cannot update metadata: {e}")))?;
 
         Ok(count)
     }
