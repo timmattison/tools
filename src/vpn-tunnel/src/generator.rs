@@ -250,6 +250,20 @@ mod tests {
     }
 
     #[test]
+    fn env_file_says_that_generate_also_reads_the_credential_field() {
+        // A user who edits or removes the line changes which key the next
+        // generate selects, so the comment names generate as a reader.
+        let dir = tempfile::tempdir().unwrap();
+        write_env(dir.path(), "test-wg-key", "credential-2").unwrap();
+
+        let content = fs::read_to_string(dir.path().join(".env")).unwrap();
+        assert!(
+            content.contains("\n# Used by vpn-tunnel status and generate (not a Docker variable)\nCREDENTIAL_FIELD="),
+            "{content}"
+        );
+    }
+
+    #[test]
     fn the_gluetun_container_name_carries_the_prefix() {
         assert_eq!(gluetun_container_name("vpn"), "vpn-gluetun");
     }
