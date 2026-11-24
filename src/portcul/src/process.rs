@@ -303,11 +303,18 @@ mod tests {
         }
     }
 
+    /// A PID that no process can have, so a real kill(2) of it gives ESRCH.
+    ///
+    /// It is above the PID limit of each kernel: 99999 on macOS, and
+    /// `PID_MAX_LIMIT` (4194304) on 64-bit Linux. A lower value, for example
+    /// 4,000,000, is a valid Linux PID, and the test would send SIGTERM to the
+    /// process that has it. `Pid` accepts this value, and PID 0 is not one
+    /// process (kill(0, sig) signals the whole process group).
+    const NO_SUCH_PID: u32 = i32::MAX.cast_unsigned();
+
     #[test]
     fn test_kill_nonexistent_process() {
-        // Use a very high PID that almost certainly doesn't exist.
-        // PID 0 must NOT be used because kill(0, sig) sends to the entire process group.
-        let result = kill_process(Pid::try_from(4_000_000).unwrap());
+        let result = kill_process(Pid::try_from(NO_SUCH_PID).unwrap());
         assert!(result.is_err());
     }
 
@@ -316,7 +323,7 @@ mod tests {
     fn test_kill_of_an_exited_process_says_that_it_exited() {
         // No process has this PID, so kill(2) gives ESRCH: the process
         // exited after the list was read.
-        let error = kill_process(Pid::try_from(4_000_000_u32).unwrap()).unwrap_err();
+        let error = kill_process(Pid::try_from(NO_SUCH_PID).unwrap()).unwrap_err();
         let text = error.to_string();
         assert!(
             text.contains("exited"),
