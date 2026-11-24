@@ -14,7 +14,7 @@
 //! make a false window.
 
 use std::io::{ErrorKind, Read};
-use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdout, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -410,6 +410,9 @@ pub struct TopStream {
 impl TopStream {
     /// Starts `program` with `arguments` and reads its output.
     ///
+    /// The child starts through `childenv::command`, so it sheds the inherited
+    /// git environment.
+    ///
     /// # Errors
     ///
     /// Gives `MachineError::CommandDidNotStart` when the program does not
@@ -419,7 +422,7 @@ impl TopStream {
             program: program.to_owned(),
             reason,
         };
-        let mut child = Command::new(program)
+        let mut child = childenv::command(program)
             .args(arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
