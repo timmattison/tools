@@ -5,23 +5,32 @@ use std::fmt;
 /// Prevents accidentally mixing up PIDs with other `u32` values (port numbers,
 /// array indices, etc.) at the type level.
 ///
-/// Construction validates that the value fits in `i32` (the POSIX `pid_t` type),
-/// preventing `kill(-1, sig)` which would signal every process.
+/// Construction validates that the value is in `1..=i32::MAX` (the positive
+/// range of the POSIX `pid_t` type). This refuses `kill(0, sig)`, which signals
+/// the process group of the caller, and `kill(-1, sig)`, which signals every
+/// process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Pid(u32);
 
-/// Error returned when a PID value exceeds the valid range for POSIX `pid_t`.
+/// Error returned when a PID value is outside `1..=i32::MAX`.
 #[derive(Debug, Clone)]
 pub struct PidRangeError(u32);
 
 impl fmt::Display for PidRangeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "PID {} exceeds maximum valid value {} (would wrap to negative in POSIX kill())",
-            self.0,
-            i32::MAX
-        )
+        if self.0 == 0 {
+            write!(
+                f,
+                "PID 0 is not one process (POSIX kill() would signal the whole process group)"
+            )
+        } else {
+            write!(
+                f,
+                "PID {} exceeds maximum valid value {} (would wrap to negative in POSIX kill())",
+                self.0,
+                i32::MAX
+            )
+        }
     }
 }
 
@@ -44,7 +53,7 @@ impl TryFrom<u32> for Pid {
     type Error = PidRangeError;
 
     fn try_from(value: u32) -> Result<Self, Self::Error> {
-        if value > i32::MAX as u32 {
+        if value == 0 || value > i32::MAX as u32 {
             return Err(PidRangeError(value));
         }
         Ok(Self(value))
@@ -153,7 +162,8 @@ pub fn kill_process(pid: Pid) -> anyhow::Result<()> {
     {
         // SAFETY: libc::kill is a standard POSIX call. We pass a valid signal number
         // (SIGTERM = 15). Pid::as_i32() is safe because the Pid type validates at
-        // construction that the value fits in i32, preventing kill(-1, sig).
+        // construction that the value is in 1..=i32::MAX, preventing kill(0, sig)
+        // and kill(-1, sig).
         let ret = unsafe { libc::kill(pid.as_i32(), libc::SIGTERM) };
         if ret != 0 {
             return Err(kill_error(&std::io::Error::last_os_error()));
