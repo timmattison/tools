@@ -128,7 +128,8 @@ impl Recording {
     ///
     /// The data goes to a temp file in the directory of `path`. The temp file
     /// is synced, given the mode of the old file, and renamed over `path`, so
-    /// a save that fails leaves the old file as it was.
+    /// a save that fails leaves the old file as it was. A save to a new path
+    /// gives the mode that `File::create` gives.
     pub fn save(&self, path: &Path, compress: bool) -> Result<(), NleError> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| NleError::SaveError(format!("Failed to serialize recording: {e}")))?;
@@ -137,7 +138,7 @@ impl Recording {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        let mut temp = tempfile::NamedTempFile::new_in(dir).map_err(|e| {
+        let mut temp = create_temp_file(dir).map_err(|e| {
             NleError::SaveError(format!(
                 "Failed to create temp file for {}: {e}",
                 path.display()
@@ -227,6 +228,25 @@ impl Recording {
                 },
             ],
         }
+    }
+}
+
+/// Create the temp file of a save in `dir`.
+///
+/// On Unix the temp file asks open(2) for mode 0o666, and the umask reduces
+/// that mode, as it does for `File::create`. The default of `tempfile` is
+/// 0o600, which gives an owner-only file on the first save to a path.
+fn create_temp_file(dir: &Path) -> std::io::Result<tempfile::NamedTempFile> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o666))
+            .tempfile_in(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        tempfile::NamedTempFile::new_in(dir)
     }
 }
 
