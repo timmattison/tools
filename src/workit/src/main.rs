@@ -185,8 +185,13 @@ impl OutputManifest {
 /// A `.git` *directory* is a repository of its own rather than a worktree. A
 /// package under one is a package nothing else holds, so it is listed, and the
 /// walk stops there: what lies above a repository says nothing about what is
-/// inside it. A submodule is one too, although its `.git` is a file, and the
-/// walk stops at it in the same way (see [`links_a_worktree`]).
+/// inside it.
+///
+/// A submodule's `.git` is a file too, but it links no worktree (see
+/// [`links_a_worktree`]), and the walk goes on past it. A submodule belongs to
+/// the checkout of its superproject, so the checkout above it decides: a
+/// package in a submodule of the main checkout is listed, and a package in a
+/// submodule of a linked worktree is left out with that worktree.
 fn is_in_worktree(manifest: &Path, root: &SearchRoot) -> bool {
     let Some(package) = manifest.parent() else {
         return false;
@@ -211,8 +216,8 @@ fn is_in_worktree(manifest: &Path, root: &SearchRoot) -> bool {
         }
 
         let git_path = directory.join(".git");
-        if git_path.is_file() {
-            return links_a_worktree(&git_path);
+        if git_path.is_file() && links_a_worktree(&git_path) {
+            return true;
         }
         if git_path.is_dir() {
             return false; // A repository of its own, not a worktree.
@@ -226,9 +231,10 @@ fn is_in_worktree(manifest: &Path, root: &SearchRoot) -> bool {
 ///
 /// A `.git` file names a git directory kept elsewhere. A linked worktree's lies
 /// under `.git/worktrees/<name>` and holds a `commondir` file that names the
-/// repository it borrows. A submodule's lies under `.git/modules/<name>`, holds
-/// no `commondir`, and is a repository of its own. A package in a submodule is
-/// thus no second checkout, and stays in.
+/// repository it borrows. A submodule's lies under `.git/modules/<name>`, or
+/// under `.git/worktrees/<wt>/modules/<name>` in a linked worktree, and holds
+/// no `commondir`. A submodule thus links no worktree of its own, and the
+/// checkout that holds it decides.
 ///
 /// A relative git directory is resolved against the directory that holds the
 /// `.git` file. A file that cannot be read, or that does not start with

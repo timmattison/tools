@@ -12,8 +12,9 @@
 //! The rules under test: a package is in a worktree only when a `.git` file
 //! whose git directory holds a `commondir` file is found between it and the
 //! search path; a `.git` directory is a repository rather than a worktree, and
-//! a package under one is listed; a submodule, whose `.git` is a file too, is a
-//! repository of its own, and its package is listed; and a run that
+//! a package under one is listed; a submodule, whose `.git` is a file too,
+//! goes with the checkout that holds it, so its package is listed under the
+//! main checkout and left out under a linked worktree; and a run that
 //! found packages and then filtered every one of them out says so, and names
 //! the flag that would have kept them.
 //!
