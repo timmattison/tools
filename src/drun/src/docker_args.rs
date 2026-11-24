@@ -218,7 +218,7 @@ const LOGS: CommandSpec = CommandSpec {
         switch('t', "timestamps"),
         value('n', "tail"),
         long_switch("details"),
-        hidden(long_switch("help")),
+        hidden(switch('h', "help")),
         long_value("since"),
         long_value("until"),
     ],
@@ -235,7 +235,7 @@ const EXEC: CommandSpec = CommandSpec {
         value('e', "env"),
         value('u', "user"),
         value('w', "workdir"),
-        hidden(long_switch("help")),
+        hidden(switch('h', "help")),
         long_switch("privileged"),
         long_value("detach-keys"),
         long_value("env-file"),
@@ -250,7 +250,7 @@ const CP: CommandSpec = CommandSpec {
         switch('a', "archive"),
         switch('L', "follow-link"),
         switch('q', "quiet"),
-        hidden(long_switch("help")),
+        hidden(switch('h', "help")),
     ],
 };
 
@@ -262,7 +262,7 @@ const RM: CommandSpec = CommandSpec {
         switch('f', "force"),
         switch('l', "link"),
         switch('v', "volumes"),
-        hidden(long_switch("help")),
+        hidden(switch('h', "help")),
     ],
 };
 
@@ -377,7 +377,7 @@ pub struct RunArgs {
 /// What the arguments of a docker command ask for.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Request<T> {
-    /// The last `--help` among the flags is on. Docker then prints its
+    /// The last `--help` or `-h` among the flags is on. Docker then prints its
     /// help and does nothing else, so `drun` prints its own usage and asks
     /// no host.
     Help,
@@ -459,7 +459,8 @@ pub fn parse_buildx(args: &[OsString]) -> Result<BuildxArgs, ArgsError> {
 }
 
 /// True when the flags of `scan` turn on the help. Docker then prints the
-/// help and does nothing else. The last `--help` wins, as for each switch.
+/// help and does nothing else. The last `--help` or `-h` wins, as for each
+/// switch.
 fn asks_for_help(scan: &Scan) -> bool {
     scan.flags
         .iter()

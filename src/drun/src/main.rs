@@ -47,7 +47,7 @@ const EXIT_DIFFERENCES: u8 = 1;
 
 /// The commands of `drun` that take no docker flags, for
 /// `drun <command> --help`. The parsers of `run`, `logs`, `exec`, `cp`, and
-/// `rm` read the help among the flags, and the last `--help` wins.
+/// `rm` read the help among the flags, and the last `--help` or `-h` wins.
 const COMMANDS_WITHOUT_FLAGS: &[&str] = &["ps", "status", "wait", "hosts", "pick", "check-flags"];
 
 /// Why a command of `drun` stopped before it could hand over to docker.
