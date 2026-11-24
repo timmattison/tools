@@ -820,4 +820,24 @@ mod tests {
         let texts: Vec<_> = messages.iter().filter_map(|m| m.text.as_deref()).collect();
         assert_eq!(texts, vec!["start", "middle", "end"]);
     }
+
+    #[test]
+    fn get_message_with_context_breaks_date_ties_by_rowid() {
+        let fx = ChatDbFixture::new();
+        let chat = fx.add_chat("c", None, 45);
+        // Nine messages with one whole-second date, as old chat.db rows have.
+        let ids: Vec<i64> = (0..9)
+            .map(|n| fx.add_message(text_message(&format!("m{n}"), 10, 0, &[chat])))
+            .collect();
+
+        let result = fx
+            .open_db()
+            .get_message_with_context(ids[4], chat)
+            .expect("context");
+        assert_eq!(result.message.message_id, ids[4]);
+        let before: Vec<i64> = result.context_before.iter().map(|m| m.message_id).collect();
+        let after: Vec<i64> = result.context_after.iter().map(|m| m.message_id).collect();
+        assert_eq!(before, ids[1..4].to_vec());
+        assert_eq!(after, ids[5..8].to_vec());
+    }
 }
