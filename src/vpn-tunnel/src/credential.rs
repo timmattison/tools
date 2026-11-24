@@ -257,14 +257,41 @@ fn parse_inspect_line(line: &str) -> Option<(String, Option<Vec<String>>)> {
     Some((name, env))
 }
 
+/// The line docker writes for each target of `docker inspect` that it cannot
+/// find. Docker 29 writes it in lower case, and older clients capitalize it.
+const NO_SUCH_OBJECT: &str = "error: no such object: ";
+
+/// True when `stderr` holds at least one line, and each line says that docker
+/// found no object for one of `ids`.
+fn only_removed(stderr: &[u8], ids: &[&str]) -> bool {
+    let stderr = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    !lines.is_empty()
+        && lines.iter().all(|line| {
+            line.get(..NO_SUCH_OBJECT.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(NO_SUCH_OBJECT))
+                && line
+                    .get(NO_SUCH_OBJECT.len()..)
+                    .is_some_and(|id| ids.contains(&id))
+        })
+}
+
 /// Runs one docker command and hands back its stdout, or the reason it failed.
-fn docker_stdout<R>(run: &R, args: &[&str]) -> Result<String, DockerError>
+///
+/// A container in `may_be_removed` can stop and go away after `docker ps`
+/// listed it. A failure that only reports such containers is a success, and
+/// the stdout holds the other containers.
+fn docker_stdout<R>(run: &R, args: &[&str], may_be_removed: &[&str]) -> Result<String, DockerError>
 where
     R: Fn(&[&str]) -> io::Result<Output>,
 {
     let output = run(args).map_err(|e| DockerError::new(args, e.to_string()))?;
 
-    if !output.status.success() {
+    if !output.status.success() && !only_removed(&output.stderr, may_be_removed) {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let detail = if stderr.is_empty() {
             format!("exited with status {}", output.status)
@@ -288,7 +315,7 @@ fn find_running_tunnels_with<R>(run: R) -> Result<Vec<RunningTunnel>, DockerErro
 where
     R: Fn(&[&str]) -> io::Result<Output>,
 {
-    let ps_stdout = docker_stdout(&run, &["ps", "-q", "--no-trunc"])?;
+    let ps_stdout = docker_stdout(&run, &["ps", "-q", "--no-trunc"], &[])?;
     let ids: Vec<&str> = ps_stdout
         .lines()
         .map(str::trim)
@@ -302,7 +329,7 @@ where
 
     let mut args = vec!["inspect", "--format", INSPECT_FORMAT];
     args.extend(&ids);
-    let inspect_stdout = docker_stdout(&run, &args)?;
+    let inspect_stdout = docker_stdout(&run, &args, &ids)?;
 
     let mut tunnels = Vec::new();
     for (index, line) in inspect_stdout.lines().enumerate() {
@@ -336,7 +363,9 @@ where
 /// # Errors
 ///
 /// Returns `DockerError` when docker cannot be started, when a docker
-/// command exits non-zero, or when a line of its answer cannot be read. A
+/// command exits non-zero, or when a line of its answer cannot be read. An
+/// inspect that fails only because a listed container is gone is not an
+/// error, because that container holds no key. A
 /// docker failure is never reported as an empty list: a credential handed out
 /// on unknown state is worse than no credential.
 pub fn find_running_tunnels() -> Result<Vec<RunningTunnel>, DockerError> {
