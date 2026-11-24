@@ -522,6 +522,37 @@ fn a_package_inside_a_submodule_of_a_worktree_below_the_search_path_is_left_out(
 }
 
 #[test]
+fn a_linked_worktree_of_a_submodule_below_the_search_path_is_left_out() {
+    let fixture = Fixture::new();
+
+    let source = fixture.repository_at("source");
+    fixture.package_at("source", "workit-fixture-submodule-worktree-sublib");
+    fixture.commit_all(&source, "add the package");
+
+    let superproject = fixture.repository_at("superproject");
+    fixture.package_at("superproject/app", "workit-fixture-submodule-worktree-app");
+    let submodule = fixture.submodule_at(&superproject, &source, "vendor/lib");
+
+    // A linked worktree of the submodule keeps its git directory under
+    // `.git/modules/vendor/lib/worktrees/<name>`. That directory holds a
+    // `commondir`, and it also lies in the `modules` directory of the
+    // superproject, beside a `HEAD` file. It is a second checkout of the
+    // submodule all the same, so the `commondir` decides.
+    fixture.worktree_at(&submodule, "superproject/wt/lib-feat");
+
+    let output = fixture.workit(&superproject, &[]);
+
+    assert_succeeded(&output);
+    assert_eq!(
+        members_of(&output),
+        vec!["app".to_string(), "vendor/lib".to_string()],
+        "a linked worktree of a submodule is a second checkout of the submodule, so its package \
+         is left out, and the package of the submodule itself is listed one time:\n{}",
+        said(&output)
+    );
+}
+
+#[test]
 fn a_separate_git_dir_repository_inside_a_worktree_below_the_search_path_is_listed() {
     let fixture = Fixture::new();
     let superproject = fixture.repository_at("superproject");
