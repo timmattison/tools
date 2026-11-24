@@ -286,8 +286,8 @@ impl<M: Machine> Run<M> {
         ledger: &mut Ledger,
     ) -> bool {
         // The swap delta covers the time between the two reads. A slow read of
-        // the other sources can delay the newer read past the end of the
-        // sample, and the window then holds that delay too.
+        // the other sources delays the read of the counters after it, so the
+        // window can be longer or shorter than the sample.
         let swap_window = newer.at.saturating_duration_since(older.at);
         let outcome = older.read.and_then(|before| {
             newer.read.and_then(|after| {

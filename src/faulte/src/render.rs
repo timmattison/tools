@@ -315,9 +315,7 @@ pub struct Measurement<'a> {
     pub usage: SwapUsage,
     /// The size of the compressor in bytes.
     pub compressor_bytes: u64,
-    /// The time between the two reads of the counters of the system. It is
-    /// longer than the window of the ranking, because `top` starts and stops
-    /// inside it.
+    /// The time between the two reads of the counters of the system.
     pub swap_window: Duration,
     /// The interval that the person asked for.
     pub interval: Span,
