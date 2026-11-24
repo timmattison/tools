@@ -298,8 +298,9 @@ where
 /// # Errors
 ///
 /// Returns `DockerError` when docker cannot be started, when a docker
-/// command exits non-zero, or when a line of its answer cannot be read. A docker failure is never reported as an empty
-/// list: a credential handed out on unknown state is worse than no credential.
+/// command exits non-zero, or when a line of its answer cannot be read. A
+/// docker failure is never reported as an empty list: a credential handed out
+/// on unknown state is worse than no credential.
 pub fn find_running_tunnels() -> Result<Vec<RunningTunnel>, DockerError> {
     find_running_tunnels_with(|args| childenv::command("docker").args(args).output())
 }
