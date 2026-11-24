@@ -464,6 +464,16 @@ mod tests {
     }
 
     #[test]
+    fn search_clamps_a_negative_limit_to_one() {
+        let (fx, _chat_a, _chat_b, _lunch_a, _lunch_b) = two_chat_fixture();
+        let db = fx.open_db();
+        let cache = rebuilt_cache(&fx, &db);
+
+        let hits = cache.search("lunch", None, -1, 0).expect("search");
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
     fn search_with_a_chat_id_returns_only_the_hits_of_that_chat() {
         let (fx, _chat_a, chat_b, _lunch_a, lunch_b) = two_chat_fixture();
         let db = fx.open_db();

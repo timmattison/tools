@@ -829,4 +829,57 @@ mod tests {
         let missing = fx.open_db().get_message_with_context(9_999, chat);
         assert!(matches!(missing, Err(MsgsError::DatabaseError(_))));
     }
+
+    #[test]
+    fn list_conversations_clamps_a_negative_limit_to_one() {
+        let fx = ChatDbFixture::new();
+        for i in 0..3 {
+            let chat = fx.add_chat(&format!("chat{i}"), None, 45);
+            fx.add_message(text_message("x", 10 + i, 0, &[chat]));
+        }
+        let list = fx.open_db().list_conversations(0, -1).expect("list");
+        assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn get_messages_clamps_a_negative_limit_to_one() {
+        let fx = ChatDbFixture::new();
+        let chat = fx.add_chat("c", None, 45);
+        for i in 0..3 {
+            fx.add_message(text_message("x", 10 + i, 0, &[chat]));
+        }
+        let messages = fx.open_db().get_messages(chat, 0, -1).expect("messages");
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn list_conversations_pages_chats_with_one_last_date_without_a_repeat() {
+        let fx = ChatDbFixture::new();
+        let chats: Vec<i64> = (0..3)
+            .map(|i| fx.add_chat(&format!("chat{i}"), None, 45))
+            .collect();
+        for chat in &chats {
+            fx.add_message(text_message("x", 10, 0, &[*chat]));
+        }
+        let db = fx.open_db();
+        let ids: Vec<i64> = (0..3)
+            .map(|offset| db.list_conversations(offset, 1).expect("page")[0].chat_id)
+            .collect();
+        assert_eq!(ids, vec![chats[2], chats[1], chats[0]]);
+    }
+
+    #[test]
+    fn get_messages_pages_messages_with_one_date_without_a_repeat() {
+        let fx = ChatDbFixture::new();
+        let chat = fx.add_chat("c", None, 45);
+        let ids: Vec<i64> = (0..4)
+            .map(|i| fx.add_message(text_message(&format!("m{i}"), 10, 0, &[chat])))
+            .collect();
+        let db = fx.open_db();
+        let paged: Vec<i64> = (0..4)
+            .map(|offset| db.get_messages(chat, offset, 1).expect("page")[0].message_id)
+            .collect();
+        let expected: Vec<i64> = ids.iter().rev().copied().collect();
+        assert_eq!(paged, expected);
+    }
 }
