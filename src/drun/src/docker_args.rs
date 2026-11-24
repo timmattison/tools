@@ -372,6 +372,9 @@ pub struct RunArgs {
     pub name: Option<String>,
     /// The source path of each bind mount, from `-v` and `--mount`.
     pub bind_sources: Vec<String>,
+    /// True when the last `--help` before the image is on. Docker then prints
+    /// the help and runs nothing, so each other field keeps its default.
+    pub help: bool,
 }
 
 /// The arguments of `docker rm`, divided into the flags and the containers.
@@ -591,9 +594,16 @@ fn lossy(arg: &OsString) -> String {
 /// Returns an [`ArgsError`] for a flag that `drun` does not know, a flag
 /// without its value, a switch with a value that is not true or false,
 /// arguments without an image, or a last `--name` that is empty once its
-/// leading `/` is gone.
+/// leading `/` is gone. Arguments that ask for the help get no error for
+/// the image or the name, because docker then prints only the help.
 pub fn parse_run(args: &[OsString]) -> Result<RunArgs, ArgsError> {
     let scan = RUN.scan(args)?;
+    if asks_for_help(&scan) {
+        return Ok(RunArgs {
+            help: true,
+            ..RunArgs::default()
+        });
+    }
     if scan.positionals.is_empty() {
         return Err(ArgsError::Shape {
             command: RUN.name,
@@ -883,6 +893,28 @@ mod tests {
     fn an_empty_name_that_a_later_name_replaces_is_accepted() {
         let parsed = run(&["--name", "", "--name", "job-1", "alpine"]).unwrap();
         assert_eq!(parsed.name.as_deref(), Some("job-1"));
+    }
+
+    #[test]
+    fn a_help_before_the_image_asks_for_the_help_and_nothing_else() {
+        let help = Ok(RunArgs {
+            help: true,
+            ..RunArgs::default()
+        });
+        for words in [
+            &["-d", "--rm", "--help", "alpine"][..],
+            &["-it", "--help"],
+            &["--help", "--name", ""],
+            &["--help=false", "--help", "alpine"],
+        ] {
+            assert_eq!(run(words), help, "{words:?}");
+        }
+        for words in [
+            &["--help", "--help=false", "alpine"][..],
+            &["alpine", "--help"],
+        ] {
+            assert_eq!(run(words), Ok(RunArgs::default()), "{words:?}");
+        }
     }
 
     #[test]

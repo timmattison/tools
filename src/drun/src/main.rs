@@ -161,6 +161,10 @@ fn dispatch(
 /// `drun run`: runs a container on the least busy host.
 fn run(environment: &Environment, args: &[OsString]) -> Result<ExitCode, Failure> {
     let parsed = docker_args::parse_run(args).map_err(usage_error)?;
+    if parsed.help {
+        print!("{}", usage(environment));
+        return Ok(ExitCode::SUCCESS);
+    }
     let config = load(environment)?;
     let (survey, inventory) = thread::scope(|scope| {
         let survey = scope.spawn(|| survey::survey(&config));
