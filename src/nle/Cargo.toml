@@ -23,9 +23,9 @@ thiserror = { workspace = true }
 flate2 = "1.0"
 buildinfo = { workspace = true }
 ts-rs = { version = "10", features = ["serde-compat"] }
+tempfile = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 yaml-rust2 = { workspace = true }
 
 [lints]

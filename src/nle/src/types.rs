@@ -125,15 +125,28 @@ impl Recording {
     }
 
     /// Save a recording to a file, optionally using gzip compression.
+    ///
+    /// The data goes to a temp file in the directory of `path`. The temp file
+    /// is synced, given the mode of the old file, and renamed over `path`, so
+    /// a save that fails leaves the old file as it was.
     pub fn save(&self, path: &Path, compress: bool) -> Result<(), NleError> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| NleError::SaveError(format!("Failed to serialize recording: {e}")))?;
 
+        let dir = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mut temp = tempfile::NamedTempFile::new_in(dir).map_err(|e| {
+            NleError::SaveError(format!(
+                "Failed to create temp file for {}: {e}",
+                path.display()
+            ))
+        })?;
+
         if compress {
-            let file = std::fs::File::create(path).map_err(|e| {
-                NleError::SaveError(format!("Failed to create file {}: {e}", path.display()))
-            })?;
-            let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            let mut encoder =
+                flate2::write::GzEncoder::new(temp.as_file(), flate2::Compression::default());
             encoder.write_all(json.as_bytes()).map_err(|e| {
                 NleError::SaveError(format!("Failed to write gzip file {}: {e}", path.display()))
             })?;
@@ -144,10 +157,33 @@ impl Recording {
                 ))
             })?;
         } else {
-            std::fs::write(path, json).map_err(|e| {
+            temp.write_all(json.as_bytes()).map_err(|e| {
                 NleError::SaveError(format!("Failed to write file {}: {e}", path.display()))
             })?;
         }
+
+        temp.as_file().sync_all().map_err(|e| {
+            NleError::SaveError(format!("Failed to sync file {}: {e}", path.display()))
+        })?;
+
+        if let Ok(old) = std::fs::metadata(path) {
+            temp.as_file()
+                .set_permissions(old.permissions())
+                .map_err(|e| {
+                    NleError::SaveError(format!(
+                        "Failed to copy permissions to {}: {e}",
+                        path.display()
+                    ))
+                })?;
+        }
+
+        temp.persist(path).map_err(|e| {
+            NleError::SaveError(format!(
+                "Failed to replace file {}: {}",
+                path.display(),
+                e.error
+            ))
+        })?;
 
         Ok(())
     }
