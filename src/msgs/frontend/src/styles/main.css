@@ -408,6 +408,12 @@ body {
   outline-offset: 2px;
 }
 
+/* The message area takes focus (tabindex="0") so the arrow keys scroll it.
+   A mouse click shows no focus ring; keyboard focus keeps the ring. */
+#message-area:focus:not(:focus-visible) {
+  outline: none;
+}
+
 #message-area.selecting .message {
   cursor: pointer;
 }
