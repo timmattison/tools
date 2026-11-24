@@ -445,6 +445,20 @@ fn all_in_use_message(err: &credential::AllCredentialsInUse, op_path: &str) -> S
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_op_path_help_names_an_item_and_its_credential_fields() {
+        use clap::CommandFactory;
+        let cli = Cli::command();
+        let help = cli
+            .find_subcommand("generate")
+            .and_then(|generate| generate.get_arguments().find(|a| a.get_id() == "op_path"))
+            .and_then(clap::Arg::get_help)
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(help.contains("op://vault/item"), "help: {help}");
+        assert!(help.contains("credential-2"), "help: {help}");
+    }
+
     /// Builds the error that a run gets when two tunnels hold both credentials.
     fn two_in_use() -> credential::AllCredentialsInUse {
         credential::AllCredentialsInUse {
