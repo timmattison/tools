@@ -63,6 +63,16 @@ struct Term {
     waits: bool,
 }
 
+/// What one job of an active run gives to the estimate of the run.
+enum Counted {
+    /// The job gives a term.
+    Term(Term),
+    /// The job gives no term, and it needs no estimate.
+    NoTerm,
+    /// The job needs an estimate and has none, thus the run has none.
+    NoEstimate,
+}
+
 /// The estimates of one frame, built one time from the shown runs.
 #[derive(Debug)]
 pub struct Estimates<'a> {
@@ -226,8 +236,10 @@ impl<'a> Estimates<'a> {
         }
         let mut terms = Vec::new();
         for job in jobs {
-            if let Some(term) = self.term(run, job, now)? {
-                terms.push(term);
+            match self.term(run, job, now) {
+                Counted::Term(term) => terms.push(term),
+                Counted::NoTerm => {}
+                Counted::NoEstimate => return None,
             }
         }
         let latest = terms.iter().map(|term| term.end).max()?;
@@ -259,9 +271,13 @@ impl<'a> Estimates<'a> {
 
     /// The term of one job of an active run.
     ///
-    /// The outer `None` means that the run has no estimate. The inner `None`
-    /// means that the job gives no term.
-    fn term(&self, run: &Run, job: &Job, now: DateTime<Utc>) -> Option<Option<Term>> {
+    fn term(&self, run: &Run, job: &Job, now: DateTime<Utc>) -> Counted {
+        self.try_term(run, job, now).unwrap_or(Counted::NoEstimate)
+    }
+
+    /// The term of one job, or `None` when the job needs an estimate and has
+    /// none.
+    fn try_term(&self, run: &Run, job: &Job, now: DateTime<Utc>) -> Option<Counted> {
         let name = (&run.repo, run.workflow.as_str(), job.name.as_str());
         let tail = |this: &Self| this.tails.get(&name).map(|time| signed(time.as_secs()));
         let term = match job.state {
@@ -302,10 +318,10 @@ impl<'a> Estimates<'a> {
                 }
             }
             RunState::Failed | RunState::Cancelled | RunState::Skipped | RunState::Other => {
-                return Some(None);
+                return Some(Counted::NoTerm);
             }
         };
-        Some(Some(term))
+        Some(Counted::Term(term))
     }
 }
 
@@ -742,6 +758,18 @@ mod tests {
             run_in(2, RunState::Failed),
             vec![passed(20, "lint", RUNNER, 500, 100)],
         ));
+        // A name with a tail, but no match on any runner, because it has no runner.
+        history.push((
+            run_in(3, RunState::Passed),
+            vec![job(
+                30,
+                "docs",
+                RunState::Passed,
+                None,
+                Some(300),
+                Some(400),
+            )],
+        ));
         let build = running(10, "build", Some(RUNNER), 120);
         let cases: Vec<(&str, Vec<Job>)> = vec![
             ("no runner", vec![running(10, "build", None, 120)]),
@@ -751,7 +779,7 @@ mod tests {
             ),
             (
                 "queued with no match",
-                vec![job(10, "unknown", RunState::Queued, None, None, None)],
+                vec![job(10, "docs", RunState::Queued, None, None, None)],
             ),
             (
                 "passed with no tail",
