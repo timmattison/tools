@@ -2365,7 +2365,8 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
       runner time, not cost.
     - The cell is empty until `ha` has the jobs of the run, and when GitHub gives no job for the
       run. When a later request for the jobs fails, the cell keeps the sum of the last good jobs.
-      A job row, a merge queue row, and a merge history row show an empty cell.
+      A merge queue row and a merge history row show an empty cell. A job row shows the time
+      left of its job, as the next item tells.
     - `ha` reads the jobs of each finished run in "Last 8h" one time, also when you do not
       expand the run, thus each row of the section gets a sum. It reads at most 32 new runs in
       each refresh, the newest finish first, thus the top rows fill first. At the start, the
@@ -2373,6 +2374,24 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     - The cell has the color of its row, thus it fades with a finished row. The column is 7
       columns wide, the width of the `TIME` column. On a narrow terminal, the text columns give
       up their columns first.
+    - A job row of a running job shows `~` and the time that the job has left, for example
+      `~3m 02s`. A job past its estimate shows `+` and the time over the estimate. For example,
+      `+1m 10s` means 1 minute 10 seconds more than the estimate. A negative time never shows.
+      - The estimate is the mean time of the newest 5 jobs that passed in the window ("Last 8h"
+        by default) with the same repository, the same workflow, the same job name, and the
+        same runner name. A matrix job such as `test (ubuntu, 18)` matches only the same
+        matrix entry. A failed, cancelled, or skipped job does not count.
+      - The text gets less precise as the time increases: seconds below 1 minute, minutes and
+        seconds below 10 minutes, minutes below 1 hour, hours and minutes below 10 hours, hours
+        below 100 hours, and `>99h` above. The text fits the 7 columns of the cell.
+      - These rows show a blank cell: a job that waits for a runner, a job that finished, and a
+        job with no match. Each job on a GitHub-hosted runner shows a blank cell too. GitHub
+        gives such a runner a different name for each job, for example
+        `GitHub Actions 1000001050`, thus no job matches. A self-hosted runner keeps its name,
+        thus its jobs get an estimate.
+      - The estimate needs no more request to GitHub. It reads the jobs that `ha` already loads
+        for the job sum. `ha` keeps no history after it stops. Thus after a start, the
+        estimates fill in over the first refreshes, as the jobs of the recent runs load.
     - A finished run can show a `JOB SUM` smaller than its `TIME`, also when its jobs ran in
       parallel. The `TIME` cell of a finished run ends at the last update of the run, and GitHub
       sometimes makes that update some minutes after the last job finished.
