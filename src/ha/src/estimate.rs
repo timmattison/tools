@@ -662,4 +662,187 @@ mod tests {
             "+30s",
         );
     }
+
+    /// One past run of the parallel example: lint and test start together.
+    fn parallel() -> Vec<(Run, Vec<Job>)> {
+        vec![(
+            run_in(1, RunState::Passed),
+            vec![
+                passed(1, "lint", RUNNER, 120, 120),
+                passed(2, "test", RUNNER, 600, 600),
+            ],
+        )]
+    }
+
+    #[test]
+    fn the_parallel_example_gives_the_latest_of_the_two_terms() {
+        let jobs = [
+            running(10, "lint", Some(RUNNER), 60),
+            running(11, "test", Some(RUNNER), 60),
+        ];
+        assert_text(
+            run_remaining_of(&parallel(), &jobs),
+            Remaining::Left(secs(540)),
+            "~9m 00s",
+        );
+    }
+
+    #[test]
+    fn the_end_of_a_past_run_is_its_latest_job_end_not_its_update_time() {
+        let mut history = chain();
+        history[0].0.updated_at = at(1620);
+        history[0].1.reverse();
+        let jobs = [running(10, "deploy", Some(RUNNER), 60)];
+        assert_text(
+            run_remaining_of(&history, &jobs),
+            Remaining::Left(secs(60)),
+            "~1m 00s",
+        );
+    }
+
+    #[test]
+    fn a_past_run_that_failed_or_was_cancelled_gives_no_tail() {
+        for state in [RunState::Failed, RunState::Cancelled] {
+            let history = vec![(run_in(1, state), chain_jobs())];
+            let jobs = [running(10, "build", Some(RUNNER), 120)];
+            assert_eq!(run_remaining_of(&history, &jobs), None, "state {state:?}");
+        }
+    }
+
+    /// A passed run whose build ended at `base` and whose run ended `tail`
+    /// seconds later.
+    fn tail_run(id: u64, base: i64, tail: i64) -> (Run, Vec<Job>) {
+        (
+            run_in(id, RunState::Passed),
+            vec![
+                passed(id * 10, "build", RUNNER, base, 300),
+                passed(id * 10 + 1, "deploy", RUNNER, base + tail, 120),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_sixth_and_older_run_does_not_change_a_tail() {
+        let mut history: Vec<(Run, Vec<Job>)> = (0_i64..5)
+            .map(|index| tail_run(10 + index.cast_unsigned(), 20_000 + 2000 * index, 720))
+            .collect();
+        history.push(tail_run(1, 500, 7200));
+        let jobs = [running(50, "build", Some(RUNNER), 120)];
+        assert_eq!(
+            run_remaining_of(&history, &jobs),
+            Some(Remaining::Left(secs(900)))
+        );
+    }
+
+    #[test]
+    fn a_job_with_no_estimate_gives_no_estimate_for_the_run() {
+        let mut history = chain();
+        // A name with a mean on a runner, but no tail, because its run failed.
+        history.push((
+            run_in(2, RunState::Failed),
+            vec![passed(20, "lint", RUNNER, 500, 100)],
+        ));
+        let build = running(10, "build", Some(RUNNER), 120);
+        let cases: Vec<(&str, Vec<Job>)> = vec![
+            ("no runner", vec![running(10, "build", None, 120)]),
+            (
+                "no match on the runner",
+                vec![running(10, "build", Some("GitHub Actions 1000001050"), 120)],
+            ),
+            (
+                "queued with no match",
+                vec![job(10, "unknown", RunState::Queued, None, None, None)],
+            ),
+            (
+                "passed with no tail",
+                vec![passed(11, "lint", RUNNER, ago(100), 100), build.clone()],
+            ),
+            (
+                "running with no tail",
+                vec![running(10, "lint", Some(RUNNER), 50)],
+            ),
+            ("no jobs", Vec::new()),
+        ];
+        for (label, jobs) in cases {
+            assert_eq!(run_remaining_of(&history, &jobs), None, "{label}");
+        }
+        let finished = run_in(99, RunState::Passed);
+        let estimates = Estimates::new(
+            history.iter().map(|(past, list)| (past, list.as_slice())),
+            now(),
+        );
+        assert_eq!(
+            estimates.run_remaining(&finished, std::slice::from_ref(&build), now()),
+            None
+        );
+    }
+
+    #[test]
+    fn a_job_that_did_not_pass_adds_no_term_and_needs_no_estimate() {
+        let history = chain();
+        for state in [
+            RunState::Failed,
+            RunState::Cancelled,
+            RunState::Skipped,
+            RunState::Other,
+        ] {
+            let jobs = [
+                running(10, "test", Some(RUNNER), 60),
+                job(
+                    11,
+                    "build",
+                    state,
+                    Some(RUNNER),
+                    Some(ago(300)),
+                    Some(ago(0)),
+                ),
+                job(12, "no tail", state, None, None, None),
+            ];
+            assert_text(
+                run_remaining_of(&history, &jobs),
+                Remaining::Left(secs(660)),
+                "~11m",
+            );
+        }
+    }
+
+    #[test]
+    fn a_queued_job_that_is_not_the_latest_term_does_not_give_at_least() {
+        let jobs = [
+            running(10, "test", Some(RUNNER), 60),
+            job(11, "deploy", RunState::Queued, None, None, None),
+        ];
+        assert_text(
+            run_remaining_of(&chain(), &jobs),
+            Remaining::Left(secs(660)),
+            "~11m",
+        );
+    }
+
+    #[test]
+    fn a_tie_goes_to_the_queued_job() {
+        let jobs = [
+            running(10, "lint", Some(RUNNER), 0),
+            job(11, "test", RunState::Queued, None, None, None),
+        ];
+        assert_text(
+            run_remaining_of(&parallel(), &jobs),
+            Remaining::AtLeast(secs(600)),
+            ">10m",
+        );
+    }
+
+    #[test]
+    fn a_run_exactly_at_its_estimate_gives_zero_left_and_never_zero_over() {
+        let jobs = [
+            passed(10, "build", RUNNER, ago(840), 300),
+            passed(11, "test", RUNNER, ago(120), 600),
+            running(12, "deploy", Some(RUNNER), 120),
+        ];
+        assert_text(
+            run_remaining_of(&chain(), &jobs),
+            Remaining::Left(Duration::ZERO),
+            "~0s",
+        );
+    }
 }
