@@ -71,6 +71,9 @@ fn verdict(port: u16, status: Option<PortStatus>) -> Verdict {
             format!("Port {port} is in use, but no owning process is visible to the current user."),
             true,
         ),
+        // A complete read of the kernel's socket table lists the sockets of
+        // every user, so after Free no hidden process exists, and `sudo` gives
+        // the same answer.
         Some(PortStatus::Free) => (format!("No processes listening on port {port}"), false),
         None => (
             format!(
@@ -94,12 +97,11 @@ fn verdict(port: u16, status: Option<PortStatus>) -> Verdict {
 /// Print the privilege note, when this run has earned one.
 ///
 /// The note applies exactly when a process that the current user cannot see
-/// can explain the answer. That is [`PortStatus::InUse`], [`PortStatus::Unknown`],
-/// and a failed enumeration of listeners. It is not [`PortStatus::Free`], because
-/// a complete read of the kernel's socket table lists the sockets of every user,
-/// so after Free no hidden process exists and `sudo` gives the same answer. It is
-/// not an answer that named a process either, because the user already has the
-/// answer and the advice is noise after it.
+/// can explain the answer: after a [`Verdict`] whose
+/// [`hidden_listener_possible`](Verdict::hidden_listener_possible) is true, and
+/// after a failed enumeration of listeners. It does not apply after an answer
+/// that named a process, because the user already has the answer and the advice
+/// is noise after it.
 fn print_privilege_note(note: Option<&str>) {
     if let Some(note) = note {
         eprintln!("{note}");
