@@ -65,6 +65,21 @@ export async function loadConversation(
   initExport(chatId);
 }
 
+/**
+ * Open a chat around one message and highlight it.
+ * Stub: opens the newest page, as `loadConversation` does.
+ */
+export async function openConversationAt(
+  chatId: number,
+  displayName: string,
+  identifier: string,
+  group: boolean,
+  messageId: number
+): Promise<void> {
+  void messageId;
+  await loadConversation(chatId, displayName, identifier, group);
+}
+
 async function loadMoreMessages(): Promise<void> {
   const generation = loadGeneration;
   if (loadingGeneration === generation || allLoaded || loadFailed || currentChatId === null) {

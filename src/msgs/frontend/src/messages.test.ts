@@ -298,3 +298,131 @@ describe("export run", () => {
     expect(byTestId("btn-export-confirm").hasAttribute("disabled")).toBe(true);
   });
 });
+
+/** `count` messages, newest first, with ids from `topId` down. One message each minute of day 10. */
+function pageOf(topId: number, count: number): Message[] {
+  return Array.from({ length: count }, (_, i) =>
+    message(topId - i, 10, 12, `m${topId - i}`, 59 - (i % 60))
+  );
+}
+
+/** Give the message area a size, so the scroll tests have a bottom and a top. */
+function sizeArea(scrollTop: number): void {
+  const el = area();
+  Object.defineProperty(el, "scrollHeight", { configurable: true, value: 5000 });
+  Object.defineProperty(el, "clientHeight", { configurable: true, value: 500 });
+  el.scrollTop = scrollTop;
+}
+
+function messageCalls(invoke: typeof import("@tauri-apps/api/core").invoke): unknown[][] {
+  return vi.mocked(invoke).mock.calls.filter(([command]) => command === "get_messages");
+}
+
+describe("openConversationAt", () => {
+  const HIT = 120;
+  const NOTICE = "The message of this search result is no longer in this chat.";
+
+  beforeEach(() => {
+    vi.resetModules();
+    document.body.innerHTML = MARKUP;
+  });
+
+  /** `get_message_position` answers `position`, and `get_messages` answers by offset. */
+  async function answerWithPosition(position: number | Promise<number>) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    vi.mocked(invoke).mockImplementation((command: string, args?: InvokeArgs) => {
+      if (command === "get_message_position") {
+        return typeof position === "number" ? Promise.resolve(position) : position;
+      }
+      const offset = offsetOf(args);
+      if (typeof offset !== "number") return Promise.reject("no offset");
+      // Message ids count down with the offset: id = 1000 - offset.
+      const limit =
+        args !== undefined && !Array.isArray(args) && !(args instanceof ArrayBuffer)
+          && !(args instanceof Uint8Array) && typeof args.limit === "number"
+          ? args.limit
+          : 0;
+      return Promise.resolve(pageOf(1000 - offset, limit));
+    });
+    return invoke;
+  }
+
+  it("loads the page around the hit and highlights the hit", async () => {
+    const invoke = await answerWithPosition(120);
+    const { openConversationAt } = await import("./messages");
+
+    // The hit sits at position 120, thus its id is 1000 - 120 = 880.
+    await openConversationAt(1, "One", "one", false, 880);
+
+    expect(invoke).toHaveBeenCalledWith("get_message_position", { chatId: 1, messageId: 880 });
+    expect(invoke).toHaveBeenCalledWith(
+      "get_messages",
+      expect.objectContaining({ chatId: 1, offset: 95, limit: PAGE_SIZE })
+    );
+    const hit = document.querySelector('[data-message-id="880"]');
+    expect(hit?.classList.contains("search-highlight")).toBe(true);
+  });
+
+  it("loads newer messages when the scroll reaches the bottom, down to offset 0", async () => {
+    const invoke = await answerWithPosition(120);
+    const { openConversationAt } = await import("./messages");
+    await openConversationAt(1, "One", "one", false, 880);
+    expect(messageCalls(invoke)).toHaveLength(1);
+
+    sizeArea(4500);
+    area().dispatchEvent(new Event("scroll"));
+    await vi.waitFor(() => expect(messageCalls(invoke)).toHaveLength(2));
+    expect(messageCalls(invoke)[1]?.[1]).toEqual(
+      expect.objectContaining({ chatId: 1, offset: 45, limit: PAGE_SIZE })
+    );
+    await vi.waitFor(() => expect(texts()).toContain("m955"));
+    // The newer messages sit below the older ones.
+    const order = messageEls().map((el) => Number(el.dataset.messageId));
+    expect(order.indexOf(955)).toBeGreaterThan(order.indexOf(880));
+
+    area().dispatchEvent(new Event("scroll"));
+    await vi.waitFor(() => expect(messageCalls(invoke)).toHaveLength(3));
+    expect(messageCalls(invoke)[2]?.[1]).toEqual(
+      expect.objectContaining({ chatId: 1, offset: 0, limit: 45 })
+    );
+    await vi.waitFor(() => expect(texts()).toContain("m1000"));
+
+    area().dispatchEvent(new Event("scroll"));
+    await settle();
+    expect(messageCalls(invoke)).toHaveLength(3);
+  });
+
+  it("shows a notice and opens the newest page when the position is gone", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    vi.mocked(invoke).mockImplementation((command: string) =>
+      command === "get_message_position"
+        ? Promise.reject("Database error: Message 5 is not in chat 1")
+        : Promise.resolve([message(11, 1, 10, "b"), message(10, 1, 9, "a")])
+    );
+    const { openConversationAt } = await import("./messages");
+
+    await openConversationAt(1, "One", "one", false, 5);
+
+    expect(area().querySelector(".load-error")?.textContent).toBe(NOTICE);
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith(
+      "get_messages",
+      expect.objectContaining({ chatId: 1, offset: 0, limit: PAGE_SIZE })
+    );
+    expect(texts()).toEqual(["a", "b"]);
+  });
+
+  it("drops the position of a chat that is no longer open", async () => {
+    const slow = deferred<number>();
+    const invoke = await answerWithPosition(slow.promise);
+    const { openConversationAt, loadConversation } = await import("./messages");
+
+    const opening = openConversationAt(1, "One", "one", false, 880);
+    await settle();
+    await loadConversation(2, "Two", "two", false);
+    slow.resolve(120);
+    await opening;
+
+    expect(document.getElementById("chat-name")?.textContent).toBe("Two");
+    expect(messageCalls(invoke).every((call) => chatIdOf(call[1] as InvokeArgs) === 2)).toBe(true);
+  });
+});
