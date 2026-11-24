@@ -54,6 +54,17 @@ const RECORDING_ENDINGS: &[&str] = &[".json", ".json.gz"];
 const VIDEO_ENDINGS: &[&str] = &[".mp4", ".gif"];
 /// File name endings that a web export may have.
 const WEB_ENDINGS: &[&str] = &[".html"];
+/// The file name ending of a gzip recording.
+const GZIP_ENDINGS: &[&str] = &[".gz"];
+
+/// Return true when `name`, in lowercase, ends with one of `endings`.
+/// Each ending in `endings` must be lowercase.
+fn has_ending(name: &str, endings: &[&str]) -> bool {
+    let lowercase_name = name.to_lowercase();
+    endings
+        .iter()
+        .any(|ending| lowercase_name.ends_with(ending))
+}
 
 /// Resolve an output path that nle writes, or that it asks `beta` to write.
 ///
@@ -72,11 +83,7 @@ fn resolve_output_path(
     let file_name = file_path
         .file_name()
         .ok_or_else(|| to_error(format!("Invalid path (no filename): {path}")))?;
-    let lowercase_name = file_name.to_string_lossy().to_lowercase();
-    if !endings
-        .iter()
-        .any(|ending| lowercase_name.ends_with(ending))
-    {
+    if !has_ending(&file_name.to_string_lossy(), endings) {
         return Err(to_error(format!(
             "Refusing to write {path}: the file name must end in one of {}",
             endings.join(", ")
@@ -101,10 +108,10 @@ fn resolve_output_path(
 }
 
 /// Save a recording to a file path.
-/// The file name must end in `.json` or `.json.gz`, and the parent directory
-/// must exist; any other path is refused.
+/// The file name must end in `.json` or `.json.gz`, in any case, and the parent
+/// directory must exist; any other path is refused.
 /// Uses gzip compression if `compress` is `Some(true)`, plain JSON if `Some(false)`,
-/// or falls back to extension detection (`.gz` suffix) if `None`.
+/// or falls back to extension detection (`.gz` suffix, in any case) if `None`.
 #[tauri::command]
 pub async fn save_recording(
     path: String,
@@ -115,26 +122,29 @@ pub async fn save_recording(
 }
 
 /// Save `recording` to `path`. It refuses a file name that does not end in
-/// `.json` or `.json.gz`, and a parent directory that does not exist.
-/// An absent `compress` falls back to the `.gz` suffix of `path`.
+/// `.json` or `.json.gz` in any case, and a parent directory that does not
+/// exist. An absent `compress` falls back to the `.gz` suffix of the file
+/// name, in any case.
 fn save_recording_to(
     path: &str,
     recording: &Recording,
     compress: Option<bool>,
 ) -> Result<(), NleError> {
     let canonical_path = resolve_output_path(path, RECORDING_ENDINGS, NleError::SaveError)?;
-    let should_compress = compress.unwrap_or_else(|| path.ends_with(".gz"));
+    let should_compress =
+        compress.unwrap_or_else(|| has_ending(&canonical_path.to_string_lossy(), GZIP_ENDINGS));
     recording.save(&canonical_path, should_compress)
 }
 
 /// List recordings in a directory, returning metadata for each.
-/// Only considers files ending in `.json` or `.json.gz`.
+/// Only considers files ending in `.json` or `.json.gz`, in any case.
 #[tauri::command]
 pub async fn list_recordings(directory: String) -> Result<Vec<RecordingMetadata>, NleError> {
     run_blocking(move || list_recordings_in(&directory)).await
 }
 
-/// Read the metadata of each loadable `.json` or `.json.gz` file in `directory`.
+/// Read the metadata of each loadable file in `directory` whose name ends in
+/// `.json` or `.json.gz`, in any case.
 /// The order of the result is not defined.
 fn list_recordings_in(directory: &str) -> Result<Vec<RecordingMetadata>, NleError> {
     let dir_path = PathBuf::from(directory);
@@ -162,7 +172,7 @@ fn list_recordings_in(directory: &str) -> Result<Vec<RecordingMetadata>, NleErro
         };
         let path = entry.path();
         let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
-        if filename.ends_with(".json") || filename.ends_with(".json.gz") {
+        if has_ending(filename, RECORDING_ENDINGS) {
             if let Ok(recording) = Recording::load(&path) {
                 recordings.push(recording.metadata(&path.to_string_lossy()));
             }
