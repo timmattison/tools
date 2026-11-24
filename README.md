@@ -403,7 +403,8 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     - Shows which process is listening on a given port. Useful for identifying what program is using a specific port
       on your system. Supports verbose output to show detailed socket information.
     - Without root, `wl` sees only the processes that you own. Run it under `sudo` for a complete answer. When a run
-      without root names no process, `wl` writes a note about this limit to standard error.
+      without root names no process, `wl` writes a note about this limit to standard error, unless the port is
+      free.
     - `wl` gives one of these answers:
         - `PID: … Process: … Socket: …`, one line for each process that it sees on the port.
         - `Port <port> is in use, but no owning process is visible to the current user.` The kernel's list of

@@ -11,6 +11,7 @@ use std::net::TcpListener;
 /// *refused* the loopback bind, while nothing is listening there — the case a
 /// bind probe could never answer, and the case the kernel's own list of
 /// listening sockets answers without any privilege at all.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const REFUSED_UNUSED_PORT: u16 = 1;
 
 /// A reader of the kernel's socket table needs no privileges, so `wl` can

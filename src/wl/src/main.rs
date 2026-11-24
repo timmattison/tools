@@ -66,28 +66,34 @@ struct Verdict {
 /// The answer for `port` when `wl` named no process on it, from what the
 /// kernel's socket table says about the port.
 fn verdict(port: u16, status: PortStatus) -> Verdict {
-    let line = match status {
-        PortStatus::InUse => format!(
-            "Port {port} is in use, but no owning process is visible to the current user."
+    let (line, hidden_listener_possible) = match status {
+        PortStatus::InUse => (
+            format!("Port {port} is in use, but no owning process is visible to the current user."),
+            true,
         ),
-        PortStatus::Free => format!("No processes listening on port {port}"),
-        PortStatus::Unknown => format!(
-            "Cannot tell whether port {port} is in use: wl could not read the kernel's list of listening sockets."
+        PortStatus::Free => (format!("No processes listening on port {port}"), false),
+        PortStatus::Unknown => (
+            format!(
+                "Cannot tell whether port {port} is in use: wl could not read the kernel's list of listening sockets."
+            ),
+            true,
         ),
     };
     Verdict {
         line,
-        hidden_listener_possible: true,
+        hidden_listener_possible,
     }
 }
 
 /// Print the privilege note, when this run has earned one.
 ///
-/// The note applies exactly when `wl` named no listening process. A process
-/// the current user cannot see is a live explanation for every answer in which
-/// `wl` named nobody — including a failure to enumerate listeners at all. When
-/// `wl` did name a process the user already has an answer, and the advice is
-/// noise after it.
+/// The note applies exactly when a process that the current user cannot see
+/// can explain the answer. That is [`PortStatus::InUse`], [`PortStatus::Unknown`],
+/// and a failed enumeration of listeners. It is not [`PortStatus::Free`], because
+/// a complete read of the kernel's socket table lists the sockets of every user,
+/// so after Free no hidden process exists and `sudo` gives the same answer. It is
+/// not an answer that named a process either, because the user already has the
+/// answer and the advice is noise after it.
 fn print_privilege_note(note: Option<&str>) {
     if let Some(note) = note {
         eprintln!("{note}");
