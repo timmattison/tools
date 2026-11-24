@@ -85,18 +85,18 @@ Uses `buildinfo::version_string!()` macro like all other tools in the repo. Vers
 
 The `attributedBody` column contains serialized `NSAttributedString` data in Apple's typedstream/NSKeyedArchiver format. The parser extracts the plain text portion.
 
-**Observed format (macOS 14 Sonoma):**
+**Format:**
 1. Find the `NSString` marker in the blob
 2. Skip 4 header bytes (`\x01\x94\x84\x01`)
-3. Read type byte: `0x2b` = short string (single-byte length follows), `0x2d` = long string (4-byte little-endian length follows)
-4. Read length, then read that many bytes as UTF-8 text
+3. Read the type byte. It must be `0x2b` (`+`).
+4. Read the length as a typedstream integer: a first byte below `0x80` is the length, `0x81` is followed by an i16 little-endian, and `0x82` is followed by an i32 little-endian
+5. Read that many bytes as UTF-8 text
 
-**Fallback strategy:**
-- If the blob format doesn't match the expected markers, attempt to find `NSString` and extract text heuristically
-- If extraction fails entirely, return `None` for text and log a warning with the first 64 bytes of the blob for debugging
+**Failure behavior:**
+- If the blob has no `NSString` marker, a different header, a different type byte, or a length that is not valid, the parser returns `None` and logs a warning with the offset of the problem
 - The parser module is isolated so versioned strategies can be added if Apple changes the format in future macOS releases
 
-**Testing:** Unit tests include blobs with ASCII, multi-byte UTF-8 (emoji, Japanese, accented characters), empty strings, and synthetic malformed blobs.
+**Testing:** Unit tests include blobs with ASCII, multi-byte UTF-8 (emoji, Japanese, accented characters), empty strings, texts of 127, 128, 300, and 70,000 bytes, and synthetic malformed blobs.
 
 ## Data Model
 

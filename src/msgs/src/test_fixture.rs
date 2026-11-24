@@ -60,17 +60,25 @@ pub fn apple_ns(unix_seconds: i64, nanos: i64) -> i64 {
     (unix_seconds - APPLE_EPOCH_OFFSET_SECONDS) * NANOS_PER_SECOND + nanos
 }
 
-/// Build an `attributedBody` blob in the short form (one length byte).
+/// Build an `attributedBody` blob with the real typedstream length encoding.
 ///
-/// Only text below 128 bytes is supported: a longer text needs the long form
-/// of the length, which this helper does not write.
+/// The length is one byte below 128, else `0x81` and an i16 little-endian up
+/// to 32,767, else `0x82` and an i32 little-endian.
 pub fn attributed_body(text: &str) -> Vec<u8> {
-    assert!(text.len() < 128, "attributed_body supports short text only");
     let mut blob = Vec::new();
     blob.extend_from_slice(b"\x04\x0bstreamtyped\x81\xe8\x03\x84\x01@\x84\x84\x84\x12NSAttributedString\x00\x84\x84\x08NSObject\x00\x85\x92\x84\x84\x84\x08");
     blob.extend_from_slice(b"NSString");
     blob.extend_from_slice(&[0x01, 0x94, 0x84, 0x01, 0x2b]);
-    blob.push(u8::try_from(text.len()).expect("length checked above"));
+    let len = text.len();
+    if len < 0x80 {
+        blob.push(u8::try_from(len).expect("below 128"));
+    } else if let Ok(short) = i16::try_from(len) {
+        blob.push(0x81);
+        blob.extend_from_slice(&short.to_le_bytes());
+    } else {
+        blob.push(0x82);
+        blob.extend_from_slice(&i32::try_from(len).expect("text below 2 GiB").to_le_bytes());
+    }
     blob.extend_from_slice(text.as_bytes());
     blob.extend_from_slice(b"\x86\x84\x02iI");
     blob
