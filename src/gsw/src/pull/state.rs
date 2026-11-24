@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use ghrest::{EtagEntry, PullNumber};
 
+use super::lookup::RATE_LIMIT_FALLBACK;
 use super::{from_numbers, LookupOutcome, PullIndicator, PullTarget};
 
 /// One lookup that the loop must start: the target, and the cache entry to send its `ETag`.
@@ -91,6 +92,10 @@ impl PullWatch {
     /// The lookup of `target` ended with `outcome` at `now`. Puts the outcome in the
     /// cache of `target`, whatever target the frame shows now, and returns the pending
     /// lookup to start, if any, for the target of the last `refresh`.
+    ///
+    /// A rate limit blocks every lookup for its wait. A wait that `now` cannot
+    /// hold, for example a `Retry-After` of the largest `u64`, blocks for
+    /// `RATE_LIMIT_FALLBACK` instead of a panic.
     pub(crate) fn answered(
         &mut self,
         target: PullTarget,
@@ -111,7 +116,8 @@ impl PullWatch {
             LookupOutcome::Failed(_) => self.forget_answer(target),
             LookupOutcome::RateLimited(wait) => {
                 self.forget_answer(target);
-                self.blocked_until = Some(now + wait);
+                self.blocked_until =
+                    Some(now.checked_add(wait).unwrap_or(now + RATE_LIMIT_FALLBACK));
             }
             LookupOutcome::NotInstalled => self.active = false,
         }
@@ -192,7 +198,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::pull::lookup::{pulls_path, RATE_LIMIT_FALLBACK};
+    use crate::pull::lookup::pulls_path;
     use ghrest::{parse_response, GithubRepo};
 
     fn target(branch: &str) -> PullTarget {

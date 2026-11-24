@@ -22,7 +22,8 @@ use super::PullTarget;
 /// The longest time that one run of `gh` can take. A run past the bound is a failure.
 pub(crate) const LOOKUP_LIMIT: Duration = Duration::from_secs(10);
 
-/// The wait after a rate limit reply that states no wait.
+/// The wait after a rate limit reply that states no wait, or that states a wait
+/// that an `Instant` cannot hold.
 pub(crate) const RATE_LIMIT_FALLBACK: Duration = Duration::from_secs(60);
 
 /// The variable that makes `gh` act as if it wrote to a terminal. It puts color codes in the reply.
