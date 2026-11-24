@@ -169,4 +169,62 @@ mod tests {
             .collect();
         assert_eq!(texts, vec!["first", "second"]);
     }
+
+    /// The Apple date that the frontend computes from the whole-second date
+    /// of a message.
+    fn frontend_apple_date(message: &crate::types::Message) -> i64 {
+        (message.date.timestamp() - 978_307_200) * 1_000_000_000
+    }
+
+    #[test]
+    fn export_includes_both_ends_when_their_dates_have_sub_second_parts() {
+        let fx = ChatDbFixture::new();
+        let alice = fx.add_handle("alice@example.com");
+        let chat = fx.add_chat("chat-subsecond", None, 45);
+        let ids: Vec<i64> = [
+            apple_ns(BASE + 10, 250_000_000),
+            apple_ns(BASE + 20, 0),
+            apple_ns(BASE + 30, 0),
+            apple_ns(BASE + 40, 750_000_000),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, date)| {
+            fx.add_message(MessageSpec {
+                text: Some(format!("m{i}")),
+                handle: alice,
+                date,
+                chats: vec![chat],
+                ..MessageSpec::default()
+            })
+        })
+        .collect();
+        let db = fx.open_db();
+        let page = db.get_messages(chat, 0, 50).expect("page");
+        let oldest = page.iter().min_by_key(|m| m.date).expect("oldest");
+        let newest = page.iter().max_by_key(|m| m.date).expect("newest");
+        let export_dir = fx.dir().join("export-subsecond");
+
+        export_conversation_range(
+            &db,
+            chat,
+            frontend_apple_date(oldest),
+            frontend_apple_date(newest),
+            false,
+            &export_dir,
+        )
+        .expect("export");
+
+        let json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(export_dir.join("messages.json")).expect("read json"),
+        )
+        .expect("parse json");
+        let exported: Vec<i64> = json["messages"]
+            .as_array()
+            .expect("messages array")
+            .iter()
+            .map(|m| m["message_id"].as_i64().expect("message id"))
+            .collect();
+        assert_eq!(exported, ids);
+    }
 }
