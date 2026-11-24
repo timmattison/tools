@@ -93,6 +93,28 @@ pub enum AnsweredProtocol {
     Sixel,
 }
 
+/// An image protocol that the user of a tool chose for the whole run.
+///
+/// This is not [`ImageProtocol`] and it is not [`AnsweredProtocol`]. Those two
+/// name what a panel states and what a terminal answers. This one names what a
+/// person stated, for example with the `--protocol` flag of `ic`, and a person
+/// can choose each of the three protocols. So this enum holds all three.
+///
+/// A person states a protocol when the detection is wrong: an xterm.js front
+/// end such as ttyd draws Sixel and the iTerm2 protocol, but the environment
+/// that it inherits can name a terminal of the Kitty protocol.
+/// [`Capabilities::with_forced_protocol`] puts the choice on a set of
+/// capabilities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForcedProtocol {
+    /// A palette and then a band of pixels at a time.
+    Sixel,
+    /// The graphics protocol of Kitty.
+    Kitty,
+    /// A whole image file in one escape sequence.
+    Iterm2,
+}
+
 /// The protocol a caller falls back to for a muxiavelli panel when the
 /// advertised preference list is absent, empty, or names nothing supported.
 const DEFAULT_MUXIAVELLI_PROTOCOL: ImageProtocol = ImageProtocol::Sixel;
@@ -132,6 +154,12 @@ pub enum TerminalType {
     /// This variant carries a fact where every other one carries a name. See
     /// [`crate::probe`].
     Answered(AnsweredProtocol),
+    /// A terminal whose protocol the user of the tool chose.
+    ///
+    /// The environment never names this variant. Only
+    /// [`Capabilities::with_forced_protocol`] makes it, because a person
+    /// stated the protocol and no signal of the terminal did.
+    Forced(ForcedProtocol),
     /// A terminal that set no signal this crate reads.
     Unknown,
 }
@@ -170,7 +198,9 @@ impl TerminalType {
             | TerminalType::WezTerm
             | TerminalType::Alacritty
             // An answer of an earlier read is already the answer.
-            | TerminalType::Answered(_) => false,
+            | TerminalType::Answered(_)
+            // A person chose the protocol, and no answer outranks that choice.
+            | TerminalType::Forced(_) => false,
         }
     }
 }
@@ -390,6 +420,15 @@ impl Capabilities {
     #[must_use]
     pub fn in_session(mut self, session: crate::session::MoshImages) -> Self {
         self.session = session;
+        self
+    }
+
+    /// Draw every picture of this run in the protocol that the user chose.
+    ///
+    /// # Arguments
+    /// * `_protocol` - The protocol that the user chose.
+    #[must_use]
+    pub fn with_forced_protocol(self, _protocol: ForcedProtocol) -> Self {
         self
     }
 
@@ -688,9 +727,10 @@ pub(crate) fn display_routine_for(terminal_type: &TerminalType) -> DisplayRoutin
         TerminalType::Kitty | TerminalType::Ghostty | TerminalType::WezTerm => {
             DisplayRoutine::Kitty
         }
-        TerminalType::ITerm2 | TerminalType::Alacritty | TerminalType::Unknown => {
-            DisplayRoutine::Iterm2
-        }
+        TerminalType::ITerm2
+        | TerminalType::Alacritty
+        | TerminalType::Unknown
+        | TerminalType::Forced(_) => DisplayRoutine::Iterm2,
     }
 }
 
@@ -982,6 +1022,7 @@ mod tests {
         let _alacritty = TerminalType::Alacritty;
         let _zellij = TerminalType::Zellij;
         let _muxiavelli = TerminalType::Muxiavelli(ImageProtocol::Sixel);
+        let _forced = TerminalType::Forced(ForcedProtocol::Sixel);
         let _unknown = TerminalType::Unknown;
     }
 
@@ -1450,5 +1491,134 @@ mod tests {
             DisplayRoutine::Iterm2,
             "a panel states the protocol it draws, and a backing session that answers for the pane must not take that statement away"
         );
+    }
+
+    // =========================================================================
+    // Tests for a protocol that the user chose (with_forced_protocol)
+    // =========================================================================
+
+    /// The routine that each forced protocol draws with.
+    const FORCED_ROUTINES: [(ForcedProtocol, DisplayRoutine); 3] = [
+        (ForcedProtocol::Sixel, DisplayRoutine::Sixel),
+        (ForcedProtocol::Kitty, DisplayRoutine::Kitty),
+        (ForcedProtocol::Iterm2, DisplayRoutine::Iterm2),
+    ];
+
+    /// A protocol that the user chose outranks every name and every answer.
+    ///
+    /// An xterm.js front end such as ttyd draws Sixel and the iTerm2 protocol,
+    /// and the environment that it inherits can name WezTerm, which this crate
+    /// sends the Kitty protocol. A person who knows better states the protocol,
+    /// and the statement wins for every terminal that the environment or an
+    /// answer can name.
+    #[test]
+    fn a_forced_protocol_outranks_every_name_and_every_answer() {
+        let terminal_types = [
+            TerminalType::Kitty,
+            TerminalType::Ghostty,
+            TerminalType::ITerm2,
+            TerminalType::WezTerm,
+            TerminalType::Alacritty,
+            TerminalType::Zellij,
+            TerminalType::Muxiavelli(ImageProtocol::Sixel),
+            TerminalType::Muxiavelli(ImageProtocol::Iterm2),
+            TerminalType::Answered(AnsweredProtocol::Kitty),
+            TerminalType::Answered(AnsweredProtocol::Sixel),
+            TerminalType::Unknown,
+        ];
+
+        for terminal_type in terminal_types {
+            for (forced, routine) in FORCED_ROUTINES {
+                let capabilities = Capabilities::new(terminal_type.clone(), true, true)
+                    .with_forced_protocol(forced);
+
+                assert_eq!(
+                    capabilities.terminal_type(),
+                    &TerminalType::Forced(forced),
+                    "a {terminal_type:?} terminal forced to {forced:?} names the choice"
+                );
+                assert_eq!(
+                    capabilities.display_routine(),
+                    routine,
+                    "a {terminal_type:?} terminal forced to {forced:?} draws with that protocol"
+                );
+            }
+        }
+    }
+
+    /// A forced protocol draws on a terminal that draws nothing by its name.
+    ///
+    /// The name of a terminal is a guess about what it draws, and the person
+    /// who forces a protocol vouches for the terminal. So a choice turns the
+    /// guess of "no image" into a terminal that draws one.
+    #[test]
+    fn a_forced_protocol_draws_on_a_terminal_that_draws_nothing_by_name() {
+        let capabilities = Capabilities::new(TerminalType::Alacritty, false, true)
+            .with_forced_protocol(ForcedProtocol::Sixel);
+
+        assert!(capabilities.draws_images());
+        assert!(
+            capabilities.draws_images_by_name(),
+            "a person named the protocol, which is stronger than a name of the environment"
+        );
+    }
+
+    /// A forced protocol outranks what a session states that it delivers.
+    ///
+    /// A session that delivers sixel alone turns the guess for a terminal of
+    /// no name into sixel. A person who chose a protocol made no guess, so the
+    /// choice stands.
+    #[test]
+    fn a_forced_protocol_outranks_what_the_session_delivers() {
+        let session = crate::session::MoshImages::from_env(Some("sixel"), None, None);
+
+        for (forced, routine) in FORCED_ROUTINES {
+            let capabilities = Capabilities::new(TerminalType::Unknown, true, true)
+                .in_session(session)
+                .with_forced_protocol(forced);
+
+            assert_eq!(
+                capabilities.display_routine(),
+                routine,
+                "a session that delivers sixel alone does not change the choice {forced:?}"
+            );
+            assert_eq!(
+                capabilities.drawn_protocols(),
+                crate::session::ProtocolSet::of_routine(routine),
+                "the gate of a caller reads the protocol of the choice {forced:?}"
+            );
+        }
+    }
+
+    /// A forced protocol changes the protocol and keeps every other fact.
+    ///
+    /// The cell that a terminal answered sizes the picture, the session states
+    /// the cap of each protocol, and the raw mode decides whether a key press
+    /// reaches the tool. A choice of protocol says nothing about the three.
+    #[test]
+    fn a_forced_protocol_keeps_the_cell_the_session_and_the_raw_mode() {
+        let cell = crate::geometry::CellPixels::measured(9, 18)
+            .expect("9 by 18 is the cell of a real terminal");
+        let session =
+            crate::session::MoshImages::from_env(Some("kitty,sixel"), None, Some("sixel=4096"));
+        let answered = Capabilities::from_env_and_answer(
+            &TerminalEnv::default(),
+            false,
+            crate::probe::TerminalAnswer {
+                protocol: Some(AnsweredProtocol::Kitty),
+                cell: Some(cell),
+            },
+        )
+        .in_session(session);
+
+        let forced = answered.with_forced_protocol(ForcedProtocol::Sixel);
+
+        assert_eq!(
+            forced.terminal_type(),
+            &TerminalType::Forced(ForcedProtocol::Sixel)
+        );
+        assert_eq!(forced.answered_cell(), Some(cell));
+        assert_eq!(forced.session(), session);
+        assert!(!forced.raw_mode());
     }
 }

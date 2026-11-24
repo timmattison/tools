@@ -14,8 +14,8 @@ use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 use termgfx::{
-    terminal_cells, Budget, Capabilities, Cursor, MoshImages, Picture, ProtocolBudgets, Request,
-    TerminalType,
+    terminal_cells, Budget, Capabilities, Cursor, ForcedProtocol, MoshImages, Picture,
+    ProtocolBudgets, Request, TerminalType,
 };
 use termion::event::Key;
 use termion::input::TermRead;
@@ -2438,22 +2438,6 @@ fn picture_from_stdin(
     Ok((img, source))
 }
 
-/// Graphics protocol used to emit an image to the terminal.
-///
-/// Decoupled from [`TerminalType`] so the protocol can be forced independently of
-/// auto-detection — e.g. an xterm.js front end such as ttyd renders Sixel and the
-/// iTerm2 inline-image protocol (via `@xterm/addon-image`) but not the Kitty
-/// graphics protocol, even though its inherited `TERM_PROGRAM` may say otherwise.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Protocol {
-    /// Sixel — Zellij passthrough and xterm.js (`@xterm/addon-image`).
-    Sixel,
-    /// Kitty graphics protocol — Kitty, Ghostty, WezTerm.
-    Kitty,
-    /// iTerm2 inline image protocol (IIP) — iTerm2 and xterm.js (`@xterm/addon-image`).
-    Iterm2,
-}
-
 /// Selector for the image protocol, accepted by both the `--protocol` flag and the
 /// `IC_PROTOCOL` environment variable. `Auto` keeps terminal-based detection; the
 /// other values force a specific protocol (see [`forced_protocol`]).
@@ -2473,23 +2457,23 @@ enum ProtocolArg {
 /// terminal-based auto-detection in charge. Env parsing reuses clap's
 /// case-insensitive [`ValueEnum`](clap::ValueEnum) so the accepted values stay in
 /// lockstep with the `--protocol` flag.
-fn forced_protocol(flag: Option<ProtocolArg>, env: Option<&str>) -> Option<Protocol> {
+fn forced_protocol(flag: Option<ProtocolArg>, env: Option<&str>) -> Option<ForcedProtocol> {
     let arg = match flag {
         Some(arg) => arg,
         None => <ProtocolArg as clap::ValueEnum>::from_str(env?, true).ok()?,
     };
     match arg {
         ProtocolArg::Auto => None,
-        ProtocolArg::Sixel => Some(Protocol::Sixel),
-        ProtocolArg::Kitty => Some(Protocol::Kitty),
-        ProtocolArg::Iterm2 => Some(Protocol::Iterm2),
+        ProtocolArg::Sixel => Some(ForcedProtocol::Sixel),
+        ProtocolArg::Kitty => Some(ForcedProtocol::Kitty),
+        ProtocolArg::Iterm2 => Some(ForcedProtocol::Iterm2),
     }
 }
 
 /// Resolve the effective protocol override from CLI args plus the `IC_PROTOCOL`
 /// environment variable. The flag wins; `IC_PROTOCOL` is the fallback so the choice
 /// can be pinned per shell session (handy for a ttyd/xterm.js front end).
-fn forced_protocol_for(args: &Args) -> Option<Protocol> {
+fn forced_protocol_for(args: &Args) -> Option<ForcedProtocol> {
     let env = std::env::var("IC_PROTOCOL").ok();
     forced_protocol(args.protocol, env.as_deref())
 }
@@ -2906,7 +2890,7 @@ mod tests {
     fn forced_flag_sixel_maps_to_sixel() {
         assert_eq!(
             forced_protocol(Some(ProtocolArg::Sixel), None),
-            Some(Protocol::Sixel)
+            Some(ForcedProtocol::Sixel)
         );
     }
 
@@ -2914,7 +2898,7 @@ mod tests {
     fn forced_flag_kitty_maps_to_kitty() {
         assert_eq!(
             forced_protocol(Some(ProtocolArg::Kitty), None),
-            Some(Protocol::Kitty)
+            Some(ForcedProtocol::Kitty)
         );
     }
 
@@ -2922,7 +2906,7 @@ mod tests {
     fn forced_flag_iterm2_maps_to_iterm2() {
         assert_eq!(
             forced_protocol(Some(ProtocolArg::Iterm2), None),
-            Some(Protocol::Iterm2)
+            Some(ForcedProtocol::Iterm2)
         );
     }
 
@@ -2933,14 +2917,17 @@ mod tests {
 
     #[test]
     fn forced_env_sixel_maps_to_sixel() {
-        assert_eq!(forced_protocol(None, Some("sixel")), Some(Protocol::Sixel));
+        assert_eq!(
+            forced_protocol(None, Some("sixel")),
+            Some(ForcedProtocol::Sixel)
+        );
     }
 
     #[test]
     fn forced_env_is_case_insensitive() {
         assert_eq!(
             forced_protocol(None, Some("ITERM2")),
-            Some(Protocol::Iterm2)
+            Some(ForcedProtocol::Iterm2)
         );
     }
 
@@ -2964,7 +2951,7 @@ mod tests {
         // An explicit flag wins even when IC_PROTOCOL says something else.
         assert_eq!(
             forced_protocol(Some(ProtocolArg::Iterm2), Some("sixel")),
-            Some(Protocol::Iterm2)
+            Some(ForcedProtocol::Iterm2)
         );
     }
 
@@ -3384,6 +3371,41 @@ mod tests {
         assert!(
             validate_terminal_for_graphics(&named, &RemoteTransport::None, false, "Image").is_ok(),
             "a variable that names no transport of this session says nothing about it"
+        );
+    }
+
+    /// A forced protocol passes the gate where every rule of it refuses.
+    ///
+    /// The person who forces a protocol vouches for the terminal. The rule
+    /// about Mosh reads a process tree, and under a multiplexer that tree can
+    /// name the Mosh of another client. So the choice is the way past a wrong
+    /// refusal, and it passes every rule: Mosh, tmux, a terminal that draws
+    /// nothing by its name, and a session that shares no protocol with the
+    /// terminal.
+    #[test]
+    fn a_forced_protocol_passes_the_gate_where_every_rule_refuses() {
+        let draws_nothing = Capabilities::new(TerminalType::Alacritty, false, true)
+            .with_forced_protocol(ForcedProtocol::Sixel);
+        for (transport, in_tmux) in [
+            (RemoteTransport::Mosh, false),
+            (RemoteTransport::None, true),
+            (RemoteTransport::Mosh, true),
+            (RemoteTransport::None, false),
+        ] {
+            assert!(
+                validate_terminal_for_graphics(&draws_nothing, &transport, in_tmux, "Image")
+                    .is_ok(),
+                "a forced protocol passes the gate under {transport:?} with tmux {in_tmux}"
+            );
+        }
+
+        let shares_nothing = Capabilities::new(TerminalType::Ghostty, true, true)
+            .in_session(MoshImages::from_env(Some("sixel"), None, None))
+            .with_forced_protocol(ForcedProtocol::Kitty);
+        assert!(
+            validate_terminal_for_graphics(&shares_nothing, &RemoteTransport::Mosh, false, "Image")
+                .is_ok(),
+            "a forced protocol passes a session that the gate reads as one that shares no protocol"
         );
     }
 

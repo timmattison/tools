@@ -85,7 +85,7 @@ mod geometry;
 mod probe;
 mod session;
 
-pub use detect::{AnsweredProtocol, Capabilities, ImageProtocol, TerminalType};
+pub use detect::{AnsweredProtocol, Capabilities, ForcedProtocol, ImageProtocol, TerminalType};
 pub use draw::{Budget, Cursor, DrawError, PayloadBudget, Picture, ProtocolBudgets, Request};
 pub use geometry::{cell_pixels, terminal_cells};
 pub use probe::Refusal;

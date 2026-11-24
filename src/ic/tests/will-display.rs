@@ -520,3 +520,49 @@ fn will_display_succeeds_for_a_named_terminal_with_a_stale_mosh_variable() {
     assert_eq!(stdout, "", "success must print nothing to stdout");
     assert_eq!(stderr, "", "success must print nothing to stderr");
 }
+
+/// A protocol that `IC_PROTOCOL` forces answers yes under an upstream Mosh.
+///
+/// The image path skips the gate for a forced protocol, because the user
+/// vouches for the terminal. The flag asks the same gate, so it must give the
+/// same answer: a script that writes `ic --will-display && ic picture.png`
+/// draws the picture that the second command can draw.
+#[test]
+fn will_display_succeeds_for_a_forced_protocol_under_an_upstream_mosh() {
+    let table = MoshProcessTable::new(TARGET_NAME);
+    let (code, stdout, stderr) = run(ic_under_mosh("xterm-ghostty", &table)
+        .arg("--will-display")
+        .env("IC_PROTOCOL", "sixel"));
+
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "", "success must print nothing to stdout");
+    assert_eq!(stderr, "", "success must print nothing to stderr");
+}
+
+/// A protocol that `--protocol` forces answers yes on a terminal that draws
+/// nothing by its name.
+///
+/// The Linux console is the terminal of
+/// [`will_display_fails_and_names_the_terminal_when_graphics_are_unsupported`].
+/// The person who forces a protocol vouches for the terminal, so the answer is
+/// the one that the image path gives.
+#[test]
+fn will_display_succeeds_for_a_forced_protocol_on_a_terminal_that_draws_nothing() {
+    let (code, stdout, stderr) = run(ic("linux").args(["--will-display", "--protocol", "iterm2"]));
+
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "", "success must print nothing to stdout");
+    assert_eq!(stderr, "", "success must print nothing to stderr");
+}
+
+/// `IC_PROTOCOL=auto` forces nothing, so the gate still decides.
+#[test]
+fn will_display_still_refuses_when_ic_protocol_is_auto() {
+    let (code, _stdout, stderr) = run(ic("linux").arg("--will-display").env("IC_PROTOCOL", "auto"));
+
+    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("not supported in this terminal"),
+        "stderr must give the reason: {stderr}"
+    );
+}
