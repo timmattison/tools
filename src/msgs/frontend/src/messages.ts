@@ -108,6 +108,9 @@ async function loadMoreMessages(): Promise<void> {
     if (currentOffset === 0) {
       area.appendChild(fragment);
     } else {
+      // The new page ends on a day that the screen starts with: keep one separator
+      const onScreen = area.querySelector(".date-separator");
+      if (onScreen !== null && onScreen.textContent === lastDateStr) onScreen.remove();
       area.insertBefore(fragment, area.firstChild);
       // Maintain scroll position after prepending
       area.scrollTop = area.scrollHeight - previousScrollHeight;
