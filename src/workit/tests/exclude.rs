@@ -78,7 +78,9 @@ fn members_of(root: &Path, extra_args: &[&str]) -> Vec<String> {
 
 #[test]
 fn a_search_root_whose_own_path_holds_an_exclusion_is_still_searched() {
-    let (_temp, root) = fixture("targeting");
+    // The root itself is named `target`, so its own path holds a component the
+    // default exclusions name exactly.
+    let (_temp, root) = fixture("target");
     package_at(&root, "widget", "workit-fixture-root-widget");
 
     assert_eq!(
