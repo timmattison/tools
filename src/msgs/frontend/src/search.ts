@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { SearchResult } from "./bindings";
-import { byId, escapeHtml, UNKNOWN_DATE_LABEL } from "./utils";
+import { initConversations } from "./conversations";
+import { byId, escapeHtml, messageOf, showError, UNKNOWN_DATE_LABEL } from "./utils";
 
 let searchTimeout: number | null = null;
 let onNavigateCallback: ((chatId: number, messageId: number) => void) | null =
@@ -103,7 +104,6 @@ function hideSearchResults(): void {
     list.dataset.mode = "";
     // Re-initialize conversation list without losing app state
     list.innerHTML = "";
-    // Dynamic import to avoid circular deps
-    import("./conversations").then((mod) => mod.initConversations());
+    initConversations().catch((e: unknown) => showError(messageOf(e)));
   }
 }

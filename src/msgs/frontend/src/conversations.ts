@@ -5,6 +5,8 @@ import { byId, escapeHtml } from "./utils";
 const PAGE_SIZE = 50;
 let currentOffset = 0;
 let loading = false;
+// Counts resets of the list. A reply of an older generation is dropped.
+let listGeneration = 0;
 let selectedChatId: number | null = null;
 let onSelectCallback: ((chatId: number) => void) | null = null;
 
@@ -68,7 +70,9 @@ export async function initConversations(): Promise<void> {
   }
 
   // Always reload conversations
+  listGeneration += 1;
   currentOffset = 0;
+  loading = false;
   list.innerHTML = "";
   conversationCache.clear();
   await loadMore();
@@ -77,11 +81,13 @@ export async function initConversations(): Promise<void> {
 async function loadMore(): Promise<void> {
   if (loading) return;
   loading = true;
+  const generation = listGeneration;
   try {
     const conversations = await invoke<Conversation[]>("list_conversations", {
       offset: currentOffset,
       limit: PAGE_SIZE,
     });
+    if (generation !== listGeneration) return;
     const list = byId("conversation-list", HTMLElement);
     for (const conv of conversations) {
       conversationCache.set(conv.chat_id, conv);
@@ -89,7 +95,7 @@ async function loadMore(): Promise<void> {
     }
     currentOffset += conversations.length;
   } finally {
-    loading = false;
+    if (generation === listGeneration) loading = false;
   }
 }
 
