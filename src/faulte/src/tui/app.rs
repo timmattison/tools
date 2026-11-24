@@ -307,11 +307,16 @@ impl App {
         self.span
     }
 
-    /// Gives the entry that the marker of the timeline shows.
+    /// Gives the entry that the marker of the timeline shows. The live view
+    /// gives the newest frame, which the table shows, also when a gap came
+    /// after it. With no frame, it gives the newest entry.
     #[must_use]
     pub fn selected_entry(&self) -> Option<EntryId> {
         match self.selection {
-            Selection::Live => self.history.newest(),
+            Selection::Live => self
+                .history
+                .newest_frame()
+                .or_else(|| self.history.newest()),
             Selection::Past(id) => Some(id),
         }
     }
