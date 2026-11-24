@@ -1492,8 +1492,8 @@ fn draw_row<Tz: TimeZone>(
 /// rows show when each pull request left the queue. With no merge history, the
 /// recent header holds the word, because its rows show when each run finished.
 /// The job-sum column stands after the right marker cell. A run row shows its
-/// `job_sum` there (see [`run_line`]), and the other rows leave it blank. The
-/// cost column stands after the job-sum column, at the right edge. A run row
+/// `job_sum` there (see [`run_line`]), a job row shows the time left of its job
+/// (see [`job_line`]), and the other rows leave it blank. The cost column stands after the job-sum column, at the right edge. A run row
 /// and a job row show their `cost` there (see [`run_line`] and [`job_line`]),
 /// and the other rows leave it blank.
 /// This function never panics, whatever the size of the frame.
