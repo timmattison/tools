@@ -173,19 +173,7 @@ fn run(cli: Cli) -> Result<()> {
                 existing_field.as_deref(),
                 &gluetun_name,
             )
-            .map_err(|err| {
-                let mut msg =
-                    "every WireGuard credential is held by a running tunnel\n".to_string();
-                for usage in &err.usage {
-                    msg.push_str(&format!(
-                        "\n  {:<20} -> held by {}",
-                        usage.field_label, usage.container_name
-                    ));
-                }
-                msg.push_str("\n\nAdd another credential in 1Password,");
-                msg.push_str("\nor stop an existing tunnel with: vpn-tunnel down --dir <path>");
-                anyhow::anyhow!("{msg}")
-            })?;
+            .map_err(|err| anyhow::anyhow!("{}", all_in_use_message(&err, &op_path)))?;
 
             let wg_key = &selected.key;
             let credential_field = &selected.field_label;
@@ -427,9 +415,58 @@ fn selection_note(selected: &credential::SelectedCredential, output_dir: &Path) 
     }
 }
 
+/// Builds the error text for a run in which a running tunnel holds each credential.
+///
+/// The text names the holder of each credential and the ways to go on.
+/// `_op_path` is the `--op-path` value of the run. It carries no color.
+fn all_in_use_message(err: &credential::AllCredentialsInUse, _op_path: &str) -> String {
+    let mut msg = "every WireGuard credential is held by a running tunnel\n".to_string();
+    for usage in &err.usage {
+        msg.push_str(&format!(
+            "\n  {:<20} -> held by {}",
+            usage.field_label, usage.container_name
+        ));
+    }
+    msg.push_str("\n\nAdd another credential in 1Password,");
+    msg.push_str("\nor stop an existing tunnel with: vpn-tunnel down --dir <path>");
+    msg
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds the error that a run gets when two tunnels hold both credentials.
+    fn two_in_use() -> credential::AllCredentialsInUse {
+        credential::AllCredentialsInUse {
+            usage: vec![
+                credential::CredentialInUse {
+                    field_label: "credential".to_string(),
+                    container_name: "scraper-gluetun".to_string(),
+                },
+                credential::CredentialInUse {
+                    field_label: "credential-2".to_string(),
+                    container_name: "vpn-gluetun".to_string(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn the_all_in_use_error_lists_each_holder_under_its_header() {
+        let text = all_in_use_message(&two_in_use(), "op://Private/ProtonVPN WireGuard key");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[0],
+            "every WireGuard credential is held by a running tunnel"
+        );
+        assert_eq!(lines[1], "");
+        assert_eq!(
+            lines[2],
+            "  credential           -> held by scraper-gluetun"
+        );
+        assert_eq!(lines[3], "  credential-2         -> held by vpn-gluetun");
+    }
 
     /// Writes a `.env` holding `content` into a fresh temporary directory.
     ///
