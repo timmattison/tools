@@ -413,6 +413,27 @@ describe("openConversationAt", () => {
     expect(texts()).toEqual(["a", "b"]);
   });
 
+  it("ignores a scroll of the old chat while the position of the hit is in flight", async () => {
+    const slow = deferred<number>();
+    const invoke = await answerWithPosition(slow.promise);
+    const { openConversationAt, loadConversation } = await import("./messages");
+    await loadConversation(1, "One", "one", false);
+
+    const opening = openConversationAt(2, "Two", "two", false, 880);
+    await settle();
+    area().scrollTop = 0;
+    area().dispatchEvent(new Event("scroll"));
+    slow.resolve(120);
+    await opening;
+
+    const chatTwoOffsets = messageCalls(invoke)
+      .filter((call) => chatIdOf(call[1] as InvokeArgs) === 2)
+      .map((call) => offsetOf(call[1] as InvokeArgs));
+    expect(chatTwoOffsets).toEqual([95]);
+    const hit = document.querySelector('[data-message-id="880"]');
+    expect(hit?.classList.contains("search-highlight")).toBe(true);
+  });
+
   it("drops the position of a chat that is no longer open", async () => {
     const slow = deferred<number>();
     const invoke = await answerWithPosition(slow.promise);
