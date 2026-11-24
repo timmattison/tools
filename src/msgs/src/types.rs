@@ -93,13 +93,9 @@ mod tests {
 
     #[test]
     fn test_apple_timestamp_known_value() {
-        // 2024-01-15 12:00:00 UTC = 725_760_000 + (14*86400 + 43200) = 726_969_600 seconds since 2001-01-01
-        // Using noon UTC ensures the date is 2024-01-15 in all UTC-aligned timezones.
-        // Seconds since 2001-01-01 00:00:00 UTC for 2024-01-15 12:00:00 UTC:
-        //   725_760_000 (to 2024-01-01) + 14*86400 + 43200 = 726_972_000... let's compute exactly:
-        // 2001-01-01 unix = 978_307_200
-        // 2024-01-15 12:00:00 UTC unix = 1705320000
-        // diff = 1705320000 - 978307200 = 727012800 seconds
+        // 2024-01-15 12:00:00 UTC is Unix 1_705_320_000. The Apple epoch
+        // (2001-01-01 00:00:00 UTC) is Unix 978_307_200. The difference is
+        // 727_012_800 seconds. Noon UTC keeps the UTC date 2024-01-15.
         let ns = 727_012_800_i64 * 1_000_000_000;
         let dt = apple_timestamp_to_datetime(ns).unwrap();
         // Convert to UTC for a timezone-independent check
