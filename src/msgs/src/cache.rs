@@ -271,4 +271,121 @@ mod tests {
         assert!(!cache.needs_rebuild(3).expect("needs after"));
         assert!(cache.needs_rebuild(2).expect("needs with other count"));
     }
+
+    /// Builds a fixture with two chats: "lunch" once in each chat, and
+    /// "dinner" in chat A only. Returns the fixture, the two chat ids, and
+    /// the ids of the "lunch" messages.
+    fn two_chat_fixture() -> (ChatDbFixture, i64, i64, i64, i64) {
+        let fx = ChatDbFixture::new();
+        let chat_a = fx.add_chat("a", None, 45);
+        let chat_b = fx.add_chat("b", None, 45);
+        let lunch_a = fx.add_message(MessageSpec {
+            text: Some("lunch at noon".to_string()),
+            date: apple_ns(1_700_000_010, 0),
+            chats: vec![chat_a],
+            ..MessageSpec::default()
+        });
+        let lunch_b = fx.add_message(MessageSpec {
+            text: Some("lunch tomorrow".to_string()),
+            date: apple_ns(1_700_000_020, 0),
+            chats: vec![chat_b],
+            ..MessageSpec::default()
+        });
+        fx.add_message(MessageSpec {
+            text: Some("dinner".to_string()),
+            date: apple_ns(1_700_000_030, 0),
+            chats: vec![chat_a],
+            ..MessageSpec::default()
+        });
+        (fx, chat_a, chat_b, lunch_a, lunch_b)
+    }
+
+    #[test]
+    fn search_returns_the_message_and_chat_of_each_hit() {
+        let (fx, chat_a, chat_b, lunch_a, lunch_b) = two_chat_fixture();
+        let db = fx.open_db();
+        let cache = TextCache::open_at(&fx.dir().join("text-cache.db")).expect("open cache");
+        cache.rebuild(db.connection()).expect("rebuild");
+
+        let mut hits = cache.search("lunch", None, 50, 0).expect("search");
+        hits.sort_unstable();
+        assert_eq!(hits, vec![(lunch_a, chat_a), (lunch_b, chat_b)]);
+    }
+
+    #[test]
+    fn search_with_a_chat_id_returns_only_the_hits_of_that_chat() {
+        let (fx, _chat_a, chat_b, _lunch_a, lunch_b) = two_chat_fixture();
+        let db = fx.open_db();
+        let cache = TextCache::open_at(&fx.dir().join("text-cache.db")).expect("open cache");
+        cache.rebuild(db.connection()).expect("rebuild");
+
+        let hits = cache.search("lunch", Some(chat_b), 50, 0).expect("search");
+        assert_eq!(hits, vec![(lunch_b, chat_b)]);
+    }
+
+    #[test]
+    fn a_second_rebuild_replaces_the_rows_of_the_first() {
+        let (fx, chat_a, chat_b, lunch_a, lunch_b) = two_chat_fixture();
+        let db = fx.open_db();
+        let cache = TextCache::open_at(&fx.dir().join("text-cache.db")).expect("open cache");
+        cache.rebuild(db.connection()).expect("first rebuild");
+        cache.rebuild(db.connection()).expect("second rebuild");
+
+        let mut hits = cache.search("lunch", None, 50, 0).expect("search");
+        hits.sort_unstable();
+        assert_eq!(hits, vec![(lunch_a, chat_a), (lunch_b, chat_b)]);
+    }
+
+    #[test]
+    fn a_cache_file_with_the_old_contentless_table_rebuilds_and_searches() {
+        let (fx, chat_a, chat_b, lunch_a, lunch_b) = two_chat_fixture();
+        let cache_path = fx.dir().join("text-cache.db");
+        write_old_contentless_cache(&cache_path);
+        let db = fx.open_db();
+        let cache = TextCache::open_at(&cache_path).expect("open cache");
+        cache.rebuild(db.connection()).expect("rebuild");
+
+        let mut hits = cache.search("lunch", None, 50, 0).expect("search");
+        hits.sort_unstable();
+        assert_eq!(hits, vec![(lunch_a, chat_a), (lunch_b, chat_b)]);
+    }
+
+    /// Writes a cache file with the contentless table of the first release
+    /// of msgs, and one row in it.
+    fn write_old_contentless_cache(cache_path: &Path) {
+        let old = Connection::open(cache_path).expect("open old cache");
+        old.execute_batch(
+            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
+             CREATE VIRTUAL TABLE message_text USING fts5(
+                 message_id UNINDEXED, chat_id UNINDEXED, sender UNINDEXED, text,
+                 content=''
+             );
+             INSERT INTO message_text (message_id, chat_id, sender, text)
+                 VALUES (1, 1, 'Me', 'stale lunch');
+             INSERT INTO metadata (key, value) VALUES ('message_count', '3');",
+        )
+        .expect("create old schema");
+    }
+
+    #[test]
+    fn a_rebuild_leaves_no_open_transaction_when_it_succeeds_or_fails() {
+        let (fx, ..) = two_chat_fixture();
+        let db = fx.open_db();
+        let cache_path = fx.dir().join("text-cache.db");
+        write_old_contentless_cache(&cache_path);
+        let cache = TextCache::open_at(&cache_path).expect("open cache");
+        let _ = cache.rebuild(db.connection());
+        assert!(
+            cache.conn.is_autocommit(),
+            "a rebuild of the old cache left a transaction open"
+        );
+
+        // A source with no message table makes the rebuild fail.
+        let empty_source = Connection::open_in_memory().expect("open empty source");
+        assert!(cache.rebuild(&empty_source).is_err());
+        assert!(
+            cache.conn.is_autocommit(),
+            "a failed rebuild left a transaction open"
+        );
+    }
 }
