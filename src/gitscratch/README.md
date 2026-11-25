@@ -1766,6 +1766,17 @@ that waits for its delay has time to show. The terminal tests of `grind` and
 every `GIT_*` variable from its children, so `GIT_TRACE` logs nothing. Only a
 `git` on `PATH` sees which git processes a replay starts.
 
+It also holds `gitscratch::testing::executable::write_executable`, the writer of
+a stub that a test runs. It takes the arguments of `std::fs::write` and makes
+the file executable, so it replaces `fs::write` followed by a change of the mode
+to `0o755`. Linux refuses to run a file that a process holds open for writing
+(`ETXTBSY`, "Text file busy"). A thread that forks while the test process
+writes a stub gives the child a copy of the write descriptor, and a run of the
+stub in that window fails. Thus a `/bin/sh` child writes the file, and the test
+process holds no write descriptor for it at any time. macOS does not refuse
+such a run, so the race shows only on Linux. The module is Unix only. Write
+each new stub that a test runs with it.
+
 | Fixture | Shape |
 | --- | --- |
 | `contested_region_repo()` | `iterated` rewrites one region across three commits, `single` touches it once — the asymmetry that makes a stop count worth printing. |
