@@ -235,6 +235,7 @@ async fn list_vouchers(
         client,
         &path,
         filter.as_deref(),
+        "vouchers",
         selection,
         output_format,
     )

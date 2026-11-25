@@ -371,7 +371,8 @@ async fn list_devices(
     let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/devices", site_id);
 
-    list_collection::<Device, DeviceRow>(client, &path, None, selection, output_format).await
+    list_collection::<Device, DeviceRow>(client, &path, None, "devices", selection, output_format)
+        .await
 }
 
 async fn get_device(

@@ -48,6 +48,25 @@ impl Selection {
     }
 }
 
+/// The note that says why a whole listing of an empty collection shows
+/// nothing.
+///
+/// # Arguments
+///
+/// * `items` - The plural name of the items, for example `"sites"`.
+/// * `filtered` - Whether the request carried a filter.
+///
+/// # Returns
+///
+/// `No {items} found.`, or `No {items} match the filter.` when `filtered`.
+fn empty_collection_note(items: &str, filtered: bool) -> String {
+    if filtered {
+        format!("No {items} match the filter.")
+    } else {
+        format!("No {items} found.")
+    }
+}
+
 /// Read the part of the collection at `path` that `selection` names, and
 /// render it.
 ///
@@ -57,13 +76,16 @@ impl Selection {
 /// * `path` - Collection path relative to the API root.
 /// * `filter` - The API's filter expression, if the user gave one. Each
 ///   request carries it.
+/// * `items` - The plural name of the items of the collection, as a note
+///   names them, for example `"sites"`.
 /// * `selection` - The part of the collection to show.
 /// * `format` - The output format the user asked for.
 ///
 /// # Returns
 ///
 /// The rendered listing. A page carries a note when it leaves items out. A
-/// whole collection carries no note.
+/// whole collection carries no note, unless it holds no item. Then one note
+/// says that nothing was found, or that nothing matches the filter.
 ///
 /// # Errors
 ///
@@ -73,6 +95,7 @@ pub async fn list_collection<T, R>(
     client: &UnifiClient,
     path: &str,
     filter: Option<&str>,
+    items: &str,
     selection: Selection,
     format: OutputFormat,
 ) -> Result<Report>
@@ -94,8 +117,13 @@ where
             render_page_listing::<T, R>(&page, format)
         }
         Selection::All => {
-            let items: Vec<T> = fetch_all_matching(client, path, filter).await?;
-            render_whole_listing::<T, R>(&items, format)
+            let found: Vec<T> = fetch_all_matching(client, path, filter).await?;
+            let report = render_whole_listing::<T, R>(&found, format)?;
+            if found.is_empty() {
+                Ok(report.with_note(empty_collection_note(items, filter.is_some())))
+            } else {
+                Ok(report)
+            }
         }
     }
 }
@@ -132,6 +160,7 @@ mod tests {
             &client,
             "sites",
             None,
+            "sites",
             Selection::All,
             OutputFormat::Json,
         )
@@ -157,6 +186,7 @@ mod tests {
             &client,
             "sites",
             None,
+            "sites",
             Selection::Page {
                 limit: 1,
                 offset: 0,

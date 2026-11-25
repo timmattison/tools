@@ -221,7 +221,8 @@ Caused by:
 
 Without `--all`, a list command answers with one page of a collection: 25
 items (100 for `vouchers list`), unless `--limit` says otherwise. `--all`
-reads every page and shows the whole collection, with no note. `--all` does
+reads every page and shows the whole collection, with no note, unless the
+collection holds nothing. Then a note says so. `--all` does
 not take `--limit` or `--offset`. It takes `--filter` on each list command
 that has one: `sites`, `clients list` and `vouchers list`. `devices list`
 has no `--filter`, because the API filters no device listing. A page that
@@ -233,7 +234,7 @@ This page shows 1-25 of 100. Use --limit and --offset to see the rest, or --all 
 
 The note goes to standard error, and it goes there in both output formats. So
 `--output json` stays a document a program reads, a redirected table stays a
-table, and a listing that is complete carries no note at all.
+table, and a listing that is complete and holds items carries no note at all.
 
 ### Sites
 
@@ -520,7 +521,8 @@ $ ufa devices list --all --output json | jq '.[] | select(.state == "OFFLINE")'
 
 A command that finds nothing still answers `--output json` with a document: `[]`. That is the
 answer of `ufa cloud hosts` for an account with no consoles, of `ufa devices stats --all` for a site
-with no devices, and of `ufa vouchers delete-filtered` for a filter that matches no voucher. So
+with no devices, of each list command with `--all` for a collection that holds nothing, and of
+`ufa vouchers delete-filtered` for a filter that matches no voucher. So
 `jq '.[]'` reads no items, and it does not fail. In a table, these commands draw no table of
 headings alone, and a note says that nothing was found.
 

@@ -234,8 +234,15 @@ async fn list_clients(
     let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/clients", site_id);
 
-    list_collection::<Client, ClientRow>(client, &path, filter.as_deref(), selection, output_format)
-        .await
+    list_collection::<Client, ClientRow>(
+        client,
+        &path,
+        filter.as_deref(),
+        "clients",
+        selection,
+        output_format,
+    )
+    .await
 }
 
 async fn get_client(

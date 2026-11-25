@@ -94,8 +94,15 @@ async fn list_sites(
     filter: Option<String>,
     output_format: OutputFormat,
 ) -> Result<Report> {
-    list_collection::<Site, SiteRow>(client, "sites", filter.as_deref(), selection, output_format)
-        .await
+    list_collection::<Site, SiteRow>(
+        client,
+        "sites",
+        filter.as_deref(),
+        "sites",
+        selection,
+        output_format,
+    )
+    .await
 }
 
 #[cfg(test)]
