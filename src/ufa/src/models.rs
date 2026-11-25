@@ -477,7 +477,16 @@ pub enum ClientAccess {
     #[serde(rename = "DEFAULT")]
     Default,
     #[serde(rename = "GUEST")]
-    Guest { authorized: bool },
+    Guest {
+        /// Whether the guest can use the network now.
+        authorized: bool,
+        /// The details of the authorization of the guest, as raw JSON: when
+        /// and how the guest got access, when the access stops, its limits,
+        /// and its usage. Nothing in this crate reads one, and the raw value
+        /// keeps a field that a later controller adds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        authorization: Option<serde_json::Value>,
+    },
     /// An access tier this build does not know, kept verbatim.
     #[serde(untagged)]
     Unknown(UnknownTaggedObject),
