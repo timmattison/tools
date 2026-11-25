@@ -6,7 +6,7 @@ use tabled::{settings::Style, Table, Tabled};
 use crate::models::Page;
 
 /// How a user reaches the part of a collection that one page left out.
-const PAGING_HINT: &str = "Use --limit and --offset to see the rest.";
+const PAGING_HINT: &str = "Use --limit and --offset to see the rest, or --all to see every item.";
 
 /// The JSON document of a collection that holds nothing.
 const EMPTY_JSON_ARRAY: &str = "[]";
@@ -370,9 +370,9 @@ where
 
 /// Render one page of a collection for a list command.
 ///
-/// A list command asks for a single page on purpose -- `--limit` and
-/// `--offset` are its arguments -- so what comes back is often a slice of
-/// something larger. A table of 25 devices from a site of a hundred looks
+/// A list command asks for one page unless the user gives `--all` --
+/// `--limit` and `--offset` are its arguments -- so what comes back is often
+/// a slice of something larger. A table of 25 devices from a site of a hundred looks
 /// exactly like a table of every device on a site of 25. The note is the only
 /// thing that tells the two apart, and it reads the same whichever collection
 /// was listed, so it is decided here instead of in each of the four commands
@@ -411,6 +411,44 @@ where
             .into_iter()
             .collect(),
     })
+}
+
+/// Render a whole collection for a list command that read every page.
+///
+/// The listing holds every item, so it carries no note.
+///
+/// # Arguments
+///
+/// * `items` - Every item of the collection, as the API gave them.
+/// * `format` - The output format the user asked for.
+///
+/// # Returns
+///
+/// The rendered collection. JSON output is one array of the raw items, and
+/// table output is one row per item. A collection that holds nothing is
+/// rendered as [`Report::of_empty_collection`] says.
+///
+/// # Errors
+///
+/// Returns an error if the items cannot be serialized as JSON.
+pub fn render_whole_listing<T, R>(items: &[T], format: OutputFormat) -> Result<Report>
+where
+    T: Serialize,
+    R: Serialize + Tabled + for<'a> From<&'a T>,
+{
+    if items.is_empty() {
+        return Ok(Report::of_empty_collection(format));
+    }
+
+    let document = match format {
+        OutputFormat::Json => render_output(&items, format)?,
+        OutputFormat::Table => {
+            let rows: Vec<R> = items.iter().map(R::from).collect();
+            render_table(&rows)
+        }
+    };
+
+    Ok(Report::of_document(document))
 }
 
 /// The line that says a page is not the whole collection.
@@ -821,5 +859,61 @@ mod tests {
             table.contains("ap-lr") && table.contains("switch-8"),
             "every row must reach the table, got:\n{table}"
         );
+    }
+
+    /// Three stand-in items, as a whole collection holds them.
+    fn three_items() -> Vec<Item> {
+        ["ap-lr", "switch-8", "gateway"]
+            .iter()
+            .map(|name| Item {
+                name: (*name).to_string(),
+            })
+            .collect()
+    }
+
+    /// A whole collection renders as a table that holds each item, and it
+    /// carries no note: nothing was left out.
+    #[test]
+    fn a_whole_listing_holds_each_item_in_a_table_and_has_no_note() {
+        let report = render_whole_listing::<Item, ItemRow>(&three_items(), OutputFormat::Table)
+            .expect("rendering a whole listing must succeed");
+
+        let table = document_of(&report);
+        assert!(table.contains(TABLE_CORNER), "got:\n{table}");
+        for name in ["ap-lr", "switch-8", "gateway"] {
+            assert!(
+                table.contains(name),
+                "{name} must reach the table:\n{table}"
+            );
+        }
+        assert!(report.notes().is_empty(), "got: {:?}", report.notes());
+    }
+
+    /// Under JSON, a whole listing is one array of the raw items.
+    #[test]
+    fn a_whole_json_listing_is_an_array_of_the_raw_items() {
+        let report = render_whole_listing::<Item, ItemRow>(&three_items(), OutputFormat::Json)
+            .expect("rendering a whole listing must succeed");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(document_of(&report)).expect("--output json must produce JSON");
+        assert_eq!(
+            parsed,
+            json!([{ "name": "ap-lr" }, { "name": "switch-8" }, { "name": "gateway" }])
+        );
+        assert!(report.notes().is_empty(), "got: {:?}", report.notes());
+    }
+
+    /// A whole listing of nothing is what an empty collection always gives.
+    #[test]
+    fn a_whole_listing_of_nothing_is_an_empty_collection() {
+        let json = render_whole_listing::<Item, ItemRow>(&[], OutputFormat::Json)
+            .expect("rendering an empty listing must succeed");
+        assert_eq!(document_of(&json), "[]");
+        assert!(json.notes().is_empty());
+
+        let table = render_whole_listing::<Item, ItemRow>(&[], OutputFormat::Table)
+            .expect("rendering an empty listing must succeed");
+        assert_eq!(table.document(), None);
     }
 }

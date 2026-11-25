@@ -220,11 +220,13 @@ Caused by:
 ### What a listing shows
 
 Every list command answers with one page of a collection: 25 items, unless
-`--limit` says otherwise. A page that holds less than the whole collection says
+`--limit` says otherwise. `--all` reads every page and shows the whole
+collection, with no note. `--all` does not take `--limit` or `--offset`, and it
+does take `--filter`. A page that holds less than the whole collection says
 so, under the table:
 
 ```
-This page shows 1-25 of 100. Use --limit and --offset to see the rest.
+This page shows 1-25 of 100. Use --limit and --offset to see the rest, or --all to see every item.
 ```
 
 The note goes to standard error, and it goes there in both output formats. So
@@ -240,6 +242,9 @@ ufa sites
 # Page through them
 ufa sites --limit 50 --offset 50
 
+# Read every page
+ufa sites --all
+
 # Filter
 ufa sites --filter "name.like('main*')"
 ```
@@ -252,6 +257,9 @@ ufa devices list
 
 # ...on a specific site
 ufa devices --site-id <SITE_ID> list --limit 100
+
+# ...or every device, all pages
+ufa devices list --all
 
 # Device details
 ufa devices get <DEVICE_ID>
@@ -303,6 +311,9 @@ the same field names and units, so one parser reads both. `error` is the reason 
 # List connected clients
 ufa clients list
 
+# ...every client, all pages
+ufa clients list --all
+
 # Only guests
 ufa clients list --filter "access.type.eq('GUEST')"
 
@@ -325,6 +336,9 @@ ufa clients unauthorize-guest <CLIENT_ID>
 ```bash
 # List vouchers (default limit 100)
 ufa vouchers list
+
+# ...every voucher, all pages
+ufa vouchers list --all
 
 # Create vouchers
 ufa vouchers create --count 10 --name "Conference 2024" --time-limit-minutes 1440

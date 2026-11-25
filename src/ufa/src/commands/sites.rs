@@ -1,7 +1,8 @@
 use crate::{
     client::UnifiClient,
-    models::{Page, Site},
-    output::{render_page_listing, OutputFormat, Report},
+    listing::{list_collection, Selection},
+    models::Site,
+    output::{OutputFormat, Report},
 };
 use anyhow::Result;
 use clap::Subcommand;
@@ -22,6 +23,10 @@ pub enum SitesCommand {
         /// Filter expression
         #[clap(long)]
         filter: Option<String>,
+
+        /// Return every site: read all the pages, not one page
+        #[clap(long, conflicts_with_all = ["limit", "offset"])]
+        all: bool,
     },
 }
 
@@ -55,48 +60,42 @@ pub async fn handle_sites_command(
             limit,
             offset,
             filter,
-        } => list_sites(client, limit, offset, filter, output_format)
-            .await
-            .map(Report::print),
+            all,
+        } => list_sites(
+            client,
+            Selection::from_flags(limit, offset, all),
+            filter,
+            output_format,
+        )
+        .await
+        .map(Report::print),
     }
 }
 
-/// List one page of the sites the controller serves.
+/// List the sites the controller serves: one page, or every site.
 ///
 /// # Arguments
 ///
 /// * `client` - The controller client to list the sites with.
-/// * `limit` - How many sites to ask for.
-/// * `offset` - Where in the collection the page starts.
+/// * `selection` - One page, or every site.
 /// * `filter` - The API's filter expression, if the user gave one.
 /// * `output_format` - The output format the user asked for.
 ///
 /// # Returns
 ///
-/// The rendered page, ready to print.
+/// The rendered listing, ready to print.
 ///
 /// # Errors
 ///
-/// Returns an error if the request fails or if the answer cannot be rendered.
+/// Returns an error if a request fails or if the answer cannot be rendered.
 async fn list_sites(
     client: &UnifiClient,
-    limit: u32,
-    offset: u64,
+    selection: Selection,
     filter: Option<String>,
     output_format: OutputFormat,
 ) -> Result<Report> {
-    let limit_str = limit.to_string();
-    let offset_str = offset.to_string();
-    let mut params: Vec<(&str, &dyn std::fmt::Display)> =
-        vec![("limit", &limit_str), ("offset", &offset_str)];
-
-    if let Some(f) = &filter {
-        params.push(("filter", f));
-    }
-
-    let page: Page<Site> = client.get_with_params("sites", &params).await?;
-
-    render_page_listing::<Site, SiteRow>(&page, output_format)
+    list_collection::<Site, SiteRow>(client, "sites", filter.as_deref(), selection, output_format)
+        .await
 }
 
 #[cfg(test)]
@@ -132,9 +131,17 @@ mod listing_tests {
         let client = UnifiClient::new(controller.origin(), API_KEY, false)
             .expect("a loopback URL must build a client");
 
-        let listing = list_sites(&client, 1, 0, None, OutputFormat::Table)
-            .await
-            .expect("the controller answered the listing");
+        let listing = list_sites(
+            &client,
+            Selection::Page {
+                limit: 1,
+                offset: 0,
+            },
+            None,
+            OutputFormat::Table,
+        )
+        .await
+        .expect("the controller answered the listing");
 
         let notice = listing
             .notes()

@@ -7,10 +7,10 @@ use uuid::Uuid;
 use crate::{
     client::UnifiClient,
     device_helper::get_device_id_or_prompt,
-    models::{Device, DeviceAction, DeviceDetails, DeviceStatistics, Page, PortAction},
+    listing::{list_collection, Selection},
+    models::{Device, DeviceAction, DeviceDetails, DeviceStatistics, PortAction},
     output::{
-        print_output, print_vec_table, render_collection, render_output, render_page_listing,
-        OutputFormat, Report,
+        print_output, print_vec_table, render_collection, render_output, OutputFormat, Report,
     },
     pagination::fetch_all,
     site_helper::get_site_id_or_prompt,
@@ -36,6 +36,10 @@ pub enum DevicesCommand {
         /// Offset for pagination
         #[clap(long, default_value = "0")]
         offset: u64,
+
+        /// Return every device: read all the pages, not one page
+        #[clap(long, conflicts_with_all = ["limit", "offset"])]
+        all: bool,
     },
 
     /// Get device details
@@ -315,11 +319,14 @@ pub async fn handle_devices_command(
     output_format: OutputFormat,
 ) -> Result<()> {
     match command {
-        DevicesCommand::List { limit, offset } => {
-            list_devices(client, site_id, limit, offset, output_format)
-                .await
-                .map(Report::print)
-        }
+        DevicesCommand::List { limit, offset, all } => list_devices(
+            client,
+            site_id,
+            Selection::from_flags(limit, offset, all),
+            output_format,
+        )
+        .await
+        .map(Report::print),
         DevicesCommand::Get { device_id } => {
             get_device(client, site_id, device_id, output_format).await
         }
@@ -338,41 +345,33 @@ pub async fn handle_devices_command(
     }
 }
 
-/// List one page of the devices on a site.
+/// List the devices on a site: one page, or every device.
 ///
 /// # Arguments
 ///
 /// * `client` - The controller client to list the devices with.
 /// * `site_id` - The site the user named, if any.
-/// * `limit` - How many devices to ask for.
-/// * `offset` - Where in the collection the page starts.
+/// * `selection` - One page, or every device.
 /// * `output_format` - The output format the user asked for.
 ///
 /// # Returns
 ///
-/// The rendered page, ready to print.
+/// The rendered listing, ready to print.
 ///
 /// # Errors
 ///
-/// Returns an error if the site cannot be resolved, if the request fails, or
+/// Returns an error if the site cannot be resolved, if a request fails, or
 /// if the answer cannot be rendered.
 async fn list_devices(
     client: &UnifiClient,
     site_id: Option<Uuid>,
-    limit: u32,
-    offset: u64,
+    selection: Selection,
     output_format: OutputFormat,
 ) -> Result<Report> {
-    let limit_str = limit.to_string();
-    let offset_str = offset.to_string();
-    let params: Vec<(&str, &dyn std::fmt::Display)> =
-        vec![("limit", &limit_str), ("offset", &offset_str)];
-
     let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/devices", site_id);
-    let page: Page<Device> = client.get_with_params(&path, &params).await?;
 
-    render_page_listing::<Device, DeviceRow>(&page, output_format)
+    list_collection::<Device, DeviceRow>(client, &path, None, selection, output_format).await
 }
 
 async fn get_device(
@@ -1370,9 +1369,17 @@ mod listing_tests {
         let client = UnifiClient::new(controller.origin(), API_KEY, false)
             .expect("a loopback URL must build a client");
 
-        let listing = list_devices(&client, Some(Uuid::new_v4()), 1, 0, OutputFormat::Table)
-            .await
-            .expect("the controller answered the listing");
+        let listing = list_devices(
+            &client,
+            Some(Uuid::new_v4()),
+            Selection::Page {
+                limit: 1,
+                offset: 0,
+            },
+            OutputFormat::Table,
+        )
+        .await
+        .expect("the controller answered the listing");
 
         let notice = listing
             .notes()

@@ -13,6 +13,7 @@ mod config;
 mod device_helper;
 mod discovery;
 mod http;
+mod listing;
 mod models;
 mod output;
 mod pagination;
@@ -383,6 +384,10 @@ enum Commands {
         /// Filter expression
         #[clap(long)]
         filter: Option<String>,
+
+        /// Return every site: read all the pages, not one page
+        #[clap(long, conflicts_with_all = ["limit", "offset"])]
+        all: bool,
     },
 
     /// Manage devices
@@ -598,11 +603,13 @@ async fn run_controller_command(
             limit,
             offset,
             filter,
+            all,
         } => {
             let cmd = sites::SitesCommand::List {
                 limit,
                 offset,
                 filter,
+                all,
             };
             sites::handle_sites_command(cmd, client, output).await
         }

@@ -5,8 +5,9 @@ use uuid::Uuid;
 
 use crate::{
     client::UnifiClient,
-    models::{Client, ClientAction, Page},
-    output::{print_output, render_page_listing, OutputFormat, Report},
+    listing::{list_collection, Selection},
+    models::{Client, ClientAction},
+    output::{print_output, OutputFormat, Report},
     site_helper::get_site_id_or_prompt,
 };
 
@@ -29,6 +30,10 @@ pub enum ClientsCommand {
         /// Filter expression
         #[clap(long)]
         filter: Option<String>,
+
+        /// Return every client: read all the pages, not one page
+        #[clap(long, conflicts_with_all = ["limit", "offset"])]
+        all: bool,
     },
 
     /// Get client details
@@ -163,9 +168,16 @@ pub async fn handle_clients_command(
             limit,
             offset,
             filter,
-        } => list_clients(client, site_id, limit, offset, filter, output_format)
-            .await
-            .map(Report::print),
+            all,
+        } => list_clients(
+            client,
+            site_id,
+            Selection::from_flags(limit, offset, all),
+            filter,
+            output_format,
+        )
+        .await
+        .map(Report::print),
         ClientsCommand::Get { client_id } => {
             get_client(client, site_id, client_id, output_format).await
         }
@@ -194,47 +206,36 @@ pub async fn handle_clients_command(
     }
 }
 
-/// List one page of the clients connected to a site.
+/// List the clients of a site: one page, or every client.
 ///
 /// # Arguments
 ///
 /// * `client` - The controller client to list the clients with.
 /// * `site_id` - The site the user named, if any.
-/// * `limit` - How many clients to ask for.
-/// * `offset` - Where in the collection the page starts.
+/// * `selection` - One page, or every client.
 /// * `filter` - The API's filter expression, if the user gave one.
 /// * `output_format` - The output format the user asked for.
 ///
 /// # Returns
 ///
-/// The rendered page, ready to print.
+/// The rendered listing, ready to print.
 ///
 /// # Errors
 ///
-/// Returns an error if the site cannot be resolved, if the request fails, or
+/// Returns an error if the site cannot be resolved, if a request fails, or
 /// if the answer cannot be rendered.
 async fn list_clients(
     client: &UnifiClient,
     site_id: Option<Uuid>,
-    limit: u32,
-    offset: u64,
+    selection: Selection,
     filter: Option<String>,
     output_format: OutputFormat,
 ) -> Result<Report> {
-    let limit_str = limit.to_string();
-    let offset_str = offset.to_string();
-    let mut params: Vec<(&str, &dyn std::fmt::Display)> =
-        vec![("limit", &limit_str), ("offset", &offset_str)];
-
-    if let Some(f) = &filter {
-        params.push(("filter", f));
-    }
-
     let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/clients", site_id);
-    let page: Page<Client> = client.get_with_params(&path, &params).await?;
 
-    render_page_listing::<Client, ClientRow>(&page, output_format)
+    list_collection::<Client, ClientRow>(client, &path, filter.as_deref(), selection, output_format)
+        .await
 }
 
 async fn get_client(
@@ -635,8 +636,10 @@ mod listing_tests {
         let listing = list_clients(
             &client,
             Some(Uuid::new_v4()),
-            1,
-            0,
+            Selection::Page {
+                limit: 1,
+                offset: 0,
+            },
             None,
             OutputFormat::Table,
         )
