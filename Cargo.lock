@@ -4499,6 +4499,7 @@ version = "0.1.0"
 dependencies = [
  "altscreen",
  "anyhow",
+ "base64 0.22.1",
  "buildinfo",
  "childenv",
  "clap",
@@ -4506,6 +4507,7 @@ dependencies = [
  "libc",
  "notify",
  "proctree",
+ "serde_json",
  "termgfx",
  "termion",
  "unicode-width",
