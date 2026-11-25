@@ -344,6 +344,23 @@ mod tests {
     }
 
     #[test]
+    fn a_variable_that_names_no_host_falls_back_to_the_file() {
+        let home = tempfile::tempdir().unwrap();
+        write_config(home.path(), "contexts = [\"box-a\"]\n");
+        for value in [" ", ",", " , ,"] {
+            let environment = Environment {
+                contexts: Some(value.into()),
+                ..environment_with_home(home.path())
+            };
+            assert_eq!(
+                names(&Config::load(&environment).unwrap()),
+                ["box-a"],
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
     fn no_hosts_is_an_error_that_names_the_config_file() {
         let home = tempfile::tempdir().unwrap();
         let error = Config::load(&environment_with_home(home.path())).unwrap_err();
