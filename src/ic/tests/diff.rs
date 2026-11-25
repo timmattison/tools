@@ -139,3 +139,30 @@ fn diff_mode_boxes_is_the_default() {
 
     assert_eq!(named, unnamed);
 }
+
+/// An emit run prints exactly one JSON line and no header, because the
+/// program that reads it parses the whole of standard output.
+#[test]
+fn diff_emit_prints_no_header() {
+    let scratch = Scratch::new(TARGET_NAME, "no-header");
+    let (first, second) = fixtures(&scratch);
+
+    let outcome = run(ic(TERM_XTERM_256COLOR)
+        .arg(FLAG)
+        .args(["--emit-rgba", BOX])
+        .arg(&first)
+        .arg(&second));
+
+    assert_eq!(outcome.code, Some(0), "stderr: {}", outcome.stderr);
+    assert!(
+        outcome.stdout.starts_with('{') && outcome.stdout.ends_with("}\n"),
+        "stdout must be one JSON line: {:?}",
+        outcome.stdout
+    );
+    assert_eq!(outcome.stdout.matches('\n').count(), 1);
+    assert!(
+        !outcome.stdout.contains(" vs "),
+        "an emit run must print no header: {:?}",
+        outcome.stdout
+    );
+}
