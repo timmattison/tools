@@ -399,9 +399,9 @@ impl Fixture {
         std::fs::read_to_string(self.path().join(format!("stdin-{host}"))).unwrap_or_default()
     }
 
-    /// Runs `drun` with `args`, the extra environment variables `env`, and
-    /// `stdin` on its stdin. Without `stdin`, stdin is empty.
-    fn run_full(&self, args: &[&str], env: &[(&str, &str)], stdin: Option<&str>) -> Run {
+    /// The command that starts `drun` with `args` and the extra environment
+    /// variables `env`, in an empty environment. The caller sets the streams.
+    fn command(&self, args: &[&str], env: &[(&str, &str)]) -> std::process::Command {
         let path = format!("{}:/usr/bin:/bin", self.path().join("bin").display());
         let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_drun"));
         command
@@ -410,13 +410,44 @@ impl Fixture {
             .env_clear()
             .env("PATH", path)
             .env("HOME", self.path().join("home"))
-            .env("XDG_CONFIG_HOME", self.path().join("config"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .env("XDG_CONFIG_HOME", self.path().join("config"));
         for (key, value) in env {
             command.env(key, value);
         }
+        command
+    }
+
+    /// Runs `drun` with `args`, with a stdout whose reader closed before
+    /// `drun` started, as when the reader of a pipe exits first. Each write to
+    /// stdout fails with a broken pipe. The `stdout` of the result is empty.
+    pub fn run_with_closed_stdout(&self, args: &[&str]) -> Run {
+        let (reader, writer) = std::io::pipe().expect("a pipe");
+        drop(reader);
+        let mut command = self.command(args, &[]);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::piped());
+        let started = Instant::now();
+        let child = command.spawn().expect("drun starts");
+        drop(command);
+        let output = child.wait_with_output().expect("drun stops");
+        Run {
+            code: output.status.code(),
+            stdout: String::new(),
+            stderr: String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+            elapsed: started.elapsed(),
+        }
+    }
+
+    /// Runs `drun` with `args`, the extra environment variables `env`, and
+    /// `stdin` on its stdin. Without `stdin`, stdin is empty.
+    fn run_full(&self, args: &[&str], env: &[(&str, &str)], stdin: Option<&str>) -> Run {
+        let mut command = self.command(args, env);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         let started = Instant::now();
         let mut child = command.spawn().expect("drun starts");
         let mut input = child.stdin.take().expect("the stdin of drun");

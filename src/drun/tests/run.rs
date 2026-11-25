@@ -661,3 +661,43 @@ fn a_host_that_is_down_is_reported_once_as_skipped() {
     );
     assert_eq!(fixture.calls_of("box-b", "run").len(), 1);
 }
+
+/// Runs `args` normally and with a closed stdout, and asserts that the exit
+/// status is the same and that `drun` did not panic. Gives the closed run.
+fn assert_closed_stdout_keeps_status(fixture: &Fixture, args: &[&str]) -> support::Run {
+    let normal = fixture.run(args);
+    let closed = fixture.run_with_closed_stdout(args);
+    assert_eq!(
+        closed.code, normal.code,
+        "{args:?}: the exit status changed: {}",
+        closed.stderr
+    );
+    assert!(
+        !closed.stderr.contains("panicked"),
+        "{args:?}: {}",
+        closed.stderr
+    );
+    closed
+}
+
+#[test]
+fn a_closed_stdout_changes_no_exit_status_and_causes_no_panic() {
+    let fixture = two_hosts();
+    for args in [
+        &["--version"][..],
+        &["--help"],
+        &["hosts"],
+        &["pick"],
+        &["run", "-d", "alpine"],
+    ] {
+        let closed = assert_closed_stdout_keeps_status(&fixture, args);
+        if args.contains(&"-d") {
+            assert_eq!(closed.code, Some(0), "{args:?}: {}", closed.stderr);
+            assert!(
+                closed.stderr.contains("runs on box-b"),
+                "{args:?}: {}",
+                closed.stderr
+            );
+        }
+    }
+}
