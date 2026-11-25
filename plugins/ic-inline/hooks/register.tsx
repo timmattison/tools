@@ -25,10 +25,12 @@ import { type Asked, fromHome, parseCommand, parsePath, startsAtHome } from './a
 import { type Drawing, pictureTree, type PictureElements } from './draw'
 import { type Options, readOptions, type Renderer } from './options'
 import {
+  DIFF_MODE_NAMES,
   DIFF_MODES,
   Decodes,
   IC_TIMEOUT_MS,
   icArguments,
+  isDiffMode,
   type Loaded,
   loadedFrom,
   notRun,
@@ -37,11 +39,14 @@ import {
 } from './picture'
 
 const SHOWN = { plugin: 'ic-inline', key: 'shown' } as const
+const DIFFED = { plugin: 'ic-inline', key: 'diffed' } as const
 const PIXELS = { plugin: 'ic-inline', key: 'pixels' } as const
 
 const COMMAND = 'ic'
 const TOOL_NAME = 'show_image'
 const TOOL = 'mcp__ic-inline__show_image'
+const DIFF_TOOL_NAME = 'show_diff'
+const DIFF_TOOL = 'mcp__ic-inline__show_diff'
 
 /** The diff form of /ic, as its usage names it. */
 const DIFF_FORM = `/ic diff [--mode ${DIFF_MODES.join('|')}] <first> <second>`
@@ -57,6 +62,16 @@ const TOOL_DESCRIPTION = [
   'The user sees the picture. You get its size alone, not its content: to look at it yourself, use Read.',
   'PNG, JPEG, GIF, WebP, BMP, TIFF and the other formats of the Rust image crate work. A video does not.',
 ].join(' ')
+
+const DIFF_TOOL_DESCRIPTION = [
+  'Show the user the differences between two image files: one picture, inline in the terminal transcript, made by ic --diff.',
+  'Use it to show what changed between two versions of a picture: a screenshot before and after a change, two renders of a chart.',
+  'ic compares the two images pixel by pixel, with no tolerance, and scales neither one.',
+  'The user sees the picture. You get its size alone, not its content: to look at the images yourself, use Read.',
+].join(' ')
+
+/** What a call of show_diff that has not two paths gets. */
+const DIFF_PATHS_NEEDED = `${DIFF_TOOL_NAME} needs two paths: first and second, the image files to compare.`
 
 /** The key of the probe Image in the band above the prompt. */
 const PROBE_KEY = 'ic-inline-probe'
@@ -114,6 +129,34 @@ export const register: Register = (on, rawOptions) => {
         required: ['path'],
       },
     })
+    await $.tool.register({
+      name: DIFF_TOOL_NAME,
+      description: DIFF_TOOL_DESCRIPTION,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          first: {
+            type: 'string',
+            description: 'The first image file, the one before: absolute, relative to the working directory, or starting with ~/.',
+          },
+          second: {
+            type: 'string',
+            description: 'The second image file, the one after, given the same way.',
+          },
+          mode: {
+            type: 'string',
+            enum: [...DIFF_MODES],
+            description: [
+              'How the picture shows the differences. Leave it out for the default of ic, boxes.',
+              'boxes: the second image, with a red outline around each region that differs.',
+              'highlight: the first image, with each pixel that differs in opaque red.',
+              'mask: opaque black, with each pixel that differs in opaque red.',
+            ].join(' '),
+          },
+        },
+        required: ['first', 'second'],
+      },
+    })
     return next(e)
   })
 
@@ -163,6 +206,43 @@ export const register: Register = (on, rawOptions) => {
     return (await drawRow($, $.ui.resolve(e), e.viewport, subject, options)) ?? next(e)
   })
 
+  on('tool.call', { tool: DIFF_TOOL }, async ($, e) => {
+    const first = await toolPathOf($, 'first' in e ? e.first : undefined)
+    const second = await toolPathOf($, 'second' in e ? e.second : undefined)
+    if (first === undefined || second === undefined) return { deny: DIFF_PATHS_NEEDED }
+
+    const given: unknown = 'mode' in e ? e.mode : undefined
+    const mode = given === undefined || isDiffMode(given) ? given : null
+    if (mode === null) {
+      const got = typeof given === 'string' ? given : JSON.stringify(given)
+      return { deny: `${DIFF_TOOL_NAME} takes a mode of ${DIFF_MODE_NAMES}, and it got ${got}.` }
+    }
+
+    const subject: Subject = { kind: 'diff', first, second, mode }
+    const loaded = await load($, options.icPath, subject, true)
+    if (!loaded.isLoaded) return { deny: `Could not ${failedOf(subject)}: ${loaded.reason}` }
+
+    await $.state.set({ ...DIFFED, id: e.tool_use_id }, { first, second, ...(mode === undefined ? {} : { mode }) })
+    const { sourceWidth, sourceHeight } = loaded.picture
+    return {
+      result: `Showed the differences between ${first} and ${second} to the user inline (${sourceWidth}×${sourceHeight} pixels). The user sees the picture; you do not.`,
+    }
+  }).catch(($, e, next) =>
+    // As for show_image: nothing beneath this hook serves the tool.
+    next.called
+      ? next(e)
+      : { deny: `${DIFF_TOOL_NAME} failed inside ic-inline: ${next.error.message ?? next.error.kind}` },
+  )
+
+  on('ui.render', { component: 'ToolResult', props: { tool: DIFF_TOOL } }, async ($, e, next) => {
+    if (e.surface !== 'terminal' || e.props.isErrored) return next(e)
+    const { value: diffed } = await $.state.get({ ...DIFFED, id: e.requestId })
+    if (diffed === undefined) return next(e)
+
+    const subject: Subject = { kind: 'diff', first: diffed.first, second: diffed.second, mode: diffed.mode }
+    return (await drawRow($, $.ui.resolve(e), e.viewport, subject, options)) ?? next(e)
+  })
+
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (options.renderer !== 'auto' || e.surface !== 'terminal') return next(e)
     const { value = 'unknown' } = await $.state.get(PIXELS)
@@ -192,6 +272,11 @@ export const register: Register = (on, rawOptions) => {
 async function pathOf($: EngineInterface, text: string): Promise<string | undefined> {
   const path = parsePath(text)
   return path === undefined ? undefined : homePath($, path)
+}
+
+/** The path that ic reads for a path of a tool call, or `undefined` when `given` is no text or is empty. */
+async function toolPathOf($: EngineInterface, given: unknown): Promise<string | undefined> {
+  return typeof given === 'string' ? pathOf($, given) : undefined
 }
 
 /** `path` with a leading `~` made into HOME, which is read only when the path needs it. */
