@@ -20,6 +20,10 @@ toml.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
+# The tests write the fake `docker` with
+# `gitscratch::testing::executable::write_executable`, because a stub that
+# `std::fs::write` writes can fail to run with ETXTBSY on Linux.
+gitscratch = { workspace = true, features = ["testing"] }
 shellquote.workspace = true
 tempfile.workspace = true
 

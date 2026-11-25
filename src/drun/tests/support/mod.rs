@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use gitscratch::testing::executable::write_executable;
+
 /// The memory of a computer with 16 GiB, in KiB.
 pub const GIB_16: u64 = 16_777_216;
 
@@ -276,10 +278,14 @@ impl Fixture {
         std::fs::create_dir_all(dir.path().join("config").join("drun")).expect("the config home");
         std::fs::create_dir_all(dir.path().join("home")).expect("the home directory");
         let quoted = shellquote::shell_quote(&dir.path().display().to_string());
-        let docker = bin.join("docker");
-        std::fs::write(&docker, FAKE_DOCKER.replace(DIRECTORY_MARK, &quoted))
-            .expect("the fake docker");
-        make_executable(&docker);
+        // `write_executable` and not `std::fs::write`: on Linux, a fork in a
+        // sibling test thread can copy the write descriptor, and the run of
+        // the fake then fails with ETXTBSY.
+        write_executable(
+            bin.join("docker"),
+            FAKE_DOCKER.replace(DIRECTORY_MARK, &quoted),
+        )
+        .expect("the fake docker");
         Self { dir }
     }
 
@@ -519,11 +525,4 @@ impl Fixture {
             .filter(|call| call.iter().any(|argument| argument == "drun.probe=true"))
             .collect()
     }
-}
-
-#[cfg(unix)]
-fn make_executable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-        .expect("the fake docker is executable");
 }
