@@ -64,8 +64,9 @@ const JSON_MEDIA_TYPE: &str = "application/json";
 /// A server can answer with anything at all -- a stack trace, an HTML error
 /// page, a dump of the record that failed -- and the whole of it in an error
 /// floods the terminal and lands in whatever collects the user's logs. This
-/// is enough to recognise what came back and to read a short message that was
-/// not in the API's own error shape.
+/// is enough to recognise what came back and to read a short message. The
+/// bound applies to a body that is not in the API's error shape and to the
+/// message of a body that is.
 const ERROR_BODY_DISPLAY_CHARS: usize = 500;
 
 /// The most of one response body `ufa` reads.
@@ -583,7 +584,11 @@ fn response_error(api: Api, status: StatusCode, body: &str) -> anyhow::Error {
     let message = if let Some(advice) = api.key_refusal(status) {
         advice
     } else if let Ok(error) = serde_json::from_str::<ApiErrorBody>(body) {
-        format!("{} error: {} (HTTP {status})", api.label(), error.message)
+        format!(
+            "{} error: {} (HTTP {status})",
+            api.label(),
+            truncate_for_display(&error.message, ERROR_BODY_DISPLAY_CHARS)
+        )
     } else {
         format!(
             "{} HTTP error {status}: {}",
