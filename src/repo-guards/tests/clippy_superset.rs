@@ -274,7 +274,12 @@ fn a_crate_config_that_changes_the_reason_of_a_ban_is_flagged() {
 #[test]
 fn a_crate_config_that_reorders_the_keys_of_a_ban_is_clean() {
     let repo = synthetic_repo(ROOT_CONFIG);
-    write_crate_config(repo.path(), "reordered", CONFIG_NAMES[0], REORDERED_KEYS_CONFIG);
+    write_crate_config(
+        repo.path(),
+        "reordered",
+        CONFIG_NAMES[0],
+        REORDERED_KEYS_CONFIG,
+    );
 
     let report = audit_fixture(&repo);
 
