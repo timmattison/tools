@@ -158,4 +158,26 @@ mod tests {
         .unwrap();
         assert_eq!(diff.differing_pixels, 0);
     }
+
+    /// The color that `changed` writes.
+    const OTHER: Rgba<u8> = Rgba([1, 2, 3, 255]);
+
+    /// A picture like `picture`, with `OTHER` at each listed position.
+    fn changed(width: u32, height: u32, spots: &[(u32, u32)]) -> DynamicImage {
+        DynamicImage::ImageRgba8(RgbaImage::from_fn(width, height, |x, y| {
+            if spots.contains(&(x, y)) {
+                OTHER
+            } else {
+                color(x, y)
+            }
+        }))
+    }
+
+    #[test]
+    fn highlight_paints_a_changed_pixel_red() {
+        let diff = compare(&picture(3, 2), &changed(2, 3, &[(0, 0)]), Mode::Highlight).unwrap();
+        assert_eq!(*diff.picture.get_pixel(1, 1), color(1, 1));
+        assert_eq!(*diff.picture.get_pixel(0, 0), RED);
+        assert_eq!(*diff.picture.get_pixel(2, 2), BLANK);
+    }
 }
