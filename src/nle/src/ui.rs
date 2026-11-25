@@ -136,6 +136,12 @@ pub(crate) fn App() -> Element {
                 },
                 on_error: move |message| error.set(Some(message)),
             }
+            if let Some(message) = error() {
+                div { class: "error-banner", role: "alert",
+                    "{message}"
+                    button { class: "error-dismiss", onclick: move |_| error.set(None), "Dismiss" }
+                }
+            }
             PreviewPane { loaded }
             Timeline { loaded }
             PropertiesPanel { loaded }
@@ -148,11 +154,30 @@ pub(crate) fn App() -> Element {
 fn MenuBar(on_loaded: EventHandler<LoadedRecording>, on_error: EventHandler<String>) -> Element {
     let services = use_context::<Services>();
     // True from the click until the dialog and the load end.
-    let opening = use_signal(|| false);
-    let _ = (&services, on_loaded, on_error);
+    let mut opening = use_signal(|| false);
     rsx! {
         div { class: "menu-bar",
-            button { disabled: opening(), "Open Recording" }
+            button {
+                disabled: opening(),
+                onclick: move |_| {
+                    // A click that arrives during a dialog or a load starts nothing.
+                    if opening() {
+                        return;
+                    }
+                    opening.set(true);
+                    let services = services.clone();
+                    spawn(async move {
+                        if let Some(path) = services.pick_recording().await {
+                            match services.load_recording(path).await {
+                                Ok(recording) => on_loaded.call(recording),
+                                Err(error) => on_error.call(format!("{OPEN_FAILED_PREFIX}: {error}")),
+                            }
+                        }
+                        opening.set(false);
+                    });
+                },
+                "Open Recording"
+            }
         }
     }
 }
