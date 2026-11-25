@@ -947,6 +947,28 @@ mod tests {
         }
     }
 
+    /// The advice about the key and the size of the body are two sentences.
+    /// A full stop must close the advice before the size text names the API,
+    /// or the message joins them into one sentence that names a different
+    /// API ("... Integrations API answered ...").
+    #[test]
+    fn a_refused_key_with_a_body_over_the_limit_names_the_size_in_its_own_sentence() {
+        for api in [Api::Controller, Api::SiteManager] {
+            for status in [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN] {
+                let rendered = format!(
+                    "{:#}",
+                    body_too_large(api, status, 4 * TEST_LIMIT, TEST_LIMIT)
+                );
+
+                let boundary = format!(". {} answered HTTP {status}", api.label());
+                assert!(
+                    rendered.contains(&boundary),
+                    "a full stop must close the advice before {boundary:?}, got: {rendered}"
+                );
+            }
+        }
+    }
+
     /// A body short enough to read in full is still shown in full, with no
     /// ellipsis suggesting something was withheld.
     #[test]
