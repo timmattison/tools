@@ -820,6 +820,43 @@ mod tests {
         );
     }
 
+    /// The `Guest access details` schema of the spec gives a guest an optional
+    /// `authorization` object beside `authorized`. `clients get --output json`
+    /// writes the client back, so the object must survive the parse.
+    #[test]
+    fn the_authorization_of_a_guest_survives_the_parse() {
+        let json = r#"{
+            "type": "WIRELESS",
+            "id": "00000000-0000-0000-0000-000000000004",
+            "name": "visitor-phone",
+            "macAddress": "00:11:22:33:44:55",
+            "uplinkDeviceId": "00000000-0000-0000-0000-000000000003",
+            "access": {
+                "type": "GUEST",
+                "authorized": true,
+                "authorization": {
+                    "authorizedAt": "2026-07-21T00:00:00Z",
+                    "authorizationMethod": "VOUCHER",
+                    "expiresAt": "2026-07-22T00:00:00Z",
+                    "dataUsageLimitMBytes": 1024,
+                    "rxRateLimitKbps": 1000,
+                    "txRateLimitKbps": 1000,
+                    "usage": { "durationSec": 600, "rxBytes": 2048, "txBytes": 1024, "bytes": 3072 }
+                }
+            }
+        }"#;
+        let sent: serde_json::Value = serde_json::from_str(json).expect("the fixture is JSON");
+
+        let client: Client = serde_json::from_str(json)
+            .unwrap_or_else(|error| panic!("the guest client must parse: {error}"));
+
+        let written = serde_json::to_value(&client).expect("writing the client back");
+        assert_eq!(
+            written["access"], sent["access"],
+            "the access of a guest must be written back as the controller sent it"
+        );
+    }
+
     /// The guardrail for this whole class of bug: an enum read from the
     /// controller that has no unknown-value fallback breaks every command
     /// that touches it the day Ubiquiti ships a new value, so adding one must
