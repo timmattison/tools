@@ -11,6 +11,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{self, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD;
@@ -29,22 +30,33 @@ pub struct Scratch {
     pub dir: PathBuf,
 }
 
+/// The count of the scratch directories that this process made.
+static SCRATCH_COUNT: AtomicU64 = AtomicU64::new(0);
+
 impl Scratch {
     /// Make an empty directory for the test called `test` of the target called
-    /// `target`. The name holds both, the process and a nanosecond stamp, so
-    /// two concurrent runs never share a directory.
+    /// `target`. The name holds both, the process, a nanosecond stamp, and the
+    /// count of the directories that this process made before it.
+    ///
+    /// The count keeps apart two tests of one process that start at the same
+    /// moment. The stamp alone does not, because the clock of macOS moves in
+    /// steps of one microsecond. The directory must not exist, so a name that
+    /// two callers share is a panic and not a shared directory.
     ///
     /// # Panics
-    /// Panics when the clock is before the epoch or the directory does not
-    /// make.
+    /// Panics when the clock is before the epoch, or when the directory exists
+    /// or does not make.
     pub fn new(target: &str, test: &str) -> Self {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("the clock must be after the epoch")
             .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("ic-{target}-{test}-{}-{nanos}", process::id()));
-        fs::create_dir_all(&dir).expect("the scratch directory must make");
+        let count = SCRATCH_COUNT.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "ic-{target}-{test}-{}-{nanos}-{count}",
+            process::id()
+        ));
+        fs::create_dir(&dir).expect("the scratch directory must make, and must be new");
         Scratch { dir }
     }
 

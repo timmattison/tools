@@ -25,8 +25,9 @@
 //!
 //! Every run starts from a cleared environment and a `PATH` that reaches
 //! nothing, as the other targets of `ic` do. Each test writes its pictures
-//! into a directory of its own, named for the test, the process and a
-//! nanosecond stamp, so two concurrent runs of this file never share a file.
+//! into a directory of its own, named for the test, the process, a nanosecond
+//! stamp and a count of the directories of the process, so two tests or two
+//! concurrent runs of this file never share a file.
 
 use std::fs;
 use std::path::Path;

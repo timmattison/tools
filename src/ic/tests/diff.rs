@@ -8,8 +8,8 @@
 //! it reads the header that the run prints above the picture.
 //!
 //! Each test writes its pictures into a directory of its own, named for the
-//! test, the process and a nanosecond stamp, so two concurrent runs of this
-//! file never share a file.
+//! test, the process, a nanosecond stamp and a count of the directories of the
+//! process, so two tests or two concurrent runs of this file never share a file.
 //!
 //! The fixtures are `a.png`, a 40 by 40 pattern, and `b.png`, the same picture
 //! with the pixel at (20, 20) changed. One changed pixel makes one region. The
@@ -83,10 +83,10 @@ fn source_pixel(source: &RgbaImage, x: u32, y: u32) -> [u8; 4] {
     source.get_pixel(x, y).0
 }
 
-/// Run the flag over the two fixtures, with `extra` options, and read the
-/// picture that it printed.
-fn emit_diff(extra: &[&str]) -> (Emitted, RgbaImage) {
-    let scratch = Scratch::new(TARGET_NAME, "emit");
+/// Run the flag over the two fixtures, with `extra` options, for the test
+/// called `test`, and read the picture that it printed.
+fn emit_diff(test: &str, extra: &[&str]) -> (Emitted, RgbaImage) {
+    let scratch = Scratch::new(TARGET_NAME, test);
     let (first, second) = fixtures(&scratch);
     let outcome = run(ic(TERM_XTERM_256COLOR)
         .arg(FLAG)
@@ -102,7 +102,7 @@ fn emit_diff(extra: &[&str]) -> (Emitted, RgbaImage) {
 /// the fit.
 #[test]
 fn diff_boxes_is_the_default_picture() {
-    let (picture, first) = emit_diff(&[]);
+    let (picture, first) = emit_diff("default-picture", &[]);
 
     assert_eq!((picture.width, picture.height), (40, 40));
     assert_eq!(pixel(&picture, 20, 20), CHANGED_PIXEL);
@@ -115,7 +115,7 @@ fn diff_boxes_is_the_default_picture() {
 /// outline.
 #[test]
 fn diff_highlight_marks_the_pixel_on_the_first_image() {
-    let (picture, first) = emit_diff(&["--diff-mode", "highlight"]);
+    let (picture, first) = emit_diff("highlight", &["--diff-mode", "highlight"]);
 
     assert_eq!(pixel(&picture, 20, 20), RED);
     assert_eq!(pixel(&picture, 10, 10), source_pixel(&first, 10, 10));
@@ -125,7 +125,7 @@ fn diff_highlight_marks_the_pixel_on_the_first_image() {
 /// `mask` shows opaque black, with each differing pixel red.
 #[test]
 fn diff_mask_marks_the_pixel_on_black() {
-    let (picture, _first) = emit_diff(&["--diff-mode", "mask"]);
+    let (picture, _first) = emit_diff("mask", &["--diff-mode", "mask"]);
 
     assert_eq!(pixel(&picture, 20, 20), RED);
     assert_eq!(pixel(&picture, 10, 10), [0, 0, 0, 255]);
@@ -134,8 +134,8 @@ fn diff_mask_marks_the_pixel_on_black() {
 /// `boxes` is the mode that a run with no `--diff-mode` takes.
 #[test]
 fn diff_mode_boxes_is_the_default() {
-    let (named, _) = emit_diff(&["--diff-mode", "boxes"]);
-    let (unnamed, _) = emit_diff(&[]);
+    let (named, _) = emit_diff("default-mode", &["--diff-mode", "boxes"]);
+    let (unnamed, _) = emit_diff("default-mode", &[]);
 
     assert_eq!(named, unnamed);
 }
