@@ -86,19 +86,84 @@ pub fn controllers() {
 }
 ";
 
+/// The entrance that clippy lets a production spawn take. `clippy.toml` bans a
+/// raw `Command::new`, so a new spawn of `op` arrives in this spelling.
+const CHILDENV_COMMAND: &str = "\
+pub fn controllers() {
+    let _ = childenv::command(\"op\").args([\"item\", \"get\", \"ufa\"]).output();
+}
+";
+
+/// The entrance that clippy lets a test fixture take.
+const CHILDENV_FIXTURE_COMMAND: &str = "\
+pub fn controllers() {
+    let _ = childenv::fixture_command(\"op\").arg(\"whoami\").output();
+}
+";
+
+/// The entrance behind an import, so the call names no crate and no type.
+const CHILDENV_IMPORTED: &str = "\
+use childenv::command;
+
+pub fn controllers() {
+    let _ = command(\"op\").arg(\"whoami\").output();
+}
+";
+
+/// The entrance inside a macro body, where the call names no `Command` type.
+const CHILDENV_INSIDE_A_MACRO: &str = "\
+pub fn controllers() {
+    println!(\"{:?}\", childenv::command(\"op\").arg(\"whoami\").output());
+}
+";
+
+/// The entrance behind an import with a new name.
+const CHILDENV_RENAMED: &str = "\
+use childenv::fixture_command as spawn;
+
+pub fn controllers() {
+    let _ = spawn(\"op\").arg(\"whoami\").output();
+}
+";
+
+/// The type behind an import with a new name, so the callee path does not end
+/// with `Command`.
+const TYPE_RENAMED: &str = "\
+use std::process::Command as Process;
+
+pub fn controllers() {
+    let _ = Process::new(\"op\").arg(\"whoami\").output();
+}
+";
+
+/// The builder of a process on a pseudo-terminal. `clippy.toml` bans its
+/// constructor beside `Command::new`, because it starts a child process too.
+const PSEUDO_TERMINAL: &str = "\
+pub fn controllers() {
+    let _ = portable_pty::CommandBuilder::new(\"op\");
+}
+";
+
 /// Everything that names `op` and runs nothing.
 ///
 /// `which` locates the binary. `op-cache` is the sanctioned route and is a
-/// different program. A JSON patch document carries an `\"op\"` key, and it is
-/// a macro body, which is where the loosest of the three checks reads.
+/// different program. An argument `\"op\"` goes to `git`, not to the
+/// constructor. A JSON patch document carries an `\"op\"` key in a macro body,
+/// and so does a format string beside an unrelated spawn. A comment and a doc
+/// comment that name the spawn are prose.
 const RUNS_SOMETHING_ELSE: &str = "\
 use std::process::Command;
 
+/// Never write `childenv::command(\"op\")` here. Use op-cache.
 pub fn controllers() {
+    // Not Command::new(\"op\") either.
     let _ = which::which(\"op\");
     let _ = Command::new(\"op-cache\").args([\"read\", \"op://Private/ufa/key\"]).output();
+    let _ = childenv::command(\"op-cache\").args([\"read\", \"op://Private/ufa/key\"]).output();
     let _ = Command::new(\"git\").arg(\"status\").output();
+    let _ = childenv::command(\"git\").arg(\"op\").output();
     let _ = serde_json::json!({ \"op\": \"replace\", \"path\": \"/a\" });
+    println!(\"{:?} {}\", Command::new(\"git\"), \"op\");
 }
 ";
 
@@ -138,14 +203,26 @@ fn canonical(path: &Path) -> PathBuf {
 
 /// Every syntactic form of a spawn is reported, and the file that holds it is
 /// named.
+///
+/// The test reads every form before it fails, so its message names each form
+/// the guard did not see, and not only the first one.
 #[test]
 fn every_spelling_of_a_spawn_is_an_offender() {
+    let mut missed = Vec::new();
+
     for (form, source) in [
         ("fully qualified", FULLY_QUALIFIED),
         ("imported", IMPORTED),
         ("asynchronous", ASYNC),
         ("named by path", NAMED_BY_PATH),
         ("inside a macro", INSIDE_A_MACRO),
+        ("childenv::command", CHILDENV_COMMAND),
+        ("childenv::fixture_command", CHILDENV_FIXTURE_COMMAND),
+        ("an imported childenv entrance", CHILDENV_IMPORTED),
+        ("a childenv call in a macro", CHILDENV_INSIDE_A_MACRO),
+        ("a renamed childenv entrance", CHILDENV_RENAMED),
+        ("a renamed Command type", TYPE_RENAMED),
+        ("a pseudo-terminal builder", PSEUDO_TERMINAL),
     ] {
         let dir = tree(&[("lib.rs", source), ("plain.rs", PLAIN)]);
         let report = op_wall::audit_sources(dir.path()).expect("the audit reaches a verdict");
@@ -155,24 +232,36 @@ fn every_spelling_of_a_spawn_is_an_offender() {
             2,
             "the {form} fixture holds two sources"
         );
-        assert!(
-            !report.is_compliant(),
-            "the {form} spelling runs the op binary, got {report}"
-        );
-        assert_eq!(
-            report.offenders().len(),
-            1,
-            "one file of the {form} fixture runs it, got {report}"
-        );
-        assert!(
-            report.offenders()[0].path().ends_with("lib.rs"),
-            "the offender must be named, got {report}"
-        );
-        assert!(
-            !report.offenders()[0].spawns().is_empty(),
-            "the report must say what the file runs, got {report}"
-        );
+
+        let names_the_spawn = match report.offenders() {
+            [offender] => offender.path().ends_with("lib.rs") && !offender.spawns().is_empty(),
+            _ => false,
+        };
+        if !names_the_spawn {
+            missed.push(format!("  {form}: {report}"));
+        }
     }
+
+    assert!(
+        missed.is_empty(),
+        "the guard must name lib.rs and what it runs, and it did not for {} form(s):\n{}",
+        missed.len(),
+        missed.join("\n")
+    );
+}
+
+/// The one sanctioned spawn of `op` is the shape that a new spawn copies. A
+/// guard that cannot see it in `op-cache` reports a copy of it clean in every
+/// other crate.
+#[test]
+fn the_guard_sees_the_spawn_inside_op_cache() {
+    let report =
+        op_wall::audit_sources(&repo_root().join(OP_CACHE)).expect("the audit reaches a verdict");
+
+    assert!(
+        !report.is_compliant(),
+        "{OP_CACHE} runs the op binary, and the guard did not see it: {report}"
+    );
 }
 
 /// Naming the binary is not running it, and a program of another name is
@@ -184,8 +273,8 @@ fn a_file_that_runs_something_else_is_left_alone() {
 
     assert!(
         report.is_compliant(),
-        "locating op, running op-cache, running git, and a JSON patch key run no 1Password \
-         CLI, got {report}"
+        "locating op, running op-cache, running git with an argument op, an op key in a macro \
+         body, and prose run no 1Password CLI, got {report}"
     );
     assert_eq!(report.files_examined(), 2, "both sources must be read");
 }
@@ -282,7 +371,7 @@ fn every_member_but_op_cache_is_read() {
             assert!(
                 !covered,
                 "the crate that owns the op binary must not be audited, or the guard reports \
-                 its own two calls"
+                 its own calls"
             );
         } else if !covered {
             unread.push(member);
