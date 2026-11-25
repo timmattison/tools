@@ -162,13 +162,23 @@ function readEmitted(stdout: string): Picture | undefined {
     return undefined
   }
   if (typeof document !== 'object' || document === null) return undefined
+  if (
+    !(
+      'width' in document &&
+      'height' in document &&
+      'source_width' in document &&
+      'source_height' in document &&
+      'rgba' in document
+    )
+  ) {
+    return undefined
+  }
 
-  const fields = document as Record<string, unknown>
-  const width = sideOf(fields.width, DECODE_SIDE)
-  const height = sideOf(fields.height, DECODE_SIDE)
-  const sourceWidth = sideOf(fields.source_width, Number.MAX_SAFE_INTEGER)
-  const sourceHeight = sideOf(fields.source_height, Number.MAX_SAFE_INTEGER)
-  const rgba = fields.rgba
+  const width = sideOf(document.width, DECODE_SIDE)
+  const height = sideOf(document.height, DECODE_SIDE)
+  const sourceWidth = sideOf(document.source_width, Number.MAX_SAFE_INTEGER)
+  const sourceHeight = sideOf(document.source_height, Number.MAX_SAFE_INTEGER)
+  const rgba = document.rgba
   if (
     width === undefined ||
     height === undefined ||

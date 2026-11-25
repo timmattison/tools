@@ -120,7 +120,7 @@ export const register: Register = (on, rawOptions) => {
   })
 
   on('tool.call', { tool: TOOL }, async ($, e) => {
-    const given: unknown = (e as { path?: unknown }).path
+    const given: unknown = 'path' in e ? e.path : undefined
     const path = typeof given === 'string' ? await pathOf($, given) : undefined
     if (path === undefined) return { deny: `${TOOL_NAME} needs a path: the image file to show.` }
 
