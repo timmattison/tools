@@ -497,6 +497,16 @@ describe('/ic diff draws', () => {
     expect((await ui.find({ type: 'Text', text: /before\.png vs after\.png/ }))?.text).toContain('4×4')
   })
 
+  test('the two paths in the caption when the two files have the same name', async ($, on) => {
+    stubIc(on, { 'old/shot.png vs new/shot.png': printed(FIXTURE_JSON) })
+    const args = 'diff old/shot.png new/shot.png'
+
+    const ui = await $.ui.mount(commandRow(args, await runIc($, args)))
+
+    expect((await ui.find({ type: 'Raster' }))?.props.columns).toBe(4)
+    expect((await ui.find({ type: 'Text', text: /4×4/ }))?.text).toBe('old/shot.png vs new/shot.png · 4×4')
+  })
+
   test('the differences again without a second run of ic', async ($, on) => {
     const { calls } = stubDiff(on)
     const args = `diff ${FIRST} ${SECOND}`
