@@ -6143,3 +6143,35 @@ After Enter, `chf` replaces itself with the shell that runs `crap`. The exit sta
 ```bash
 cargo install --git https://github.com/timmattison/tools chf
 ```
+
+## nle (non-linear editor)
+
+A desktop application for the terminal recordings that `beta` writes. This
+version is the scaffold: it opens a `.json` or `.json.gz` recording and shows
+its metadata. The timeline (issue #150) and the preview pane (issue #151) are
+placeholders.
+
+The application is Tauri 2. The Rust side reads and writes every recording
+file, and the frontend reads one through typed commands. The backend also has
+commands that save a recording, list the recordings in a directory, and export
+a recording through the `beta` CLI as a video or a web player. The frontend
+does not call them yet. `ts-rs` generates a TypeScript type from each Rust
+struct that the commands use, and a test fails when the committed types drift
+from the Rust structs.
+
+The export commands run `beta` with the PATH of the app, then
+`$CARGO_HOME/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.
+A macOS app that starts from Finder or the Dock gets only the system PATH.
+`beta` runs `ffmpeg` through the same PATH.
+
+`cargo install` does not build this tool, because the application carries a
+frontend that a bundler must build first. To run it from a checkout:
+
+```bash
+./src/nle/scripts/dev.ts
+```
+
+The script installs the frontend dependencies. It asks `portplz` for a free
+port. Then it starts `cargo tauri dev` with Vite on that port.
+
+To build the desktop application, run `cargo tauri build` from `src/nle`.
