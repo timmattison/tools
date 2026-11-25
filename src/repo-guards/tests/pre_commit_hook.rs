@@ -842,7 +842,8 @@ fn directory_of_links(dir: &Path, programs: &[&str]) -> PathBuf {
 /// never read as clean.
 ///
 /// `PATH` holds only the programs that the hook and the script run before the
-/// check for the CLI, so a claude CLI that is installed on this machine cannot be found.
+/// check for the CLI, so a claude CLI that is installed on this machine cannot
+/// be found.
 /// Proven able to fail by mutation: with `exit 0` in place of the `exit 1` of
 /// the check, the hook passes and this test fails.
 #[test]
@@ -908,7 +909,8 @@ fn plugin_checks_script_runs_from_another_directory() {
 /// A failed `claude plugin test` must fail the commit. The fake `claude` passes
 /// each validation and fails only the tests, so the hook reaches the last call
 /// of the block. Proven able to fail by mutation: with `|| true` after the
-/// `claude plugin test` line of `scripts/plugin-checks.sh`, the hook passes and this test fails.
+/// `claude plugin test` line of `scripts/plugin-checks.sh`, the hook passes and
+/// this test fails.
 #[test]
 fn failed_plugin_test_fails_the_commit() {
     let dir = unique_fixture_dir();

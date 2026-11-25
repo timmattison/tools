@@ -5,10 +5,10 @@
 # and the hook run the same lists of checks. Add a new check to a script, not
 # to this file.
 #
-# The Rust jobs run on Linux and on macOS. Some crates hold code that compiles only
-# on macOS (`#[cfg(target_os = "macos")]`). A Linux job does not compile, lint,
-# or test that code. GitHub does not charge for standard runners in a public
-# repository.
+# The Rust jobs run on Linux and on macOS. Some crates hold code that compiles
+# only on macOS (`#[cfg(target_os = "macos")]`). A Linux job does not compile,
+# lint, or test that code. GitHub does not charge for standard runners in a
+# public repository.
 #
 # Each third-party action is pinned to a full commit SHA, with its release tag
 # in a comment. A tag can move, but a commit SHA cannot.

@@ -1227,8 +1227,8 @@ only when a staged path is one that the script reads.
 
 To run the full list by hand, run `./scripts/rust-checks.sh`, then
 `./scripts/plugin-checks.sh`, from the repository root. Do this at the end of a
-TDD run. A `git commit --allow-empty` stages
-no file, thus the hook runs no check in this repository.
+TDD run. A `git commit --allow-empty` stages no file, thus the hook runs no
+check in this repository.
 
 ### What CI does
 
@@ -1261,8 +1261,9 @@ The plugin checks need no login. `claude plugin test` runs the tests in the
 sandbox of the engine, which has no file system, network or process, thus one
 platform is sufficient.
 
-The workflow sets `CARGO_PROFILE_DEV_DEBUG=0` for each job, because debug information is most
-of the size of the target directory, and the disk of a Linux runner is small.
+The workflow sets `CARGO_PROFILE_DEV_DEBUG=0` for each job, because debug
+information is most of the size of the target directory, and the disk of a
+Linux runner is small.
 
 ### To add a check
 
