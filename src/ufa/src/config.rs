@@ -1759,6 +1759,61 @@ mod tests {
         }
     }
 
+    /// A user must find the bad line in the file, and the report holds no text
+    /// of it, because the text can hold a key. So the report names the line
+    /// where the setting starts. The position that dotenvy gives is no help:
+    /// its unit changes with the kind of error. Comments, blank lines, and a
+    /// value over two lines come before the bad line in some cases, and a
+    /// setting that spans lines is named by its first line.
+    #[test]
+    fn a_settings_line_that_cannot_be_parsed_is_named_by_its_line_number() {
+        const LEAKED_KEY: &str = "sekrit-api-key";
+        const EARLIER_SETTING: &str = "UFA_TEST_SETTING_BEFORE_THE_BAD_LINE";
+        let cases = [
+            (
+                format!(
+                    "# ufa settings\n\n{EARLIER_SETTING}=\"first\nsecond\"\n\
+                     UNIFI_API_KEY={LEAKED_KEY} with space\nUNIFI_INSECURE=true\n"
+                ),
+                5,
+            ),
+            (
+                format!(
+                    "{EARLIER_SETTING}=one\nUNIFI_API_KEY=\"{LEAKED_KEY}\nUNIFI_INSECURE=true\n"
+                ),
+                2,
+            ),
+            (
+                format!("{EARLIER_SETTING}=one\n\n1UNIFI_API_KEY={LEAKED_KEY}\n"),
+                3,
+            ),
+            (
+                format!("{EARLIER_SETTING}=one\nUNIFI_API_KEY=\"{LEAKED_KEY}\nrest\" junk\n"),
+                2,
+            ),
+        ];
+
+        for (text, expected) in cases {
+            let temp = TempConfigDir::new("env-unparsable-line-number");
+            create_directory(&temp.dir);
+            write_file(&temp.dir.join(ENVIRONMENT_FILE), &text);
+
+            let (loaded, _) = load_and_take_back(EARLIER_SETTING, &temp.dir);
+
+            let error = loaded.expect_err("a settings line that cannot be parsed is a fault");
+            for report in [format!("{error:#}"), format!("{error:?}")] {
+                assert!(
+                    report.contains(&format!(" line {expected} ")),
+                    "the failure must name line {expected} of {text:?}, got {report}"
+                );
+                assert!(
+                    !report.contains(LEAKED_KEY),
+                    "the failure must not show the value of {text:?}, got {report}"
+                );
+            }
+        }
+    }
+
     /// The file the user put beside the configuration file is the one that is
     /// read, and its settings reach the process environment.
     #[test]
