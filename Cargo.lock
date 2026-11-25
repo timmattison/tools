@@ -6617,6 +6617,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "portcul"
+version = "0.1.0"
+dependencies = [
+ "altscreen",
+ "anyhow",
+ "buildinfo",
+ "clap",
+ "crossterm",
+ "libc",
+ "listeners",
+ "ratatui",
+ "textfit",
+ "unicode-width",
+]
+
+[[package]]
 name = "portplz"
 version = "0.1.0"
 dependencies = [
