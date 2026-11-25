@@ -115,7 +115,8 @@ impl fmt::Display for StatusError {
 impl std::error::Error for StatusError {}
 
 /// The status of the answer that `error` reports, when a UniFi API answered
-/// a request with a status that is not a success.
+/// a request with a status that is not a success. [`failed_answer`] tells the
+/// other failures apart.
 ///
 /// # Arguments
 ///
@@ -130,6 +131,77 @@ pub fn answered_status(error: &anyhow::Error) -> Option<StatusCode> {
         .chain()
         .find_map(|cause| cause.downcast_ref::<StatusError>())
         .map(|answer| answer.status)
+}
+
+/// A UniFi API answered with a success status, and ufa could not read the
+/// body.
+///
+/// The error keeps the status beside the message. A caller reads the status
+/// back through [`failed_answer`], and never from the text of the message.
+#[derive(Debug)]
+struct UnreadableAnswer {
+    /// The status the API answered with.
+    status: StatusCode,
+    /// What the user reads.
+    message: String,
+    /// Why the body could not be read, when a parser says why.
+    source: Option<serde_json::Error>,
+}
+
+impl fmt::Display for UnreadableAnswer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for UnreadableAnswer {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_ref()
+            .map(|cause| cause as &(dyn std::error::Error + 'static))
+    }
+}
+
+/// How far a failed request to a UniFi API got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailedAnswer {
+    /// No answer arrived: the connection failed, timed out, or broke during
+    /// the body.
+    Missing,
+    /// The API answered with a status that is not a success.
+    Refused(StatusCode),
+    /// The API answered with a success status, and ufa could not read the
+    /// body.
+    Unreadable(StatusCode),
+}
+
+/// How far the request that `error` reports got.
+///
+/// # Arguments
+///
+/// * `error` - An error from a request to a UniFi API.
+///
+/// # Returns
+///
+/// [`FailedAnswer::Refused`] when the API answered with a status that is not
+/// a success. [`FailedAnswer::Unreadable`] when it answered with a success
+/// status and ufa could not read the body. [`FailedAnswer::Missing`] when no
+/// answer arrived.
+pub fn failed_answer(error: &anyhow::Error) -> FailedAnswer {
+    if let Some(status) = answered_status(error) {
+        return FailedAnswer::Refused(status);
+    }
+
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<UnreadableAnswer>())
+        .map_or(FailedAnswer::Missing, |answer| {
+            if answer.status.is_success() {
+                FailedAnswer::Unreadable(answer.status)
+            } else {
+                FailedAnswer::Refused(answer.status)
+            }
+        })
 }
 
 /// Which UniFi API a response came from.
@@ -320,7 +392,7 @@ where
         return Err(response_error(api, status, &body));
     }
 
-    parse_body(api, &body)
+    parse_body(api, status, &body)
 }
 
 /// Read the whole body of `response`, up to `limit` bytes of it.
@@ -396,13 +468,18 @@ async fn read_body(api: Api, mut response: reqwest::Response, limit: u64) -> Res
 ///
 /// # Returns
 ///
-/// The error to raise.
+/// The error to raise. It carries `status`, which [`failed_answer`] reads
+/// back.
 fn body_too_large(api: Api, status: StatusCode, size: u64, limit: u64) -> anyhow::Error {
-    anyhow::anyhow!(
-        "{} answered HTTP {status} with a body of at least {size} bytes, over the {limit} bytes \
-         ufa reads. Ask for a smaller part of the collection, or check the server that answered.",
-        api.label()
-    )
+    anyhow::Error::new(UnreadableAnswer {
+        status,
+        message: format!(
+            "{} answered HTTP {status} with a body of at least {size} bytes, over the {limit} bytes \
+             ufa reads. Ask for a smaller part of the collection, or check the server that answered.",
+            api.label()
+        ),
+        source: None,
+    })
 }
 
 /// Deserialize a successful response body as `T`.
@@ -410,6 +487,7 @@ fn body_too_large(api: Api, status: StatusCode, size: u64, limit: u64) -> anyhow
 /// # Arguments
 ///
 /// * `api` - Which API answered, which decides how the error names it.
+/// * `status` - The success status it answered with.
 /// * `body` - The response body.
 ///
 /// # Returns
@@ -419,16 +497,20 @@ fn body_too_large(api: Api, status: StatusCode, size: u64, limit: u64) -> anyhow
 /// # Errors
 ///
 /// Returns an error if `body` is not the JSON `T` expects.
-fn parse_body<T>(api: Api, body: &str) -> Result<T>
+fn parse_body<T>(api: Api, status: StatusCode, body: &str) -> Result<T>
 where
     T: DeserializeOwned,
 {
-    serde_json::from_str(body).with_context(|| {
-        format!(
-            "Failed to parse {} response JSON: {}",
-            api.label(),
-            truncate_for_display(body, ERROR_BODY_DISPLAY_CHARS)
-        )
+    serde_json::from_str(body).map_err(|cause| {
+        anyhow::Error::new(UnreadableAnswer {
+            status,
+            message: format!(
+                "Failed to parse {} response JSON: {}",
+                api.label(),
+                truncate_for_display(body, ERROR_BODY_DISPLAY_CHARS)
+            ),
+            source: Some(cause),
+        })
     })
 }
 
@@ -464,7 +546,9 @@ fn response_error(api: Api, status: StatusCode, body: &str) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_server::{chunked_response, json_response, TestServer};
+    use crate::test_server::{
+        chunked_response, json_response, json_response_with_status, TestServer,
+    };
     use std::time::Instant;
 
     /// What the `http` crate's own debug output says in place of a header
@@ -591,7 +675,7 @@ mod tests {
     fn a_huge_unparseable_body_is_quoted_only_in_part() {
         let body = "x".repeat(HUGE_BODY_CHARS);
 
-        let error = parse_body::<serde_json::Value>(Api::SiteManager, &body)
+        let error = parse_body::<serde_json::Value>(Api::SiteManager, StatusCode::OK, &body)
             .expect_err("a body of x's is not JSON");
         let rendered = format!("{error:#}");
 
@@ -716,6 +800,76 @@ mod tests {
                 "the whole body must survive the read, chunked or not"
             );
         }
+    }
+
+    /// Read the answer of `server` as JSON that no test body matches, and
+    /// classify the error.
+    async fn classify(server: &TestServer) -> (anyhow::Error, FailedAnswer) {
+        let error = read_json_response_within::<Vec<String>>(
+            Api::Controller,
+            fetch(server).await,
+            TEST_LIMIT,
+        )
+        .await
+        .expect_err("the body is not a list of strings");
+        let class = failed_answer(&error);
+        (error, class)
+    }
+
+    /// A hang-up gives no answer at all.
+    #[tokio::test]
+    async fn a_hang_up_is_a_missing_answer() {
+        let server = TestServer::hanging_up().await;
+
+        let error = build_client(Api::Controller, "an-api-key", false, Timeouts::PRODUCTION)
+            .expect("a client with a well-formed key must build")
+            .get(server.origin())
+            .send()
+            .await
+            .map_err(anyhow::Error::new)
+            .expect_err("a server that hangs up gives no answer");
+
+        assert_eq!(failed_answer(&error), FailedAnswer::Missing);
+    }
+
+    /// An answer with a status that is not a success is a refusal.
+    #[tokio::test]
+    async fn a_not_found_answer_is_refused() {
+        let server = TestServer::replying(&json_response_with_status("404 Not Found", "{}")).await;
+
+        let (_, class) = classify(&server).await;
+
+        assert_eq!(class, FailedAnswer::Refused(StatusCode::NOT_FOUND));
+    }
+
+    /// A success answer with a body of another shape is unreadable, and the
+    /// text of the error is the text it had before the class existed.
+    #[tokio::test]
+    async fn a_success_answer_of_another_shape_is_unreadable() {
+        let server = TestServer::replying(&json_response(r#"{"deleted":true}"#)).await;
+
+        let (error, class) = classify(&server).await;
+
+        assert_eq!(class, FailedAnswer::Unreadable(StatusCode::OK));
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.starts_with("Failed to parse"),
+            "the text of the error must not change, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("invalid type"),
+            "the text must still carry the parser error, got: {rendered}"
+        );
+    }
+
+    /// A body over the limit comes with a status, and the class says so.
+    #[tokio::test]
+    async fn a_body_over_the_limit_is_unreadable() {
+        let server = TestServer::replying(&json_response(&over_the_limit())).await;
+
+        let (_, class) = classify(&server).await;
+
+        assert_eq!(class, FailedAnswer::Unreadable(StatusCode::OK));
     }
 
     /// A body short enough to read in full is still shown in full, with no

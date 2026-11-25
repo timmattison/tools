@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     client::UnifiClient,
-    http::answered_status,
+    http::{failed_answer, FailedAnswer},
     models::{Page, Voucher, VoucherCreateRequest, VoucherCreateResponse, VoucherDeletionResults},
     output::{
         print_output, print_vec_table, render_collection, render_page_listing, OutputFormat, Report,
@@ -353,9 +353,10 @@ enum DeletionOutcome<R> {
 
 /// What the deletion of the listed vouchers did, one voucher at a time.
 ///
-/// A failure that the controller answered with a status, such as a 404, does
-/// not stop the deletion. A failure with no HTTP status stops it, and the
-/// vouchers after that failure are not sent.
+/// The deletion stops only when no answer arrived. A failure that the
+/// controller answered with a status, such as a 404, does not stop it. A
+/// success answer that ufa cannot read does not stop it either, and the
+/// tally counts it as unconfirmed.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct DeletionTally {
     /// The sum of the counts that the controller answered with.
@@ -363,11 +364,14 @@ struct DeletionTally {
     /// How many deletions failed. The failure that stopped the deletion is
     /// one of them.
     failures: usize,
-    /// How many listed vouchers the deletion did not send, because a failure
-    /// with no HTTP status stopped it.
+    /// How many listed vouchers the deletion did not send, because a
+    /// failure with no answer stopped it.
     not_attempted: usize,
-    /// One sentence for each voucher whose deletion failed, or whose count
-    /// was not one, in list order.
+    /// How many deletions the controller answered with a success status that
+    /// ufa could not read. Each one can have deleted its voucher.
+    unconfirmed: usize,
+    /// One sentence for each voucher whose deletion failed, whose answer
+    /// ufa could not read, or whose count was not one, in list order.
     remarks: Vec<String>,
 }
 
@@ -381,21 +385,38 @@ impl DeletionTally {
     ///
     /// # Returns
     ///
-    /// The text of the error, or `None` when no deletion failed and the
-    /// deletion sent every listed voucher. A count other than one is not an
-    /// error, because the request succeeded.
+    /// The text of the error, or `None` when no deletion failed, ufa could
+    /// read each answer, and the deletion sent every listed voucher. A count
+    /// other than one is not an error, because the request succeeded.
     fn shortfall(&self, match_count: usize) -> Option<String> {
         let failures = self.failures;
-        match self.not_attempted {
-            0 if failures == 0 => None,
-            0 => Some(format!(
-                "Could not delete {failures} of {match_count} voucher(s). The notes above name each voucher."
-            )),
-            not_attempted => Some(format!(
-                "Could not delete {failures} of {match_count} voucher(s), and {}. The notes above name each voucher that failed.",
-                not_attempted_count(not_attempted)
-            )),
+        let unconfirmed = self.unconfirmed;
+        if failures == 0 && unconfirmed == 0 && self.not_attempted == 0 {
+            return None;
         }
+
+        let mut sentences = Vec::new();
+        if failures > 0 || self.not_attempted > 0 {
+            sentences.push(match self.not_attempted {
+                0 => format!("Could not delete {failures} of {match_count} voucher(s)."),
+                not_attempted => format!(
+                    "Could not delete {failures} of {match_count} voucher(s), and {}.",
+                    not_attempted_count(not_attempted)
+                ),
+            });
+        }
+        if unconfirmed > 0 {
+            sentences.push(format!(
+                "ufa could not read the answer to the deletion of {unconfirmed} of {match_count} voucher(s)."
+            ));
+        }
+        sentences.push(if self.not_attempted == 0 {
+            "The notes above name each voucher.".to_string()
+        } else {
+            "The notes above name each voucher that failed.".to_string()
+        });
+
+        Some(sentences.join(" "))
     }
 }
 
@@ -478,12 +499,14 @@ where
 /// The deletions go one at a time, in list order. The controller is often a
 /// small router, and one request at a time keeps its load low. A deletion
 /// that the controller answered with a failure status, such as a 404, does
-/// not stop the others. A failure with no HTTP status stops the deletion: a
-/// timeout, a refused or reset connection, or an answer that `ufa` cannot
-/// read. Such a failure says that the controller gave no usable answer, and
-/// each voucher after it waits the full request timeout for an answer that
-/// does not come. The vouchers after that failure are not attempted, and a
-/// note before the closing note gives their count.
+/// not stop the others. A success answer that `ufa` cannot read does not stop
+/// them either: a note says that `ufa` does not know if the voucher was
+/// deleted, and the command fails. A failure with no HTTP status stops the
+/// deletion: a timeout, a refused or reset connection, or a connection that
+/// breaks while the body arrives. Such a failure says that the controller
+/// gave no usable answer, and each voucher after it waits the full request
+/// timeout for an answer that does not come. The vouchers after that failure
+/// are not attempted, and a note before the closing note gives their count.
 ///
 /// A note names each voucher that was not deleted, with the error. The
 /// controller answers each deletion with a count, and the total is the sum
@@ -559,8 +582,10 @@ async fn delete_vouchers_filtered(
 ///
 /// The tally counts each failed deletion, and keeps a remark that names the
 /// voucher and the error. A failure that the controller answered with a
-/// status, such as a 404, does not stop the others. A failure with no HTTP
-/// status stops the loop, because each voucher after it waits the full
+/// status, such as a 404, does not stop the others. A success answer that ufa
+/// cannot read does not stop them either: the tally counts it as unconfirmed
+/// and keeps a remark that says the voucher may be deleted. A failure with no
+/// answer at all stops the loop, because each voucher after it waits the full
 /// request timeout for an answer that does not come. The tally counts the
 /// vouchers after that failure as not attempted.
 ///
@@ -592,17 +617,28 @@ async fn delete_listed_vouchers(
                     ));
                 }
             }
-            Err(error) => {
-                tally.failures += 1;
-                tally
-                    .remarks
-                    .push(format!("Could not delete voucher {name}: {error:#}"));
-
-                if answered_status(&error).is_none() {
+            Err(error) => match failed_answer(&error) {
+                FailedAnswer::Unreadable(status) => {
+                    tally.unconfirmed += 1;
+                    tally.remarks.push(format!(
+                        "The controller answered the deletion of voucher {name} with HTTP {status}, but ufa could not read the answer, so it does not know if the voucher was deleted: {error:#}"
+                    ));
+                }
+                FailedAnswer::Refused(_) => {
+                    tally.failures += 1;
+                    tally
+                        .remarks
+                        .push(format!("Could not delete voucher {name}: {error:#}"));
+                }
+                FailedAnswer::Missing => {
+                    tally.failures += 1;
+                    tally
+                        .remarks
+                        .push(format!("Could not delete voucher {name}: {error:#}"));
                     tally.not_attempted = vouchers.len() - index - 1;
                     break;
                 }
-            }
+            },
         }
     }
 
@@ -646,7 +682,11 @@ fn outcome_report(outcome: DeletionOutcome<DeletionTally>, match_count: usize) -
 /// The report of the deletion.
 fn deletion_report(tally: DeletionTally, match_count: usize) -> Report {
     let listed = u64::try_from(match_count).unwrap_or(u64::MAX);
-    let closing = if tally.failures == 0 && tally.not_attempted == 0 && tally.deleted == listed {
+    let closing = if tally.failures == 0
+        && tally.not_attempted == 0
+        && tally.unconfirmed == 0
+        && tally.deleted == listed
+    {
         format!("Deleted {} voucher(s)", tally.deleted)
     } else {
         format!("Deleted {} of {match_count} voucher(s)", tally.deleted)
@@ -1410,6 +1450,36 @@ mod deletion_tests {
         assert!(
             names_not_attempted(before_closing, 1),
             "the note before the closing note must name the count of vouchers that were not attempted, got {notes:?}"
+        );
+    }
+
+    /// The text of the error names each kind of shortfall in a fixed order,
+    /// and keeps the texts it had before an answer could be unreadable.
+    #[test]
+    fn the_shortfall_names_unreadable_answers_after_the_failures() {
+        let tally = |failures, not_attempted, unconfirmed| DeletionTally {
+            failures,
+            not_attempted,
+            unconfirmed,
+            ..DeletionTally::default()
+        };
+
+        assert_eq!(tally(0, 0, 0).shortfall(3), None);
+        assert_eq!(
+            tally(1, 0, 0).shortfall(3).as_deref(),
+            Some("Could not delete 1 of 3 voucher(s). The notes above name each voucher.")
+        );
+        assert_eq!(
+            tally(1, 1, 0).shortfall(3).as_deref(),
+            Some("Could not delete 1 of 3 voucher(s), and 1 voucher(s) were not attempted. The notes above name each voucher that failed.")
+        );
+        assert_eq!(
+            tally(0, 0, 1).shortfall(3).as_deref(),
+            Some("ufa could not read the answer to the deletion of 1 of 3 voucher(s). The notes above name each voucher.")
+        );
+        assert_eq!(
+            tally(1, 1, 1).shortfall(3).as_deref(),
+            Some("Could not delete 1 of 3 voucher(s), and 1 voucher(s) were not attempted. ufa could not read the answer to the deletion of 1 of 3 voucher(s). The notes above name each voucher that failed.")
         );
     }
 

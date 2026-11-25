@@ -366,8 +366,8 @@ Deleted 36 of 37 voucher(s)
 Error: Could not delete 1 of 37 voucher(s). The notes above name each voucher.
 ```
 
-When a deletion fails with no HTTP status — a timeout, a refused or reset connection, or an answer
-`ufa` cannot read — `ufa` stops. A controller that stops answering in the middle of a run (a reboot,
+When a deletion fails with no HTTP status — a timeout, a refused or reset connection, or a
+connection that breaks while the answer arrives — `ufa` stops. A controller that stops answering in the middle of a run (a reboot,
 a dropped VPN) would otherwise make each remaining voucher wait the full 30-second request timeout.
 `ufa` does not send the vouchers after that failure, and a note gives their count:
 
@@ -376,6 +376,17 @@ Could not delete voucher 2222222222 (ID 00000000-0000-0000-0000-000000000002): F
 The controller gave no usable answer, so the deletion stopped. 35 voucher(s) were not attempted.
 Deleted 1 of 37 voucher(s)
 Error: Could not delete 1 of 37 voucher(s), and 35 voucher(s) were not attempted. The notes above name each voucher that failed.
+```
+
+When the controller answers a deletion with a success status and `ufa` cannot read the answer, `ufa`
+continues with the other vouchers, because the controller answered at once. A note names the voucher
+and says that `ufa` does not know if the controller deleted it. The closing note does not count that
+voucher, and the command exits with an error:
+
+```
+The controller answered the deletion of voucher 2222222222 (ID 00000000-0000-0000-0000-000000000002) with HTTP 200 OK, but ufa could not read the answer, so it does not know if the voucher was deleted: Failed to parse API response JSON: ...
+Deleted 36 of 37 voucher(s)
+Error: ufa could not read the answer to the deletion of 1 of 37 voucher(s). The notes above name each voucher.
 ```
 
 Run the same `delete-filtered` command again when the controller answers. It lists the vouchers that
