@@ -24,14 +24,13 @@ flate2 = "1.0"
 buildinfo = { workspace = true }
 ts-rs = { version = "10", features = ["serde-compat"] }
 tempfile = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 # The `test` feature gives `tauri::test::mock_builder`, a mock app that the
 # tests of `beta_command` build the shell plugin command on.
 tauri = { version = "2", features = ["test"] }
 yaml-rust2 = { workspace = true }
-# The run_blocking test builds a tokio runtime of its own.
-tokio = { workspace = true }
 # The tests start node through childenv::fixture_command, because clippy.toml
 # bans std::process::Command::new.
 childenv = { workspace = true }

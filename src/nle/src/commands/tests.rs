@@ -43,6 +43,15 @@ fn canonical_out(dir: &tempfile::TempDir, name: &str) -> String {
         .to_string()
 }
 
+/// Run `future` to its end on a multi-thread tokio runtime of its own.
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future)
+}
+
 fn strings(items: &[&str]) -> Vec<String> {
     items.iter().map(ToString::to_string).collect()
 }
@@ -409,10 +418,8 @@ fn video_export_args_gives_beta_the_canonical_output_path() {
 #[test]
 fn run_blocking_runs_the_work_on_another_thread() {
     let caller = std::thread::current().id();
-    let worker = tauri::async_runtime::block_on(async {
-        run_blocking(|| Ok(std::thread::current().id())).await
-    })
-    .unwrap();
+    let worker =
+        block_on(async { run_blocking(|| Ok(std::thread::current().id())).await }).unwrap();
     assert_ne!(caller, worker);
 }
 
@@ -433,8 +440,7 @@ fn run_blocking_runs_the_work_on_the_blocking_pool_of_the_callers_runtime() {
 
 #[test]
 fn run_blocking_turns_a_panic_into_a_task_error() {
-    let result: Result<(), NleError> =
-        tauri::async_runtime::block_on(async { run_blocking(|| panic!("boom")).await });
+    let result: Result<(), NleError> = block_on(async { run_blocking(|| panic!("boom")).await });
     assert!(
         matches!(result, Err(NleError::TaskError(_))),
         "got {result:?}"
@@ -446,8 +452,7 @@ fn load_recording_command_returns_the_recording() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("a.json");
     write_fixture(&file, false);
-    let loaded =
-        tauri::async_runtime::block_on(load_recording(file.to_string_lossy().to_string())).unwrap();
+    let loaded = block_on(load_recording(file.to_string_lossy().to_string())).unwrap();
     assert_eq!(loaded.metadata.event_count, 2);
 }
 
@@ -455,7 +460,7 @@ fn load_recording_command_returns_the_recording() {
 fn save_recording_command_writes_a_file_that_loads_back() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("a.json");
-    tauri::async_runtime::block_on(save_recording(
+    block_on(save_recording(
         file.to_string_lossy().to_string(),
         Recording::test_fixture(),
         None,
@@ -468,9 +473,7 @@ fn save_recording_command_writes_a_file_that_loads_back() {
 fn list_recordings_command_lists_one_saved_file() {
     let dir = tempfile::tempdir().unwrap();
     write_fixture(&dir.path().join("a.json"), false);
-    let listed =
-        tauri::async_runtime::block_on(list_recordings(dir.path().to_string_lossy().to_string()))
-            .unwrap();
+    let listed = block_on(list_recordings(dir.path().to_string_lossy().to_string())).unwrap();
     assert_eq!(listed.len(), 1);
 }
 

@@ -317,7 +317,10 @@ fn starts_dx_serve_in_src_nle_on_the_port_of_portplz() {
 
     let calls = shims.calls();
     let nle = fs::canonicalize(crate_dir()).expect("can resolve the crate directory");
-    let expected = format!("dx serve --desktop --port {DEFAULT_PORT} @ {}", nle.display());
+    let expected = format!(
+        "dx serve --desktop --port {DEFAULT_PORT} @ {}",
+        nle.display()
+    );
     assert!(
         calls.contains(&expected),
         "the calls must hold the line '{expected}'. The calls were: {calls:?}"

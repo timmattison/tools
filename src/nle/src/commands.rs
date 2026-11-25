@@ -6,15 +6,16 @@ use tauri_plugin_shell::ShellExt;
 use crate::error::NleError;
 use crate::types::{ExportFormat, ExportOptions, LoadedRecording, Recording, RecordingMetadata};
 
-/// Run blocking file work on the blocking thread pool of the Tauri async
-/// runtime, so that the work does not hold a worker of that runtime.
+/// Run blocking file work on the blocking pool of the tokio runtime that the
+/// caller runs on (dioxus-desktop starts a multi-thread tokio runtime), so that
+/// the work does not hold a worker of that runtime.
 /// A panic in the work becomes `NleError::TaskError`.
 async fn run_blocking<T, F>(work: F) -> Result<T, NleError>
 where
     F: FnOnce() -> Result<T, NleError> + Send + 'static,
     T: Send + 'static,
 {
-    tauri::async_runtime::spawn_blocking(work)
+    tokio::task::spawn_blocking(work)
         .await
         .map_err(|e| NleError::TaskError(e.to_string()))?
 }
