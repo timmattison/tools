@@ -106,8 +106,7 @@ fn dispatch(
     }
     match name {
         "-V" | "--version" => {
-            print_out(&format!("drun {}\n", version_string!()))
-                .map_err(|error| cannot_write(&error))?;
+            print_out(&format!("drun {}\n", version_string!()))?;
             Ok(ExitCode::SUCCESS)
         }
         "run" => unless_help(environment, docker_args::parse_run(args), |parsed| {
@@ -155,7 +154,7 @@ fn dispatch(
 /// Prints the usage of `drun` on standard output. Gives the exit status of a
 /// help.
 fn print_usage(environment: &Environment) -> Result<ExitCode, Failure> {
-    print_out(&usage(environment)).map_err(|error| cannot_write(&error))?;
+    print_out(&usage(environment))?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -257,7 +256,7 @@ fn buildx(
 fn hosts(environment: &Environment) -> Result<ExitCode, Failure> {
     let config = load(environment)?;
     let survey = survey::survey(&config);
-    print_out(&survey.table()).map_err(|error| cannot_write(&error))?;
+    print_out(&survey.table())?;
     if survey.chosen().is_some() {
         Ok(ExitCode::SUCCESS)
     } else {
@@ -273,7 +272,7 @@ fn pick(environment: &Environment) -> Result<ExitCode, Failure> {
         return Err(no_host_answered(&survey));
     };
     report_skipped(&survey);
-    print_out(&format!("{host}\n")).map_err(|error| cannot_write(&error))?;
+    print_out(&format!("{host}\n"))?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -281,7 +280,7 @@ fn pick(environment: &Environment) -> Result<ExitCode, Failure> {
 fn ps(environment: &Environment) -> Result<ExitCode, Failure> {
     let config = load(environment)?;
     let inventory = fleet::inventory(&config, Scope::Managed);
-    print_out(&inventory.table()).map_err(|error| cannot_write(&error))?;
+    print_out(&inventory.table())?;
     let mut complete = true;
     for (context, failure) in inventory.failures() {
         eprintln!("drun: {context} did not answer: {failure}");
@@ -318,7 +317,7 @@ fn status(environment: &Environment, args: &[OsString]) -> Result<ExitCode, Fail
             answer.trim()
         ))
     })?;
-    print_out(&format!("{host} {state}\n")).map_err(|error| cannot_write(&error))?;
+    print_out(&format!("{host} {state}\n"))?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -346,7 +345,7 @@ fn wait(environment: &Environment, args: &[OsString]) -> Result<ExitCode, Failur
             text.trim()
         ))
     })?;
-    print_out(&format!("{code}\n")).map_err(|error| cannot_write(&error))?;
+    print_out(&format!("{code}\n"))?;
     Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
 }
 
@@ -407,14 +406,12 @@ fn check_flags() -> Result<ExitCode, Failure> {
     let mut count = 0_usize;
     for (command, differences) in &report {
         for difference in differences {
-            print_out(&format!("docker {command}: {difference}\n"))
-                .map_err(|error| cannot_write(&error))?;
+            print_out(&format!("docker {command}: {difference}\n"))?;
             count += 1;
         }
     }
     if count == 0 {
-        print_out("The flag tables of drun agree with the docker CLI on this computer.\n")
-            .map_err(|error| cannot_write(&error))?;
+        print_out("The flag tables of drun agree with the docker CLI on this computer.\n")?;
         return Ok(ExitCode::SUCCESS);
     }
     eprintln!(
@@ -545,7 +542,7 @@ fn start_detached(
         .output()
         .map_err(cannot_start)?;
     if output.status.success() {
-        if let Err(error) = print_out(&format!("{host} {name}\n")) {
+        if let Err(error) = write_stdout(&format!("{host} {name}\n")) {
             eprintln!(
                 "drun: {name} runs on {host}, but drun cannot write that on standard output: {error}"
             );
@@ -585,7 +582,7 @@ fn hand_over(mut command: Command) -> ExitCode {
 /// status 101. A reader that closed the pipe wants no more text, so a
 /// broken pipe gives `Ok`, and the command keeps its exit status. Each
 /// other failure is the error.
-fn print_out(text: &str) -> io::Result<()> {
+fn write_stdout(text: &str) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     match stdout
         .write_all(text.as_bytes())
@@ -596,9 +593,11 @@ fn print_out(text: &str) -> io::Result<()> {
     }
 }
 
-/// The failure when `drun` cannot write on standard output.
-fn cannot_write(error: &io::Error) -> Failure {
-    Failure::NotStarted(format!("cannot write on standard output: {error}"))
+/// Writes `text` on standard output through [`write_stdout`]. A failure of
+/// the write, other than a broken pipe, is a [`Failure::NotStarted`].
+fn print_out(text: &str) -> Result<(), Failure> {
+    write_stdout(text)
+        .map_err(|error| Failure::NotStarted(format!("cannot write on standard output: {error}")))
 }
 
 /// The exit status that `drun` gives for a docker that stopped with
