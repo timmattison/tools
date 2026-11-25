@@ -64,3 +64,13 @@ export function buildTauriDevArgs(port: Port): string[] {
   };
   return ["tauri", "dev", "--config", JSON.stringify(config)];
 }
+
+/**
+ * Build the `dx` arguments that start the desktop dev server on a given port.
+ *
+ * @param _port - the port that dx binds.
+ * @returns the arguments, without the `dx` command itself.
+ */
+export function buildDxServeArgs(_port: Port): string[] {
+  return [];
+}
