@@ -291,25 +291,28 @@ mod tests {
     }
 
     /// The spec sends an empty string for a time that it does not know. The
-    /// Last Seen cell then shows that no data exists.
+    /// Last Seen cell then shows that no data exists. A time that is not RFC
+    /// 3339 shows as the API sent it.
     #[test]
-    fn an_empty_last_state_change_shows_no_data() {
-        let mut host = test_host("edge");
-        host.last_connection_state_change = Some(String::new());
+    fn a_last_state_change_that_is_not_a_time_shows_no_data_or_the_text() {
+        for (changed, shown) in [("", "N/A"), ("yesterday", "yesterday")] {
+            let mut host = test_host("edge");
+            host.last_connection_state_change = Some(changed.to_string());
 
-        let rendered = render_hosts(&[host], OutputFormat::Table)
-            .expect("rendering the host listing must succeed");
+            let rendered = render_hosts(&[host], OutputFormat::Table)
+                .expect("rendering the host listing must succeed");
 
-        let row = rendered
-            .lines()
-            .find(|line| line.contains("edge"))
-            .unwrap_or_else(|| panic!("the listing must have a row, got:\n{rendered}"));
-        let last_cell = row
-            .trim_end_matches(CELL_SEPARATOR)
-            .rsplit(CELL_SEPARATOR)
-            .next()
-            .map(str::trim);
-        assert_eq!(last_cell, Some("N/A"), "got:\n{rendered}");
+            let row = rendered
+                .lines()
+                .find(|line| line.contains("edge"))
+                .unwrap_or_else(|| panic!("the listing must have a row, got:\n{rendered}"));
+            let last_cell = row
+                .trim_end_matches(CELL_SEPARATOR)
+                .rsplit(CELL_SEPARATOR)
+                .next()
+                .map(str::trim);
+            assert_eq!(last_cell, Some(shown), "got:\n{rendered}");
+        }
     }
 
     /// A console the user named at length must not push every column after it
