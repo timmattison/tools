@@ -122,6 +122,49 @@ describe("MenuBar open flow", () => {
     expect(onRecordingLoaded).not.toHaveBeenCalled();
   });
 
+  it("starts no second load while the first load runs", async () => {
+    let finishLoad: (result: LoadedRecording) => void = () => undefined;
+    mockOpen.mockResolvedValue(SELECTED_PATH);
+    mockInvoke.mockReturnValue(
+      new Promise<LoadedRecording>((resolve) => {
+        finishLoad = resolve;
+      }),
+    );
+
+    const { onRecordingLoaded } = renderMenuBar();
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledTimes(1);
+    });
+    const button = screen.getByRole("button", { name: "Open Recording" });
+    expect(button).toBeDisabled();
+
+    fireEvent.click(button);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mockOpen).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+
+    finishLoad(LOADED);
+    await waitFor(() => {
+      expect(button).toBeEnabled();
+    });
+    expect(onRecordingLoaded).toHaveBeenCalledTimes(1);
+    expect(onRecordingLoaded).toHaveBeenCalledWith(LOADED);
+  });
+
+  it("lets the user open again after a load fails", async () => {
+    mockOpen.mockResolvedValue(SELECTED_PATH);
+    mockInvoke.mockRejectedValue("File not found: /tmp/demo.json");
+
+    const { onError } = renderMenuBar();
+
+    await waitFor(() => {
+      expect(onError).toHaveBeenCalledTimes(1);
+    });
+    expect(
+      screen.getByRole("button", { name: "Open Recording" }),
+    ).toBeEnabled();
+  });
+
   it("reports a dialog that rejects, and does not invoke", async () => {
     mockOpen.mockRejectedValue(new Error("dialog broke"));
 
