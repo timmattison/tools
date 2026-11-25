@@ -1,4 +1,4 @@
-use chrono::{DateTime, FixedOffset, Offset, TimeZone};
+use chrono::{DateTime, FixedOffset, TimeZone};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
@@ -67,6 +67,11 @@ pub fn apple_timestamp_to_datetime(apple_ns: i64) -> Option<DateTime<FixedOffset
 
 /// Convert Apple Core Data timestamp (nanoseconds since 2001-01-01) to a
 /// DateTime in `zone`.
+///
+/// Each date gets the UTC offset of `zone` at that date, not the offset of
+/// now. Thus a summer date keeps its summer offset in winter, and a date near
+/// midnight keeps its own local date. An instant has one local time, but if
+/// the zone gives two, the earlier one wins, and no case panics.
 pub fn apple_timestamp_in_zone<Tz: TimeZone>(
     apple_ns: i64,
     zone: &Tz,
@@ -75,8 +80,9 @@ pub fn apple_timestamp_in_zone<Tz: TimeZone>(
         return None;
     }
     let unix_seconds = apple_ns / 1_000_000_000 + 978_307_200;
-    let now_offset = chrono::Utc::now().with_timezone(zone).offset().fix();
-    chrono::DateTime::from_timestamp(unix_seconds, 0).map(|dt| dt.with_timezone(&now_offset))
+    zone.timestamp_opt(unix_seconds, 0)
+        .earliest()
+        .map(|dt| dt.fixed_offset())
 }
 
 /// Truncate a string to max_chars characters, appending "..." if truncated.
