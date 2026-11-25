@@ -508,6 +508,26 @@ fn plugin_block_runs_claude_without_git_variables() {
     }
 }
 
+/// With no directory below `plugins/`, the loop of the plugin block must run no
+/// claude command. An unmatched glob stays the text `plugins/*/`.
+#[test]
+fn plugin_block_without_a_plugin_directory_validates_only_the_marketplace() {
+    let dir = unique_fixture_dir();
+    write_fixture_plugin(&dir);
+    fs::remove_dir_all(dir.join("plugins")).expect("remove the plugins directory");
+    git_init_and_stage(&dir, &[MARKETPLACE_FILE]);
+    let claude = install_fake_program(&dir, "claude", None);
+
+    let HookRun { passed, output } = run_hook_configured(&dir, |command| {
+        command.env("PATH", path_with_fake_first(&claude.bin_dir));
+    });
+    let calls = read_recording(&claude);
+    cleanup(&dir);
+
+    assert!(passed, "the hook must pass with a fake claude: {output}");
+    assert_eq!(calls.arguments, ["plugin validate ."], "{output}");
+}
+
 /// The start of the line that the hook prints when no claude CLI is on `PATH`.
 const NO_CLAUDE_REFUSAL: &str = "pre-commit: the claude CLI is not on PATH";
 
