@@ -252,7 +252,8 @@ pub struct Config {
     pub insecure: Option<bool>,
     /// Site Manager (cloud) API key stored directly in the config file.
     ///
-    /// Legacy fallback: `sm_op_path` is preferred.
+    /// `sm_op_path` is preferred. Setup writes this field when the user pastes
+    /// a key that is not a 1Password reference.
     pub site_manager_api_key: Option<Secret>,
     /// 1Password path to the API key (e.g. "op://Private/ufa/key - 192.168.0.1 port 443")
     pub op_path: Option<String>,
@@ -753,8 +754,8 @@ const OWNER_ONLY: u32 = 0o600;
 /// Create the configuration file, emptied and ready to be written, at a mode
 /// no other user can read.
 ///
-/// The file holds a controller key the user pasted during setup and a legacy
-/// plaintext Site Manager key, and the mode goes on the open rather than on
+/// The file holds a controller key and a Site Manager key that the user pasted
+/// during setup, and the mode goes on the open rather than on
 /// the file afterwards. A create asks the kernel for 0666 and the kernel
 /// subtracts the process umask, which lands on 0644 on a normal machine, so a
 /// file narrowed only after the write is readable by every other user of that
@@ -1036,9 +1037,9 @@ impl ResolvedKey {
 /// This is the one place that decides which source wins. A configured
 /// `op_path` always wins: if it is present but cannot be read, the error is
 /// reported rather than quietly downgrading to the plaintext copy, which would
-/// hide a broken 1Password reference. `plaintext` is the legacy in-config
-/// fallback, and `missing` is the message used when neither source is
-/// configured.
+/// hide a broken 1Password reference. `plaintext` is the fallback in the
+/// configuration file, and `missing` is the message used when neither source
+/// is configured.
 ///
 /// The reader is a parameter so a test can say what 1Password answered without
 /// a vault, a biometric prompt, or a network.
@@ -1055,7 +1056,7 @@ impl ResolvedKey {
 ///
 /// * `read_reference` - Reads the secret a 1Password reference names.
 /// * `op_path` - The configured 1Password reference, when there is one.
-/// * `plaintext` - The legacy in-config value, when there is one.
+/// * `plaintext` - The value in the configuration file, when there is one.
 /// * `missing` - Said when neither source is configured.
 ///
 /// # Returns
@@ -1347,8 +1348,8 @@ mod tests {
         );
     }
 
-    /// The config file can hold an API key in plaintext (the pasted-key path,
-    /// and the legacy `site_manager_api_key` field), so it must never be
+    /// The config file can hold an API key in plaintext (the pasted controller
+    /// key, and the pasted `site_manager_api_key` field), so it must never be
     /// readable by other users on the machine.
     #[cfg(unix)]
     #[test]
@@ -1377,7 +1378,7 @@ mod tests {
 
     /// The mode a file ends at says nothing about the mode it was created at.
     ///
-    /// The file holds a pasted controller key and a legacy plaintext Site
+    /// The file holds a pasted controller key and a pasted plaintext Site
     /// Manager key, and it is created before either is written and before the
     /// mode is narrowed. A create at the process umask lands on 0644 on a
     /// normal machine, so every save hands every other user of that machine a
@@ -1457,7 +1458,7 @@ mod tests {
 
     /// Nothing formats a `Config` with `{:?}` today, so nothing leaks today.
     /// The type is one `eprintln!` added while debugging away from printing a
-    /// pasted controller key and a legacy plaintext Site Manager key in full,
+    /// pasted controller key and a pasted plaintext Site Manager key in full,
     /// and a panic message that carries the config does the same on a machine
     /// nobody chose.
     #[test]
@@ -1536,7 +1537,7 @@ mod tests {
         );
     }
 
-    /// A configured 1Password reference wins over the legacy plaintext field.
+    /// A configured 1Password reference wins over the plaintext field.
     /// Falling back on failure would silently keep using a stale plaintext key
     /// after the user moved the credential into 1Password.
     #[test]

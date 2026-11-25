@@ -133,8 +133,9 @@ op_path = "op://Private/ufa/key - 192.168.1.1 port 443"
 # Site Manager (cloud) API key, in 1Password (recommended)
 sm_op_path = "op://Private/ufa/site manager key"
 
-# Legacy plaintext alternatives to the two references above. See the
-# security caveat below before using either.
+# Plaintext alternatives to the two references above. Setup writes one when
+# you paste a key that is not a 1Password reference. See the security caveat
+# below before using either.
 # api_key = "..."
 # site_manager_api_key = "..."
 ```
@@ -551,9 +552,9 @@ In descending order of preference:
    one path and searches no other, so no directory you happen to run from can supply settings.
    Never commit one; `.gitignore` here ignores `.env*` and makes an exception only for
    `.env.example`.
-4. **Plaintext in the config file** (`api_key` / `site_manager_api_key`) — a legacy fallback, kept
-   so existing configs keep working, and what setup falls back to when you paste a key that is not
-   in 1Password. `ufa` restricts the file to mode `0600` on Unix, but the key is still cleartext:
+4. **Plaintext in the config file** (`api_key` / `site_manager_api_key`) — the fallback that setup
+   writes when you paste a key that is not in 1Password, and that an existing config keeps working
+   with. `ufa` restricts the file to mode `0600` on Unix, but the key is still cleartext:
    readable by anything running as you, by anyone with your backups, and by anyone who reads the
    file over your shoulder. Move it to `op_path` when you can.
 5. **Command line** (`--api-key`) — avoid outside of one-off debugging. Arguments are visible in

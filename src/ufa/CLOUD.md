@@ -37,7 +37,10 @@ Store the key in 1Password and point the config file at it:
 sm_op_path = "op://Private/ufa/site manager key"
 ```
 
-### Option 4: Configuration File — plaintext (legacy)
+### Option 4: Configuration File — plaintext
+
+Setup writes this field when you paste a key that is not a 1Password reference.
+
 ```toml
 site_manager_api_key = "your-site-manager-api-key"
 ```
