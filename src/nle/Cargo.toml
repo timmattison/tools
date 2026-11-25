@@ -22,8 +22,12 @@ tokio = { workspace = true }
 # bans std::process::Command::new.
 childenv = { workspace = true }
 chrono = { workspace = true }
+# The file dialog of the Open Recording button. These are the same features that
+# dioxus-desktop uses, so the build holds one copy of rfd.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 
 [dev-dependencies]
+dioxus-ssr = "0.7"
 toml = { workspace = true }
 
 [lints]
