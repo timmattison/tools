@@ -295,7 +295,7 @@ fn each_documented_answer_reads_into_its_model() {
 #[test]
 fn a_model_that_disagrees_with_its_schema_is_refused() {
     #[derive(Debug, serde::Deserialize)]
-    #[allow(dead_code, reason = "the fields exist to be read by serde")]
+    #[expect(dead_code, reason = "the fields exist to be read by serde")]
     struct Wrong {
         note: String,
         count: String,
