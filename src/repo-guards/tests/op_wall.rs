@@ -1,7 +1,7 @@
 //! Guard tests for `repo_guards::op_wall`.
 //!
 //! Every test builds a real source tree on disk and feeds it to the real
-//! `audit_sources()` — the directory walk, the parse, and the syntax-tree walk
+//! `audit_sources()` — the directory walk, the parse, and the token walk
 //! together, rather than a string predicate in isolation.
 //!
 //! Each fixture is one *syntactic form* that a spawn of the `op` binary arrives
