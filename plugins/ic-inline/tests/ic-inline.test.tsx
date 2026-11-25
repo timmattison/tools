@@ -190,8 +190,9 @@ function cellsOf(base64: string): number[][] {
  */
 function recordShown(on: On, key: 'shown' | 'diffed' = 'shown'): string[] {
   const ids: string[] = []
-  on('state.set', { plugin: PLUGIN, key }, ($, e, next) => {
-    if (e.id !== undefined) ids.push(e.id)
+  // A matcher takes one key, not a union of keys, so the body reads the key.
+  on('state.set', { plugin: PLUGIN }, ($, e, next) => {
+    if (e.key === key && e.id !== undefined) ids.push(e.id)
     return next(e)
   })
   return ids
