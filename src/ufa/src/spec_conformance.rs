@@ -308,6 +308,11 @@ const CASES: &[Case] = &[
         reads::<models::DeviceStatistics>,
     ),
     (
+        "Latest statistics for a device",
+        Document::Full,
+        reads::<models::DeviceStatistics>,
+    ),
+    (
         "Device details",
         Document::Full,
         reads::<models::DeviceDetails>,
