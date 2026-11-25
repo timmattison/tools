@@ -109,7 +109,7 @@ Error: Image display is not supported in this terminal.
 ...
 ```
 
-The flag asks the same question the display path asks — the terminal, the multiplexer, and the remote transport — so a session that passes cannot be refused by the next `ic image.png`. The flag does not ask whether stdout is a terminal, thus a redirected stdout does not change the answer.
+The flag asks the same question the display path asks — the terminal, the multiplexer, and the remote transport — so a session that passes cannot be refused by the next `ic image.png`. A protocol that `--protocol` or `IC_PROTOCOL` forces passes that question, as it does on the display path. The flag does not ask whether stdout is a terminal, thus a redirected stdout does not change the answer.
 
 `--will-display` is an input mode of its own. Do not combine it with a file, `--stdin`, or `--monitor`.
 
@@ -123,8 +123,13 @@ The flag asks the same question the display path asks — the terminal, the mult
 - `--monitor <DIR>` - Watch a directory and show each new image and text file (see [Show new images and text files in a directory](#show-new-images-and-text-files-in-a-directory)). Give it more than one time to watch more than one directory
 - `-n, --no-newline` - Leave the cursor to the caller and write only the image (see [Where the Cursor Ends](#where-the-cursor-ends))
 - `--will-display` - Report whether this session can display an image, then exit (0 = yes, 1 = no with the reason on stderr)
+- `--protocol <auto|sixel|kitty|iterm2>` - Force an image protocol in place of the one that `ic` selects for the terminal (default: the value of `IC_PROTOCOL`, else `auto`). A forced protocol also skips the checks that refuse a session. See [Forcing a Protocol](#forcing-a-protocol). The `IC_PROTOCOL` environment variable does the same.
 - `-h, --help` - Print help information
 - `-V, --version` - Print version information
+
+## Environment Variables
+
+- `IC_PROTOCOL` - The same values as `--protocol` (`auto`, `sixel`, `kitty`, `iterm2`). The `--protocol` flag wins when both are set. Use it to force the protocol for a whole shell session, for example `export IC_PROTOCOL=sixel` in a web terminal. See [Forcing a Protocol](#forcing-a-protocol).
 
 ## Compatibility
 
@@ -133,6 +138,34 @@ This utility uses iTerm2's inline image protocol or the Kitty image protocol. It
 Kitty support is experimental.
 
 Inside Zellij, `ic` uses Sixel instead, since the Kitty protocol does not pass through Zellij's renderer.
+
+### Forcing a Protocol
+
+By default, `ic` selects the protocol from the environment and from the answer of the terminal to a query. See [muxiavelli Panels](#muxiavelli-panels) and [Multiplexers and mosh](#multiplexers-and-mosh). If that selection is wrong, force the protocol with `--protocol`, or with `IC_PROTOCOL` for a whole shell session:
+
+```bash
+ic --protocol sixel image.png
+# or, for the whole session:
+export IC_PROTOCOL=sixel    # or: iterm2, kitty
+ic image.png
+```
+
+The values are `auto`, `sixel`, `kitty`, and `iterm2`, in uppercase or lowercase. `auto` forces nothing. The flag wins over the variable. `ic` ignores a value of `IC_PROTOCOL` that it does not know, and selects the protocol as it does for `auto`.
+
+A forced protocol wins over each name of a terminal, each answer of a terminal, and each protocol that a mosh session states that it carries. The picture of a file, of stdin, of a video, and of monitor mode draws in that protocol.
+
+**A forced protocol also skips each check that refuses a session.** With a forced protocol, `ic` does not refuse a terminal that draws no image by its name, a tmux session, or a Mosh session. You vouch for the terminal. The Mosh check reads the process tree, and under a multiplexer such as Zellij that tree can name the Mosh session of a different client. That gives a false "Mosh detected" error, and a forced protocol is the way past it. `--will-display` gives the same answer: with a forced protocol, it exits with code 0.
+
+### xterm.js Front Ends (ttyd, wetty, code-server, …)
+
+Web terminals that use [xterm.js](https://xtermjs.org/), ttyd for example, draw images only when the page loads the [`@xterm/addon-image`](https://www.npmjs.com/package/@xterm/addon-image) addon. That addon draws **Sixel and the iTerm2 inline-image protocol, but not the Kitty graphics protocol**. The default builds, also the default ttyd, do not load the addon, and then no protocol draws.
+
+A [muxiavelli panel](#muxiavelli-panels) states its protocols, and `ic` reads them, so it needs no forced protocol. A different front end inherits the environment of the terminal that started it. For example, an inherited `TERM_PROGRAM=WezTerm` makes `ic` select the Kitty protocol, and the addon cannot draw it. If your front end loads the addon, force a protocol that the addon draws:
+
+```bash
+export IC_PROTOCOL=sixel    # or: iterm2
+ic image.png
+```
 
 ### Where the Cursor Ends
 
