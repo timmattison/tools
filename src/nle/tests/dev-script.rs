@@ -15,7 +15,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Directories that hold the shell and the core utilities the shims need.
@@ -200,7 +200,7 @@ fn node() -> PathBuf {
 /// The environment is cleared rather than inherited, so nothing the caller
 /// exported can redirect the script at a different toolchain.
 fn run_script(script: &Path, path_value: &str) -> Output {
-    Command::new(node())
+    childenv::fixture_command(node())
         .arg(NODE_QUIET_FLAG)
         .arg(script)
         .env_clear()
@@ -433,7 +433,7 @@ fn forwards_the_exit_status_of_tauri_dev() {
 #[test]
 fn the_pure_logic_passes_its_unit_tests() {
     let tests = crate_dir().join("scripts").join("dev-utils.test.ts");
-    let output = Command::new(node())
+    let output = childenv::fixture_command(node())
         .arg(NODE_QUIET_FLAG)
         .arg("--test")
         .arg(&tests)

@@ -69,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => std::env::current_dir()?,
             };
             let user = portplz_core::UserSalt::current().map_err(|e| e.to_string())?;
-            let d = portplz_core::derive(&derive_path, cli.no_git, &user)?;
+            let d = portplz_core::derive(&derive_path, cli.no_git, &user, None)?;
             let src = if cli.verbose {
                 Some(d.describe())
             } else {

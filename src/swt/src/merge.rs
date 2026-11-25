@@ -29,6 +29,8 @@ use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
+use shellquote::shell_quote;
+
 use crate::git::{git, git_must, worktree_dirt};
 use crate::green_check::{is_green, Outcome};
 use crate::lock::with_parent_lock;
@@ -178,12 +180,14 @@ fn merge_under_lock(root: &Path, wt: &Path, branch: &str, parent_branch: &str) -
         if !rebase.ok {
             // The conflicted rebase is deliberately left in place: it is the
             // user's to finish, and the command to resume with is the same one
-            // they just ran.
+            // they just ran. A person pastes that command into a shell, so the
+            // path after `swt merge` goes in shell quotes. The path in the
+            // prose before it stays bare.
             return Outcome::failed(format!(
                 "{}\nResolve conflicts in {}, then re-run: swt merge {}\n",
                 rebase.out,
                 wt.display(),
-                wt.display()
+                shell_quote(&wt.to_string_lossy())
             ));
         }
         let re_green = is_green(wt, Some(root));

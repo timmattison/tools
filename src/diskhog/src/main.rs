@@ -1,52 +1,13 @@
 use std::cmp::Reverse;
 use std::collections::HashMap;
-use std::io::{self, Write};
+use std::io;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use buildinfo::version_string;
 use clap::Parser;
-use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::{backend::CrosstermBackend, Terminal};
-
-/// RAII guard that restores terminal state on drop.
-///
-/// This ensures the terminal is properly restored even if a panic occurs,
-/// preventing the user from being left with a broken terminal (raw mode,
-/// alternate screen, etc.).
-struct TerminalGuard {
-    /// Whether the terminal has been initialized (raw mode enabled, alternate screen entered).
-    initialized: bool,
-}
-
-impl TerminalGuard {
-    /// Creates a new guard, marking the terminal as initialized.
-    fn new() -> Self {
-        Self { initialized: true }
-    }
-
-    /// Marks the terminal as successfully cleaned up, preventing double-cleanup on drop.
-    fn disarm(&mut self) {
-        self.initialized = false;
-    }
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        if self.initialized {
-            // Best-effort cleanup on panic - ignore errors since we're already in trouble
-            let _ = disable_raw_mode();
-            let _ = execute!(io::stdout(), LeaveAlternateScreen);
-            // Try to show the cursor
-            let _ = io::stdout().write_all(b"\x1B[?25h");
-            let _ = io::stdout().flush();
-        }
-    }
-}
 
 mod collector;
 mod model;
@@ -132,27 +93,14 @@ async fn main() -> Result<()> {
         eprintln!("Run with sudo to enable IOPS monitoring.\n");
     }
 
-    // Set up terminal
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-    terminal.clear()?;
-
-    // Create guard AFTER terminal is set up - it will restore on panic
-    let mut guard = TerminalGuard::new();
+    // Set up terminal. The session restores it on every exit, a panic included.
+    let mut session = altscreen::RatatuiSession::enter(altscreen::Options::default())?;
 
     // Run the app
-    let result = run_app(&mut terminal, args, iops_mode).await;
-
-    // Normal cleanup path - disarm the guard since we'll clean up explicitly
-    guard.disarm();
+    let result = run_app(session.terminal(), args, iops_mode).await;
 
     // Restore terminal
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    drop(session);
 
     // Now that terminal is restored, log any shutdown errors
     let shutdown_error = result?;

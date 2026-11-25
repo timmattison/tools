@@ -66,6 +66,35 @@ cat image.png | ./ic --stdin
 curl -s https://example.com/image.jpg | ./ic --stdin
 ```
 
+### Show new images and text files in a directory:
+
+```bash
+ic --monitor ~/Screenshots
+```
+
+`--monitor` watches the directory and all the directories in it. When a file is new or changes, `ic` shows it:
+
+- `ic` shows a new image below the line `Found new image: <path>`.
+- `ic` prints the content of a new text file below the line `Found new text file: <path>`.
+
+`ic` shows each file one time. It forgets the files that it showed every 60 seconds, and a file that changes after that shows again.
+
+Monitor mode ignores these paths, and it gives no output for them:
+
+- A directory.
+- A binary file that is not an image. A file is binary when its bytes are not valid UTF-8, or when they hold a control character other than tab, line feed, and carriage return, such as a NUL byte or the escape character that starts a terminal control sequence. Any program can put a file in a watched directory, and such a sequence can write the clipboard or change the terminal.
+- An empty file. A program often makes a file before it writes to it, so `ic` shows the file at a later event, when the file holds its content.
+- A path that is gone at its event, for example a temporary file that a program renamed.
+- A video.
+
+A text file that `ic` cannot read, for example because you do not have permission to read it, gives one error. The error names the path and the cause.
+
+An image that does not display gives an error that names the path and the cause. `ic` tries the image again at the next event for it, because a program can write an image in more than one step, and an image that is not complete does not decode. Thus each failed event gives its error.
+
+To watch more than one directory, give `--monitor` one time for each directory. Press `Ctrl+C` to stop monitor mode.
+
+`--monitor` is an input mode of its own. Do not combine it with a file, `--stdin`, or `--will-display`.
+
 ### Ask whether an image can be displayed here:
 
 ```bash
@@ -80,9 +109,32 @@ Error: Image display is not supported in this terminal.
 ...
 ```
 
-The flag asks the same question the display path asks — the terminal, the multiplexer, and the remote transport — so a session that passes cannot be refused by the next `ic image.png`. The flag does not ask whether stdout is a terminal, thus a redirected stdout does not change the answer.
+The flag asks the same question the display path asks — the terminal, the multiplexer, and the remote transport — so a session that passes cannot be refused by the next `ic image.png`. A protocol that `--protocol` or `IC_PROTOCOL` forces passes that question, as it does on the display path. The flag does not ask whether stdout is a terminal, thus a redirected stdout does not change the answer.
 
 `--will-display` is an input mode of its own. Do not combine it with a file, `--stdin`, or `--monitor`.
+
+### Give the pixels to a program that draws the picture itself:
+
+```bash
+ic --emit-rgba 640x480 photo.jpg
+cat photo.jpg | ic --emit-rgba 640x480 --stdin
+```
+
+Some programs own every cell of the screen, and they draw each cell again when something changes. Claude Code is one. An image that `ic` writes into such a program lands at a position that the next frame paints over. `--emit-rgba` gives the program the pixels instead, and the program draws the picture with its own elements. The [`ic-inline` Claude Code plugin](../../plugins/ic-inline/README.md) uses it.
+
+The flag decodes the picture, fits it inside the box of `WIDTHxHEIGHT` pixels, and prints one line of JSON:
+
+```json
+{"width":640,"height":427,"source_width":4032,"source_height":2688,"rgba":"..."}
+```
+
+- `width` and `height` are the size of the printed picture. It keeps the shape of the source.
+- `source_width` and `source_height` are the size of the picture in the file.
+- `rgba` holds 4 bytes for each pixel (red, green, blue, alpha), row by row from the top left, in standard base64.
+
+Each side of the box takes 1 to 4096 pixels. A picture that fits the box keeps its size, because a larger copy holds no detail that the file did not hold.
+
+`--emit-rgba` reads no terminal and writes nothing to the terminal, thus a terminal that draws no image, tmux, and mosh do not change the result. Do not combine it with a display option (`--width`, `--height`, `--scale`, `--no-newline`, `--protocol`, or a video option), with `--monitor`, or with `--will-display`. The flag ignores `IC_PROTOCOL`, because it draws no picture. It takes one file or `--stdin`. A video gives an error, because the flag prints one picture.
 
 ## Command Line Options
 
@@ -91,10 +143,17 @@ The flag asks the same question the display path asks — the terminal, the mult
 - `--height <HEIGHT>` - Height in characters (defaults to auto-sizing)
 - `--preserve-aspect` - Preserve aspect ratio when resizing (default: true)
 - `--stdin` - Read from stdin instead of file
+- `--monitor <DIR>` - Watch a directory and show each new image and text file (see [Show new images and text files in a directory](#show-new-images-and-text-files-in-a-directory)). Give it more than one time to watch more than one directory
 - `-n, --no-newline` - Leave the cursor to the caller and write only the image (see [Where the Cursor Ends](#where-the-cursor-ends))
 - `--will-display` - Report whether this session can display an image, then exit (0 = yes, 1 = no with the reason on stderr)
+- `--emit-rgba <WIDTHxHEIGHT>` - Print the picture, fitted inside the box, as one line of JSON with base64 RGBA pixels, then exit. It writes nothing to the terminal (see [Give the pixels to a program that draws the picture itself](#give-the-pixels-to-a-program-that-draws-the-picture-itself))
+- `--protocol <auto|sixel|kitty|iterm2>` - Force an image protocol in place of the one that `ic` selects for the terminal (default: the value of `IC_PROTOCOL`, else `auto`). A forced protocol also skips the checks that refuse a session. See [Forcing a Protocol](#forcing-a-protocol). The `IC_PROTOCOL` environment variable does the same.
 - `-h, --help` - Print help information
 - `-V, --version` - Print version information
+
+## Environment Variables
+
+- `IC_PROTOCOL` - The same values as `--protocol` (`auto`, `sixel`, `kitty`, `iterm2`). The `--protocol` flag wins when both are set. Use it to force the protocol for a whole shell session, for example `export IC_PROTOCOL=sixel` in a web terminal. See [Forcing a Protocol](#forcing-a-protocol).
 
 ## Compatibility
 
@@ -103,6 +162,34 @@ This utility uses iTerm2's inline image protocol or the Kitty image protocol. It
 Kitty support is experimental.
 
 Inside Zellij, `ic` uses Sixel instead, since the Kitty protocol does not pass through Zellij's renderer.
+
+### Forcing a Protocol
+
+By default, `ic` selects the protocol from the environment and from the answer of the terminal to a query. See [muxiavelli Panels](#muxiavelli-panels) and [Multiplexers and mosh](#multiplexers-and-mosh). If that selection is wrong, force the protocol with `--protocol`, or with `IC_PROTOCOL` for a whole shell session:
+
+```bash
+ic --protocol sixel image.png
+# or, for the whole session:
+export IC_PROTOCOL=sixel    # or: iterm2, kitty
+ic image.png
+```
+
+The values are `auto`, `sixel`, `kitty`, and `iterm2`, in uppercase or lowercase. `auto` forces nothing. The flag wins over the variable. `ic` ignores a value of `IC_PROTOCOL` that it does not know, and selects the protocol as it does for `auto`.
+
+A forced protocol wins over each name of a terminal, each answer of a terminal, and each protocol that a mosh session states that it carries. The picture of a file, of stdin, of a video, and of monitor mode draws in that protocol.
+
+**A forced protocol also skips each check that refuses a session.** With a forced protocol, `ic` does not refuse a terminal that draws no image by its name, a tmux session, or a Mosh session. You vouch for the terminal. The Mosh check reads the process tree, and under a multiplexer such as Zellij that tree can name the Mosh session of a different client. That gives a false "Mosh detected" error, and a forced protocol is the way past it. `--will-display` gives the same answer: with a forced protocol, it exits with code 0.
+
+### xterm.js Front Ends (ttyd, wetty, code-server, …)
+
+Web terminals that use [xterm.js](https://xtermjs.org/), ttyd for example, draw images only when the page loads the [`@xterm/addon-image`](https://www.npmjs.com/package/@xterm/addon-image) addon. That addon draws **Sixel and the iTerm2 inline-image protocol, but not the Kitty graphics protocol**. The default builds, also the default ttyd, do not load the addon, and then no protocol draws.
+
+A [muxiavelli panel](#muxiavelli-panels) states its protocols, and `ic` reads them, so it needs no forced protocol. A different front end inherits the environment of the terminal that started it. For example, an inherited `TERM_PROGRAM=WezTerm` makes `ic` select the Kitty protocol, and the addon cannot draw it. If your front end loads the addon, force a protocol that the addon draws:
+
+```bash
+export IC_PROTOCOL=sixel    # or: iterm2
+ic image.png
+```
 
 ### Where the Cursor Ends
 
@@ -196,15 +283,35 @@ mosh that draws images states what it carries there:
 |----------|-------|---------|
 | `MOSH_IMAGES` | e.g. `kitty,sixel,iterm2` | The protocols that the **transport** carries. Only a mosh that draws images writes it, so a mosh session that carries none is an upstream mosh and `ic` still refuses it. |
 | `MOSH_CLIENT_IMAGES` | e.g. `kitty,sixel` | The protocols that the **terminal of the user** draws. The wrapper writes it where that terminal answered the query, and an upstream server started by that wrapper carries this one and no `MOSH_IMAGES`. |
+| `MOSH_IMAGE_BUDGETS` | e.g. `kitty=1638400,sixel=1048576,iterm2=1048576` | The largest picture that the **transport** carries, for each protocol it carries. The names are the names of `MOSH_IMAGES` and they stand in the same order. Each cap counts the command of the protocol together with the payload, so `ic` takes room for the command off it. A protocol that the value does not name keeps a careful number that `ic` holds, so a mosh that states no cap draws as it drew before. |
 
-`ic` reads the process tree as well as these two variables, and the two answer
-different questions: the variable states what the transport carries, and the
-process tree states that the transport of this session is a mosh. The variable
-outlives the session that wrote it, because it crosses a multiplexer. A user
-exports it by hand, and a tmux server or a Zellij server that a mosh session
-started hands the whole environment of that session to every pane it opens after
-the mosh session ends. So a variable that names no mosh of this session states
-nothing, and `ic` answers for the terminal that this session really has.
+**The three numbers do not count one unit.** Each one counts the stretch of the
+escape sequence that carries one whole picture in its own protocol, and one unit
+is one byte on the wire in every case. The `kitty` number counts the characters
+of the control block and of the payload of one transmission, added together,
+over every chunk of that transmission. The `sixel` number counts the characters
+of the body of one device-control string. The `iterm2` number counts the bytes
+of the body of one operating system command, the `1337;File=` part and the
+base64 payload together. A reader that takes the three for one unit answers for
+the wrong protocol on two runs out of three, which is the defect that this
+variable closes.
+
+**Above the cap the three protocols fail two different ways.** mosh refuses a
+whole `kitty` transmission with `ENOSPC`, and the user reads an empty screen.
+mosh cuts a `sixel` picture or an `iterm2` picture at the cap and keeps the
+rest, and nothing tells `ic` that the cut happened. So `ic` measures a picture
+against the cap of the protocol it writes, before it writes one byte, and it
+draws a smaller picture in place of a picture that never arrives whole.
+
+`ic` reads the process tree as well as these three variables, and the two
+sources answer different questions: a variable states what the transport
+carries, and the process tree states that the transport of this session is a
+mosh. A variable outlives the session that wrote it, because it crosses a
+multiplexer. A user exports it by hand, and a tmux server or a Zellij server
+that a mosh session started hands the whole environment of that session to every
+pane it opens after the mosh session ends. So a variable that names no mosh of
+this session states nothing, and `ic` answers for the terminal that this session
+really has.
 
 A picture travels through the transport and then draws on the terminal of the
 user, so `ic` draws it with a protocol that both of them read and that this
@@ -238,15 +345,17 @@ A picture in a protocol that one of the two does not read lands on the screen as
 For image display, use a terminal that draws one of the protocols this Mosh carries.
 ```
 
-Both variables state what the transport carries and what the terminal of the
-user draws. Neither one states what a multiplexer in front of the picture
-draws, because the shell that starts that multiplexer hands the whole
-environment to it. So a mosh session that carries images lifts the refusal that
-names mosh and lifts no other one: a tmux that answers no query still takes the
-refusal that names tmux, inside such a mosh as everywhere else.
+The two lists state what the transport carries and what the terminal of the
+user draws. None of the three variables states what a multiplexer in front of
+the picture draws, because the shell that starts that multiplexer hands the
+whole environment to it. So a mosh session that carries images lifts the refusal
+that names mosh and lifts no other one: a tmux that answers no query still takes
+the refusal that names tmux, inside such a mosh as everywhere else.
 
 See [timmattison/mosh-rs#78](https://github.com/timmattison/mosh-rs/issues/78)
-for the two variables and where they come from.
+for the two lists and where they come from, and
+[timmattison/mosh-rs#94](https://github.com/timmattison/mosh-rs/issues/94) for
+the caps and why the three numbers do not count one unit.
 
 ### A terminal that refuses a picture
 
@@ -267,9 +376,12 @@ A smaller image can fit where this one did not: try --width, --height or --scale
 
 The exit code is 1, so a script reads the failure as well.
 
-**The last line belongs to `ENOSPC` alone.** A full image store is the one
-refusal that the size of the picture caused, so a smaller picture is the one
-repair for it. A terminal that answers another code, such as `EINVAL` for bytes
+**The last line belongs to `ENOSPC` alone.** A terminal that answers that code
+refused the picture for room, which is the one refusal that the size of the
+picture caused, so a smaller picture is the one repair for it. The message
+beside the code names the room that ran out. A mosh answers it where one
+transmission stands above the cap that `MOSH_IMAGE_BUDGETS` states for that
+protocol. A terminal that answers another code, such as `EINVAL` for bytes
 it decodes as no picture, refused the picture for a reason that a resize does
 not touch. `ic` reports the code and the message of the terminal there, and it
 advises nothing:

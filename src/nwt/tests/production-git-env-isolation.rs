@@ -1,0 +1,1170 @@
+//! Pins that the `nwt` **binary** acts on the repository it was pointed at,
+//! whatever git the environment carries.
+//!
+//! `tests/git-env-isolation.rs` covers the shared test fixture. This file
+//! covers production: it runs the built binary, so every git child `nwt` spawns
+//! is measured, and a spawn that sheds nothing is caught here and nowhere else.
+//!
+//! The gap this closes is narrow and worth stating. A spawn that sheds nothing
+//! is not written in a shape a rule can name, so `repo_guards::git_env_sweep`
+//! cannot report one and says so in its own documentation. It proves no call
+//! site passes a `GIT_`-prefixed name to `env_remove` as a literal, and a list
+//! of those names held in a constant and applied in a loop walks through even
+//! that. It does not prove a given spawn sheds anything at all. The only thing
+//! that proves *that* is a run of the binary in a hostile environment, with the
+//! damage measured on the file system afterwards. Removing the sweep from a
+//! production spawn left every test of `nwt` and of `repo-guards` green, which
+//! is how this file came to exist.
+//!
+//! Two tests are the two halves of one rule, which
+//! `childenv::command` states:
+//! shed the whole `GIT_` prefix, and keep the six names of
+//! `childenv::USER_INTENT_GIT_ENVIRONMENT`. A test of the shedding half alone
+//! passes for a tool that sheds everything, and such a tool breaks the user who
+//! states `GIT_SSH_COMMAND` or `GIT_CONFIG_GLOBAL` on purpose. So the keep half
+//! is pinned beside it.
+//!
+//! `--sparse-exclude` adds git children of its own: `git ls-tree` for the
+//! check, `git sparse-checkout set`, `git read-tree -mu HEAD`,
+//! `git rev-parse HEAD`, and `git hook run`. With `-c`, the run also asks git
+//! which remote branch its checkout DWIM takes. Two more tests hold the
+//! shedding half for each of those children: one with `-b` and a
+//! `post-checkout` hook, and one with `-c` for a branch that only a remote
+//! holds.
+//!
+//! `-b <name>` looks for a remote branch of that name before it makes
+//! anything, and that lookup adds four git children. `git show-ref` asks
+//! whether a local branch `<name>` exists. `git config --get-regexp` reads the
+//! fetch refspec of each remote, and `git rev-parse --verify` asks whether each
+//! mapped ref exists. When more than one remote holds the name,
+//! `git config --get checkout.defaultRemote` names the remote to take. Each of
+//! the four only reads, so it leaves the decoy byte-identical also when it
+//! reads the decoy. So two more tests measure the answer of the lookup, and not
+//! only the damage. Their decoy holds a local branch `<name>`, no remote, and no
+//! `checkout.defaultRemote`.
+//! A child that reads that decoy gets another answer than the clone gives, and
+//! the run then starts the branch at `HEAD` or refuses. One test has one
+//! remote, and it holds `git show-ref`, `git config --get-regexp` and
+//! `git rev-parse`. The other has two remotes and a `checkout.defaultRemote`,
+//! and it holds all four.
+//!
+//! The copy of untracked `.env` files adds one git child, `git ls-files`,
+//! which names the files that the source tracks. Every other test here turns
+//! the copy off with `--no-copy-env`, so one more test leaves it on. That child
+//! only reads too, so the test measures the answer and not only the damage.
+//! Its decoy tracks `.env.local`, and its source holds an untracked
+//! `.env.local`. A `git ls-files` that reads the decoy names that file as
+//! tracked. The run then does not copy the file of the source, and the new
+//! worktree does not hold it.
+//!
+//! The hook bootstrap adds one child that is not git: the install of the
+//! package manager. The install runs the `prepare` script, and that script
+//! runs git. Every other test here turns the bootstrap off with
+//! `--no-bootstrap-hooks`, so one more test leaves it on. A fake `pnpm`, first
+//! on the `PATH` of the child, stands in for the install. It writes one key
+//! with `git config`, and it records the `GIT_SSH_COMMAND` that it gets. So that
+//! test holds both halves of the rule for the install child. The write must
+//! land in the source and not in the decoy, and the `GIT_SSH_COMMAND` that the
+//! user states must reach the install.
+//!
+//! The check for an ungated worktree adds one git child. `missing_hooks_path`
+//! runs `git config --type=path core.hooksPath` in the new worktree. That child
+//! only reads too, so one more test measures the answer and not only the
+//! damage. Its source sets `core.hooksPath` to a directory that is not there,
+//! and its decoy sets no `core.hooksPath`. A child that reads the decoy finds
+//! no key. The run then does not warn that the new worktree runs no hooks.
+//!
+//! The link of each child repository (issue #537) adds two git children, both
+//! in the new worktree. `git check-ignore -q` asks whether git ignores the path
+//! of a child. For a child that git does not ignore,
+//! `git check-ignore -v -z --stdin` asks which rule matches the directory form
+//! of that path. Both only read, so one more test measures the answer and not
+//! only the damage. Its source is a container whose committed `.gitignore`
+//! ignores the child `vial`, and its decoy has no such rule. A child that reads
+//! the decoy gets the answer that git does not ignore the path, or an error.
+//! The run then makes no link, and it warns.
+//!
+//! Every variable below is set on the **child command**, and nothing here
+//! touches the environment of this process. Cargo runs the tests of one binary
+//! on parallel threads, so a process-wide variable would aim the git children
+//! of a sibling thread at this file's decoy. That is why this file may hold
+//! more than one test where `tests/git-env-isolation.rs`, which does mutate the
+//! process environment, holds exactly one.
+
+mod support;
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+use support::{
+    clone_of, container, difference, git_stdout, init_repo, nanos, nwt_command, repo_with_files,
+    run_git, snapshot, write_file, Snapshot,
+};
+
+/// The suffix `nwt` adds to the repository name to name the directory that
+/// holds every new worktree.
+const WORKTREES_SUFFIX: &str = "-worktrees";
+
+/// The prefix of the line that names a worktree in `git worktree list
+/// --porcelain`.
+const WORKTREE_LINE_PREFIX: &str = "worktree ";
+
+/// The configuration key `nwt` reads to decide whether a new worktree runs
+/// hooks at all.
+const HOOKS_PATH_KEY: &str = "core.hooksPath";
+
+/// The name of the directory the stated global configuration points
+/// [`HOOKS_PATH_KEY`] at.
+///
+/// Nothing ever creates it. A hooks directory that is not there is what makes
+/// `nwt` warn, so the absence is the whole fixture.
+const ABSENT_HOOKS_DIR: &str = "no-such-hooks-directory";
+
+/// The file name of the stated global configuration.
+const GLOBAL_CONFIG_FILE: &str = "stated-global-config";
+
+/// Resolve a path before an assertion reads it.
+///
+/// Git prints resolved paths, and every fixture lives under a temporary
+/// directory that macOS reaches through a symbolic link: `/var` resolves to
+/// `/private/var`.
+///
+/// # Panics
+///
+/// Panics if the path cannot be resolved.
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|e| panic!("canonicalize {}: {e}", path.display()))
+}
+
+/// A branch name that no concurrent copy of this suite can also hold.
+///
+/// Two `cargo test` runs share one machine, and a branch name is a shared
+/// resource. The process id and a nanosecond clock reading keep them apart.
+fn unique_branch(label: &str) -> String {
+    format!("{label}-{}-{}", std::process::id(), nanos())
+}
+
+/// The directory `nwt` puts every new worktree in: the name of `main_worktree`
+/// plus [`WORKTREES_SUFFIX`], beside `main_worktree`.
+///
+/// # Panics
+///
+/// Panics if `main_worktree` has no name, or a name that is not UTF-8.
+fn expected_worktrees_dir(main_worktree: &Path) -> PathBuf {
+    let main_worktree = canonical(main_worktree);
+    let name = main_worktree
+        .file_name()
+        .expect("the main worktree has a name")
+        .to_str()
+        .expect("utf-8 main worktree name");
+
+    main_worktree.with_file_name(format!("{name}{WORKTREES_SUFFIX}"))
+}
+
+/// The `nwt` command for `source`, with five git variables that aim git at the
+/// repository at `decoy`.
+///
+/// The five variables cover four distinct ways a leaked variable redirects
+/// git: the repository it finds (`GIT_DIR`, `GIT_WORK_TREE`), the index it
+/// stages into (`GIT_INDEX_FILE`), the store it writes objects to
+/// (`GIT_OBJECT_DIRECTORY`), and the configuration it reads
+/// (`GIT_CONFIG_PARAMETERS`). The last one carries no path at all, so no list
+/// of location names ever catches it; only a sweep of the whole prefix does.
+///
+/// Every variable goes on the child, never on this process: a sibling test
+/// thread spawns git of its own, and a process-wide variable would aim it at
+/// the decoy.
+fn hostile_nwt_command(source: &Path, decoy: &Path) -> Command {
+    let decoy_git_dir = decoy.join(".git");
+    let mut command = nwt_command(source);
+    command
+        .env("GIT_DIR", &decoy_git_dir)
+        .env("GIT_WORK_TREE", decoy)
+        .env("GIT_INDEX_FILE", decoy_git_dir.join("index"))
+        .env("GIT_OBJECT_DIRECTORY", decoy_git_dir.join("objects"))
+        .env("GIT_CONFIG_PARAMETERS", "'nwt.envleakprobe=leaked'");
+    command
+}
+
+/// Every worktree the repository at `main_worktree` holds, resolved.
+fn listed_worktrees(main_worktree: &Path) -> Vec<PathBuf> {
+    git_stdout(main_worktree, &["worktree", "list", "--porcelain"])
+        .lines()
+        .filter_map(|line| line.strip_prefix(WORKTREE_LINE_PREFIX))
+        .map(|path| canonical(Path::new(path)))
+        .collect()
+}
+
+/// The commit `HEAD` of the repository at `repo` names.
+fn head_commit(repo: &Path) -> String {
+    git_stdout(repo, &["rev-parse", "HEAD"]).trim().to_string()
+}
+
+/// The binary must act on the repository it stands in, and leave the repository
+/// the environment names exactly as it found it.
+///
+/// Git obeys the environment before it obeys the directory a command was
+/// pointed at, and it exports its own variables into every hook it runs. So a
+/// `nwt` run started from a pre-commit hook, from `git bisect run`, or from
+/// `rebase --exec` carries `GIT_DIR`, `GIT_INDEX_FILE` and
+/// `GIT_CONFIG_PARAMETERS` that name the repository being committed to. A git
+/// child of `nwt` that keeps them acts on that repository instead.
+///
+/// The five variables of [`hostile_nwt_command`] are aimed at a decoy
+/// repository. [`DecoyWatch::assert_untouched`] holds the three assertions of
+/// this rule, so the sparse runs below hold the same three.
+#[test]
+fn the_binary_leaves_the_repository_the_environment_names_untouched() {
+    // Two repositories under two temporary directories. The source is the one
+    // `nwt` runs in and the only one it may touch. The decoy stands in for the
+    // repository a launching hook exported, which on a real machine is the
+    // developer's own.
+    let (_source_temp, source) = init_repo();
+    let (_decoy_temp, decoy) = init_repo();
+
+    let watch = DecoyWatch::before_the_run(&source, &decoy);
+    let branch = unique_branch("hostile-env");
+
+    let output = hostile_nwt_command(&source, &decoy)
+        .args(["-b", &branch, "--no-copy-env", "--no-bootstrap-hooks"])
+        .output()
+        .expect("run the nwt binary");
+
+    watch.assert_untouched(&output, Some(&branch));
+}
+
+/// What a decoy test reads before its run, so that it can say after the run
+/// what the run changed.
+struct DecoyWatch {
+    /// The repository `nwt` runs in, and the only one it may touch.
+    source: PathBuf,
+    /// The repository the hostile environment names.
+    decoy: PathBuf,
+    /// Every path of the decoy, with its bytes, before the run.
+    before: Snapshot,
+    /// The commit `HEAD` of the source named before the run.
+    source_head_before: String,
+}
+
+impl DecoyWatch {
+    /// Read the decoy and the `HEAD` of the source, before the run.
+    fn before_the_run(source: &Path, decoy: &Path) -> Self {
+        Self {
+            source: source.to_path_buf(),
+            decoy: decoy.to_path_buf(),
+            before: snapshot(decoy),
+            source_head_before: head_commit(source),
+        }
+    }
+
+    /// Demand that the run that wrote `output` left the decoy byte-identical,
+    /// and made a worktree of the source in the worktrees directory of the
+    /// source. Hand back the worktree path that the run printed.
+    ///
+    /// `worktree_name` is the name of the worktree directory when the run
+    /// states it with `-b`. A run without `-b` gets a random name, and the
+    /// assertion then reads only the directory that holds the worktree.
+    ///
+    /// Three assertions, and each one has a job. The decoy must be
+    /// byte-identical, which is the damage. The worktree must land beside the
+    /// source repository *and* be a worktree of it, which stops the first
+    /// assertion passing merely because the run made nothing anywhere. The
+    /// history of the source repository must be unchanged, because a leaked
+    /// `GIT_INDEX_FILE` writes into a repository as readily as it reads from
+    /// one.
+    fn assert_untouched(&self, output: &Output, worktree_name: Option<&str>) -> PathBuf {
+        let source = &self.source;
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let after = snapshot(&self.decoy);
+
+        // The damage. `git worktree add` is the spawn that writes, and it writes a
+        // branch ref, a reflog and a whole `worktrees/<name>` directory into
+        // whichever repository it reached.
+        let changed = difference(&self.before, &after);
+        assert!(
+            changed.is_empty(),
+            "nwt acted on the repository the environment named instead of the one it \
+             stands in. A run started from a git hook therefore writes into the \
+             repository being committed to. {} path(s) of the decoy at {} changed:\n{}\n\
+             nwt stdout:\n{stdout}\nnwt stderr:\n{stderr}",
+            changed.len(),
+            self.decoy.display(),
+            changed.join("\n"),
+        );
+
+        // The control against a vacuous pass. A run that made nothing anywhere
+        // leaves the decoy byte-identical too.
+        assert!(
+            output.status.success(),
+            "nwt failed in {}:\n{stdout}\n{stderr}",
+            source.display(),
+        );
+
+        let printed = PathBuf::from(stdout.trim());
+        assert!(
+            printed.is_dir(),
+            "nwt printed {}, which is no directory:\n{stdout}\n{stderr}",
+            printed.display(),
+        );
+        let resolved = canonical(&printed);
+        let worktrees_dir = expected_worktrees_dir(source);
+        match worktree_name {
+            Some(name) => assert_eq!(
+                resolved,
+                worktrees_dir.join(name),
+                "nwt must put the worktree beside {}",
+                source.display(),
+            ),
+            None => assert_eq!(
+                resolved.parent(),
+                Some(worktrees_dir.as_path()),
+                "nwt must put the worktree beside {}",
+                source.display(),
+            ),
+        }
+
+        // Where the directory sits is only half of "landed beside the source
+        // repository". The other half is whose worktree it is: a `git worktree add`
+        // that reached the decoy still makes the directory in the right place, and
+        // checks the decoy out into it.
+        assert!(
+            listed_worktrees(source).contains(&canonical(&printed)),
+            "git must count {} as a worktree of the repository at {}, and it counts \
+             these instead: {:?}",
+            printed.display(),
+            source.display(),
+            listed_worktrees(source),
+        );
+
+        assert_eq!(
+            head_commit(source),
+            self.source_head_before,
+            "nwt must add no commit to the repository it runs in",
+        );
+
+        printed
+    }
+}
+
+/// The tracked directory the sparse decoy runs exclude.
+const HEAVY_DIR: &str = "heavy";
+
+/// A tracked file under [`HEAVY_DIR`].
+const HEAVY_FILE: &str = "heavy/big.txt";
+
+/// A tracked file that a sparse decoy run keeps.
+const KEPT_FILE: &str = "light.txt";
+
+/// The branch that the clone of the `-c` decoy run holds only as
+/// `origin/<branch>`.
+const REMOTE_ONLY_BRANCH: &str = "foo";
+
+/// Demand that the worktree at `worktree` holds [`KEPT_FILE`] and no
+/// [`HEAVY_DIR`].
+fn assert_heavy_dir_excluded(worktree: &Path) {
+    assert!(
+        !worktree.join(HEAVY_DIR).exists(),
+        "--sparse-exclude {HEAVY_DIR} must keep {HEAVY_DIR}/ out of {}",
+        worktree.display(),
+    );
+    assert!(
+        worktree.join(KEPT_FILE).is_file(),
+        "the sparse worktree at {} must hold {KEPT_FILE}",
+        worktree.display(),
+    );
+}
+
+/// A sparse `-b` run leaves the repository the environment names untouched,
+/// through each git child that the sparse path adds.
+///
+/// Those children are `git ls-tree` for the check, `git sparse-checkout set`,
+/// `git read-tree -mu HEAD`, `git rev-parse HEAD`, and `git hook run`. The
+/// source repository has a `post-checkout` hook, so the run starts
+/// `git hook run` and the hook runs. The hook writes its arguments to a log
+/// outside both repositories. A `git hook run` that reads the configuration of
+/// the decoy finds no hook, and the log stays empty. So the log proves that the
+/// hook step ran in the source.
+#[cfg(unix)]
+#[test]
+fn a_sparse_run_leaves_the_repository_the_environment_names_untouched() {
+    let (_source_temp, source) = repo_with_files(&[HEAVY_FILE, KEPT_FILE]);
+    let (_decoy_temp, decoy) = init_repo();
+
+    let hooks = tempfile::TempDir::new().expect("create the hooks directory");
+    let logs = tempfile::TempDir::new().expect("create the hook log directory");
+    let log = logs.path().join("post-checkout.log");
+    let log_text = log.to_str().expect("utf-8 log path");
+    assert!(
+        !log_text.contains('\''),
+        "the log path goes into single quotes, so it cannot hold one: {log_text}"
+    );
+    support::install_post_checkout_hook(
+        &source,
+        hooks.path(),
+        &format!("printf '%s\\n' \"$*\" >> '{log_text}'\n"),
+    );
+
+    let watch = DecoyWatch::before_the_run(&source, &decoy);
+    let branch = unique_branch("hostile-sparse");
+
+    let output = hostile_nwt_command(&source, &decoy)
+        .args(["-b", &branch, "--sparse-exclude", HEAVY_DIR])
+        .args(["--no-copy-env", "--no-bootstrap-hooks"])
+        .output()
+        .expect("run the nwt binary");
+
+    let worktree = watch.assert_untouched(&output, Some(&branch));
+    assert_heavy_dir_excluded(&worktree);
+
+    let head = head_commit(&source);
+    let recorded = fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(
+        recorded.lines().collect::<Vec<&str>>(),
+        vec![format!("{} {head} 1", "0".repeat(head.len()))],
+        "the post-checkout hook of the source must run one time, with the arguments of a \
+         plain add"
+    );
+}
+
+/// A sparse `-c <branch>` run for a branch that only a remote holds leaves the
+/// repository the environment names untouched.
+///
+/// The run asks git which remote branch the checkout DWIM takes, checks the
+/// directory at that branch, and lets `git worktree add` make the local branch.
+/// Each of those git children must read the clone, not the decoy. A run
+/// without `-b` gives the worktree a random name, so the test does not state
+/// the name of the worktree directory.
+#[test]
+fn a_sparse_checkout_of_a_remote_branch_leaves_the_repository_the_environment_names_untouched() {
+    let (_upstream_temp, upstream) = repo_with_files(&[HEAVY_FILE, KEPT_FILE]);
+    assert!(
+        run_git(&upstream, &["branch", REMOTE_ONLY_BRANCH]),
+        "git branch failed"
+    );
+    let (_clone_temp, clone) = clone_of(&upstream);
+    let local = format!("refs/heads/{REMOTE_ONLY_BRANCH}");
+    assert!(
+        !run_git(&clone, &["show-ref", "--verify", "--quiet", &local]),
+        "the fixture clone must not hold {local}"
+    );
+    let (_decoy_temp, decoy) = init_repo();
+
+    let watch = DecoyWatch::before_the_run(&clone, &decoy);
+
+    let output = hostile_nwt_command(&clone, &decoy)
+        .args(["-c", REMOTE_ONLY_BRANCH, "--sparse-exclude", HEAVY_DIR])
+        .args(["--no-copy-env", "--no-bootstrap-hooks"])
+        .output()
+        .expect("run the nwt binary");
+
+    let worktree = watch.assert_untouched(&output, None);
+    assert_heavy_dir_excluded(&worktree);
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).trim_end(),
+        REMOTE_ONLY_BRANCH,
+        "the worktree must check out the local {REMOTE_ONLY_BRANCH} that git's DWIM makes"
+    );
+}
+
+/// The first remote of a clone, as `git clone` names it.
+const ORIGIN: &str = "origin";
+
+/// The second remote of the clone that two remotes give the branch.
+const SECOND_REMOTE: &str = "upstream";
+
+/// The file that the checked-out branch of the second remote adds, so that its
+/// branch commit is not a commit of the first remote.
+const SECOND_REMOTE_FILE: &str = "upstream.txt";
+
+/// A clone that holds a branch only as a remote-tracking branch, with the
+/// temporary directories that hold it and its remotes.
+struct RemoteBranchClone {
+    /// The temporary directory that holds only the clone and, after the run,
+    /// its worktrees directory.
+    _temp: tempfile::TempDir,
+    /// The clone, where `nwt` runs.
+    clone: PathBuf,
+    /// The temporary directories of the remotes, kept alive for the life of
+    /// the clone.
+    _remotes: Vec<tempfile::TempDir>,
+}
+
+/// The commit that `rev` names in `repo`.
+fn commit_of(repo: &Path, rev: &str) -> String {
+    git_stdout(repo, &["rev-parse", "--verify", rev])
+        .trim_end()
+        .to_owned()
+}
+
+/// Make a clone whose [`ORIGIN`] holds `branch`, which the clone holds only as
+/// `origin/<branch>`.
+///
+/// `branch` stays at the first commit of the source, and the checked-out
+/// branch of the source gets a second commit. So `HEAD` of the clone is not the
+/// commit of `origin/<branch>`, and a run that starts the branch at `HEAD`
+/// gives another commit than a run that tracks the remote branch.
+fn clone_whose_origin_holds(branch: &str) -> RemoteBranchClone {
+    let (origin_temp, origin) = repo_with_files(&[KEPT_FILE]);
+    assert!(
+        run_git(&origin, &["branch", branch, "HEAD~1"]),
+        "git branch failed"
+    );
+    let (temp, clone) = clone_of(&origin);
+
+    let local = format!("refs/heads/{branch}");
+    assert!(
+        !run_git(&clone, &["show-ref", "--verify", "--quiet", &local]),
+        "the fixture clone must not hold {local}"
+    );
+    assert_ne!(
+        head_commit(&clone),
+        commit_of(&clone, &format!("refs/remotes/{ORIGIN}/{branch}")),
+        "{ORIGIN}/{branch} must not be at HEAD of the clone"
+    );
+
+    RemoteBranchClone {
+        _temp: temp,
+        clone,
+        _remotes: vec![origin_temp],
+    }
+}
+
+/// Make a clone whose [`ORIGIN`] and [`SECOND_REMOTE`] both hold `branch`, each
+/// at its own commit, and whose own configuration names [`SECOND_REMOTE`] as
+/// `checkout.defaultRemote`.
+///
+/// With two candidates, the lookup reads `checkout.defaultRemote`. The clone
+/// states it, so a lookup that reads the clone takes `upstream/<branch>`.
+fn clone_whose_two_remotes_hold(branch: &str) -> RemoteBranchClone {
+    let mut fixture = clone_whose_origin_holds(branch);
+
+    let (second_temp, second) = repo_with_files(&[SECOND_REMOTE_FILE]);
+    assert!(run_git(&second, &["branch", branch]), "git branch failed");
+    let second = second.to_str().expect("utf-8 remote path");
+    assert!(
+        run_git(&fixture.clone, &["remote", "add", SECOND_REMOTE, second]),
+        "git remote add failed"
+    );
+    assert!(
+        run_git(&fixture.clone, &["fetch", "--quiet", SECOND_REMOTE]),
+        "git fetch failed"
+    );
+    assert!(
+        run_git(
+            &fixture.clone,
+            &["config", "checkout.defaultRemote", SECOND_REMOTE]
+        ),
+        "git config failed"
+    );
+    fixture._remotes.push(second_temp);
+
+    let second_commit = commit_of(
+        &fixture.clone,
+        &format!("refs/remotes/{SECOND_REMOTE}/{branch}"),
+    );
+    assert_ne!(
+        second_commit,
+        head_commit(&fixture.clone),
+        "{SECOND_REMOTE}/{branch} must not be at HEAD of the clone"
+    );
+    assert_ne!(
+        second_commit,
+        commit_of(&fixture.clone, &format!("refs/remotes/{ORIGIN}/{branch}")),
+        "{SECOND_REMOTE}/{branch} must not be at the commit of {ORIGIN}/{branch}"
+    );
+
+    fixture
+}
+
+/// Make the decoy repository, and give it a local branch `branch`.
+///
+/// The lookup of `-b <branch>` reads four answers, and the decoy gives a
+/// different answer to each of them than the clone gives. It holds `branch`
+/// as a local branch, so a `git show-ref` that reads it finds the branch and
+/// skips the lookup. It holds no remote, so a `git config --get-regexp` that
+/// reads it finds no fetch refspec, and a `git rev-parse` that reads it finds
+/// no mapped ref. It states no `checkout.defaultRemote`, so a
+/// `git config --get` that reads it picks no remote.
+fn decoy_that_holds_the_branch(branch: &str) -> (tempfile::TempDir, PathBuf) {
+    let (temp, decoy) = init_repo();
+    assert!(run_git(&decoy, &["branch", branch]), "git branch failed");
+    (temp, decoy)
+}
+
+/// Run `nwt -b <branch>` in `clone` with the hostile environment aimed at
+/// `decoy`, and hand back what it wrote.
+///
+/// The run reads an empty global and system configuration, so a
+/// `checkout.defaultRemote` of the host cannot give the lookup an answer that
+/// the clone did not state.
+fn hostile_tracking_run(clone: &Path, decoy: &Path, branch: &str) -> Output {
+    let empty_config = tempfile::NamedTempFile::new().expect("create an empty git configuration");
+    hostile_nwt_command(clone, decoy)
+        .args(["-b", branch, "--no-copy-env", "--no-bootstrap-hooks"])
+        .env("GIT_CONFIG_GLOBAL", empty_config.path())
+        .env("GIT_CONFIG_SYSTEM", empty_config.path())
+        .output()
+        .expect("run the nwt binary")
+}
+
+/// Demand that the worktree at `worktree` starts at `<remote>/<branch>` of
+/// `clone`, and that the local `branch` of `clone` tracks that branch.
+fn assert_tracks(clone: &Path, worktree: &Path, branch: &str, remote: &str) {
+    assert_eq!(
+        head_commit(worktree),
+        commit_of(clone, &format!("refs/remotes/{remote}/{branch}")),
+        "the worktree must start at {remote}/{branch} of the clone. A lookup child that reads \
+         the decoy gets another answer there, and the run starts the branch at HEAD"
+    );
+    assert_eq!(
+        git_stdout(
+            clone,
+            &[
+                "rev-parse",
+                "--abbrev-ref",
+                &format!("{branch}@{{upstream}}")
+            ]
+        )
+        .trim_end(),
+        format!("{remote}/{branch}"),
+        "the new branch must track {remote}/{branch}"
+    );
+}
+
+/// A `-b <branch>` run that tracks a remote branch reads the lookup from the
+/// repository it stands in, and leaves the repository the environment names
+/// untouched.
+///
+/// Before it makes anything, the run asks `git show-ref` whether a local
+/// `<branch>` exists, and asks `git config --get-regexp` and `git rev-parse`
+/// which remote holds `<branch>`. Each only reads, so the decoy stays
+/// byte-identical also when a child reads it. The decoy of
+/// [`decoy_that_holds_the_branch`] thus gives each child another answer, and
+/// a child that reads it starts the branch at `HEAD` of the clone. `HEAD` is
+/// not the commit of `origin/<branch>`, so [`assert_tracks`] fails then.
+#[test]
+fn a_branch_that_tracks_a_remote_branch_reads_the_repository_nwt_stands_in() {
+    let branch = unique_branch("hostile-track");
+    let fixture = clone_whose_origin_holds(&branch);
+    let (_decoy_temp, decoy) = decoy_that_holds_the_branch(&branch);
+
+    let watch = DecoyWatch::before_the_run(&fixture.clone, &decoy);
+    let output = hostile_tracking_run(&fixture.clone, &decoy, &branch);
+
+    let worktree = watch.assert_untouched(&output, Some(&branch));
+    assert_tracks(&fixture.clone, &worktree, &branch, ORIGIN);
+}
+
+/// When two remotes hold `<branch>`, the run reads `checkout.defaultRemote`
+/// from the repository it stands in, and leaves the repository the environment
+/// names untouched.
+///
+/// The clone names [`SECOND_REMOTE`], and the decoy names no remote. A
+/// `git config --get checkout.defaultRemote` that reads the decoy picks none
+/// of the two candidates, and the run refuses with exit 16. The test also
+/// holds `git show-ref`, `git config --get-regexp` and `git rev-parse`, as the
+/// test above does.
+#[test]
+fn checkout_default_remote_is_read_from_the_repository_nwt_stands_in() {
+    let branch = unique_branch("hostile-default-remote");
+    let fixture = clone_whose_two_remotes_hold(&branch);
+    let (_decoy_temp, decoy) = decoy_that_holds_the_branch(&branch);
+
+    let watch = DecoyWatch::before_the_run(&fixture.clone, &decoy);
+    let output = hostile_tracking_run(&fixture.clone, &decoy, &branch);
+
+    let worktree = watch.assert_untouched(&output, Some(&branch));
+    assert_tracks(&fixture.clone, &worktree, &branch, SECOND_REMOTE);
+}
+
+/// The `.env` file that the source of the copy run holds untracked, and that
+/// the decoy of that run tracks.
+///
+/// The name matches `.env.*`, so the copy takes the file when the source does
+/// not track it.
+const UNTRACKED_ENV_FILE: &str = ".env.local";
+
+/// Whether the repository at `repo` tracks `file`.
+fn tracks(repo: &Path, file: &str) -> bool {
+    run_git(repo, &["ls-files", "--error-unmatch", "--", file])
+}
+
+/// The `.env` copy reads the tracked files of the repository `nwt` stands in,
+/// and leaves the repository the environment names untouched.
+///
+/// The copy takes each `.env` file that the source does not track, and one
+/// `git ls-files` names the tracked files. `get_tracked_files` joins each name
+/// that it prints onto the source. That child only reads, so the decoy stays
+/// byte-identical also when the child reads it, and the test must measure the
+/// answer. The decoy tracks [`UNTRACKED_ENV_FILE`], and the source holds a file
+/// of that name that it does not track. A `git ls-files` that reads the decoy
+/// names the file as tracked, so the run does not copy it, and the new worktree
+/// does not hold it.
+///
+/// The file of the source holds bytes that no other run holds, and the file of
+/// the decoy holds other bytes. So the last assertion also fails when a run
+/// copies some other file to that name.
+///
+/// Every other test in this file turns the copy off with `--no-copy-env`. This
+/// test leaves it on, which is the default: the private home of
+/// [`nwt_command`] holds no `.nwt.toml` that turns it off.
+#[test]
+fn the_env_copy_reads_the_tracked_files_of_the_repository_nwt_stands_in() {
+    let (_source_temp, source) = init_repo();
+    let source_contents = format!("SOURCE_ONLY={}-{}\n", std::process::id(), nanos());
+    write_file(&source, UNTRACKED_ENV_FILE, &source_contents);
+    assert!(
+        !tracks(&source, UNTRACKED_ENV_FILE),
+        "the fixture source must not track {UNTRACKED_ENV_FILE}"
+    );
+
+    // The decoy commits the file. Without that, a `git ls-files` that reads the
+    // decoy names nothing the copy looks for, and the test passes for a spawn
+    // that sheds nothing.
+    let (_decoy_temp, decoy) = repo_with_files(&[UNTRACKED_ENV_FILE]);
+    assert!(
+        tracks(&decoy, UNTRACKED_ENV_FILE),
+        "the fixture decoy must track {UNTRACKED_ENV_FILE}"
+    );
+
+    let watch = DecoyWatch::before_the_run(&source, &decoy);
+    let branch = unique_branch("hostile-copy-env");
+
+    let output = hostile_nwt_command(&source, &decoy)
+        .args(["-b", &branch, "--no-bootstrap-hooks"])
+        .output()
+        .expect("run the nwt binary");
+
+    let worktree = watch.assert_untouched(&output, Some(&branch));
+    let copied = fs::read_to_string(worktree.join(UNTRACKED_ENV_FILE)).ok();
+    assert_eq!(
+        copied.as_deref(),
+        Some(source_contents.as_str()),
+        "the new worktree at {} must hold the untracked {UNTRACKED_ENV_FILE} of {}, with the \
+         same bytes. A leaked environment made `git ls-files` read the index of the other \
+         repository, so nwt took that file for a tracked file and did not copy it. The user \
+         expects every untracked .env file in the new worktree.\nnwt stderr:\n{}",
+        worktree.display(),
+        source.display(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// The manifest file that `nwt` reads to decide whether a new worktree needs
+/// the hook bootstrap.
+#[cfg(unix)]
+const PACKAGE_JSON: &str = "package.json";
+
+/// A manifest that makes `nwt` run `pnpm install` in the new worktree.
+///
+/// A non-empty `scripts.prepare` asks for the install. The corepack
+/// `packageManager` field names pnpm, and that field comes before each other
+/// rule of `detect_hook_bootstrap`.
+#[cfg(unix)]
+const BOOTSTRAP_MANIFEST: &str =
+    r#"{"scripts": {"prepare": "husky"}, "packageManager": "pnpm@9.0.0"}"#;
+
+/// The program that `nwt` runs for [`BOOTSTRAP_MANIFEST`], and so the name of
+/// the fake.
+#[cfg(unix)]
+const FAKE_PACKAGE_MANAGER: &str = "pnpm";
+
+/// The configuration key that the fake install writes with `git config`.
+#[cfg(unix)]
+const BOOTSTRAP_PROBE_KEY: &str = "nwt.bootstrapprobe";
+
+/// The value that the fake install writes to [`BOOTSTRAP_PROBE_KEY`].
+#[cfg(unix)]
+const BOOTSTRAP_PROBE_VALUE: &str = "written";
+
+/// What the fake install records when no `GIT_SSH_COMMAND` reaches it.
+#[cfg(unix)]
+const NO_SSH_COMMAND: &str = "unset";
+
+/// Write an executable fake [`FAKE_PACKAGE_MANAGER`] into `bin_dir`.
+///
+/// The fake does two things, one for each half of the rule. First, it writes
+/// the `GIT_SSH_COMMAND` that it gets, or [`NO_SSH_COMMAND`], to `record`.
+/// Then it runs `git config` [`BOOTSTRAP_PROBE_KEY`] [`BOOTSTRAP_PROBE_VALUE`]
+/// in its working directory, which is the new worktree, and exits with the
+/// status of that git. A real `prepare` script runs git in the same way, for
+/// example `git config core.hooksPath .husky/_`.
+///
+/// # Panics
+///
+/// Panics when `record` is not UTF-8, or when the fake cannot be written or
+/// made executable.
+#[cfg(unix)]
+fn install_fake_package_manager(bin_dir: &Path, record: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let record = shellquote::shell_quote(record.to_str().expect("utf-8 record path"));
+    let script = format!(
+        "#!/bin/sh\n\
+         printf '%s' \"${{GIT_SSH_COMMAND-{NO_SSH_COMMAND}}}\" > {record}\n\
+         exec git config {BOOTSTRAP_PROBE_KEY} {BOOTSTRAP_PROBE_VALUE}\n"
+    );
+    let fake = bin_dir.join(FAKE_PACKAGE_MANAGER);
+    fs::write(&fake, script).unwrap_or_else(|e| panic!("write {}: {e}", fake.display()));
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755))
+        .unwrap_or_else(|e| panic!("make {} executable: {e}", fake.display()));
+}
+
+/// The hook bootstrap install acts on the repository `nwt` stands in, and gets
+/// the `GIT_SSH_COMMAND` that the user states.
+///
+/// A new worktree whose `package.json` holds a `prepare` script gets a
+/// package-manager install, and the lifecycle scripts of that install run git.
+/// The install is a child of `nwt` like each git child, so it gets the same
+/// rule: shed the whole `GIT_` prefix, and keep the six names of
+/// `childenv::USER_INTENT_GIT_ENVIRONMENT`. This test holds both halves for
+/// that child.
+///
+/// The fake of [`install_fake_package_manager`] runs `git config` in the new
+/// worktree. A linked worktree shares the configuration of its repository, so
+/// with the shed that write lands in the configuration of the source. With a
+/// leak, `GIT_DIR` sends the write into the configuration of the decoy, and
+/// [`DecoyWatch::assert_untouched`] finds the change.
+///
+/// Every other test in this file turns the bootstrap off with
+/// `--no-bootstrap-hooks`. This test leaves it on, which is the default: the
+/// private home of [`nwt_command`] holds no `.nwt.toml` that turns it off.
+#[cfg(unix)]
+#[test]
+fn the_hook_bootstrap_install_acts_on_the_repository_nwt_stands_in() {
+    // The source commits the manifest, so the new worktree checks it out.
+    let (_source_temp, source) = init_repo();
+    write_file(&source, PACKAGE_JSON, BOOTSTRAP_MANIFEST);
+    assert!(
+        run_git(&source, &["add", "--", PACKAGE_JSON]),
+        "git add failed"
+    );
+    assert!(
+        run_git(
+            &source,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add the manifest"
+            ]
+        ),
+        "git commit failed"
+    );
+    let (_decoy_temp, decoy) = init_repo();
+
+    let fake_bin = tempfile::TempDir::new().expect("create the fake bin directory");
+    let records = tempfile::TempDir::new().expect("create the record directory");
+    let record = records.path().join("git-ssh-command.txt");
+    install_fake_package_manager(fake_bin.path(), &record);
+
+    // A value that no other run holds, so the record cannot match by chance.
+    let ssh_command = format!(
+        "ssh -o SetEnv=NWT_BOOTSTRAP_SENTINEL={}-{}",
+        std::process::id(),
+        nanos()
+    );
+
+    let watch = DecoyWatch::before_the_run(&source, &decoy);
+    let branch = unique_branch("hostile-bootstrap");
+
+    let output = hostile_nwt_command(&source, &decoy)
+        .args(["-b", &branch, "--no-copy-env"])
+        .env("PATH", support::path_with_first(fake_bin.path()))
+        .env("GIT_SSH_COMMAND", &ssh_command)
+        .output()
+        .expect("run the nwt binary");
+
+    watch.assert_untouched(&output, Some(&branch));
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    // The control against a vacuous pass. An install that never ran, or a git
+    // in it that failed, also leaves the decoy byte-identical. The key in the
+    // configuration of the source proves that the install ran and that its git
+    // reached the source.
+    let probe = git_stdout(
+        &source,
+        &[
+            "config",
+            "--local",
+            "--get",
+            "--default",
+            "",
+            BOOTSTRAP_PROBE_KEY,
+        ],
+    );
+    assert_eq!(
+        probe.trim_end(),
+        BOOTSTRAP_PROBE_VALUE,
+        "the fake {FAKE_PACKAGE_MANAGER} install must run in the new worktree and write \
+         {BOOTSTRAP_PROBE_KEY} into the configuration of {}. The key is not there, so the \
+         install did not run, or its git did not reach the source.\nnwt stderr:\n{stderr}",
+        source.display(),
+    );
+
+    // The keep half. A sweep that sheds everything passes each assertion above,
+    // and drops this variable. A user who holds a non-default SSH key then gets
+    // an authentication failure from each install that fetches a private git
+    // dependency.
+    let recorded = fs::read_to_string(&record).ok();
+    assert_eq!(
+        recorded.as_deref(),
+        Some(ssh_command.as_str()),
+        "the install must get the GIT_SSH_COMMAND that the user states. It got another value \
+         (\"{NO_SSH_COMMAND}\" means none). Without it, an install that fetches a private git \
+         dependency cannot authenticate the way the shell of the user does.\nnwt \
+         stderr:\n{stderr}",
+    );
+}
+
+/// The value of [`HOOKS_PATH_KEY`] that the configuration of the repository at
+/// `repo` sets, or an empty string when it sets none.
+///
+/// It reads the file of the repository only. That file is the step that a
+/// child of `nwt` reads from the source with the shed, and from the decoy with
+/// a leak.
+fn local_hooks_path(repo: &Path) -> String {
+    git_stdout(
+        repo,
+        &[
+            "config",
+            "--local",
+            "--get",
+            "--default",
+            "",
+            HOOKS_PATH_KEY,
+        ],
+    )
+    .trim_end()
+    .to_owned()
+}
+
+/// The check for an ungated worktree reads [`HOOKS_PATH_KEY`] from the
+/// repository `nwt` stands in, and the run leaves the repository the
+/// environment names untouched.
+///
+/// `missing_hooks_path` runs `git config --type=path core.hooksPath` in the new
+/// worktree. A linked worktree shares the configuration of its repository, so
+/// with the shed that child reads the key of the source. The child only reads,
+/// so the decoy stays byte-identical also when the child reads it, and the test
+/// must measure the answer. The source sets the key to a directory that is not
+/// there, and the decoy sets no key. A child that reads the decoy finds no key,
+/// so the run does not warn, and stderr does not name the path of the source.
+///
+/// This is the shed half of the check. The test below holds the keep half.
+#[test]
+fn the_hooks_check_reads_the_repository_nwt_stands_in() {
+    let (source_temp, source) = init_repo();
+    let (_decoy_temp, decoy) = init_repo();
+
+    // A hooks directory that is not there, in the configuration of the source
+    // only. Git runs no hook at all in that case, and says nothing about it,
+    // which is what `nwt` warns for.
+    let absent_hooks_dir = source_temp.path().join(ABSENT_HOOKS_DIR);
+    let stated = absent_hooks_dir
+        .to_str()
+        .expect("utf-8 absent hooks directory");
+    assert!(
+        run_git(&source, &["config", HOOKS_PATH_KEY, stated]),
+        "git config {HOOKS_PATH_KEY} failed"
+    );
+
+    // The preconditions. A source that sets no key gives no warning, and a
+    // decoy that sets the same key gives the same warning. In both cases the
+    // test passes for a spawn that sheds nothing.
+    assert!(
+        !absent_hooks_dir.exists(),
+        "the fixture hooks directory {stated} must not exist"
+    );
+    assert_eq!(
+        local_hooks_path(&source),
+        stated,
+        "the fixture source must set {HOOKS_PATH_KEY} to {stated}"
+    );
+    assert_eq!(
+        local_hooks_path(&decoy),
+        "",
+        "the fixture decoy must set no {HOOKS_PATH_KEY}"
+    );
+
+    let watch = DecoyWatch::before_the_run(&source, &decoy);
+    let branch = unique_branch("hostile-hooks-check");
+
+    let output = hostile_nwt_command(&source, &decoy)
+        .args(["-b", &branch, "--no-copy-env", "--no-bootstrap-hooks"])
+        .output()
+        .expect("run the nwt binary");
+
+    watch.assert_untouched(&output, Some(&branch));
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    // Git prints a path value back as the configuration file spells it, so the
+    // warning names the path as written rather than as resolved.
+    assert!(
+        stderr.contains(stated),
+        "nwt must read {HOOKS_PATH_KEY} from the repository it stands in, and warn that \
+         {stated} is not there. A leaked environment made `git config` read the configuration \
+         of the other repository, which sets no {HOOKS_PATH_KEY}. A run that a hook starts \
+         thus reads the hooks setting of the repository of that hook, and reports an ungated \
+         worktree as gated.\nnwt stdout:\n{stdout}\nnwt stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(HOOKS_PATH_KEY),
+        "the warning must name the key the user has to fix, and it reads:\n{stderr}"
+    );
+}
+
+/// A `GIT_CONFIG_GLOBAL` the user stated must still reach the check that reads
+/// [`HOOKS_PATH_KEY`].
+///
+/// This is the keep half of the rule, and it is the half a blanket sweep
+/// breaks. `missing_hooks_path` predicts what git reads at commit time, and it
+/// reads four steps of precedence: the worktree, the repository, the global
+/// file and the system file. `GIT_CONFIG_GLOBAL` names the global file. Shed
+/// it, and the prediction is made against a file the user replaced, so a
+/// worktree whose hooks directory is missing is reported as gated and every
+/// commit in it is silently ungated.
+///
+/// The keep is safe where a strip-list is not, because the two go stale in
+/// opposite directions. A name git invents next year is shed by default, and
+/// the cost of that is one setting a user states again. A strip-list that goes
+/// stale inherits the new name, and the cost of that is a repository written
+/// into by mistake.
+///
+/// This test is the opposite of
+/// [`the_hooks_check_reads_the_repository_nwt_stands_in`]. That test sets a
+/// hostile environment and demands that the check sheds it. This test sets
+/// nothing hostile and demands that the check keeps one variable that the
+/// user states.
+#[test]
+fn a_stated_global_configuration_still_reaches_the_hooks_check() {
+    let (temp, repo) = init_repo();
+
+    // A hooks directory that is not there. Git runs no hook at all in that
+    // case, and says nothing about it, which is what `nwt` warns for.
+    let absent_hooks_dir = temp.path().join(ABSENT_HOOKS_DIR);
+    let global_config = temp.path().join(GLOBAL_CONFIG_FILE);
+    fs::write(
+        &global_config,
+        format!(
+            "[core]\n\thooksPath = {}\n",
+            absent_hooks_dir
+                .to_str()
+                .expect("utf-8 absent hooks directory")
+        ),
+    )
+    .unwrap_or_else(|e| panic!("write {}: {e}", global_config.display()));
+
+    let branch = unique_branch("stated-global");
+    let output = nwt_command(&repo)
+        .args(["-b", &branch, "--no-copy-env", "--no-bootstrap-hooks"])
+        .env("GIT_CONFIG_GLOBAL", &global_config)
+        .output()
+        .expect("run the nwt binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    assert!(
+        output.status.success(),
+        "nwt -b {branch} failed in {}:\n{stdout}\n{stderr}",
+        repo.display(),
+    );
+
+    // Git prints a path value back as the configuration file spells it, so the
+    // warning names the path as written rather than as resolved.
+    let stated = absent_hooks_dir
+        .to_str()
+        .expect("utf-8 absent hooks directory");
+    assert!(
+        stderr.contains(stated),
+        "nwt must read {HOOKS_PATH_KEY} through the global configuration file the \
+         user stated in GIT_CONFIG_GLOBAL, and warn that {stated} is not there. A \
+         sweep that sheds that variable reads some other file, finds no key, and \
+         reports an ungated worktree as gated.\nnwt stdout:\n{stdout}\nnwt \
+         stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(HOOKS_PATH_KEY),
+        "the warning must name the key the user has to fix, and it reads:\n{stderr}"
+    );
+}
+
+/// The child repository of the source of the link test.
+const LINKED_CHILD: &str = "vial";
+
+/// The `.gitignore` rule of the source that ignores [`LINKED_CHILD`] at the
+/// root. It also ignores a symlink of that name.
+const IGNORE_LINKED_CHILD: &str = "/vial";
+
+/// The start of each warning that `nwt` prints.
+const WARNING_PREFIX: &str = "Warning:";
+
+/// The link of a child repository reads the ignore rules of the repository
+/// `nwt` stands in, and the run leaves the repository the environment names
+/// untouched.
+///
+/// `link_children` runs `git check-ignore -q` in the new worktree. For a child
+/// that git does not ignore, it then runs `git check-ignore -v -z --stdin`.
+/// Both children only read, so the decoy stays byte-identical also when a
+/// child reads it, and the test must measure the answer. The committed
+/// `.gitignore` of the source ignores [`LINKED_CHILD`], and the decoy has no
+/// such rule. A `git check-ignore` that reads the decoy says that git does not
+/// ignore the path, or it fails, because the new worktree is outside the work
+/// tree of the decoy. Either way the run makes no link, and it warns.
+#[test]
+fn the_child_link_reads_the_ignore_rules_of_the_repository_nwt_stands_in() {
+    let (_source_temp, source) = container(&[IGNORE_LINKED_CHILD], &[LINKED_CHILD]);
+    let (_decoy_temp, decoy) = init_repo();
+
+    // The preconditions. A decoy that also ignores the child gives the same
+    // link, and the test then passes for a spawn that sheds nothing.
+    assert!(
+        run_git(&source, &["check-ignore", "-q", "--", LINKED_CHILD]),
+        "the fixture source must ignore {LINKED_CHILD}"
+    );
+    assert!(
+        !run_git(&decoy, &["check-ignore", "-q", "--", LINKED_CHILD]),
+        "the fixture decoy must not ignore {LINKED_CHILD}"
+    );
+
+    let watch = DecoyWatch::before_the_run(&source, &decoy);
+    let branch = unique_branch("hostile-link-children");
+
+    let output = hostile_nwt_command(&source, &decoy)
+        .args(["-b", &branch, "--no-copy-env", "--no-bootstrap-hooks"])
+        .output()
+        .expect("run the nwt binary");
+
+    let worktree = watch.assert_untouched(&output, Some(&branch));
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let link = worktree.join(LINKED_CHILD);
+    let target = fs::read_link(&link).unwrap_or_else(|e| {
+        panic!(
+            "{} must be a symlink to the child of {}, and it is not ({e}). A leaked environment \
+             made `git check-ignore` read the ignore rules of the other repository, so nwt made \
+             no link.\nnwt stderr:\n{stderr}",
+            link.display(),
+            source.display(),
+        )
+    });
+    assert_eq!(
+        canonical(&target),
+        canonical(&source.join(LINKED_CHILD)),
+        "{} must point at the child of the source",
+        link.display()
+    );
+    let warnings: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.starts_with(WARNING_PREFIX))
+        .collect();
+    assert!(
+        warnings.is_empty(),
+        "the run must print no warning, and it printed:\n{}",
+        warnings.join("\n")
+    );
+}

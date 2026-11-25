@@ -9,6 +9,7 @@ name = "spv"
 path = "src/main.rs"
 
 [dependencies]
+childenv.workspace = true
 sysinfo.workspace = true
 clap.workspace = true
 anyhow.workspace = true
@@ -19,6 +20,8 @@ which.workspace = true
 libc.workspace = true
 regex.workspace = true
 unicode-width.workspace = true
+chrono.workspace = true
+proctree.workspace = true
 
 [lints]
 workspace = true

@@ -30,6 +30,9 @@ tempfile = { workspace = true }
 # tests of `beta_command` build the shell plugin command on.
 tauri = { version = "2", features = ["test"] }
 yaml-rust2 = { workspace = true }
+# The tests start node through childenv::fixture_command, because clippy.toml
+# bans std::process::Command::new.
+childenv = { workspace = true }
 
 [lints]
 workspace = true

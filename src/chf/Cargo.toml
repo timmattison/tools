@@ -1,0 +1,38 @@
+[package]
+name = "chf"
+version = "0.1.0"
+edition.workspace = true
+description = "Find a Claude Code session by a word and resume it with ch or che"
+license = "MIT"
+
+[[bin]]
+name = "chf"
+path = "src/main.rs"
+
+[dependencies]
+altscreen = { workspace = true, features = ["ratatui"] }
+blake3.workspace = true
+buildinfo.workspace = true
+childenv.workspace = true
+chrono.workspace = true
+clap.workspace = true
+claude-transcript.workspace = true
+crossterm.workspace = true
+dirs.workspace = true
+rayon.workspace = true
+ratatui.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+shellquote.workspace = true
+textfit.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+gitscratch = { workspace = true, features = ["testing"] }
+portable-pty.workspace = true
+tempfile.workspace = true
+wait-timeout.workspace = true
+
+[lints]
+workspace = true

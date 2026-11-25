@@ -379,7 +379,7 @@ fn value_name<T: ValueEnum>(value: &T) -> String {
 // The help names the `?` key and no other key of the live table, because
 // `live::KEYS` is the one list that says what a key does and a doc comment of
 // `clap` is a string literal that reads that list at no time. A help page that
-// named all five keys would be a second list of them, and the second list
+// named every key would be a second list of them, and the second list
 // drifts. One key name opens the first list from inside the table, and
 // `live::tests::the_long_help_names_the_key_that_lists_the_keys` holds that
 // name and the list together.
@@ -396,7 +396,7 @@ fn value_name<T: ValueEnum>(value: &T) -> String {
     args_conflicts_with_subcommands = true,
     subcommand_negates_reqs = true,
 )]
-#[allow(
+#[expect(
     clippy::struct_excessive_bools,
     reason = "each flag of the design is one switch of the command line"
 )]
@@ -2324,14 +2324,19 @@ fn screen_of(
     config: &ResolvedConfig,
     start: &RunRecord,
     path: &Path,
-) -> Result<(Box<dyn live::Screen>, Option<live::TerminalGuard>), TraceFailure> {
+) -> Result<(Box<dyn live::Screen>, Option<altscreen::Session>), TraceFailure> {
     if display_of(config.headless, std::io::stdout().is_terminal()) == Display::Headless {
         return Ok((
             Box::new(live::Headless::new(std::io::stdout(), live::SystemClock)),
             None,
         ));
     }
-    let guard = live::TerminalGuard::enter().map_err(|error| {
+    // The session takes raw mode, so a key of the reader reaches the run, and
+    // the alternate screen, so the lines that stood in the terminal come back at
+    // the end. It hides the cursor, which a table that redraws ten times each
+    // second drags across itself. Its panic hook puts the terminal back before
+    // the message of a panic prints, so the reader reads that message.
+    let guard = altscreen::Session::enter(altscreen::Options::default()).map_err(|error| {
         TraceFailure::new(
             &format!("the live table did not take the terminal: {error}"),
             EXIT_FAILURE,
