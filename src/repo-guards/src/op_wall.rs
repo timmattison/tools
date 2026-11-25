@@ -99,6 +99,8 @@
 //! - an entrance in a variable: `let spawn = childenv::command; spawn("op")`.
 //! - a qualified path: `<Command>::new("op")`, whose tokens put `>` between
 //!   the type and `::new`.
+//! - a type alias of an entrance: `type Sh = std::process::Command;
+//!   Sh::new("op")`. The walk learns a new name only from `X as Y`.
 //!
 //! To resolve a binding needs the name resolution of a compiler, which this
 //! guard is not. A literal at the call, behind a plain path, is the shape of
@@ -135,6 +137,9 @@ const OP_CACHE: &str = "src/op-cache";
 
 /// The name of the 1Password CLI, as a program name.
 const OP: &str = "op";
+
+/// The name of the 1Password CLI, as the file of a Windows install.
+const OP_EXE: &str = "op.exe";
 
 /// The functions that start a child process: the two constructors of
 /// `childenv`.
@@ -669,10 +674,12 @@ fn op_program(arguments: TokenStream) -> Option<String> {
 /// Whether a program name names the 1Password CLI.
 ///
 /// The last segment of a path decides, so `/opt/homebrew/bin/op` runs the same
-/// binary as `op`, and `op-cache` runs neither.
+/// binary as `op`, and `op-cache` runs neither. The segment is `op` or
+/// `op.exe`, in any case. The default file system of macOS and the file system
+/// of Windows ignore case, so `OP` finds the same binary.
 fn names_the_op_binary(program: &str) -> bool {
     program
         .rsplit(PATH_SEPARATORS)
         .next()
-        .is_some_and(|name| name == OP)
+        .is_some_and(|name| name.eq_ignore_ascii_case(OP) || name.eq_ignore_ascii_case(OP_EXE))
 }
