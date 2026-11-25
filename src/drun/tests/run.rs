@@ -290,12 +290,17 @@ fn the_bind_mount_warning_names_its_condition_and_points_at_drun_cp() {
 #[test]
 fn a_named_volume_or_a_path_that_is_not_on_this_computer_prints_no_warning() {
     let fixture = two_hosts();
+    // The fixture owns its directory, and no test makes `absent` in it, so
+    // neither path exists on any computer that runs the test.
+    let absent = format!("{}/absent:/x", fixture.path().display());
     let run = fixture.run(&[
         "run",
         "-v",
         "data:/data",
         "-v",
-        "/srv/only-on-the-host:/x",
+        &absent,
+        "-v",
+        "./absent:/y",
         "alpine",
     ]);
     assert_eq!(run.code, Some(0), "{}", run.stderr);
