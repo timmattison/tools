@@ -141,6 +141,24 @@ mod tests {
     /// One site, as the API writes it.
     const SITE: &str = r#"{"id":"00000000-0000-0000-0000-000000000004","internalReference":"default","name":"Home"}"#;
 
+    /// A page of a collection that holds nothing.
+    const EMPTY_PAGE: &str = r#"{"offset":0,"limit":25,"count":0,"totalCount":0,"data":[]}"#;
+
+    /// The first page of 25 sites, as `ufa sites` asks for it.
+    const FIRST_PAGE: Selection = Selection::Page {
+        limit: 25,
+        offset: 0,
+    };
+
+    /// Read `EMPTY_PAGE` through `list_collection` with the filter and format given.
+    async fn list_empty_page(filter: Option<&str>, format: OutputFormat) -> Report {
+        let server = TestServer::replying(&json_response(EMPTY_PAGE)).await;
+        let client = UnifiClient::new(server.origin(), API_KEY, false).expect("a loopback URL");
+        list_collection::<Site, SiteRow>(&client, "sites", filter, "sites", FIRST_PAGE, format)
+            .await
+            .expect("the controller answered the page")
+    }
+
     /// `--all` reads each page, and the report holds each item and no note.
     #[tokio::test]
     async fn all_reads_every_page_and_adds_no_note() {
@@ -211,5 +229,68 @@ mod tests {
                 offset: 10
             }
         );
+    }
+
+    /// An empty page draws no table of headings, and a note says why.
+    #[tokio::test]
+    async fn an_empty_page_draws_no_table_and_says_nothing_was_found() {
+        let report = list_empty_page(None, OutputFormat::Table).await;
+
+        assert_eq!(
+            report.document(),
+            None,
+            "a table of headings alone tells a person nothing"
+        );
+        assert_eq!(report.notes(), ["No sites found."]);
+    }
+
+    /// An empty JSON page keeps its envelope, so a program still reads `totalCount`.
+    #[tokio::test]
+    async fn an_empty_json_page_keeps_its_envelope_and_says_nothing_was_found() {
+        let report = list_empty_page(None, OutputFormat::Json).await;
+
+        let document: serde_json::Value =
+            serde_json::from_str(report.document().expect("a JSON page has a document"))
+                .expect("the document is JSON");
+        assert_eq!(document["totalCount"], 0);
+        assert_eq!(document["data"], serde_json::json!([]));
+        assert_eq!(report.notes(), ["No sites found."]);
+    }
+
+    /// An empty page of a filtered request says that nothing matches the filter.
+    #[tokio::test]
+    async fn an_empty_filtered_page_says_nothing_matches_the_filter() {
+        let report = list_empty_page(Some("name.eq('none')"), OutputFormat::Table).await;
+
+        assert_eq!(report.document(), None);
+        assert_eq!(report.notes(), ["No sites match the filter."]);
+    }
+
+    /// A page past the end of a collection that holds items is not an empty collection.
+    #[tokio::test]
+    async fn a_page_past_the_end_is_not_an_empty_collection() {
+        let past = r#"{"offset":500,"limit":25,"count":0,"totalCount":100,"data":[]}"#;
+        let server = TestServer::replying(&json_response(past)).await;
+        let client = UnifiClient::new(server.origin(), API_KEY, false).expect("a loopback URL");
+
+        let report = list_collection::<Site, SiteRow>(
+            &client,
+            "sites",
+            None,
+            "sites",
+            Selection::Page {
+                limit: 25,
+                offset: 500,
+            },
+            OutputFormat::Table,
+        )
+        .await
+        .expect("the controller answered the page");
+
+        assert!(report.document().is_some(), "the page keeps its table");
+        assert_eq!(report.notes().len(), 1, "got: {:?}", report.notes());
+        let note = &report.notes()[0];
+        assert!(!note.contains("No sites found."), "got: {note}");
+        assert!(note.contains("100"), "got: {note}");
     }
 }
