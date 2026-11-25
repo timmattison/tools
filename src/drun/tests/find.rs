@@ -391,7 +391,13 @@ fn commands_that_take_one_name_refuse_other_arguments() {
     ] {
         let run = fixture.run(args);
         assert_eq!(run.code, Some(2), "{args:?}: {}", run.stderr);
-        assert!(fixture.calls(LOCAL).is_empty(), "{args:?}: {}", run.stderr);
+        for host in [LOCAL, "box-a", "box-b"] {
+            assert!(
+                fixture.calls(host).is_empty(),
+                "{args:?}: {host} got a call: {}",
+                run.stderr
+            );
+        }
     }
 }
 
