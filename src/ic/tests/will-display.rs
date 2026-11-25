@@ -20,7 +20,7 @@
 //! keep that promise for the whole file, where each test once had to remember
 //! it.
 //!
-//! # One test needs a terminal and the rest need none
+//! # Two tests need a terminal and the rest need none
 //!
 //! A pseudo-terminal belongs to the whole machine, which holds a few hundred of
 //! them, and the tests of this file run beside each other. A file that opens one
@@ -28,7 +28,8 @@
 //!
 //! Only
 //! [`will_display_asks_nothing_of_a_named_terminal_that_reports_no_pixel_size`]
-//! reads what a run wrote to a terminal, and a test reads that of a terminal it
+//! and [`will_display_asks_nothing_of_a_zellij_pane_with_a_forced_protocol`]
+//! read what a run wrote to a terminal, and a test reads that of a terminal it
 //! holds. Every other verdict of this file is an exit status and two pipes, and
 //! none of them reads the size of a window: the flag asks for the protocol
 //! alone, and the rule that decides whether to ask the terminal reads no window
@@ -376,4 +377,85 @@ fn will_display_succeeds_for_a_named_terminal_with_a_stale_mosh_variable() {
     assert_eq!(code, Some(0), "stderr: {stderr}");
     assert_eq!(stdout, "", "success must print nothing to stdout");
     assert_eq!(stderr, "", "success must print nothing to stderr");
+}
+
+/// A protocol that `IC_PROTOCOL` forces answers yes under an upstream Mosh.
+///
+/// The image path skips the gate for a forced protocol, because the user
+/// vouches for the terminal. The flag asks the same gate, so it must give the
+/// same answer: a script that writes `ic --will-display && ic picture.png`
+/// draws the picture that the second command can draw.
+#[test]
+fn will_display_succeeds_for_a_forced_protocol_under_an_upstream_mosh() {
+    let table = MoshProcessTable::new(TARGET_NAME);
+    let (code, stdout, stderr) = run(ic_under_mosh("xterm-ghostty", &table)
+        .arg("--will-display")
+        .env("IC_PROTOCOL", "sixel"));
+
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "", "success must print nothing to stdout");
+    assert_eq!(stderr, "", "success must print nothing to stderr");
+}
+
+/// A protocol that `--protocol` forces answers yes on a terminal that draws
+/// nothing by its name.
+///
+/// The Linux console is the terminal of
+/// [`will_display_fails_and_names_the_terminal_when_graphics_are_unsupported`].
+/// The person who forces a protocol vouches for the terminal, so the answer is
+/// the one that the image path gives.
+#[test]
+fn will_display_succeeds_for_a_forced_protocol_on_a_terminal_that_draws_nothing() {
+    let (code, stdout, stderr) = run(ic("linux").args(["--will-display", "--protocol", "iterm2"]));
+
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "", "success must print nothing to stdout");
+    assert_eq!(stderr, "", "success must print nothing to stderr");
+}
+
+/// A pane of Zellij with a forced protocol must be asked nothing.
+///
+/// A Zellij pane is a name that the answer of the terminal outranks, so a run
+/// with no forced protocol asks the terminal which protocol it draws. A forced
+/// protocol passes the gate on its type alone, and no verdict reads that answer.
+/// The round trip then costs the budget of the query for nothing, and it
+/// swallows whatever the user typed while it held the terminal in raw mode.
+/// This is the session that a forced protocol is for: under Zellij, the process
+/// tree can name the Mosh of a different client.
+#[test]
+fn will_display_asks_nothing_of_a_zellij_pane_with_a_forced_protocol() {
+    let outcome = run_with_terminal(
+        ic("xterm-256color")
+            .args(["--will-display", "--protocol", "sixel"])
+            .env("ZELLIJ", "0"),
+        WINDOW,
+    );
+
+    assert!(
+        outcome.wrote.is_empty(),
+        "--will-display with a forced protocol must write nothing to the terminal, and it wrote {:?}",
+        String::from_utf8_lossy(&outcome.wrote)
+    );
+    assert_eq!(
+        outcome.code,
+        Some(0),
+        "and it must still report that the forced protocol displays an image: {}",
+        outcome.stderr
+    );
+    assert_eq!(
+        outcome.stdout, "",
+        "and success must print nothing to stdout"
+    );
+}
+
+/// `IC_PROTOCOL=auto` forces nothing, so the gate still decides.
+#[test]
+fn will_display_still_refuses_when_ic_protocol_is_auto() {
+    let (code, _stdout, stderr) = run(ic("linux").arg("--will-display").env("IC_PROTOCOL", "auto"));
+
+    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("not supported in this terminal"),
+        "stderr must give the reason: {stderr}"
+    );
 }
