@@ -913,10 +913,11 @@ mod tests {
         }))
     }
 
-    /// The `Grid` of `MEMORY_SIDE` pixels with a flag on where `on` is true.
-    fn memory_grid(on: impl Fn(u32, u32) -> bool) -> Grid {
-        let mut grid = Grid::new(MEMORY_SIDE, MEMORY_SIDE);
-        for y in 0..MEMORY_SIDE {
+    /// The `Grid` of `MEMORY_SIDE` columns and `height` rows with a flag on
+    /// where `on` is true.
+    fn memory_grid(height: u32, on: impl Fn(u32, u32) -> bool) -> Grid {
+        let mut grid = Grid::new(MEMORY_SIDE, height);
+        for y in 0..height {
             for x in 0..MEMORY_SIDE {
                 if on(x, y) {
                     grid.set(x, y);
@@ -963,19 +964,38 @@ mod tests {
         }
     }
 
+    /// How many times taller the tall grid of the width test is than the
+    /// square one. A structure of the area grows by this factor.
+    const TALL_FACTOR: u32 = 8;
+
     /// The fill of the regions takes memory that grows with the width, not with
     /// the area.
+    ///
+    /// The square grid holds its peak below `WORK_BYTES_PER_COLUMN` for each
+    /// column. A grid with the same width and `TALL_FACTOR` times the height
+    /// must not raise the peak, so a structure of the area fails, also at one
+    /// bit for each pixel.
     #[test]
     fn the_regions_take_memory_that_grows_with_the_width() {
         let bound = WORK_BYTES_PER_COLUMN * usize::try_from(MEMORY_SIDE).unwrap();
         for (name, on) in memory_cases() {
-            let grid = memory_grid(on);
-            let (regions, peak) = peak_bytes_of(|| find_regions(&grid, 2));
-            eprintln!("find_regions, {name}: peak {peak} bytes, bound {bound}");
-            assert_eq!(regions, vec![region(0, 0, 511, 511)], "{name}");
+            let peak_at = |height: u32| {
+                let grid = memory_grid(height, on);
+                let (regions, peak) = peak_bytes_of(|| find_regions(&grid, 2));
+                eprintln!("find_regions, {name}, {height} rows: peak {peak} bytes");
+                let all = region(0, 0, MEMORY_SIDE - 1, height - 1);
+                assert_eq!(regions, vec![all], "{name}, {height} rows");
+                peak
+            };
+            let square = peak_at(MEMORY_SIDE);
+            let tall = peak_at(MEMORY_SIDE * TALL_FACTOR);
             assert!(
-                peak <= bound,
-                "{name}: peak {peak} is over the bound {bound}"
+                square <= bound,
+                "{name}: peak {square} is over the bound {bound}"
+            );
+            assert!(
+                tall <= square,
+                "{name}: the peak grew with the height, from {square} to {tall}"
             );
         }
     }
