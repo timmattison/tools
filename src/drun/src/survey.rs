@@ -14,6 +14,7 @@
 //! lowest value. When two hosts have the same value, the host with more free
 //! memory wins, and after that the host that is first in the configuration.
 
+use std::io::Write;
 use std::time::Duration;
 
 use crate::config::Config;
@@ -112,6 +113,7 @@ where
             if !lacks_probe_image(context, host_timeout, &ask) {
                 return Err(failure);
             }
+            note_pull(context);
             ask(context, &["pull", PROBE_IMAGE], PULL_TIMEOUT).map_err(|cause| {
                 HostFailure::PullFailed {
                     context: context.clone(),
@@ -124,6 +126,18 @@ where
         Err(failure) => return Err(failure),
     };
     Load::parse(&text).map_err(HostFailure::Unreadable)
+}
+
+/// Tells the person on stderr that `drun` pulls [`PROBE_IMAGE`] on the host
+/// `context`, because the pull can hold `drun` for up to [`PULL_TIMEOUT`].
+/// The survey runs on a thread for each host, so a stderr that is closed is
+/// not a reason to panic. The note is then lost.
+fn note_pull(context: &ContextName) {
+    let _ = writeln!(
+        std::io::stderr(),
+        "drun: {context} does not have {PROBE_IMAGE}. drun pulls it now, with a limit of {} s",
+        PULL_TIMEOUT.as_secs()
+    );
 }
 
 /// `true` when the host `context` answers that it does not have

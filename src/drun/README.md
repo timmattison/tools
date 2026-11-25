@@ -161,8 +161,8 @@ the probe. Each host gets the image one time, in a separate step:
 
 1. When the probe fails, `drun` runs `docker image inspect busybox:1.37` on
    the host.
-2. When the host does not have the image, `drun` runs
-   `docker pull busybox:1.37` on the host, with a limit of 120 s.
+2. When the host does not have the image, `drun` writes a note on stderr and
+   runs `docker pull busybox:1.37` on the host, with a limit of 120 s.
 3. When the pull succeeds, `drun` starts the probe again.
 
 When the pull fails or takes more than 120 s, `drun` skips the host. The
