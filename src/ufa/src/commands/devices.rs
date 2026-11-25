@@ -1395,3 +1395,35 @@ mod listing_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod empty_listing_tests {
+    use super::*;
+    use crate::test_server::{json_response, TestServer};
+
+    /// The API key a test hands the client. Nothing reads it back.
+    const API_KEY: &str = "an-api-key";
+
+    /// A collection that holds nothing, as the API writes it.
+    const EMPTY_COLLECTION: &str = r#"{"offset":0,"limit":200,"count":0,"totalCount":0,"data":[]}"#;
+
+    /// `--all` on a site with no device must say that it found none.
+    #[tokio::test]
+    async fn an_empty_device_listing_with_all_says_nothing_was_found() {
+        let controller = TestServer::replying(&json_response(EMPTY_COLLECTION)).await;
+        let client = UnifiClient::new(controller.origin(), API_KEY, false)
+            .expect("a loopback URL must build a client");
+
+        let listing = list_devices(
+            &client,
+            Some(Uuid::new_v4()),
+            Selection::All,
+            OutputFormat::Table,
+        )
+        .await
+        .expect("the controller answered the listing");
+
+        assert_eq!(listing.document(), None, "an empty table has no document");
+        assert_eq!(listing.notes(), ["No devices found."]);
+    }
+}

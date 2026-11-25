@@ -156,4 +156,22 @@ mod listing_tests {
             "the note must say how to reach the rest, got: {notice}"
         );
     }
+
+    /// A collection that holds nothing, as the API writes it.
+    const EMPTY_COLLECTION: &str = r#"{"offset":0,"limit":200,"count":0,"totalCount":0,"data":[]}"#;
+
+    /// `--all` on a controller with no site must say that it found none.
+    #[tokio::test]
+    async fn an_empty_site_listing_with_all_says_nothing_was_found() {
+        let controller = TestServer::replying(&json_response(EMPTY_COLLECTION)).await;
+        let client = UnifiClient::new(controller.origin(), API_KEY, false)
+            .expect("a loopback URL must build a client");
+
+        let listing = list_sites(&client, Selection::All, None, OutputFormat::Table)
+            .await
+            .expect("the controller answered the listing");
+
+        assert_eq!(listing.document(), None, "an empty table has no document");
+        assert_eq!(listing.notes(), ["No sites found."]);
+    }
 }
