@@ -437,6 +437,11 @@ pub fn span_header(measurement: &Measurement<'_>, span: &SpanTotals<'_>) -> Vec<
 /// a process without a word reports a clean Mac that is not clean, so each
 /// count is here. A count of zero adds no part, and a Mac that hides nothing
 /// says nothing, the same as `occ`.
+///
+/// In a span, the count of the processes that exited is a sum over the
+/// frames. The zombies and the unsampled processes come from the newest frame
+/// of the span, so the span states the same two counts as the one-frame view
+/// of that frame.
 fn skipped_line(ranking: &Ranking) -> Option<String> {
     let skipped = ranking.skipped;
     let mut parts: Vec<String> = Vec::new();

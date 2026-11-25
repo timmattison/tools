@@ -1089,6 +1089,10 @@ impl History {
     /// history up to `end` for [`SpanWidth::Whole`]. The faults of a process
     /// are the sum over the frames, and the window is the sum of the windows.
     /// A gap adds to neither sum. A span with no frame gives `None`.
+    ///
+    /// The processes that exited are a sum over the frames, because each one
+    /// exited in one window. The zombies and the unsampled processes both
+    /// come from the newest frame of the span, because they are snapshots.
     #[must_use]
     pub fn span(&self, end: EntryId, width: SpanWidth) -> Option<Reading> {
         if width == SpanWidth::OneFrame {
@@ -1185,8 +1189,12 @@ impl History {
                 .iter()
                 .map(|frame| frame.skipped.exited_faults)
                 .fold(0, u64::saturating_add),
-            zombies: 0,
-            unsampled: 0,
+            // The zombies and the unsampled processes are snapshots of the
+            // table of `ps`, not events. A sum counts one zombie once for each
+            // frame that saw it, so the span states the newest frame, as the
+            // one-frame view does.
+            zombies: newest.skipped.zombies,
+            unsampled: newest.skipped.unsampled,
         };
         let (rows, extras): (Vec<RankedRow>, Vec<RowExtra>) = ranked.into_iter().unzip();
         let processes = rows.len();
