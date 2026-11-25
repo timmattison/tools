@@ -315,21 +315,42 @@ fn kill_error(error: &std::io::Error) -> anyhow::Error {
 
 /// Formats the header shown before listing processes to kill.
 ///
-/// `targets` are the processes that listen on `port`.
+/// `targets` are the processes that listen on `port`. The header counts the
+/// processes, because each one gets one SIGTERM. The CLI prints one line for
+/// each address, so the header also counts the addresses when that count is
+/// different.
 ///
-/// Example: "Found 2 processes on port 8080:"
+/// Examples: "Found 2 processes on port 8080:" and
+/// "Found 1 process (2 addresses) on port 8080:"
 pub fn format_kill_header(targets: &[&ListeningProcess], port: u16) -> String {
-    let count: usize = targets.iter().map(|l| l.addresses.len()).sum();
-    let noun = if count == 1 { "process" } else { "processes" };
-    format!("Found {count} {noun} on port {port}:")
+    let processes = targets.len();
+    let addresses: usize = targets.iter().map(|l| l.addresses.len()).sum();
+    let found = counted(processes, "process", "processes");
+    if addresses == processes {
+        format!("Found {found} on port {port}:")
+    } else {
+        let addresses = counted(addresses, "address", "addresses");
+        format!("Found {found} ({addresses}) on port {port}:")
+    }
 }
 
 /// Formats the question that `portcul kill` asks before it sends SIGTERM.
 ///
 /// `targets` are the processes that the header of [`format_kill_header`]
-/// counts.
-pub fn format_kill_prompt(_targets: &[&ListeningProcess]) -> &'static str {
-    "Kill these processes? [y/n] "
+/// counts. The question asks about "this process" for one process.
+pub fn format_kill_prompt(targets: &[&ListeningProcess]) -> &'static str {
+    if targets.len() == 1 {
+        "Kill this process? [y/n] "
+    } else {
+        "Kill these processes? [y/n] "
+    }
+}
+
+/// Formats `count` with the singular noun for one item and the plural noun
+/// for each other count, for example "1 process" or "2 processes".
+fn counted(count: usize, singular: &str, plural: &str) -> String {
+    let noun = if count == 1 { singular } else { plural };
+    format!("{count} {noun}")
 }
 
 /// Formats the result message after sending SIGTERM.
