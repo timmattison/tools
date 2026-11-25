@@ -62,7 +62,9 @@ const ENVIRONMENT_FILE: &str = ".env";
 ///
 /// A file that is not there is the normal case and stays silent. Any other
 /// fault is reported, because a settings file the user wrote and `ufa` cannot
-/// read is a fault the user must see.
+/// read is a fault the user must see. A line that cannot be parsed is
+/// reported by its position only: dotenvy puts the text of the line into its
+/// error, and that text holds the value, which is often a key.
 ///
 /// # Arguments
 ///
@@ -77,6 +79,12 @@ pub fn load_environment_file(directory: &Path) -> Result<Option<PathBuf>> {
     match dotenvy::from_path(&path) {
         Ok(()) => Ok(Some(path)),
         Err(error) if error.not_found() => Ok(None),
+        Err(dotenvy::Error::LineParse(_, position)) => Err(anyhow::anyhow!(
+            "Failed to parse settings file {}: a line has an error at position {position}. \
+             The line is not shown, because it can hold a key. \
+             Put quotes around a value that holds a space.",
+            path.display()
+        )),
         Err(error) => Err(anyhow::Error::new(error))
             .with_context(|| format!("Failed to read settings file: {}", path.display())),
     }
