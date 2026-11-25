@@ -6174,4 +6174,5 @@ The script asks `portplz` for a free port. Then it starts
 `dx serve --desktop --port <port>` in `src/nle`.
 
 To build the desktop application, run `dx bundle --desktop` from `src/nle`.
-The bundle goes to `target/dx/nle/bundle/<platform>/`.
+On macOS, the app (`Nle.app`) and a disk image go to
+`target/dx/nle/bundle/macos/macos/`.
