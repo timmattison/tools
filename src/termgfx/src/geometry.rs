@@ -20,6 +20,77 @@ const ESTIMATED_CELL_WIDTH_PX: u32 = 10;
 /// Value of 20px is typical for modern terminals with default fonts (roughly 2:1 aspect).
 const ESTIMATED_CELL_HEIGHT_PX: u32 = 20;
 
+/// The largest cell that this crate takes for a real one, in pixels on either
+/// axis.
+///
+/// A character cell is a few tens of pixels. A cell of more than this is not a
+/// cell: it is a terminal that answered a question this crate never asked, a
+/// parameter that belongs to another control sequence, or a number that
+/// overran. The estimate is a better measure than any of the three, so
+/// [`CellPixels::measured`] refuses them all.
+///
+/// The bound is generous on purpose. A display of a high pixel density at a
+/// large font draws a cell of about 60 pixels by 130, and this is several
+/// times that.
+const MAX_CELL_PIXELS: u32 = 512;
+
+/// The size of one character cell, in pixels.
+///
+/// The width stands first here, and it stands **second** in the answer that a
+/// terminal writes for `CSI 16 t`. That answer is `CSI 6 ; height ; width t`.
+/// A pair of bare numbers carries no name for either axis, so a reader that
+/// swapped them would measure a cell of the wrong shape and every picture of
+/// the run would come out the wrong shape with it. This type carries the names,
+/// and [`CellPixels::measured`] is the one place the two numbers are put in
+/// order.
+///
+/// Both numbers are above zero and no higher than [`MAX_CELL_PIXELS`], because
+/// that constructor is the only way to make one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CellPixels {
+    /// The width of the cell in pixels.
+    width: u32,
+    /// The height of the cell in pixels.
+    height: u32,
+}
+
+impl CellPixels {
+    /// The cell that a run takes when nothing measured one.
+    ///
+    /// 10 pixels by 20 is about the cell of a modern terminal at its default
+    /// font, and the ratio of the two carries the shape of a cell better than
+    /// either number carries its size.
+    pub(crate) const ESTIMATE: Self = Self {
+        width: ESTIMATED_CELL_WIDTH_PX,
+        height: ESTIMATED_CELL_HEIGHT_PX,
+    };
+
+    /// One cell of the stated width and height, when the pair measures a cell.
+    ///
+    /// # Arguments
+    /// * `width` - The width of the cell in pixels.
+    /// * `height` - The height of the cell in pixels.
+    ///
+    /// # Returns
+    /// The cell, or `None` when either number is zero and when either number
+    /// stands above [`MAX_CELL_PIXELS`]. A cell of no width holds no pixel of
+    /// a picture, and a cell above the bound is no cell at all.
+    pub(crate) fn measured(width: u32, height: u32) -> Option<Self> {
+        let is_a_cell = |pixels: u32| (1..=MAX_CELL_PIXELS).contains(&pixels);
+        (is_a_cell(width) && is_a_cell(height)).then_some(Self { width, height })
+    }
+
+    /// The width of the cell in pixels.
+    pub(crate) fn width(self) -> u32 {
+        self.width
+    }
+
+    /// The height of the cell in pixels.
+    pub(crate) fn height(self) -> u32 {
+        self.height
+    }
+}
+
 /// Default Sixel output width in pixels when no size information is available.
 /// Used as final fallback when both ioctl and character cell estimates fail.
 const DEFAULT_SIXEL_WIDTH_PX: u32 = 800;
@@ -141,6 +212,10 @@ pub(crate) fn cells_of(window: Option<Window>) -> (u32, u32) {
 /// window of zero columns and no window of zero rows. See
 /// `src/termsize/src/lib.rs`.
 ///
+/// A quotient above [`MAX_CELL_PIXELS`] is no size either, and it gives `None`
+/// with them. A character cell is a few tens of pixels, and the doc of that
+/// constant says what a number several times larger is instead.
+///
 /// This is not [`cell_pixels_or_estimate_of`]. That function answers the same
 /// question and never says `None`: it falls back to an estimate of the cell of
 /// a typical terminal. The fallback is right for a tool with no second way to
@@ -149,7 +224,7 @@ pub(crate) fn cells_of(window: Option<Window>) -> (u32, u32) {
 /// the block characters that need no size at all.
 #[must_use]
 pub fn cell_pixels() -> Option<(u32, u32)> {
-    cell_pixels_of(termsize::drawing_window())
+    cell_pixels_of(termsize::drawing_window()).map(|cell| (cell.width(), cell.height()))
 }
 
 /// The size of one character cell that one window measures.
@@ -169,9 +244,11 @@ pub fn cell_pixels() -> Option<(u32, u32)> {
 ///
 /// # Returns
 /// The width and the height of one cell in pixels, or `None` when the probe
-/// measured no window, when the terminal reports no pixel size, or when either
-/// quotient is zero.
-fn cell_pixels_of(window: Option<Window>) -> Option<(u32, u32)> {
+/// measured no window, when the terminal reports no pixel size, when either
+/// quotient is zero, and when either quotient stands above
+/// [`MAX_CELL_PIXELS`]. A quotient above that bound is no character cell, and
+/// the doc of the constant says what such a number is instead.
+pub(crate) fn cell_pixels_of(window: Option<Window>) -> Option<CellPixels> {
     let (pixels_wide, pixels_tall) = window_pixels(window)?;
     let (columns, rows) = window?.cells();
 
@@ -179,13 +256,13 @@ fn cell_pixels_of(window: Option<Window>) -> Option<(u32, u32)> {
     // rule now, and it makes no window of zero columns and no window of zero
     // rows, so no count of zero reaches this division. The tests of that rule
     // live in `src/termsize/src/lib.rs`.
-    let cell_width = pixels_wide / u32::from(columns);
-    let cell_height = pixels_tall / u32::from(rows);
-    if cell_width == 0 || cell_height == 0 {
-        return None;
-    }
-
-    Some((cell_width, cell_height))
+    //
+    // `CellPixels::measured` refuses a quotient of no pixels, which is what a
+    // window smaller than its own grid gives.
+    CellPixels::measured(
+        pixels_wide / u32::from(columns),
+        pixels_tall / u32::from(rows),
+    )
 }
 
 /// The size of the window in pixels, when the terminal reports one.
@@ -207,8 +284,34 @@ pub(crate) fn window_pixels(window: Option<Window>) -> Option<(u32, u32)> {
     Some((u32::from(pixels_wide), u32::from(pixels_tall)))
 }
 
-/// The size of one character cell in pixels, with the estimate for a window
-/// that reports none.
+/// The size of one character cell in pixels, from the best source that
+/// answered.
+///
+/// **This is the one function that answers "how big is one cell" for this
+/// crate.** Every picture takes its measure here, so no two steps of one
+/// picture can name two sizes, and no caller holds an order of its own.
+///
+/// # The order of the sources
+///
+/// 1. The pixel size that the `TIOCGWINSZ` ioctl reports. It costs no round
+///    trip, so a terminal that reports one keeps the measure it already had.
+/// 2. The cell that the terminal named in its answer to the query of
+///    [`crate::probe`]. `CSI 16 t` names one cell directly and `CSI 14 t`
+///    names the text area, and [`crate::probe::read_cell`] puts those two in
+///    order and gives the better of them. That answer arrives here as one
+///    measure, because which of the two questions it came from changes nothing
+///    a caller does.
+/// 3. The estimate of 10 pixels by 20, for a terminal that answered nothing.
+///
+/// The second source is the one a mosh session has. The mosh wire protocol
+/// resizes with a width and a height in cells and nothing else, so the server
+/// writes a zero into both pixel fields of the pseudo terminal and keeps them
+/// there for the life of the session. A pane of Zellij and a ttyd panel report
+/// no pixel size either. GitHub issue #468 reports what the estimate did to
+/// such a run: `ic` drew a picture about 7 percent too narrow, because the
+/// column count is directly proportional to the shape of the cell.
+///
+/// # Why the estimate is here at all
 ///
 /// This is the measure that a tool takes when it must draw an image whatever
 /// the terminal says, which is what `ic` does: a run of `ic` has no second way
@@ -224,13 +327,19 @@ pub(crate) fn window_pixels(window: Option<Window>) -> Option<(u32, u32)> {
 /// # Arguments
 /// * `window` - The window that the probe measured, or `None` when the probe
 ///   measured none.
+/// * `answered` - The cell that the terminal named in its answer, or `None`
+///   when it named none and when nothing asked it.
 ///
 /// # Returns
-/// The width and the height of one character cell in pixels. Both numbers are
-/// above zero, because [`cell_pixels_of`] refuses a quotient of zero and the
-/// estimate then stands.
-pub(crate) fn cell_pixels_or_estimate_of(window: Option<Window>) -> (u32, u32) {
-    cell_pixels_of(window).unwrap_or((ESTIMATED_CELL_WIDTH_PX, ESTIMATED_CELL_HEIGHT_PX))
+/// One character cell. Both of its numbers are above zero, because
+/// [`CellPixels::measured`] refuses a zero and the estimate then stands.
+pub(crate) fn cell_pixels_or_estimate_of(
+    window: Option<Window>,
+    answered: Option<CellPixels>,
+) -> CellPixels {
+    cell_pixels_of(window)
+        .or(answered)
+        .unwrap_or(CellPixels::ESTIMATE)
 }
 
 /// The shape of one character cell, as its height over its width.
@@ -251,10 +360,6 @@ pub(crate) fn cell_pixels_or_estimate_of(window: Option<Window>) -> (u32, u32) {
 /// # Returns
 /// The height of the cell over its width. A typical terminal gives about 2.
 #[must_use]
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "a character cell is a few tens of pixels, far inside the exact range of f64"
-)]
 pub(crate) fn cell_aspect_of(cell_width_px: u32, cell_height_px: u32) -> f64 {
     cell_height_px as f64 / cell_width_px as f64
 }
@@ -275,13 +380,22 @@ fn cells_to_pixels(cols: u32, rows: u32, cell_w: u32, cell_h: u32) -> (u32, u32)
 /// [`cell_pixels_or_estimate_of`] measured. This function works in terminal
 /// character cells, not pixels.
 ///
+/// **One bound is enough.** A caller that states one axis and leaves the other
+/// open gets both axes back, because the aspect ratio decides the open one.
+/// That is what a caller means by one bound, and it is what the [`Budget`] of
+/// [`crate::draw`] promises. It also matters to the payload: an open axis
+/// stops [`downscale_to_display_pixels`] from resizing at all, so an open axis
+/// that survived this call sent the whole picture at its original resolution.
+///
+/// A caller that turns `preserve_aspect` off states every axis it wants, so an
+/// open axis stays open there. There is no ratio left to decide it with.
+///
 /// The casts from f64 to u32 are intentional - display dimensions are always positive
 /// and will never exceed u32::MAX for any reasonable terminal size.
 #[must_use]
-#[allow(
+#[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::cast_precision_loss,
     reason = "display dimensions are always positive and fit in u32"
 )]
 pub(crate) fn calculate_aspect_preserving_size(
@@ -296,9 +410,11 @@ pub(crate) fn calculate_aspect_preserving_size(
         return (max_width, max_height);
     }
 
-    // Guard against division by zero. Valid images always have height > 0,
-    // but we handle this defensively to avoid panics on malformed input.
-    if img_height == 0 {
+    // The arms below divide by the height of the image and by its aspect
+    // ratio, and an axis of zero pixels makes each of those divisors zero. A
+    // valid image has a width and a height above zero on both axes, but a
+    // malformed one comes back with the bounds of the caller unchanged.
+    if img_width == 0 || img_height == 0 {
         return (max_width, max_height);
     }
 
@@ -322,8 +438,26 @@ pub(crate) fn calculate_aspect_preserving_size(
                 (Some(display_width.max(1)), Some(display_height))
             }
         }
-        (Some(w), None) => (Some(w), None),
-        (None, Some(h)) => (None, Some(h)),
+        // One bound is enough. The aspect ratio decides the other axis, and
+        // the two expressions below are the two branches above with the box
+        // taken out of them, so one bound and two bounds agree whenever the
+        // same axis constrains the picture.
+        //
+        // The open axis used to come back open, and `downscale_to_display_pixels`
+        // resizes nothing at all for an open axis, so `ic --width 90` sent the
+        // whole picture at its original resolution.
+        (Some(max_w), None) => {
+            let img_aspect = img_width as f64 / img_height as f64;
+            let display_height = ((max_w as f64 / img_aspect) / cell_aspect).round() as u32;
+            (Some(max_w), Some(display_height.max(1)))
+        }
+        (None, Some(max_h)) => {
+            let img_aspect = img_width as f64 / img_height as f64;
+            let display_width = (max_h as f64 * cell_aspect * img_aspect).round() as u32;
+            (Some(display_width.max(1)), Some(max_h))
+        }
+        // Neither axis bound means the picture draws at its own pixel size,
+        // which is what the `Budget` doc states. There is no box to fit it to.
         (None, None) => (None, None),
     }
 }
@@ -386,10 +520,9 @@ pub(crate) fn downscale_to_display_pixels<'a>(
 /// The casts from f64 to u32 are intentional - pixel dimensions are always positive
 /// and will never exceed u32::MAX for any reasonable display.
 #[must_use]
-#[allow(
+#[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::cast_precision_loss,
     reason = "pixel dimensions are always positive and fit in u32"
 )]
 pub(crate) fn calculate_sixel_dimensions(
@@ -448,7 +581,7 @@ pub(crate) fn calculate_sixel_dimensions(
 /// The width and the height of the budget in pixels. Each axis is 1 or more, so
 /// a degenerate terminal cannot ask the encoder for an image of no size.
 #[must_use]
-#[allow(
+#[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     reason = "pixel dimensions are always positive and fit in u32"
@@ -578,6 +711,28 @@ mod tests {
     /// [`REPORTED_PIXELS`].
     const REPORTED_CELL: (u32, u32) = (10, 20);
 
+    /// The cell that a terminal names in an answer of its own.
+    ///
+    /// It is neither the cell that any window of these tests measures nor the
+    /// estimate, so a test that finds this cell knows the answer came off the
+    /// terminal.
+    const ANSWERED_CELL: (u32, u32) = (14, 30);
+
+    /// [`ANSWERED_CELL`] as the type that every source of a cell gives.
+    fn answered_cell() -> Option<CellPixels> {
+        Some(cell(ANSWERED_CELL))
+    }
+
+    /// One cell of a stated width and height.
+    ///
+    /// # Panics
+    /// Panics for a pair that measures no cell. Every pair a test states here
+    /// is a cell of a real terminal.
+    fn cell(pixels: (u32, u32)) -> CellPixels {
+        CellPixels::measured(pixels.0, pixels.1)
+            .expect("a test that states a cell must state one of a real size")
+    }
+
     /// The columns and the rows of a second window. Neither number is the one
     /// of the fallback, so a test that finds this size knows that the answer
     /// came off the window and not off the fallback.
@@ -591,6 +746,12 @@ mod tests {
 
     /// The measured cell of a window of [`REPORTED_CELLS`] and [`DENSE_PIXELS`].
     const DENSE_CELL: (u32, u32) = (20, 40);
+
+    /// The pixel size of a window whose quotient stands above
+    /// [`MAX_CELL_PIXELS`]. 48000 pixels over 80 columns is a cell 600 pixels
+    /// wide, and 14400 pixels over 24 rows is a cell 600 pixels tall. No font
+    /// has a cell of that size.
+    const ABSURD_PIXELS: (u16, u16) = (48_000, 14_400);
 
     /// The window that a terminal of a stated size reports.
     ///
@@ -632,13 +793,18 @@ mod tests {
     fn a_reported_pixel_size_measures_one_cell_and_no_pixel_size_measures_nothing() {
         assert_eq!(
             cell_pixels_of(window(REPORTED_CELLS, Some(REPORTED_PIXELS))),
-            Some(REPORTED_CELL),
+            Some(cell(REPORTED_CELL)),
             "800 pixels over 80 columns is a cell 10 pixels wide, and 480 pixels over 24 rows is a cell 20 pixels tall"
         );
         assert_eq!(
             cell_pixels_of(window(REPORTED_CELLS, None)),
             None,
             "a pane of Zellij and a ttyd panel report their cells and no pixel size, so there is nothing to divide and no cell to measure"
+        );
+        assert_eq!(
+            cell_pixels_of(window(REPORTED_CELLS, Some(ABSURD_PIXELS))),
+            None,
+            "a quotient of 600 pixels on each side stands above MAX_CELL_PIXELS, and a number that large is no character cell"
         );
     }
 
@@ -706,20 +872,38 @@ mod tests {
     }
 
     #[test]
+    fn the_cell_a_terminal_named_stands_behind_the_ioctl_and_in_front_of_the_estimate() {
+        // The four sources of a cell, in the order this function holds them.
+        // The ioctl costs no round trip, so it stands first. The answer of the
+        // terminal costs one, and it is the only source a mosh session and a
+        // pane of Zellij have. The estimate is a guess, so it stands last.
+        assert_eq!(
+            cell_pixels_or_estimate_of(window(REPORTED_CELLS, Some(DENSE_PIXELS)), answered_cell()),
+            cell(DENSE_CELL),
+            "a terminal that reports a pixel size keeps the measure it already had, whatever it answered"
+        );
+        assert_eq!(
+            cell_pixels_or_estimate_of(window(REPORTED_CELLS, None), answered_cell()),
+            cell(ANSWERED_CELL),
+            "a mosh session reports no pixel size, and the answer of the terminal is the one measure it has"
+        );
+    }
+
+    #[test]
     fn the_estimate_stands_for_every_window_that_measures_no_cell() {
         assert_eq!(
-            cell_pixels_or_estimate_of(window(REPORTED_CELLS, Some(DENSE_PIXELS))),
-            DENSE_CELL,
+            cell_pixels_or_estimate_of(window(REPORTED_CELLS, Some(DENSE_PIXELS)), None),
+            cell(DENSE_CELL),
             "a terminal that reports a pixel size measures the cell, and the estimate stands aside"
         );
         assert_eq!(
-            cell_pixels_or_estimate_of(window(REPORTED_CELLS, None)),
-            (ESTIMATED_CELL_WIDTH_PX, ESTIMATED_CELL_HEIGHT_PX),
+            cell_pixels_or_estimate_of(window(REPORTED_CELLS, None), None),
+            CellPixels::ESTIMATE,
             "a pane of Zellij reports no pixel size, and ic must draw an image there all the same"
         );
         assert_eq!(
-            cell_pixels_or_estimate_of(None),
-            (ESTIMATED_CELL_WIDTH_PX, ESTIMATED_CELL_HEIGHT_PX),
+            cell_pixels_or_estimate_of(None, None),
+            CellPixels::ESTIMATE,
             "a run that measured no terminal holds no measure to draw with, and an image at an estimated size beats no image"
         );
     }
@@ -764,6 +948,23 @@ mod tests {
         assert_eq!(result, (Some(50), Some(50)));
     }
 
+    /// An image of no width states no aspect ratio, and the one-bound arm
+    /// divides by that ratio.
+    ///
+    /// A division by zero gives infinity, and the cast of infinity to `u32`
+    /// gives `u32::MAX`. Both axes then come back bound, so
+    /// [`downscale_to_display_pixels`] no longer stops at its open axis, and
+    /// [`cells_to_pixels`] multiplies `u32::MAX` by the height of the cell.
+    /// The bounds of the caller stand unchanged instead.
+    #[test]
+    fn aspect_preserving_size_survives_a_zero_image_width() {
+        assert_eq!(
+            calculate_aspect_preserving_size(0, 100, Some(50), None, true, TEST_CELL_ASPECT),
+            (Some(50), None),
+            "an image of no width gives no ratio, so the bounds of the caller stand"
+        );
+    }
+
     #[test]
     fn aspect_preserving_square_image_in_square_box() {
         // Square image (100x100) in square box (50x50)
@@ -798,18 +999,53 @@ mod tests {
         assert_eq!(result, (Some(25), Some(50)));
     }
 
+    /// One bound is enough to size an image, because the aspect ratio decides
+    /// the other axis.
+    ///
+    /// The axis that the caller leaves open used to come back open, and
+    /// [`downscale_to_display_pixels`] then resized nothing at all, so a
+    /// caller that stated one bound sent the whole picture at its original
+    /// resolution. `ic --width 90` is that caller.
+    ///
+    /// The answer is the answer that the two-bound case already gives for a
+    /// box that the same axis constrains: an image of 100 pixels by 100 in 50
+    /// columns takes 25 rows, whichever way the caller asks the question.
     #[test]
-    fn aspect_preserving_only_width_specified() {
-        let result =
-            calculate_aspect_preserving_size(100, 100, Some(50), None, true, TEST_CELL_ASPECT);
-        assert_eq!(result, (Some(50), None));
+    fn one_bound_sizes_the_other_axis_from_the_aspect_ratio() {
+        assert_eq!(
+            calculate_aspect_preserving_size(100, 100, Some(50), None, true, TEST_CELL_ASPECT),
+            (Some(50), Some(25)),
+            "50 columns of a square image take 25 rows in a cell twice as tall as it is wide"
+        );
+        assert_eq!(
+            calculate_aspect_preserving_size(100, 100, Some(50), Some(50), true, TEST_CELL_ASPECT),
+            calculate_aspect_preserving_size(100, 100, Some(50), None, true, TEST_CELL_ASPECT),
+            "the width bound decides this box, so the open row bound changes no answer"
+        );
     }
 
+    /// The same rule the other way round, and the two are not symmetrical.
+    ///
+    /// A row is twice the height of a column here, so 50 rows of a square
+    /// image take 100 columns.
     #[test]
-    fn aspect_preserving_only_height_specified() {
-        let result =
-            calculate_aspect_preserving_size(100, 100, None, Some(50), true, TEST_CELL_ASPECT);
-        assert_eq!(result, (None, Some(50)));
+    fn one_row_bound_sizes_the_width_from_the_aspect_ratio() {
+        assert_eq!(
+            calculate_aspect_preserving_size(100, 100, None, Some(50), true, TEST_CELL_ASPECT),
+            (Some(100), Some(50)),
+            "50 rows of a square image take 100 columns in a cell twice as tall as it is wide"
+        );
+    }
+
+    /// An open axis stays open when the caller asks for no aspect ratio at
+    /// all, because the caller then states the size itself.
+    #[test]
+    fn one_bound_stays_alone_when_the_caller_wants_no_aspect_ratio() {
+        assert_eq!(
+            calculate_aspect_preserving_size(100, 100, Some(50), None, false, TEST_CELL_ASPECT),
+            (Some(50), None),
+            "a caller that turned the aspect ratio off states every axis it wants"
+        );
     }
 
     #[test]
@@ -1071,10 +1307,6 @@ mod tests {
     // =========================================================================
 
     #[test]
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "a character cell is a few tens of pixels, far inside the exact range of f64"
-    )]
     fn constants_have_reasonable_values() {
         // Derived cell aspect ratio (from fallback constants) should be reasonable (1.5 to 3.0)
         let fallback_aspect = ESTIMATED_CELL_HEIGHT_PX as f64 / ESTIMATED_CELL_WIDTH_PX as f64;
@@ -1198,10 +1430,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "the dimensions of a test image are a few hundred pixels, far inside the exact range of f64"
-    )]
     fn downscale_preserves_aspect_ratio() {
         // A cell of 10 pixels by 20 gives 10 columns by 5 rows a box of 100
         // pixels by 100. The image is 5 times as wide as it is tall, and it is

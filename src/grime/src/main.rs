@@ -30,18 +30,39 @@ const TOOL: &str = "grime";
 #[derive(Parser, Debug)]
 #[clap(author, version = version_string!())]
 struct Args {
-    /// Branch to merge into HEAD
+    /// Branch to merge into HEAD [default: main, else master]
+    ///
+    // The default is stated in the doc comment above rather than through clap's
+    // `default_value`, and the difference is the refusal. A `default_value` of
+    // `main` hands the tool a name in a repository that has no `main`, and the
+    // run then fails as though the developer had typed a branch that does not
+    // exist. The choice needs to see the repository, so it happens where the
+    // repository is open - and `None` is how it learns nobody named one.
     #[clap(value_name = "BRANCH")]
-    branch: String,
+    branch: Option<String>,
 
     /// Print nothing about the merge - the exit code is the answer
     #[clap(short, long)]
     quiet: bool,
+
+    /// Print the diff of the one halt of the merge after the breakdown
+    ///
+    // A request for the diff and a request for no output contradict each
+    // other, so clap refuses the pair with its usage error and exit 2. A tool
+    // that obeys one of the two in silence surprises the caller who gave the
+    // other.
+    #[clap(long, conflicts_with = "quiet")]
+    diff: bool,
 }
 
 /// Hands the whole shell to [`Console::answer`] - what this tool says, the one
 /// switch that silences it, and the three exit codes it answers with. The
 /// question below is all that is left, and it is all `grime` owns.
+///
+/// A run that names no `BRANCH` is not a usage error. The argument is
+/// optional, and the branch it stands for is chosen from the repository - so a
+/// repository that holds no default branch to pick is refused by `grime`
+/// itself, in a message `-q` does silence.
 ///
 /// See [`Console::answer`] for why an [`ExitCode`] is returned rather than a
 /// `Result`: a `Result` exits **1**, which is already the code for a merge that
@@ -49,7 +70,37 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
 
+    decide_color();
+
     Console::answer(TOOL, args.quiet, |console| run(&args, console))
+}
+
+/// Decide once, before the first word, whether the halt diff of `--diff` is in
+/// color.
+///
+/// Only the halt diff is painted. `gitscratch` paints it with `colored`, and
+/// `colored` decides at format time whether to write the codes of its paint.
+/// Its own rules cover a terminal and the usual variables.
+///
+/// [`termwindow::should_force_colors_here`] adds the rule of a wrapper, which
+/// `colored` cannot see: a pipe, and a width stated in `COLUMNS`, as
+/// `viddy(1)` gives. It also holds the two variables that refuse that rule,
+/// `NO_COLOR` and `CLICOLOR=0`, and the parse of `COLUMNS` that `termbar`
+/// uses for the width. `grind` asks the same function, so the two tools paint
+/// by one rule, and a fix to it reaches both.
+///
+/// The override is `set_override(true)` or nothing. The answer never goes to
+/// `set_override` directly. On a terminal that answer is false, and
+/// `set_override(false)` turns off the color that `colored` gives a terminal by
+/// itself.
+fn decide_color() {
+    if termwindow::should_force_colors_here() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "this process decides its own color output at startup; the ban covers the tests, which must go through testcolor::with_forced_ansi"
+        )]
+        colored::control::set_override(true);
+    }
 }
 
 /// Answer the question, returning what the merge would cost.
@@ -57,10 +108,11 @@ fn main() -> ExitCode {
 /// # Errors
 ///
 /// Returns an error if the current directory cannot be read, is not inside a
-/// git repository, has no commit at HEAD to merge into, does not contain
-/// `branch`, or if the merge itself failed without leaving a conflict to
-/// measure. Not for a working tree that cannot be inspected: that only costs
-/// the uncommitted-work note, which is a caveat rather than part of the answer.
+/// git repository, has no commit at HEAD to merge into, holds no branch the run
+/// could measure against - the one named, or a default when none was named - or
+/// if the merge itself failed without leaving a conflict to measure. Not for a
+/// working tree that cannot be inspected: that only costs the uncommitted-work
+/// note, which is a caveat rather than part of the answer.
 fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     let cwd = std::env::current_dir().context("could not determine the current directory")?;
     let repo = Repo::open(&cwd)?;
@@ -81,13 +133,24 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
         "a merge starts from HEAD, and there is no commit at HEAD to merge into \
          - an empty repository, or a branch nothing has been committed to yet",
     )?;
-    repo.resolve(&args.branch)?;
+    // Before the branch resolves, because there is no branch to resolve until
+    // the choice is made. `gitscratch` owns the choice rather than this file,
+    // so every tool built on it picks the same branch and refuses in the same
+    // words.
+    //
+    // The name comes back unresolved, and the line below is what resolves it.
+    // That keeps one message for a branch that does not exist, whether the
+    // developer typed the name or the default supplied it.
+    let branch = repo.branch_or_default(args.branch.as_deref())?;
+    repo.resolve(&branch)?;
 
     // The tool's name alone. The note below reads nothing else, and the verdict
     // adds the action on the next line. `UnwordedReport` is `Copy`, so one
     // value serves both.
     let unworded = Report::for_tool(TOOL);
-    let action = format!("merging {} into HEAD", args.branch);
+    // The chosen name, so this line tells the developer which branch got
+    // measured on a run that named none.
+    let action = format!("merging {branch} into HEAD");
 
     // `without_stops`, because a merge halts exactly once. Git makes one
     // three-way merge and stops at it, so the count is `1` for every conflicted
@@ -132,8 +195,20 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     // already words as no note at all.
     let dirty_note = unworded.dirty_note(repo.uncommitted_files().unwrap_or_default());
 
-    let scratch = repo.scratch("HEAD")?;
-    let conflicts = scratch.replay_merge(&args.branch)?;
+    // The display reports the three phases of the merge and no commit count,
+    // because git counts no steps in a merge.
+    // `Console` decides whether it shows (a terminal, no `-q`, the delay) and
+    // clears it before the note and the verdict, so this call site decides
+    // nothing.
+    let scratch = repo.scratch_with_progress("HEAD", console.progress(&action))?;
+    // `--diff` asks for the capture. Without it, the merge captures nothing
+    // and costs what it cost before the flag existed.
+    let (conflicts, diffs) = if args.diff {
+        let (conflicts, diffs) = scratch.replay_merge_with_diffs(&branch)?;
+        (conflicts, Some(diffs))
+    } else {
+        (scratch.replay_merge(&branch)?, None)
+    };
 
     // There is a verdict now, so the caveat has something to qualify.
     if let Some(note) = dirty_note {
@@ -161,6 +236,23 @@ fn run(args: &Args, console: &Console) -> Result<Conflicts> {
     // state a width of its own.
     console
         .verdict(&report.render_within(&conflicts, usize::from(TerminalWidth::get_or_default())));
+
+    // The diff comes after the verdict that it explains, on the same stream.
+    // `render_diffs` gives nothing for a merge that did not halt, so a clean
+    // run prints the same bytes with the flag and without it. A run that fails
+    // never gets here, because the merge returned its error above. A diff with
+    // no answer is no part of an answer.
+    //
+    // The report is `without_stops`, so the diff of the one halt comes with no
+    // stop heading. A merge halts once, and a heading of `stop 1 of 1` names a
+    // constant, as the stop count does.
+    //
+    // Through `Console::verdict` like the verdict, so `-q` reaches it and a
+    // failed write costs the words and never the exit code. clap refuses `-q`
+    // with `--diff`, so the reach of `-q` here is a second guard.
+    if let Some(text) = diffs.and_then(|diffs| report.render_diffs(&diffs)) {
+        console.verdict(&text);
+    }
 
     Ok(conflicts)
 }

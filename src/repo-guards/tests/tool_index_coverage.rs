@@ -13,7 +13,6 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use repo_guards::tool_index;
 use tempfile::TempDir;
@@ -494,7 +493,7 @@ fn the_guard_enumerates_exactly_the_binaries_cargo_builds() {
 /// what turns "the guard found nothing wrong" into a claim about the tools that
 /// exist, rather than about the tools the guard happened to look for.
 fn cargo_binary_names(repo_root: &Path) -> BTreeSet<String> {
-    let output = Command::new(env!("CARGO"))
+    let output = childenv::fixture_command(env!("CARGO"))
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .current_dir(repo_root)
         .output()

@@ -9,14 +9,24 @@ name = "gsw"
 path = "src/main.rs"
 
 [dependencies]
+altscreen.workspace = true
 anyhow.workspace = true
 buildinfo.workspace = true
+childenv.workspace = true
 clap.workspace = true
 colored.workspace = true
 crossterm.workspace = true
+gitscratch.workspace = true
+ghrest.workspace = true
 gix.workspace = true
 ignore.workspace = true
 notify.workspace = true
+proctree.workspace = true
+runlimit.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+shellquote.workspace = true
+tempfile.workspace = true
 termsize.workspace = true
 termwindow.workspace = true
 textfit.workspace = true
@@ -26,7 +36,10 @@ unicode-width.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
+# The fixture repositories and `Conflicts::from_files`, for the tests of the
+# `m` key in `src/conflicts.rs`. The feature is on for the test targets only,
+# so the shipped binary has no way to state a cost that no replay measured.
+gitscratch = { workspace = true, features = ["testing"] }
 testcolor.workspace = true
 
 [lints]

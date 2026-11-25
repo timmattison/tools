@@ -59,7 +59,7 @@ const DIRTY_STATE: &str = "dirty";
 /// through it, so no call site can forget to take the AWS and git variables
 /// out of the environment of the child.
 fn subito() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_subito"));
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_subito"));
 
     for name in scrubbed_names(std::env::vars_os().map(|(name, _value)| name)) {
         command.env_remove(name);

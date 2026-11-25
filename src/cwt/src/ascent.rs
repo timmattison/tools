@@ -7,9 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::worktree::{
-    canonical, is_checkout, list_worktrees, paths_equal, RepoWorktrees, Worktree,
-};
+use repowalker::holds_git_entry;
+
+use crate::worktree::{canonical, list_worktrees, paths_equal, RepoWorktrees, Worktree};
 
 /// The branch names that identify the main worktree, in order of priority.
 ///
@@ -62,7 +62,9 @@ fn main_worktree_of(worktrees: &[Worktree]) -> Option<&Worktree> {
 /// Returns `None` when no repository above `from` has a main worktree.
 pub fn climb(from: &Path) -> Option<PathBuf> {
     climb_with(from, |dir| {
-        is_checkout(dir).then(|| list_worktrees(dir).ok()).flatten()
+        holds_git_entry(dir)
+            .then(|| list_worktrees(dir).ok())
+            .flatten()
     })
 }
 

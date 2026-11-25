@@ -202,7 +202,7 @@ fn measured(size: (u16, u16)) -> Option<(u16, u16)> {
 /// probe, which is to fall back to a width of its own choosing.
 #[must_use]
 pub fn controlling_size() -> Option<(u16, u16)> {
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "this is the helper the ban points every other caller at; the one call that reads the size of the controlling terminal lives here"
     )]
@@ -232,7 +232,7 @@ pub fn controlling_columns() -> Option<u16> {
 /// why a zero is no answer.
 #[must_use]
 pub fn stdout_size() -> Option<(u16, u16)> {
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "this is the helper the ban points every other caller at; the one call that reads the size of standard output lives here"
     )]
@@ -291,7 +291,7 @@ mod unix {
             ws_ypixel: 0,
         };
 
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this is the helper the ban points every other caller at; the one call that reads the window of a terminal lives here"
         )]

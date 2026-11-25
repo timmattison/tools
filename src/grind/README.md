@@ -96,7 +96,8 @@ That name is the one that cost the most. Git knows `--root` as an option of
 conflict, and reported `grind: clean` at exit 0 — a clean verdict for a branch
 that does not exist.
 
-**Both** revisions are resolved up front, not just the one you typed. A replay
+**Every** revision is resolved up front, not just the ones you typed: `HEAD`,
+BRANCH, and NEWBASE when [`--onto`](#a-stacked-branch---onto) names one. A replay
 starts from `HEAD`, so an empty repository or a fresh `git checkout --orphan` has
 nothing to replay — and being told that is worth more than watching a scratch
 worktree get built for a rebase that could never have started:
@@ -113,16 +114,21 @@ $ echo $?
 ## Usage
 
 ```console
-grind [-q] [BRANCH]
+grind [-q | --diff] [BRANCH]
+grind [-q | --diff] --onto NEWBASE BRANCH
 ```
 
 | Argument | Meaning |
 | --- | --- |
-| `[BRANCH]` | What to rebase HEAD onto. Anything git resolves to a commit works — a branch, a remote-tracking ref, a tag, a raw sha. Leave it out for `main`, or `master` in a repository with no `main`. |
+| `[BRANCH]` | What to rebase HEAD onto. Anything git resolves to a commit works — a branch, a remote-tracking ref, a tag, a raw sha. Leave it out for `main`, or `master` in a repository with no `main`. With `--onto`, BRANCH is the upstream, and you must name it. |
+| `--onto NEWBASE` | Replay only `BRANCH..HEAD`, onto NEWBASE, as `git rebase --onto NEWBASE BRANCH` does. See [A stacked branch: `--onto`](#a-stacked-branch---onto). |
 | `-q`, `--quiet` | Print nothing about the rebase. The exit code is still the answer. |
+| `--diff` | Print the diff of each stop after the breakdown. It cannot go with `-q`. On a terminal, the diff is in color. See [The diff of each stop](#the-diff-of-each-stop). |
 
-One positional argument and no `--onto`. `grind` simulates from `HEAD`, which is
-the only thing it *can* simulate from, so there is no second ref to give it.
+`grind` replays from `HEAD`, which is the only thing it *can* replay from. That
+fixes the optional `<branch>` argument of `git rebase`, which selects the commits
+to replay. It does not fix `--onto`, which is a different argument: the new base
+where the commits land.
 
 Unlike `grist`, `grind` has no answer to pipe — the answer *is* the exit code —
 so `-q` means silence rather than a terser rendering. It covers both streams:
@@ -131,11 +137,17 @@ caller redirecting stdout to `/dev/null` and getting chatter on the terminal
 anyway has not been given a quiet tool.
 
 `-q` silences everything `grind` itself says, and stops there. The argument
-parser answers before `grind` starts. So `grind -q --onto main` still prints a
-usage error and exits `2`, and `grind -q --version` still prints the version and
+parser answers before `grind` starts. So `grind -q --onto main`, which names no
+BRANCH, still prints a usage error and exits `2`, and `grind -q --version` still
+prints the version and
 exits `0`. Both answer about the tool rather than about a rebase. A caller left
 with a bare `2` and no word about which part of the command line was refused is
 worse off.
+
+`grind -q --diff` is a second refusal of the parser, with the same usage error
+and exit `2`. A request for the diff and a request for no output contradict each
+other, and a tool that obeys one of the two in silence surprises the caller who
+gave the other.
 
 A run with no `BRANCH` is not one of those. That refusal — no default branch to
 pick — is `grind`'s own, so `-q` does silence it and the exit code is the whole
@@ -201,6 +213,50 @@ The choice itself lives in [`gitscratch`](../gitscratch/README.md), which every
 tool built on that harness shares, so no two of them can drift into measuring
 different branches for the same command line.
 
+## A stacked branch: `--onto`
+
+`grind --onto NEWBASE BRANCH` measures `git rebase --onto NEWBASE BRANCH`. It
+replays only the commits of `BRANCH..HEAD`, and it puts them on NEWBASE.
+
+That is the rebase that moves a stacked branch. Branch `child` starts on branch
+`parent`, and then `parent` gets a squash merge into `main`. The squash commit
+holds the change of each commit of `parent`, but under a different patch. Git
+thus does not drop those commits, and a plain rebase of `child` onto `main`
+stops on each one:
+
+```console
+$ grind main
+grind: conflicts - replaying HEAD onto main
+       2 hunks across 1 file, 2 stops
+
+  shared.txt    2 hunks
+$ grind --onto main parent
+grind: clean - replaying parent..HEAD onto main hit no conflicts
+```
+
+The first answer is about a rebase that you do not intend to do. The second is
+about `git rebase --onto main parent`, which replays only the commits of
+`child`. `grind parent` does not help either: it replays nothing onto `main`.
+
+The verdict line names the range and the new base, so the answer says which
+rebase it measured. `--diff` and `-q` work with `--onto` as they work without
+it, and the three exit codes keep their meanings. A run without `--onto` prints
+the same bytes as before.
+
+The rules:
+
+- **`--onto` needs BRANCH.** BRANCH is the upstream that bounds the replay. The
+  default branch in its place turns `grind --onto main` into a plain rebase onto
+  `main`, under a verdict that names `--onto`. So the argument parser refuses
+  that command line with its usage error and exit `2`, also under `-q`.
+- **NEWBASE is resolved up front**, beside `HEAD` and BRANCH, before a scratch
+  worktree exists. A NEWBASE that does not resolve gets exit `2` and the same
+  `could not resolve` message as a BRANCH that does not resolve.
+- **A NEWBASE that starts with a dash is a revision.** Git knows `--root` as an
+  option of `rebase`, so `grind --onto=--root parent` is the dangerous case. It
+  is refused with exit `2`. It never replays onto the root, and it never reports
+  clean.
+
 ## The three numbers
 
 | Number | What it counts |
@@ -242,6 +298,128 @@ $ COLUMNS=40 grind origin/main
 Two callers want this. A wrapper such as `viddy(1)` holds the terminal and hands
 `grind` a pipe, so the wrapper exports the width it measured. And a test states
 a width rather than arranging a terminal to produce one.
+
+## The diff of each stop
+
+`--diff` prints the diff of each stop after the breakdown. Each stop gets a
+heading that names the stop and the commit that stopped. Under the heading is
+the text that `git diff` shows at that stop in a real rebase:
+
+```console
+$ grind --diff main
+grind: conflicts - replaying HEAD onto main
+       3 hunks across 2 files, 2 stops
+
+  f.txt    2 hunks
+  g.txt    1 hunk
+
+stop 1 of 2 - 6ee2c41 feat one
+diff --cc f.txt
+index a5f1be7,60b32f6..0000000
+--- a/f.txt
++++ b/f.txt
+@@@ -1,5 -1,5 +1,9 @@@
+  a
+++<<<<<<< HEAD
+ +MAIN
+++=======
++ FEAT1
+++>>>>>>> 6ee2c41 (feat one)
+  c
+  d
+  e
+* Unmerged path g.txt
+
+stop 2 of 2 - 9910691 feat two
+diff --cc f.txt
+index 1edf9f2,a1ec13b..0000000
+--- a/f.txt
++++ b/f.txt
+@@@ -1,9 -1,5 +1,13 @@@
+  a
+ +<<<<<<< HEAD
+++<<<<<<< HEAD
+ +MAIN
+ +=======
+ +FEAT1
+ +>>>>>>> 6ee2c41 (feat one)
+++=======
++ FEAT2
+++>>>>>>> 9910691 (feat two)
+  c
+  d
+  e
+```
+
+At stop 2, the lines with one `+` are the markers that the replay staged at
+stop 1. A later stop shows the markers of an earlier stop as content, because
+the replay resolves each stop by staging its markers. That is also why the hunk
+count runs slightly hot. See
+[Reading the numbers honestly](#reading-the-numbers-honestly).
+
+The rules:
+
+- **`--diff` adds words and changes nothing else.** The verdict, the breakdown,
+  and the exit code are the same with the flag and without it. A clean rebase
+  has no stop, so a clean run prints the same bytes.
+- **The diff names the files that the breakdown counts, and no others.** The
+  diff and the counter read the same filter of unmerged paths.
+- **A run that fails prints no diff.** If the replay fails at stop 3, the run
+  exits `2` with the error, and it prints no diff of stops 1 and 2. The diff is
+  part of the answer, and there is no answer. The uncommitted-work note obeys
+  the same rule.
+- **A diff that git cannot give leaves the verdict alone.** The section of that
+  stop says `diff not available:` and gives the message from git. The counts
+  and the exit code do not change.
+- **A control character cannot reach your terminal.** A control character in
+  the diff or in a heading comes out as `\u{...}`, as it does in a name in the
+  breakdown. A newline, a tab, and a CRLF line ending stay.
+
+Only the diff is in color, with the palette of `git diff`: bold file headers,
+cyan hunk headers, green and red content lines, and a yellow stop heading. The
+verdict, the breakdown, and the note stay plain. The
+[`gitscratch` README](../gitscratch/README.md#the-halt-diffs) has the full
+palette. These rules decide the color:
+
+- On a terminal, the diff is in color.
+- Into a pipe, the diff is plain. `grind --diff main > conflicts.txt` writes
+  plain text.
+- A wrapper such as `viddy(1)` gives `grind` a pipe and exports `COLUMNS`, and
+  it shows the bytes on a terminal. So a pipe gets color too when `COLUMNS`
+  states a width: a number above zero. An empty `COLUMNS`, or one that is no
+  number, states no width, and the diff stays plain. `grind` reads the width of
+  the breakdown by the same rule. `gsw` and `wn` paint for a wrapper too.
+- `NO_COLOR`, with any value, turns color off, also for a wrapper.
+- `CLICOLOR=0` turns color off, also for a wrapper.
+- `CLICOLOR_FORCE=1` turns color on, also into a pipe, and it wins over
+  `NO_COLOR`. A pager that reads color codes needs it:
+
+```console
+$ CLICOLOR_FORCE=1 grind --diff main | less -R
+```
+
+There is no flag for color. The variables above are the interface.
+
+## Progress on stderr
+
+A run that takes more than 500 ms shows a bar on stderr. First a spinner shows
+the creation of the scratch worktree. Then the bar shows the commit that git
+replays now, and the elapsed time:
+
+```console
+grind: replaying HEAD onto main  ██████▌   87/200 commits  0:05
+```
+
+The position comes from the state files of git, `rebase-merge/msgnum` and
+`rebase-merge/end`. These are the files that `git-prompt.sh` reads. The tool
+does not parse the text that git writes for a person, because git can change
+that text.
+
+The display clears itself before the note, the verdict, or an error. It goes to
+stderr only, so stdout stays the verdict that a script reads. It shows only when
+stderr is a terminal, and `-q` hides it. A run with `-q`, or with stderr on a
+pipe or a file, writes the same bytes as before. There is no flag for the
+display.
 
 ## Uncommitted work
 
@@ -386,3 +564,47 @@ assertion then fails for a reason it is not about. The pin is read back off the
 built command by a test of its own, because a machine whose git ships no
 translations cannot show the failure, and a pin nothing asserts is a pin the
 next person deletes.
+
+The builder also takes `NO_COLOR`, `CLICOLOR`, and `CLICOLOR_FORCE` away from
+each run, and a test reads the removal back off the built command, as it reads
+the locale pin. Without the removal, a developer who exports one of them gets
+tests of the paint that fail on that machine only. A test that needs one of the
+three sets it on its own run.
+
+The `--onto` tests hold the rules of
+[A stacked branch: `--onto`](#a-stacked-branch---onto). They use the
+`squash_merged_parent_repo` fixture of `gitscratch`, where `parent` got a
+squash merge into `main`:
+
+- From `child`, a control run of `grind main` reports the false conflicts first,
+  so the clean verdict of `grind --onto main parent` is not vacuous.
+- From `contested-child`, `grind --onto main parent` gives one golden: one stop,
+  in `stacked.txt` only, and no hunk from the commits of `parent`.
+- A NEWBASE that does not resolve, and `--onto=--root`, are refused before a
+  scratch worktree exists. The proof is the poisoned `TMPDIR`, as for BRANCH.
+- `--onto` without BRANCH gets the usage error of the parser, also under `-q`.
+- `--diff --onto main parent` prints exactly one halt diff, for the commit of
+  `contested-child`. One golden holds the whole of stdout.
+
+The `--diff` tests hold the rules of
+[The diff of each stop](#the-diff-of-each-stop):
+
+- A clean run prints the same bytes with the flag and without it.
+- A conflict prints the verdict, then the diff of each stop. One golden holds
+  the whole of stdout, byte for byte, and each id in it comes from the git of
+  the fixture.
+- A run that fails prints no diff. That holds also for a replay that captured a
+  stop and then failed, because git could not write the commit of the stop.
+- `日本語.txt` stays intact in the diff, and a run from a subdirectory names each
+  file from the repository root.
+- A closed pipe costs the diff its words and never the exit code.
+- clap refuses `-q --diff` and `--quiet --diff`.
+- Seven tests hold the color. The pipe of a wrapper gets color, and the paint
+  changes no character. `NO_COLOR` and `CLICOLOR=0` refuse that color. A pipe
+  with no `COLUMNS` stays plain, and so does a pipe with an empty `COLUMNS` or
+  a `COLUMNS` that is no number. `CLICOLOR_FORCE=1` paints a pipe. A
+  pseudo-terminal from `gitscratch::testing::pty` gets color with no variable
+  set. That last test fails for a `grind` that gives the answer of
+  `should_force_colors_here` to `set_override` directly. On a terminal that
+  answer is false, and `set_override(false)` turns off the color of the
+  terminal.

@@ -7,7 +7,7 @@
 //! otherwise move the very branch refs being simulated.
 //!
 //! The other half of "against the right repository" is the *environment*, which
-//! [`NoInheritedGitEnvironment`] strips, because a git invocation obeys it
+//! [`childenv::fixture_command`] strips, because a git invocation obeys it
 //! before it obeys the directory it was pointed at. The same sweep takes the
 //! rest of what a hook hands its children — who is committing, and when —
 //! because an environment variable outranks every config source, so the
@@ -24,10 +24,6 @@ use anyhow::{Context, Result};
 const HARNESS_NAME: &str = "gitscratch";
 const HARNESS_EMAIL: &str = "gitscratch@localhost";
 
-/// The prefix that makes a variable git's, and therefore one
-/// [`NoInheritedGitEnvironment`] removes.
-const GIT_ENVIRONMENT_PREFIX: &str = "GIT_";
-
 /// The key that says where git looks a hook up.
 ///
 /// Spelled once because [`Git::safety_config`] pins it and the README inventory
@@ -35,104 +31,6 @@ const GIT_ENVIRONMENT_PREFIX: &str = "GIT_";
 /// whole of what a document can quote, and two spellings that drifted apart
 /// would leave that check asking about a key nothing pins.
 const HOOKS_PATH_KEY: &str = "core.hooksPath";
-
-/// Spawn a command that takes its repository, and its identity, from nothing it
-/// inherited.
-///
-/// **The rule is the `GIT_` prefix, and never a list of names.** A list strips
-/// nothing new the day git adds a variable, and from then on it returns the same
-/// clean-looking answer as a list that works. This scrub was a fifteen-name list
-/// once, and `GIT_CONFIG_PARAMETERS` walked straight through it — a variable git
-/// exports to every hook, which injects arbitrary configuration (`user.email`,
-/// `core.bare`, `core.hooksPath`) into every git this crate spawns. It is not a
-/// location variable, so no amount of adding location names would have caught
-/// it. Enumerating [`std::env::vars_os`] sweeps whatever git invents next
-/// without anyone editing this file. Pinned by `tests/inherited-environment.rs`.
-///
-/// Three families the old lists named are worth keeping in mind, because the
-/// prefix now covers all of them. The location variables — `GIT_DIR`,
-/// `GIT_WORK_TREE`, `GIT_INDEX_FILE` and their kin — aim git at a repository
-/// other than the one the runner is rooted in, and git hands several of them to
-/// its hooks, `GIT_INDEX_FILE` often *relative* so it silently re-anchors on
-/// whatever directory each command runs in. The attribution variables —
-/// `GIT_AUTHOR_NAME` and its five siblings — are read in preference to `-c`
-/// *and* to `git config`, so leaving them in place re-attributes anything this
-/// crate commits, and the two `DATE` variables are the quieter half: left in
-/// place, every commit a run makes carries one identical timestamp. The
-/// configuration variables — `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`,
-/// `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` — hand the caller a way to set any
-/// key at all.
-///
-/// Removing `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` costs nothing, because
-/// removing a variable is not the same as pinning it to `/dev/null`: with them
-/// gone git falls back to the host's `~/.gitconfig` and `/etc/gitconfig` exactly
-/// as it does in a normal shell.
-///
-/// One trait rather than one per family, because the prefix cannot tell the
-/// families apart, and any split back into halves is a list again. A call site
-/// that asked for the location half alone would be asking for the shape this
-/// crate stopped trusting.
-///
-/// Public, and an extension trait rather than a private helper, because the
-/// commands that need it are not all git: a consumer's test suite spawning its
-/// own binary inherits exactly the same environment, and a second copy of this
-/// rule living in a test file is the drift this exists to prevent.
-pub trait NoInheritedGitEnvironment {
-    /// Remove every `GIT_`-prefixed variable from the environment this command
-    /// will be spawned with.
-    ///
-    /// A no-op in normal use — nothing sets these outside a hook or a replay —
-    /// which is precisely why it has to be unconditional. The one run where it
-    /// matters is the one nobody is watching.
-    ///
-    /// A caller that wants one of these variables set — or wants it gone
-    /// whatever this process holds — does so *after* calling this, and wins.
-    /// That is how `Git::command` pins `GIT_EDITOR` and the four identity
-    /// names on top of a swept command, and takes the two identity dates off it
-    /// again: this sweep removes only what the process carries, so a restated
-    /// removal is what makes the second guard hold on its own.
-    ///
-    /// Keys are compared through [`std::ffi::OsStr::to_string_lossy`]: lossy
-    /// conversion replaces invalid bytes with U+FFFD, so it can never
-    /// manufacture a `GIT_` prefix out of bytes that did not spell one.
-    fn without_inherited_git_environment(&mut self) -> &mut Self;
-}
-
-impl NoInheritedGitEnvironment for Command {
-    fn without_inherited_git_environment(&mut self) -> &mut Self {
-        for (key, _) in std::env::vars_os() {
-            if key.to_string_lossy().starts_with(GIT_ENVIRONMENT_PREFIX) {
-                self.env_remove(&key);
-            }
-        }
-
-        self
-    }
-}
-
-/// Detach `command` from every part of the git environment this process
-/// inherited: the repository it names and the identity it carries, in one call.
-///
-/// The free-function spelling of [`NoInheritedGitEnvironment`], for a call site
-/// that holds a `&mut Command` rather than a builder chain.
-///
-/// Public because the danger is not this crate's alone. Anything in this
-/// repository that spawns git - a tool that adds a worktree, a test that builds
-/// a throwaway repository - is broken the same way by the same environment, and
-/// the rule for what to shed is worth keeping in one reusable place rather than
-/// copied into each of them to drift.
-///
-/// That is an offer, not a guarantee. Nothing - no lint, no type, no guard -
-/// obliges a git spawn in this repository to call this, so immunity holds where
-/// it is called and nowhere else.
-///
-/// ```no_run
-/// let mut command = std::process::Command::new("git");
-/// gitscratch::shed_inherited_git_environment(&mut command);
-/// ```
-pub fn shed_inherited_git_environment(command: &mut Command) {
-    command.without_inherited_git_environment();
-}
 
 /// The outcome of one git invocation.
 pub struct GitOutput {
@@ -222,7 +120,7 @@ impl Git {
     /// `an_argument_cannot_re_pin_a_setting_the_safety_config_fixed` and
     /// `an_argument_cannot_aim_the_runner_at_another_repository`.
     fn command(&self, subcommand: &str, args: &[&str]) -> Command {
-        let mut command = Command::new("git");
+        let mut command = childenv::fixture_command("git");
         command
             .args(self.safety_config())
             .arg(subcommand)
@@ -238,7 +136,6 @@ impl Git {
             // they put the developer's own name on scratch commits, which is
             // the single thing the pin exists to prevent. Both halves leave
             // with the one sweep, because the rule is the `GIT_` prefix.
-            .without_inherited_git_environment()
             // A rebase that stops would otherwise try to open an editor and
             // hang forever on a commit message or a todo list.
             .env("GIT_EDITOR", "true")
@@ -264,6 +161,12 @@ impl Git {
             // each commit its own time, exactly as it does in a shell that
             // holds nothing. Pinned by
             // `every_identity_variable_is_settled_on_the_command_the_runner_builds`.
+            //
+            // These are the only two removals by name that this workspace
+            // allows, and `repo_guards::git_env_sweep::EXEMPTIONS` names them
+            // one variable at a time. A third removal written here is still a
+            // violation, and an exemption that stops matching is reported, so
+            // neither this comment nor that list can quietly outlive the other.
             .env_remove("GIT_AUTHOR_DATE")
             .env_remove("GIT_COMMITTER_DATE");
         command
@@ -274,8 +177,9 @@ impl Git {
     /// Private because raw output is a footgun in the one way this crate cares
     /// about: everything public either trims it deliberately ([`Git::try_run`],
     /// [`Git::run`]) or deliberately does not ([`Git::nul_separated`],
-    /// [`Git::nul_separated_paths`], [`Git::path`]), and which of those a caller
-    /// wants is not a choice worth re-making per call site.
+    /// [`Git::nul_separated_paths`], [`Git::path`], [`Git::verbatim`]), and
+    /// which of those a caller wants is not a choice worth re-making per call
+    /// site.
     fn output(&self, subcommand: &str, args: &[&str]) -> Result<Output> {
         self.command(subcommand, args)
             .output()
@@ -517,6 +421,38 @@ impl Git {
         Ok(path_from_git(printed))
     }
 
+    /// Run git and return its stdout as the bytes git wrote: not trimmed and
+    /// not decoded.
+    ///
+    /// **The reader for text that goes to a person verbatim.** A halt diff is
+    /// such text, and each other reader changes it. [`Git::run`] and
+    /// [`Git::try_run`] trim, so a diff loses the newline at its end and the
+    /// spaces at the end of its last line. They also decode lossily, so a byte
+    /// of file content outside UTF-8 becomes U+FFFD before the caller decides
+    /// how to show it. [`Git::nul_separated`] and the two path-list readers ask
+    /// git for `-z` and split its answer into fields, and [`Git::path`] removes
+    /// one newline. A diff has none of those shapes. Its bytes are the answer,
+    /// and the caller that prints them decodes them at print time.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned or exited non-zero. The
+    /// error carries git's stderr, because git says there why it gave no
+    /// answer.
+    pub fn verbatim(&self, subcommand: &str, args: &[&str]) -> Result<Vec<u8>> {
+        let output = self.output(subcommand, args)?;
+
+        anyhow::ensure!(
+            output.status.success(),
+            "git {} failed:\n{}\n{}",
+            invocation(subcommand, args),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+
+        Ok(output.stdout)
+    }
+
     /// Resolve a revision to a full commit id.
     ///
     /// **Both flags are the question, not decoration.** A bare
@@ -537,7 +473,7 @@ impl Git {
     /// alone catches every dash-leading revision git knows today, because an
     /// option prints no object id and `--verify` demands one. That is a fact
     /// about today's option list rather than a rule, and this crate takes the
-    /// rule: the same reasoning that makes [`NoInheritedGitEnvironment`] match
+    /// rule: the same reasoning that makes [`childenv::fixture_command`] match
     /// a prefix instead of a list of names.
     ///
     /// # Errors
@@ -704,6 +640,33 @@ impl Git {
             // merge replay. Read out of a real merge rather than from git's
             // documentation.
             "merge.verifySignatures=false",
+            // A halt diff carries abbreviated object ids on its `index` line,
+            // and `core.abbrev` sets how many hex digits git prints for one.
+            // Under `core.abbrev=12`, git 2.55 printed that line of a conflict
+            // diff with ids of 12 digits in place of 7. The flag `--abbrev=7`
+            // on the diff call does not reach that line of a combined diff,
+            // and only `-c core.abbrev=auto` gives it back. A `-c` pair cannot
+            // follow the subcommand, so this pin is here and not with the
+            // other pins of the halt diff in `DIFF_AT_HALT`. `auto` is what
+            // git uses when nothing sets the key, so the name of a stopped
+            // commit also gets git's default length. The counter reads the
+            // shape of a marker and not its label, so no count changes. Pinned
+            // by
+            // `a_halt_diff_abbreviates_each_id_to_git_s_default_length_whatever_core_abbrev_says`
+            // in `tests/diffs.rs`.
+            "core.abbrev=auto",
+            // `log.showSignature=true` makes `git log` check the signature of
+            // a signed commit and write the result on stdout, above the line
+            // of the format. For an SSH-signed stopped commit, git 2.55 wrote
+            // `Good "git" signature for ...` above the name that
+            // `name_stopped_commit` returns, so the stop heading had two lines.
+            // The pin is here and not on that one call, so it covers each
+            // `log` call. A check of a signature also runs the program that
+            // `gpg.ssh.program` or `gpg.program` names, and a replay runs no
+            // program from the configuration of the developer. Pinned by
+            // `a_halt_diff_names_a_signed_stopped_commit_on_one_line_whatever_log_show_signature_says`
+            // in `tests/diffs.rs`.
+            "log.showSignature=false",
         ]
         .iter()
         .map(|setting| (*setting).to_string())
@@ -712,7 +675,7 @@ impl Git {
         // harness that actually made them.
         .chain([
             // These two settle the identity only in company with
-            // `NoInheritedGitEnvironment`, which takes back off the identity
+            // `childenv::fixture_command`, which takes back off the identity
             // variables that would otherwise outrank them.
             format!("user.name={HARNESS_NAME}"),
             format!("user.email={HARNESS_EMAIL}"),
@@ -810,10 +773,9 @@ mod tests {
     use pulldown_cmark::{Event, Parser, Tag};
     use tempfile::TempDir;
 
-    use super::{
-        Git, NoInheritedGitEnvironment, PathBuf, GIT_ENVIRONMENT_PREFIX, HARNESS_EMAIL,
-        HARNESS_NAME, HOOKS_PATH_KEY,
-    };
+    use childenv::GIT_ENVIRONMENT_PREFIX;
+
+    use super::{Git, PathBuf, HARNESS_EMAIL, HARNESS_NAME, HOOKS_PATH_KEY};
     use crate::repo::PREFLIGHT_HOOKS_PATH;
     use crate::testing::{child_ran, run_child_half, TestRepo};
 
@@ -1144,13 +1106,13 @@ mod tests {
     ///
     /// `update-index --index-info` reads its records from stdin and
     /// [`TestRepo::git`] passes none, so that one spawn is made directly here -
-    /// scrubbed through [`NoInheritedGitEnvironment`] like every other spawn in this
+    /// scrubbed through [`childenv::fixture_command`] like every other spawn in this
     /// crate, because an inherited `GIT_INDEX_FILE` would otherwise stage this
     /// name into whichever repository the hook that started the run belongs to.
     #[test]
     fn a_path_git_reports_comes_back_byte_for_byte_even_when_it_is_not_utf8() {
         use std::io::Write;
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
 
         let repo = TestRepo::init();
         repo.commit_file("seed.txt", "seed\n", "base");
@@ -1161,10 +1123,9 @@ mod tests {
         record.extend_from_slice(BAD_NAME);
         record.push(0);
 
-        let mut child = Command::new("git")
+        let mut child = childenv::fixture_command("git")
             .args(["update-index", "-z", "--index-info"])
             .current_dir(repo.path())
-            .without_inherited_git_environment()
             .stdin(Stdio::piped())
             .spawn()
             .expect("spawn git update-index");
@@ -1910,7 +1871,7 @@ mod tests {
     /// inherited means something other than the environment outranked the pin,
     /// and that is a different bug worth saying out loud.
     ///
-    /// Applies [`shed_inherited_git_environment`]'s own rule — the `GIT_`
+    /// Applies [`childenv::fixture_command`]'s own rule — the `GIT_`
     /// prefix, read off [`std::env::vars_os`] — rather than a list of its own,
     /// so the diagnosis names the variables the runner actually acts on. A list
     /// here would go stale the first time the rule widened, and it would go
@@ -1961,7 +1922,7 @@ mod tests {
              got:         {ident}\n  \
              inherited:   {}\n\
              An identity variable outranks every config source, `-c` included, so \
-             NoInheritedGitEnvironment removes every `GIT_` variable and \
+             childenv::fixture_command removes every `GIT_` variable and \
              Git::command pins the four name and email variables back to the \
              harness before git is spawned. git exports them into every hook it \
              runs, and into every commit that rebase, cherry-pick, or am \
@@ -2181,7 +2142,7 @@ mod tests {
     /// the runner puts on the command it builds.
     ///
     /// The armed control comes first, and it is what makes the assertion mean
-    /// anything. [`NoInheritedGitEnvironment`] schedules a removal for every
+    /// anything. [`childenv::fixture_command`] schedules a removal for every
     /// `GIT_` variable the process *holds*, so a run started from a git hook
     /// would see both date variables removed from the command whether or not
     /// [`Git::command`] says anything about them. Under a process that holds
@@ -2244,7 +2205,7 @@ mod tests {
     /// restated and two left to the sweep alone, a sweep that was edited away
     /// would hold the name and the address and let both dates through - and
     /// every commit a run makes would carry one identical timestamp, which is
-    /// the cost the crate already names at [`NoInheritedGitEnvironment`].
+    /// the cost the crate already names at [`childenv::fixture_command`].
     ///
     /// Read off the command rather than out of a commit, because the question
     /// is what the runner says rather than what git resolves. A commit made in

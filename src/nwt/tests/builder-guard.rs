@@ -2,9 +2,9 @@
 //! integration test that spawns the real `nwt` binary does so through this
 //! builder, and the builder must scrub the environment that would otherwise let
 //! the spawned `nwt` reach out of its fixture and act on the developer's real
-//! session — the terminal multiplexer (whose tab it would rename) and the whole
-//! `GIT_*` family (which would point its `git worktree add`, its object writes
-//! and its config reads at the developer's real repository).
+//! session — the whole `GIT_*` family, which would point its
+//! `git worktree add`, its object writes and its config reads at the
+//! developer's real repository.
 //!
 //! **The rule under test is the prefix, not a list of names.** An earlier
 //! version of this file asserted a fixed five-name list, which merely mirrored
@@ -15,14 +15,10 @@
 //! names the builder never mentions by name, and demands that every one of them
 //! is scheduled for removal.
 //!
-//! `ZELLIJ`/`TMUX` stay named explicitly because they are not a prefix family:
-//! there is no `MULTIPLEXER_*` to sweep, and the tab-rename tests deliberately
-//! re-add them on the returned command.
-//!
 //! This inspects the builder's configured environment directly via
 //! `Command::get_envs`, so it is deterministic and cross-platform — no process
 //! is spawned and it does not depend on whether the test runner itself happens
-//! to be inside a multiplexer or a git hook.
+//! to be inside a git hook.
 //!
 //! This file deliberately holds a SINGLE `#[test]`: it mutates the process-wide
 //! environment, and cargo runs the tests within one test binary on parallel
@@ -54,14 +50,6 @@ const PROBE_VALUE: &str = "nwt-builder-guard-probe";
 /// severe. `GIT_CONFIG_PARAMETERS` and `GIT_OBJECT_DIRECTORY` in particular were
 /// verified to pass straight through a three-name scrub.
 const REQUIRED_REMOVALS: &[(&str, &str)] = &[
-    (
-        "ZELLIJ",
-        "the spawned nwt would believe it is inside zellij and rename the user's real tab",
-    ),
-    (
-        "TMUX",
-        "the spawned nwt would believe it is inside tmux and rename the user's real window",
-    ),
     (
         "GIT_DIR",
         "git exports this into hooks and it overrides cwd-based discovery, so the spawned \

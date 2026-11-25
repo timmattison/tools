@@ -20,7 +20,6 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use repo_guards::doc_links;
 use tempfile::TempDir;
@@ -386,7 +385,7 @@ fn repo_root() -> PathBuf {
 /// started, or compared against a set it quietly failed to parse, would be an
 /// instance of the very defect it exists to catch.
 fn cargo_documentable_targets(repo_root: &Path) -> BTreeSet<String> {
-    let output = Command::new(env!("CARGO"))
+    let output = childenv::fixture_command(env!("CARGO"))
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .current_dir(repo_root)
         .output()

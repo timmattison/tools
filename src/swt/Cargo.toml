@@ -13,13 +13,19 @@ path = "src/main.rs"
 
 [dependencies]
 buildinfo.workspace = true
+childenv.workspace = true
 clap.workspace = true
 serde_json.workspace = true
+shellquote.workspace = true
 
 [target.'cfg(unix)'.dependencies]
+libc.workspace = true
 signal-hook.workspace = true
 
 [dev-dependencies]
+# The shared git fixtures. `tests/hostile-git-environment.rs` takes its decoy
+# repository from them.
+gitscratch = { workspace = true, features = ["testing"] }
 libc.workspace = true
 regex.workspace = true
 tempfile.workspace = true

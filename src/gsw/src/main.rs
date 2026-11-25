@@ -8,7 +8,7 @@ use buildinfo::version_string;
 use clap::Parser;
 use colored::Colorize;
 
-use crate::git::{FileEntry, FileStatus};
+use crate::git::FileEntry;
 use crate::render::{
     plan_section_caps, render, render_with_offset, LogEntry, RefreshStatus, RenderOptions, Snapshot,
 };
@@ -17,18 +17,38 @@ use termwindow::should_force_colors;
 
 mod age;
 mod bar;
+/// Starting a child process that cannot reach the terminal gsw is drawing on.
+mod child;
+/// Measuring a rebase and a merge against the default branch, for the `m` key.
+mod conflicts;
 mod git;
+/// Opening the issue that the branch names, through a command the user supplies.
+mod issue;
 /// Cutting a child process's byte chunks into lines that are safe to paint.
 mod lines;
+/// The pull-request indicator of the watch-mode header.
+mod pull;
 mod push;
+/// Deciding whether the person who reads this screen sits at this machine.
+mod remote;
 mod render;
 mod repo;
+/// The shell that runs a command the user supplies, for every key that runs one.
+mod shell;
 mod snapshot;
+/// Putting the number of the pull request of the branch on the tab title, through a
+/// command the user supplies, for the `T` key.
+mod tab;
 /// Shared git fixtures for the unit tests. Test-only: it shells out to `git` to
 /// build throwaway repositories, which the shipped binary never does.
 #[cfg(test)]
 mod testrepo;
+/// Bringing the branch up to date with the base, through a command the user
+/// supplies, for the `R` and `M` keys.
+mod update;
 mod watch;
+/// The worktrees of the repository, sorted by path, for the arrow keys.
+mod worktrees;
 
 #[derive(Parser)]
 #[command(name = "gsw")]
@@ -37,17 +57,166 @@ mod watch;
     about = "Compact git status watch — event-driven, self-refreshing branch-state view",
     long_about = "Prints a compact, color-coded view of the current branch's state: \
                   commits ahead of (and behind) the base branch, a recent-commit log, and a \
-                  per-file list showing a magnitude bar, +/- counts, and recency. On a TTY it \
+                  per-file list showing a magnitude bar, +/- counts, and recency. In the log, \
+                  a blue ▎ in the left column marks each commit that is only on the current \
+                  branch: the commits that the ahead count counts. The mark is a glyph, so it \
+                  stays visible with no color. On a TTY it \
                   runs as a self-refreshing watch that repaints on filesystem changes and \
                   re-walks the repository every --refresh-interval seconds, with the \
                   separator under the header showing how stale the screen is and how long \
                   until the next refresh; with `--one-shot` (or when its output is piped) \
                   it renders once and exits.\n\n\
-                  Watch-mode keys: q or Ctrl-C quits, r refreshes now, and p pushes the current \
+                  In watch mode, the right end of the header row shows whether the branch on \
+                  the screen has an open pull request on GitHub. PR #690 in bold green means \
+                  one open pull request, and PR #690 +1 means two or more: the lowest number, \
+                  then the count of the others. A draft pull request counts as open. no PR, \
+                  dim, means none. PR ?, dim, means that no answer came yet or that the last \
+                  lookup failed. The pull request is the one whose head is the branch that \
+                  branch.<name>.merge names, in the repository of the remote of the branch. A \
+                  branch that tracks nothing asks about its own name, in the remote that p \
+                  pushes a new branch to. gsw asks GitHub through gh api, with REST and an \
+                  ETag, so an answer that did not change costs nothing against the rate limit. \
+                  It asks after the first frame, at each timed refresh, when r refreshes, and \
+                  when the branch or the worktree on the screen changes. It never asks because \
+                  of a filesystem event. One lookup runs at a time, for at most 10 seconds. A \
+                  rate limit shows PR ? and stops the lookups until GitHub lets them start \
+                  again. The name of the branch outranks the indicator: in a pane too narrow \
+                  for both, the indicator goes. There is no indicator in one-shot mode, with \
+                  --no-pr, without gh on PATH, on a detached HEAD, and for a remote that is \
+                  not on GitHub. GH_HOST names one more GitHub host.\n\n\
+                  Watch-mode keys: q or Ctrl-C quits, r refreshes now, p pushes the current \
                   branch after a confirmation that names what it will do — a branch not yet on \
-                  the remote is confirmed as creating one. A push whose branch stopped being \
+                  the remote is confirmed as creating one — P does the same push with \
+                  --no-verify, so the pre-push hook of the repository does not run, G opens the \
+                  pull request of the \
+                  branch, or the issue the branch names when there is no pull request, T puts \
+                  the number of the pull request of the branch on the zellij tab title, R \
+                  rebases the branch onto the base and pushes it, M merges the base \
+                  into the branch and pushes it, m measures a rebase and a merge against the \
+                  default branch, and the arrow keys move the watch between the worktrees of \
+                  the repository. \
+                  A push whose branch stopped being \
                   checked out between the question and the answer is refused, not redirected. \
-                  p never force-pushes.\n\n\
+                  The push gets no GIT_ variable out of gsw's own environment, but for the six \
+                  you state on purpose, and the check that reads the branch gets none either. \
+                  So a gsw started from inside a git hook still pushes the repository on the \
+                  screen. p never force-pushes.\n\n\
+                  G runs up to two commands in your own interactive shell, with the work tree \
+                  as their current directory. GSW_PR_COMMAND holds the command that runs \
+                  first, and it defaults to `ggsp`. GSW_ISSUE_COMMAND holds the command that \
+                  runs only when the first one fails, and it defaults to `ggs`. So G opens the \
+                  pull request of the branch, and the issue when the branch has no pull \
+                  request. Set a variable to an empty string to remove its step, and set both \
+                  to turn the key off. Each value is a whole command line, so it can carry \
+                  arguments — `gh issue view --web` works. gsw asks your shell about the first \
+                  word and runs the whole line, so the first word is what has to exist and the \
+                  shell reads the rest the way it reads arguments at a prompt. Each command is \
+                  usually a shell function, so gsw asks your shell once at startup whether \
+                  each one exists. Where only one exists, G runs that one alone. Where neither \
+                  exists, G does nothing and says nothing, the way an unbound key does — and a \
+                  function you add to your rc file after gsw started needs a restart. A press \
+                  that opens a page costs the frame no row, and the failure of the first step \
+                  shows nothing. A press where both steps fail puts the last line of the issue \
+                  command under the frame, where it waits for a key. A press gets a minute, \
+                  and its two steps share it: after that gsw stops waiting, says so under the \
+                  frame, starts no second step, and gives the key back — the command itself \
+                  keeps running, because it is yours, and it can be the process that holds \
+                  the browser open.\n\n\
+                  T runs one command in your own interactive shell, with the worktree on the \
+                  screen as its current directory. GSW_TAB_COMMAND holds the command, and it \
+                  defaults to `stp`: a shell function that puts the number of the open pull \
+                  request of the branch at the front of the zellij tab title, and keeps the \
+                  rest of the title. This repository ships no `stp`. The value is a whole \
+                  command line, as the value of GSW_ISSUE_COMMAND is, and gsw adds no argument \
+                  to it. Set it to an empty string to turn the key off, and gsw then asks no \
+                  shell about it. Where the command does not exist, T does nothing and says \
+                  nothing, the way G does. T asks nothing first, because a tab title is not the \
+                  repository, and it asks for no second press on a remote shell, because the \
+                  rename goes through the zellij server. One run at a time: T does nothing \
+                  while a run of T is in flight, and it acts while a push, R, or M runs, as G \
+                  does. A run that worked puts the last line the command wrote under the frame, \
+                  where it fades after a minute, and a run that wrote nothing posts nothing. A \
+                  run that failed puts its last line under the frame in red, where it waits for \
+                  a key. A press gets a minute: after that gsw stops waiting, says so under the \
+                  frame, and gives the key back. Two limits apply. T works in zellij only: in \
+                  tmux and in a bare terminal the title changes through an escape sequence on \
+                  the standard output of the command, and gsw reads that output and does not \
+                  forward the sequence. And the worktree on the screen gives the number, but \
+                  the tab is always the tab of the gsw pane: after Left or Right moves the \
+                  watch, T puts the number of that worktree on the tab of gsw.\n\n\
+                  m measures what grind and grime measure, in this process: a rebase of HEAD \
+                  onto the default branch (main, else master) and a merge of that branch into \
+                  HEAD. The bottom row says `Running grind and grime against main…` until the \
+                  run ends. Then one line such as `main: rebase clean · merge 1 hunk in 1 \
+                  file` takes its place and fades off after a minute. One run at a time: m \
+                  does nothing while a run is in flight. A rebase or a merge that starts \
+                  during a run moves HEAD, so that run shows no line. A quit during a run \
+                  waits for the replay in flight, so no scratch worktree stays behind.\n\n\
+                  R rebases the branch onto the base and pushes it, and M merges the base into \
+                  the branch and pushes it. Neither act is gsw's own: each key runs one command \
+                  that you supply, in your own interactive shell, and that command pushes the \
+                  branch itself. GSW_REBASE_COMMAND holds the command of R and it defaults to \
+                  `grp`. GSW_MERGE_COMMAND holds the command of M and it defaults to `gmp`. \
+                  This repository ships neither one: both are shell functions of one person, \
+                  which is why each name is yours to set. Set a variable to an empty string to \
+                  turn that key off, and gsw then asks no shell about it. The value is a whole \
+                  command line, as the value of GSW_ISSUE_COMMAND is, and gsw puts the base on \
+                  the end of that line as one quoted word — a value of `grp --fork-point` runs \
+                  `grp --fork-point 'main'`. A command that replaces grp or gmp must therefore \
+                  take the base as its last argument. Where the command does not exist, the key \
+                  does nothing and says nothing, the way G does. Each key asks first, and the \
+                  question names the act, the branch, the base, how far behind it is, and the \
+                  command: y or Enter runs it, and n, Esc, or q cancels it. p never \
+                  force-pushes, but R runs your command, and grp force-pushes — so the R \
+                  question takes the color of caution, because a rebase rewrites the commits of \
+                  the branch. The key asks nothing and posts a fading line instead where the \
+                  repository gives it nothing to do: a rebase or a merge that git is holding, \
+                  a detached HEAD, a base that is neither main nor master, HEAD on the base \
+                  itself, and a branch that already contains the base. The first that applies \
+                  wins, so a stopped rebase is named as the rebase, not as a detached HEAD. A \
+                  checkout, a rebase, or a merge that starts between the question and the \
+                  answer refuses the run, and no shell starts. gsw fetches nothing and \
+                  neither command fetches, so the base is your local branch. While the command \
+                  runs, its output shows live in the window under the frame that a push uses, \
+                  and the notice counts the time. The run has no deadline, because a pre-push \
+                  hook of this workspace runs for minutes. While it runs, p, P, R, M, and m do \
+                  nothing, and G still acts. A run that worked leaves the sentence of gsw \
+                  and, under it, the last line the command wrote, because grp and gmp report a \
+                  push they skipped only there. A run that failed leaves the last lines of the \
+                  output, and above them any CONFLICT line of git, in red, until you press a \
+                  key. A rebase or a merge that the run started and left stopped is aborted in \
+                  the worktree of the run, and the run fails with a last line such as `rebase \
+                  stopped on 2 conflicts — gsw aborted it`, whatever the exit status of the \
+                  command. gsw aborts only an operation on the branch of the question that \
+                  started from the HEAD of before the run: it leaves any other operation as it \
+                  is, and says so. An abort that git refuses gives the reason of git and says \
+                  that the operation is still in progress. A quit does not stop the command: a \
+                  rebase that gsw stopped in the middle would leave a repository you must \
+                  repair. gsw aborts only while it runs, so a rebase that stops on a conflict \
+                  after a quit shows in the ⚠ rebase row at the next start. Every outcome walks \
+                  the repository at once, so the header shows the new counts.\n\n\
+                  Up goes to the home worktree, where gsw started. Left and Right go to the \
+                  previous and the next worktree in path order, which is the order of cwt, and \
+                  they wrap. Down opens a list of the worktrees: Up and Down move the cursor, \
+                  Page Up and Page Down move it one page, Enter goes to the worktree under it, \
+                  and Esc or q closes the list. A page is one row less than the rows of the \
+                  list that the pane shows, so the row at the edge stays in view. While the \
+                  repository has more than one worktree, the header shows the position of the \
+                  worktree and marks the home worktree with ⌂. The name in the header is red \
+                  while it is not the branch where gsw started, and bold again when it is. A \
+                  rebase of that branch keeps it bold. While the name is red, two presses of \
+                  Esc go back to that branch. The first Esc shows Hit Escape again to go back \
+                  to <branch> for 3 seconds. An Esc in that time goes to the home worktree when \
+                  it is on the branch, or else to the worktree that is on it. When no worktree \
+                  is on it, gsw goes home and runs git switch --no-guess <branch> there, with \
+                  its output live under the frame. gsw never forces the switch: when git \
+                  refuses, the last lines of git stay in red until a key. Another key between the \
+                  two presses makes the next Esc a first press, and so does another line that \
+                  takes the place of the hint under the frame. A switch walks the new worktree \
+                  at once and removes every line under the frame. The arrow keys do nothing \
+                  while a push runs or while the push question is up. When the worktree on the \
+                  screen is removed, gsw goes back to the home worktree. gsw does not change the \
+                  directory of the shell that started it.\n\n\
                   While a push runs, a notice reports how long it has taken, and up to six rows \
                   under it carry the newest output from git and from any pre-push hook. Each row \
                   arrives as the hook writes it, so a hook that builds and tests a workspace \
@@ -60,6 +229,11 @@ struct Cli {
     /// is piped/captured (not a TTY) always falls back to this single render.
     #[arg(long)]
     one_shot: bool,
+
+    /// Turn the pull-request indicator of watch mode off. gsw then shows no
+    /// indicator and starts no `gh`. One-shot mode never shows the indicator.
+    #[arg(long)]
+    no_pr: bool,
 
     /// Strip ANSI color codes from output.
     #[arg(long)]
@@ -83,10 +257,10 @@ struct Cli {
     #[arg(long, default_value_t = 0)]
     width_offset: usize,
 
-    /// Number of recent commits to show in the `git log --oneline`-style
-    /// section appended after the file list.
-    #[arg(long, default_value_t = 20)]
-    log_lines: usize,
+    /// Cap the recent-commit log at N rows. By default the log fills the rows
+    /// that the header and the file list leave.
+    #[arg(long, value_name = "N")]
+    log_lines: Option<usize>,
 
     /// Disable the recent-commit section entirely. The newest commit's age
     /// lives on the first row of that section, so this takes the commit age
@@ -182,6 +356,22 @@ fn effective_truecolor(
     }
 }
 
+impl Cli {
+    /// The settings of the pull-request lookups that watch mode starts.
+    ///
+    /// `path_var` is the value of `PATH`, and `gh_host` is the value of
+    /// `GH_HOST`. Returns `None` when the user gave `--no-pr`, and when no
+    /// `gh` that the user can run is on the search path. Watch mode then shows
+    /// no indicator and starts no `gh`.
+    fn pull_settings(
+        &self,
+        path_var: Option<&std::ffi::OsStr>,
+        gh_host: Option<String>,
+    ) -> Option<pull::PullSettings> {
+        pull::PullSettings::from_environment(self.no_pr, path_var, gh_host)
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -198,7 +388,7 @@ fn main() -> Result<()> {
     );
 
     if cli.no_color {
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this process decides its own color output at startup; the ban covers the tests, which must go through testcolor::with_forced_ansi"
         )]
@@ -207,7 +397,7 @@ fn main() -> Result<()> {
         // A watch-like wrapper (e.g. viddy) is rendering our output inside
         // its own TTY-backed UI. The colored crate would otherwise strip
         // colors because our stdout is a pipe.
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "this process decides its own color output at startup; the ban covers the tests, which must go through testcolor::with_forced_ansi"
         )]
@@ -222,10 +412,10 @@ fn main() -> Result<()> {
     // Everything the renderer needs that doesn't depend on the live terminal
     // size. In watch mode this is computed once and reused for every repaint.
     let cfg = RenderConfig {
-        base: cli.base,
+        base: cli.base.clone(),
         max_files: cli.max_files,
         bar_width: cli.bar_width,
-        log_lines: if cli.no_log { 0 } else { cli.log_lines },
+        log: LogDemand::from_cli(cli.no_log, cli.log_lines),
         truecolor,
         width_offset: cli.width_offset,
         refresh_interval: refresh_interval(cli.refresh_interval),
@@ -256,7 +446,14 @@ fn main() -> Result<()> {
         }
         // Hand the handle over: watch mode owns the repository from here and
         // re-opens it on every refresh.
-        watch::Mode::Watch => watch::run(handle, &cfg),
+        watch::Mode::Watch => watch::run(
+            handle,
+            &cfg,
+            cli.pull_settings(
+                std::env::var_os(pull::PATH_VARIABLE).as_deref(),
+                std::env::var(pull::GH_HOST_VARIABLE).ok(),
+            ),
+        ),
     }
 }
 
@@ -284,8 +481,10 @@ pub(crate) struct RenderConfig {
     pub max_files: Option<usize>,
     /// Magnitude-bar width in cells.
     pub bar_width: usize,
-    /// Recent-commit rows to request; `0` when `--no-log` suppressed the section.
-    pub log_lines: usize,
+    /// How many recent commits the log section asks for (`--log-lines` and
+    /// `--no-log`). A frame applies it to the height of its pane through
+    /// [`LogDemand::fetch_limit`].
+    pub log: LogDemand,
     /// Whether the 24-bit truecolor fades are in effect. The fades are the
     /// commit-log gradient, the recency fade on the file rows, and the fade
     /// on the push status message.
@@ -295,6 +494,57 @@ pub(crate) struct RenderConfig {
     /// How often watch mode re-walks the repository with no filesystem event to
     /// prompt it (`--refresh-interval`), or `None` to stay purely event-driven.
     pub refresh_interval: Option<Duration>,
+}
+
+/// How many recent commits the log section asks for, as the command line
+/// states it.
+///
+/// The rows that the log gets come from the pane, and the pane of watch mode
+/// changes size while gsw runs. So the demand stays a rule, and each walk
+/// applies it to the height of its pane through
+/// [`fetch_limit`](Self::fetch_limit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LogDemand {
+    /// `--no-log`: the frame has no log section, and the walk fetches no
+    /// commit.
+    Off,
+    /// The default: the log fills the rows that the header and the file list
+    /// leave.
+    Fill,
+    /// `--log-lines N`: the log fills the rows that the header and the file
+    /// list leave, up to N rows. `--log-lines 0` gives no log, as it always
+    /// did.
+    AtMost(usize),
+}
+
+impl LogDemand {
+    /// The demand that the command line states. `--no-log` wins over
+    /// `--log-lines`, and no `--log-lines` means [`Fill`](Self::Fill).
+    fn from_cli(no_log: bool, log_lines: Option<usize>) -> Self {
+        match (no_log, log_lines) {
+            (true, _) => Self::Off,
+            (false, Some(rows)) => Self::AtMost(rows),
+            (false, None) => Self::Fill,
+        }
+    }
+
+    /// The most commits that a pane of `height` rows can show under this
+    /// demand.
+    ///
+    /// The tallest log fills the pane under the smallest header chrome
+    /// ([`BASE_HEADER_CHROME`]): no merge or rebase in progress, and no file
+    /// row. A walk fetches no more commits than that, because a commit that no
+    /// row can show costs a step of the walk and gives nothing. A frame with
+    /// file rows or with the line of an operation shows fewer, and
+    /// [`render_frame`] takes the rows it has from the top of this fetch.
+    pub(crate) fn fetch_limit(self, height: usize) -> usize {
+        let tallest = height.saturating_sub(BASE_HEADER_CHROME);
+        match self {
+            Self::Off => 0,
+            Self::Fill => tallest,
+            Self::AtMost(rows) => rows.min(tallest),
+        }
+    }
 }
 
 /// Where a frame sits in time: how stale the snapshot behind it is, and when
@@ -327,7 +577,38 @@ impl FrameTiming {
             next_refresh_in: interval,
         }
     }
+
+    /// The refresh clock that the separator of a frame at this timing shows,
+    /// or `None` when no walk is scheduled.
+    ///
+    /// The clock reports the same offset that every age on the frame is
+    /// advanced by. Every frame takes its clock from here, so no two frames
+    /// show different clocks for one timing.
+    fn refresh_status(self) -> Option<RefreshStatus> {
+        self.next_refresh_in.map(|next_refresh_in| RefreshStatus {
+            last_refresh_ago: self.age_offset,
+            next_refresh_in,
+        })
+    }
 }
+
+/// Rows at the top of every frame, above its content: the header, the line of
+/// a merge or a rebase in progress, and the separator.
+///
+/// [`render::render_head`] draws exactly these rows. Every row budget counts
+/// them from here, so no frame reserves a different number of rows for them.
+fn header_chrome(snapshot: &Snapshot) -> usize {
+    BASE_HEADER_CHROME + usize::from(snapshot.operation.is_some())
+}
+
+/// Rows at the top of a frame with no merge or rebase in progress: the header
+/// and the separator.
+///
+/// [`header_chrome`] adds the line of an operation to this number, and
+/// [`LogDemand::fetch_limit`] reads it as the smallest header chrome. Both read
+/// this one constant, so the fetch never counts the header differently from
+/// the frame.
+const BASE_HEADER_CHROME: usize = 2;
 
 /// A rendered frame plus the metadata watch mode needs to schedule its next
 /// time-driven refresh. One-shot mode reads only [`Render::output`]; watch mode
@@ -373,12 +654,15 @@ fn snapshot_freshest_age(snapshot: &Snapshot) -> Option<Duration> {
 /// byte-identical to a direct render; watch mode instead calls the two halves
 /// separately so it can re-render a *cached* snapshot at a growing offset
 /// without re-walking the repo.
+///
+/// The walk fetches as many commits as a pane of `dims.height` rows can show
+/// under `cfg.log` ([`LogDemand::fetch_limit`]), so the log can fill the pane.
 pub(crate) fn build_output(
     repo: &gix::Repository,
     cfg: &RenderConfig,
     dims: watch::Dimensions,
 ) -> Result<Render> {
-    let snapshot = collect_snapshot(repo, cfg)?;
+    let snapshot = collect_snapshot(repo, cfg, cfg.log.fetch_limit(dims.height))?;
     Ok(render_frame(
         &snapshot,
         cfg,
@@ -397,12 +681,35 @@ pub(crate) fn build_output(
 /// repository state, independent of the live terminal — turning it into a frame
 /// for a given [`watch::Dimensions`] is the separate, cheap [`render_frame`]
 /// half. Watch mode collects once per filesystem change and re-renders the
-/// cached snapshot many times. Uses only `cfg.base` and `cfg.log_lines`.
-pub(crate) fn collect_snapshot(repo: &gix::Repository, cfg: &RenderConfig) -> Result<Snapshot> {
+/// cached snapshot many times. Uses only `cfg.base`.
+///
+/// `log_limit` is the number of recent commits to fetch for the log. The
+/// caller takes it from [`LogDemand::fetch_limit`] at the height of the pane
+/// that it renders for. The snapshot has no terminal size of its own, so the
+/// caller, which has one, sets the limit. The walk also records whether it
+/// reached the end of the history at or before that limit
+/// ([`Snapshot::log_complete`]), and the commit that its log started from
+/// ([`Snapshot::log_start`]), at every limit.
+///
+/// The log is read first. Its start holds the one walk of the commits that
+/// only the branch has. The counts against the base come from that start
+/// ([`repo::base_status`]), so they and the log share one read of HEAD. The
+/// ahead count is the size of the set that the log marks from, and the behind
+/// count is one more walk. The branch name and the upstream counts read HEAD on
+/// their own.
+pub(crate) fn collect_snapshot(
+    repo: &gix::Repository,
+    cfg: &RenderConfig,
+    log_limit: usize,
+) -> Result<Snapshot> {
     let branch = repo::branch_name(repo);
 
     let base = cfg.base.clone().unwrap_or_else(|| repo::resolve_base(repo));
-    let base_status = repo::base_status(repo, &base);
+    // The log comes first. Its start holds the one walk of `base..HEAD`, and
+    // the counts against the base come from that start. So the base counts and
+    // the log read HEAD one time, and they agree.
+    let fetched = fetch_head_log(repo, &base, log_limit);
+    let base_status = repo::base_status(repo, fetched.start.as_ref());
 
     let repo::Changes {
         entries,
@@ -423,7 +730,9 @@ pub(crate) fn collect_snapshot(repo: &gix::Repository, cfg: &RenderConfig) -> Re
         &ages,
     );
 
-    snapshot.log = fetch_log(repo, cfg.log_lines);
+    snapshot.log = fetched.entries;
+    snapshot.log_complete = fetched.complete;
+    snapshot.log_start = fetched.start;
 
     snapshot.upstream = repo::upstream_status(repo);
     snapshot.push_remote = repo::push_remote(repo);
@@ -431,14 +740,9 @@ pub(crate) fn collect_snapshot(repo: &gix::Repository, cfg: &RenderConfig) -> Re
     // Surface an in-progress merge/rebase. The conflict count comes for free
     // from the status walk already done — every unmerged path is a
     // `FileStatus::Conflicted` row — so no extra git work is needed.
-    let conflicts = u32::try_from(
-        snapshot
-            .files
-            .iter()
-            .filter(|f| f.status == FileStatus::Conflicted)
-            .count(),
-    )
-    .unwrap_or(u32::MAX);
+    // `repo::conflict_count` is the one rule for that count, which the run of
+    // `R` and `M` shares through `repo::held_operation`.
+    let conflicts = repo::conflict_count(snapshot.files.iter().map(|f| f.status));
     snapshot.operation = repo::operation_state(repo, conflicts);
 
     Ok(snapshot)
@@ -471,32 +775,38 @@ pub(crate) fn render_frame(
     // section based on what each actually needs to show. Chrome we
     // deduct up front:
     //   header                                                          1
+    //   merge or rebase line (only while an operation is in progress)   0 or 1
     //   post-header separator                                            1
     //   inter-section separator (only when both sections render)         0 or 1
-    //   reserved row for a `+N more files` footer (only when files > 0)  0 or 1
+    //   `+N more files` footer (only when the file list truncates)       0 or 1
     // Whatever's left goes to the file list first — it's the primary
     // content and renders at the bottom, so it must stay fully on-screen
-    // rather than being squeezed by a long log (`--log-lines` defaults to
-    // 20). The log takes the remaining rows; only when the file list is
-    // itself truncated does a floor claw rows back to it. See
-    // `plan_section_caps`.
+    // rather than being squeezed by a long log (by default the walk fetches
+    // enough commits to fill the pane). The log takes the remaining rows; only
+    // when the file list is itself truncated does a floor claw rows back to
+    // it. See `plan_section_caps`.
+    //
+    // The footer gets a row only when it prints. A row kept for a footer that
+    // does not print stays empty at the bottom of the frame, and the log then
+    // stops one row short of the pane. So the split is planned first with no
+    // footer row. When that plan hides file rows, the footer prints, and the
+    // split is planned again with a row for it. The second plan has one row
+    // less, so it hides file rows too, and the footer prints in the row that
+    // the plan kept for it.
     let file_count = snapshot.files.len();
     let log_count = snapshot.log.len();
     // The operation indicator (merge/rebase) is one extra chrome row between
     // the header and the separator, present only when the snapshot carries an
-    // in-progress operation. Reserve it so the file list at the bottom isn't
-    // pushed past the fold.
-    let header_chrome: usize = 2 + usize::from(snapshot.operation.is_some());
-    let inter_chrome: usize = if file_count > 0 && log_count > 0 {
-        1
-    } else {
-        0
+    // in-progress operation. `header_chrome` reserves it, so the file list at
+    // the bottom isn't pushed past the fold.
+    let inter_chrome = usize::from(file_count > 0 && log_count > 0);
+    // The rows for content under the chrome, with or without a row for the
+    // footer.
+    let content_rows = |footer: bool| {
+        terminal_height
+            .saturating_sub(header_chrome(snapshot) + inter_chrome + usize::from(footer))
+            .max(1)
     };
-    let footer_chrome: usize = if file_count > 0 { 1 } else { 0 };
-    let chrome = header_chrome + inter_chrome + footer_chrome;
-    let available_rows = terminal_height.saturating_sub(chrome).max(1);
-    let (planned_file_cap, planned_log_cap) =
-        plan_section_caps(file_count, log_count, available_rows);
 
     // `--max-files` always wins when the user has set it (including 0,
     // which means unlimited). When the user pinned a file cap, the log
@@ -508,10 +818,21 @@ pub(crate) fn render_frame(
             } else {
                 n.min(file_count)
             };
-            let log_budget = available_rows.saturating_sub(consumed_by_files);
+            // The pinned cap hides file rows exactly when it is under the
+            // file count, and only then does the footer print.
+            let truncates = consumed_by_files < file_count;
+            let log_budget = content_rows(truncates).saturating_sub(consumed_by_files);
             (Some(n), log_count.min(log_budget))
         }
-        None => (Some(planned_file_cap), planned_log_cap),
+        None => {
+            let plan =
+                |footer: bool| plan_section_caps(file_count, log_count, content_rows(footer));
+            let (file_cap, log_cap) = match plan(false) {
+                (shown_files, _) if shown_files < file_count => plan(true),
+                fits => fits,
+            };
+            (Some(file_cap), log_cap)
+        }
     };
 
     let opts = RenderOptions {
@@ -520,12 +841,7 @@ pub(crate) fn render_frame(
         max_files: file_cap_opt,
         log_lines: log_cap,
         truecolor: cfg.truecolor,
-        // The clock renders only when a walk is actually scheduled, and it
-        // reports the same offset every age on this frame was advanced by.
-        refresh: timing.next_refresh_in.map(|next_refresh_in| RefreshStatus {
-            last_refresh_ago: age_offset,
-            next_refresh_in,
-        }),
+        refresh: timing.refresh_status(),
     };
 
     // One-shot mode and the watch seed walk render at offset zero, which is
@@ -547,27 +863,165 @@ pub(crate) fn render_frame(
     }
 }
 
-/// Fetch the `n` most recent commits as [`LogEntry`] records via gix.
+/// How many rows of the worktree list the pane shows under the separator.
 ///
-/// Returns an empty list when `n == 0` or the repo has no commits.
+/// The rows under the separator are what the pane leaves under the header
+/// chrome ([`header_chrome`]). With two rows or more, the bottom row holds the
+/// hint and the list takes the rest. With one row, the list takes it and no
+/// hint shows. With no row, the answer is 0: the list cannot open, and an open
+/// list closes, so Enter never chooses a row that the user did not see.
+pub(crate) fn list_rows(snapshot: &Snapshot, dims: watch::Dimensions) -> usize {
+    let under = dims.height.saturating_sub(header_chrome(snapshot));
+    match under {
+        // No row for the hint: the one row, if the pane has it, is the list.
+        0 | 1 => under,
+        // The bottom row is the hint.
+        _ => under - 1,
+    }
+}
+
+/// Render the frame of the worktree list for `dims`: the head of the status
+/// frame, the rows of `list`, and the hint on the bottom row.
+///
+/// The header, the line of a merge or a rebase, and the separator with its
+/// refresh clock come from [`render::render_head`], as on the status frame.
+/// Under them, [`list_rows`] rows show the window of `list` that holds the
+/// cursor, and blank rows fill what the list leaves. The hint takes the bottom
+/// row of the pane when [`list_rows`] left a row for it. The frame is as tall
+/// as the pane, and no row of it is wider than the pane.
+///
+/// Nothing on the frame ages, so [`Render::freshest_age`] is `None`. Nothing
+/// on the frame reads the [`RenderConfig`] either, so the call takes none.
+pub(crate) fn render_list_frame(
+    snapshot: &Snapshot,
+    dims: watch::Dimensions,
+    timing: FrameTiming,
+    list: &worktrees::WorktreeList,
+) -> Render {
+    let rows = list_rows(snapshot, dims);
+    let window = list.window(rows);
+    let mut lines = render::render_head(snapshot, dims.width, timing.refresh_status().as_ref());
+    lines.extend(render::list::rows(&window, dims.width));
+    // Blank rows fill what a short list leaves, so the hint stays on the
+    // bottom row of the pane.
+    lines.resize(lines.len() + rows - window.len(), String::new());
+    // The hint takes the row that `list_rows` left under the list, when it
+    // left one.
+    if header_chrome(snapshot) + rows < dims.height {
+        lines.push(render::list::hint(dims.width));
+    }
+    Render {
+        output: lines.join("\n"),
+        freshest_age: None,
+    }
+}
+
+/// One read of the log: the commit that the read started from, the newest
+/// commits of its history up to the limit of the read, and whether the history
+/// ended at or before that limit.
+///
+/// [`fetch_head_log`] reads from the commit that HEAD names, and makes the
+/// start with its one walk of the branch commits. [`collect_snapshot`] puts
+/// all three on the [`Snapshot`]. Watch mode reads
+/// from the start that the snapshot recorded, through [`fetch_log_from`], on a
+/// resize.
+#[derive(Debug, Clone)]
+pub(crate) struct FetchedLog {
+    /// The commit that the read started from ([`Snapshot::log_start`]).
+    /// `None` when HEAD named no commit.
+    pub(crate) start: Option<repo::LogStart>,
+    /// The commits, newest first. Each entry tells whether its commit is only
+    /// on the branch ([`LogEntry::on_branch`]). The set of branch commits that
+    /// `start` keeps decides that mark.
+    pub(crate) entries: Vec<LogEntry>,
+    /// `entries` is complete: the walk of the history of `start` reached its
+    /// end at or before the limit, so a read from `start` with a higher limit
+    /// finds no more commits. See [`Snapshot::log_complete`].
+    pub(crate) complete: bool,
+}
+
+/// Fetch the `n` most recent commits from HEAD as [`LogEntry`] records via
+/// gix, with the start of the walk: the commit that HEAD names, the commit
+/// that `base` names, and the set of the commits that only the branch has
+/// ([`repo::LogStart`]). This call makes the one walk of that set.
+///
+/// Returns an empty list when `n == 0` or the repo has no commits. The start
+/// is known at `n == 0` too, as [`repo::recent_log`] resolves it.
+///
+/// An entry is marked when its commit is only on the branch: HEAD reaches it,
+/// and `base` does not ([`LogEntry::on_branch`]). These are the commits that
+/// the header counts as ahead of the base. No entry is marked when HEAD is on
+/// the base, or when `base` does not resolve.
+///
+/// [`FetchedLog::complete`] tells whether the walk reached the end of the
+/// history, as [`repo::recent_log`] finds it. A history of exactly `n` commits
+/// and a repository with no commit are complete. A limit of zero and every
+/// failure are not.
 ///
 /// A commit whose timestamp does not resolve into an elapsed duration — a
 /// negative epoch second, or a time ahead of the local clock through skew or a
 /// hand-set `--date` — yields `age: None`. The row then renders the unknown-age
 /// mark. Collapsing such a commit to `Duration::ZERO` instead would paint it as
 /// the freshest thing on screen, which is the one reading ruled out.
-fn fetch_log(repo: &gix::Repository, n: usize) -> Vec<LogEntry> {
+///
+/// Each age is measured at the instant of this call. [`collect_snapshot`]
+/// calls it for each walk, and nothing else reads the log from HEAD.
+fn fetch_head_log(repo: &gix::Repository, base: &str, n: usize) -> FetchedLog {
     let now = SystemTime::now();
-    repo::recent_log(repo, n)
+    fetched_at(repo::recent_log(repo, base, n), now)
+}
+
+/// Fetch the `n` most recent commits of the history of `start` as
+/// [`LogEntry`] records, as [`fetch_head_log`] fetches them from HEAD.
+///
+/// Watch mode calls it alone, when a resize needs more commits than its cached
+/// snapshot holds, because the rest of the snapshot does not depend on the
+/// size of the pane. `start` is the start that the walk of that snapshot
+/// recorded ([`Snapshot::log_start`]), and never the live HEAD. The history of
+/// a commit never changes, so the read gives the commits of the walk first,
+/// and more commits of the same history after them
+/// ([`repo::recent_log_from`]). Each age is measured at the instant of this
+/// call.
+///
+/// The marks of the entries ([`LogEntry::on_branch`]) come from the set of
+/// branch commits that `start` keeps, and not from the commit that the base
+/// names now. So the read gives the commits of the walk with the marks of the
+/// walk, also when the base moved after the walk. The read walks no more than
+/// its rows, and it never walks the commits of the branch again.
+pub(crate) fn fetch_log_from(
+    repo: &gix::Repository,
+    start: repo::LogStart,
+    n: usize,
+) -> FetchedLog {
+    let now = SystemTime::now();
+    fetched_at(repo::recent_log_from(repo, start, n), now)
+}
+
+/// The [`FetchedLog`] of `recent`, with the age of each commit measured at
+/// `now`. Each entry keeps the mark of its commit
+/// ([`repo::LogCommit::on_branch`]).
+fn fetched_at(recent: repo::RecentLog, now: SystemTime) -> FetchedLog {
+    let entries = recent
+        .commits
         .into_iter()
-        .map(|(hash, secs, subject)| {
-            let age = u64::try_from(secs)
+        .map(|commit| {
+            let age = u64::try_from(commit.secs)
                 .ok()
                 .map(|s| SystemTime::UNIX_EPOCH + Duration::from_secs(s))
                 .and_then(|when| now.duration_since(when).ok());
-            LogEntry { hash, subject, age }
+            LogEntry {
+                hash: commit.hash,
+                subject: commit.summary,
+                age,
+                on_branch: commit.on_branch,
+            }
         })
-        .collect()
+        .collect();
+    FetchedLog {
+        start: recent.start,
+        entries,
+        complete: recent.complete,
+    }
 }
 
 /// Get mtime ages for each entry's path, where the path still exists on disk.
@@ -605,6 +1059,7 @@ mod tests {
     use crate::git::FileStatus;
     use crate::render::Operation;
     use crate::render::RenderEntry;
+    use crate::worktrees::{WorktreeBadge, WorktreeEntry, WorktreeList, WorktreePath};
 
     #[test]
     fn the_frame_a_walk_paints_counts_down_a_whole_interval() {
@@ -687,6 +1142,114 @@ mod tests {
     }
 
     #[test]
+    fn the_no_pr_flag_turns_the_pull_lookups_of_watch_mode_off() {
+        // Issue #676: with `--no-pr`, watch mode shows no indicator and starts
+        // no `gh`, also when a `gh` that the user can run is on the path.
+        let bin = pull::dir_with_gh(0o755);
+        let path = std::env::join_paths([bin.path()]).expect("join the path");
+        assert_eq!(
+            Cli::parse_from(["gsw", "--no-pr"]).pull_settings(Some(&path), None),
+            None,
+        );
+    }
+
+    #[test]
+    fn with_no_flag_watch_mode_looks_up_pull_requests_through_gh() {
+        // The same path as the test of `--no-pr` gives settings when the flag
+        // is absent, so that test is not true only because of its fixture.
+        let bin = pull::dir_with_gh(0o755);
+        let path = std::env::join_paths([bin.path()]).expect("join the path");
+        let settings = Cli::parse_from(["gsw"])
+            .pull_settings(Some(&path), Some("ghe.example.com".to_string()))
+            .expect("gh is on the path");
+        assert!(settings.program().starts_with(bin.path()));
+        assert_eq!(settings.extra_host(), Some("ghe.example.com"));
+    }
+
+    /// The demand of the log that `args` state on the command line.
+    fn log_demand_of(args: &[&str]) -> LogDemand {
+        let cli = Cli::parse_from(std::iter::once("gsw").chain(args.iter().copied()));
+        LogDemand::from_cli(cli.no_log, cli.log_lines)
+    }
+
+    #[test]
+    fn with_no_log_flag_the_log_fills_the_pane() {
+        // Issue #521: the default was a cap of 20 rows, and a tall pane
+        // stayed empty under the log.
+        assert_eq!(log_demand_of(&[]), LogDemand::Fill);
+    }
+
+    #[test]
+    fn log_lines_is_a_cap_and_no_log_wins_over_it() {
+        assert_eq!(log_demand_of(&["--log-lines", "30"]), LogDemand::AtMost(30));
+        assert_eq!(
+            log_demand_of(&["--log-lines", "0"]),
+            LogDemand::AtMost(0),
+            "--log-lines 0 stays a log of no rows",
+        );
+        assert_eq!(log_demand_of(&["--no-log"]), LogDemand::Off);
+        assert_eq!(
+            log_demand_of(&["--no-log", "--log-lines", "30"]),
+            LogDemand::Off,
+            "--no-log removes the log whatever --log-lines says",
+        );
+    }
+
+    #[test]
+    fn fetch_limit_is_the_pane_under_the_header_and_the_separator() {
+        // A pane of 40 rows. The header and the separator take 2 rows, so the
+        // tallest log has 38 rows.
+        assert_eq!(LogDemand::Fill.fetch_limit(40), 38);
+        assert_eq!(
+            LogDemand::AtMost(30).fetch_limit(40),
+            30,
+            "a cap under the pane is the limit",
+        );
+        assert_eq!(
+            LogDemand::AtMost(100).fetch_limit(40),
+            38,
+            "a cap over the pane fetches no commit that no row can show",
+        );
+        assert_eq!(LogDemand::AtMost(0).fetch_limit(40), 0);
+        assert_eq!(LogDemand::Off.fetch_limit(40), 0);
+    }
+
+    #[test]
+    fn fetch_limit_of_a_pane_with_no_row_under_the_separator_is_zero() {
+        for height in [0, 1, 2] {
+            for demand in [LogDemand::Fill, LogDemand::AtMost(5), LogDemand::Off] {
+                assert_eq!(
+                    demand.fetch_limit(height),
+                    0,
+                    "{demand:?} in a pane of {height} rows",
+                );
+            }
+        }
+        assert_eq!(
+            LogDemand::Fill.fetch_limit(3),
+            1,
+            "one row under the separator"
+        );
+    }
+
+    #[test]
+    fn fetch_limit_and_header_chrome_count_the_same_header() {
+        // The tallest log and the header chrome of a frame with no merge or
+        // rebase fill the pane together, and no row is left over. If the two
+        // counted the header differently, the log of a clean worktree would
+        // stop one row short of the pane, or it would push the frame one row
+        // past it.
+        let clean = snapshot_with(None, &[]);
+        for height in BASE_HEADER_CHROME..=60 {
+            assert_eq!(
+                LogDemand::Fill.fetch_limit(height) + header_chrome(&clean),
+                height,
+                "a pane of {height} rows",
+            );
+        }
+    }
+
+    #[test]
     fn operation_line_reserves_a_chrome_row_so_file_list_is_not_clipped() {
         // When an in-progress operation adds its indicator line between the
         // header and the separator, render_frame must count that line as
@@ -710,7 +1273,7 @@ mod tests {
             base: None,
             max_files: None,
             bar_width: 6,
-            log_lines: 0,
+            log: LogDemand::Off,
             truecolor: false,
             refresh_interval: None,
             width_offset: 0,
@@ -726,9 +1289,14 @@ mod tests {
             commits_behind: 0,
             files,
             log: Vec::new(),
+            log_complete: false,
+            log_start: None,
             upstream: None,
             operation: Some(Operation::Merge { conflicts: 1 }),
             push_remote: None,
+            worktree: None,
+            off_start_branch: false,
+            pull: None,
         };
         let frame = render_frame(&snap, &cfg, dims, FrameTiming::at_walk(None));
         let lines = frame.output.lines().count();
@@ -738,6 +1306,633 @@ mod tests {
              operation indicator is shown; the indicator row must be reserved as chrome:\n{}",
             dims.height,
             frame.output,
+        );
+    }
+
+    /// The start of the hash of each log row that [`snapshot_of`] makes. The
+    /// hash follows the gutter of the row. The header and the file rows never
+    /// hold it there.
+    const SWEEP_HASH_PREFIX: &str = "lg";
+
+    /// A snapshot with `files` changed files and `commits` log rows, for the
+    /// sweep of the row budget. The files are named `f<n>.rs`, as in
+    /// [`snapshot_with`].
+    fn snapshot_of(files: usize, commits: usize) -> Snapshot {
+        let mut snap = snapshot_with(None, &vec![Some(Duration::from_secs(30)); files]);
+        snap.log = (0..commits)
+            .map(|n| LogEntry {
+                hash: format!("{SWEEP_HASH_PREFIX}{n:05}"),
+                subject: format!("commit {n}"),
+                age: Some(Duration::from_secs(90)),
+                on_branch: false,
+            })
+            .collect();
+        snap
+    }
+
+    #[test]
+    fn a_status_frame_fits_its_pane_and_hides_nothing_when_it_is_shorter() {
+        // The row budget of `render_frame`, over each mix of file rows and log
+        // rows up to more than a pane of 6 to 24 rows can show. A frame taller
+        // than the pane pushes its bottom rows, the file list, off the screen.
+        // A frame shorter than the pane that hides a row wastes the row that
+        // the hidden row could take. Issue #521 found the second defect: a
+        // row kept for a `+N more files` footer that did not print.
+        //
+        // 6 rows is the smallest pane that holds each part of a full frame:
+        // the header, the separator, a log row, the rule, a file row, and the
+        // footer. `--max-files` is not swept, because a pinned file cap wins
+        // over the height of the pane on purpose.
+        const SMALLEST_PANE: usize = 6;
+        const TALLEST_PANE: usize = 24;
+        const MOST_ROWS: usize = TALLEST_PANE + 2;
+        let cfg = render_config();
+        for height in SMALLEST_PANE..=TALLEST_PANE {
+            for files in 0..=MOST_ROWS {
+                for commits in 0..=MOST_ROWS {
+                    let snap = snapshot_of(files, commits);
+                    let painted = testcolor::with_forced_ansi(|| {
+                        render_frame(&snap, &cfg, pane_of(height), FrameTiming::at_walk(None))
+                            .output
+                    });
+                    let glyphs = testcolor::strip_ansi(&painted);
+                    let lines: Vec<&str> = glyphs.lines().collect();
+                    let shape = format!("{files} files and {commits} commits in {height} rows");
+
+                    assert!(
+                        lines.len() <= height,
+                        "{shape}: the frame has {} lines:\n{glyphs}",
+                        lines.len(),
+                    );
+                    if lines.len() < height {
+                        let log_rows = lines
+                            .iter()
+                            .filter(|line| {
+                                crate::render::after_log_gutter(line)
+                                    .is_some_and(|row| row.starts_with(SWEEP_HASH_PREFIX))
+                            })
+                            .count();
+                        let file_rows = lines.iter().filter(|line| line.contains(".rs")).count();
+                        assert_eq!(
+                            (log_rows, file_rows),
+                            (commits, files),
+                            "{shape}: a frame shorter than its pane shows every row:\n{glyphs}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A pane of `height` rows and 80 columns. The width does not change how
+    /// many rows the list takes.
+    fn pane_of(height: usize) -> watch::Dimensions {
+        watch::Dimensions { width: 80, height }
+    }
+
+    #[test]
+    fn list_rows_leaves_the_bottom_row_for_the_hint() {
+        // The header and the separator take two rows. The list takes every
+        // other row but the bottom row, which holds the hint.
+        let snap = snapshot_with(None, &[]);
+        assert_eq!(list_rows(&snap, pane_of(24)), 21);
+        assert_eq!(
+            list_rows(&snap, pane_of(8)),
+            5,
+            "the pane of the example in the issue: four worktrees, one blank row, and the hint",
+        );
+        assert_eq!(
+            list_rows(&snap, pane_of(4)),
+            1,
+            "two rows under the separator: one row of the list and the hint",
+        );
+    }
+
+    #[test]
+    fn list_rows_gives_one_row_and_no_hint_to_a_pane_with_one_row_under_the_separator() {
+        // The one row goes to the list and not to the hint. A hint with no
+        // row of the list names the keys of a list that the user cannot see.
+        // A pane with no row under the separator shows no list: the list
+        // cannot open, and an open list closes, so Enter never chooses a row
+        // that the user did not see.
+        let snap = snapshot_with(None, &[]);
+        assert_eq!(
+            list_rows(&snap, pane_of(3)),
+            1,
+            "one row under the separator"
+        );
+        for height in [2, 1, 0] {
+            assert_eq!(
+                list_rows(&snap, pane_of(height)),
+                0,
+                "a pane of {height} rows has no row under the separator",
+            );
+        }
+    }
+
+    #[test]
+    fn list_rows_gives_a_row_to_the_line_of_a_merge_or_a_rebase() {
+        // The line of an operation in progress sits between the header and
+        // the separator, so the list has one row less.
+        for operation in [
+            Operation::Merge { conflicts: 1 },
+            Operation::Rebase {
+                step: None,
+                conflicts: 0,
+            },
+        ] {
+            let mut snap = snapshot_with(None, &[]);
+            snap.operation = Some(operation.clone());
+            assert_eq!(
+                list_rows(&snap, pane_of(24)),
+                20,
+                "{operation:?} in a pane of 24 rows",
+            );
+            assert_eq!(
+                list_rows(&snap, pane_of(5)),
+                1,
+                "{operation:?}: one row of the list and the hint",
+            );
+            assert_eq!(
+                list_rows(&snap, pane_of(4)),
+                1,
+                "{operation:?}: one row of the list and no hint",
+            );
+            assert_eq!(
+                list_rows(&snap, pane_of(3)),
+                0,
+                "{operation:?}: no row under the separator",
+            );
+        }
+    }
+
+    /// The worktrees of the example in the issue, sorted by path: the main
+    /// worktree, two worktrees on branches, and a detached worktree.
+    fn issue_worktrees() -> Vec<WorktreeEntry> {
+        [
+            ("/code/tools", "main"),
+            ("/code/tools-worktrees/issue-475", "issue-475"),
+            ("/code/tools-worktrees/issue-498", "issue-498"),
+            ("/code/tools-worktrees/sweep", "HEAD@9ba6951"),
+        ]
+        .into_iter()
+        .map(|(path, label)| WorktreeEntry {
+            path: WorktreePath::fake(path),
+            label: label.to_string(),
+        })
+        .collect()
+    }
+
+    /// Open the list of `entries` with the cursor on row `cursor` and the
+    /// home worktree on row `home`.
+    fn list_at(entries: &[WorktreeEntry], cursor: usize, home: usize) -> WorktreeList {
+        WorktreeList::open(
+            entries.to_vec(),
+            &entries[cursor].path,
+            entries[home].path.clone(),
+        )
+        .expect("a list with rows opens")
+    }
+
+    /// The snapshot of the example in the issue: the home worktree, the first
+    /// of four, on `main`.
+    fn issue_snapshot() -> Snapshot {
+        let mut snap = snapshot_with(None, &[]);
+        snap.branch = "main".into();
+        snap.commits_ahead = 0;
+        snap.worktree = Some(WorktreeBadge {
+            position: 1,
+            count: 4,
+            home: true,
+            label: "main".into(),
+        });
+        snap
+    }
+
+    /// The timing of the example in the issue: the last walk was 12 seconds
+    /// ago, and the next walk is 48 seconds away.
+    fn issue_timing() -> FrameTiming {
+        FrameTiming {
+            age_offset: Duration::from_secs(12),
+            next_refresh_in: Some(Duration::from_secs(48)),
+        }
+    }
+
+    /// A render config for the status frame of these tests. The list frame
+    /// takes none.
+    fn render_config() -> RenderConfig {
+        RenderConfig {
+            base: None,
+            max_files: None,
+            bar_width: 6,
+            log: LogDemand::Off,
+            truecolor: false,
+            refresh_interval: None,
+            width_offset: 0,
+        }
+    }
+
+    #[test]
+    fn a_one_shot_snapshot_is_never_off_the_start_branch() {
+        // A guard, not red-first: the field is `false` by construction, and
+        // this test keeps it so. One-shot mode draws one frame, so no frame
+        // comes after the start, and the header must not paint the name red.
+        let dir = crate::testrepo::init_repo();
+        let walk = |dir: &std::path::Path| {
+            let repo = gix::open(dir).expect("open the repository");
+            collect_snapshot(&repo, &render_config(), 0).expect("walk the repository")
+        };
+        assert!(!walk(dir.path()).off_start_branch);
+
+        crate::testrepo::git(dir.path(), &["switch", "-q", "-c", "elsewhere"]);
+        let moved = walk(dir.path());
+        assert_eq!(moved.branch, "elsewhere", "the fixture switched branch");
+        assert!(!moved.off_start_branch);
+    }
+
+    /// The rows of the list frame, as visible glyphs.
+    ///
+    /// The frame is painted with the escape codes forced on, and then the
+    /// codes are taken out, so the comparison covers the painted rows. The
+    /// split is on each line break, so a blank row at the bottom counts.
+    fn list_frame_rows(
+        snapshot: &Snapshot,
+        dims: watch::Dimensions,
+        list: &WorktreeList,
+    ) -> Vec<String> {
+        let painted = testcolor::with_forced_ansi(|| {
+            render_list_frame(snapshot, dims, issue_timing(), list).output
+        });
+        testcolor::strip_ansi(&painted)
+            .split('\n')
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The hint under the list, as the issue states it. Stated here as the
+    /// oracle, apart from the constant of the code under test.
+    const ISSUE_HINT: &str = "↑↓ move · Enter go · Esc back";
+
+    #[test]
+    fn the_list_frame_draws_the_example_of_the_issue() {
+        // The user started gsw in /code/tools, pressed Down to open the
+        // list, and pressed Down again. The widest visible path is 31
+        // columns, so every label starts in the same column. The list leaves
+        // one row blank, and the hint takes the bottom row of the pane.
+        let entries = issue_worktrees();
+        let mut list = list_at(&entries, 0, 0);
+        list.down();
+        let dims = watch::Dimensions {
+            width: 60,
+            height: 8,
+        };
+
+        assert_eq!(
+            list_frame_rows(&issue_snapshot(), dims, &list),
+            [
+                "gsw ⌂ 1/4 • main • 0 commits ahead of main".to_string(),
+                format!(
+                    "{} last refresh: 12s ago, next refresh: 48s {}",
+                    "─".repeat(13),
+                    "─".repeat(5),
+                ),
+                format!("    {:<31}  [main]  ⌂", "/code/tools"),
+                format!("  > {:<31}  [issue-475]", "/code/tools-worktrees/issue-475"),
+                format!("    {:<31}  [issue-498]", "/code/tools-worktrees/issue-498"),
+                format!("    {:<31}  [HEAD@9ba6951]", "/code/tools-worktrees/sweep"),
+                String::new(),
+                ISSUE_HINT.to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn the_list_frame_draws_the_head_of_the_status_frame_byte_for_byte() {
+        // The header, the line of a merge or a rebase, and the separator with
+        // its refresh clock come from one function, so the list frame paints
+        // them exactly as the status frame paints them. The frame is as tall
+        // as the pane with or without the line of an operation, and nothing on
+        // it ages.
+        let entries = issue_worktrees();
+        let list = list_at(&entries, 1, 0);
+        let dims = watch::Dimensions {
+            width: 60,
+            height: 12,
+        };
+        for (operation, head) in [(None, 2), (Some(Operation::Merge { conflicts: 2 }), 3)] {
+            let mut snap = issue_snapshot();
+            snap.operation = operation;
+            let (list_frame, status_frame) = testcolor::with_forced_ansi(|| {
+                (
+                    render_list_frame(&snap, dims, issue_timing(), &list),
+                    render_frame(&snap, &render_config(), dims, issue_timing()),
+                )
+            });
+            let list_painted: Vec<&str> = list_frame.output.split('\n').collect();
+            let status_painted: Vec<&str> = status_frame.output.split('\n').collect();
+
+            assert_eq!(
+                list_painted.get(..head),
+                status_painted.get(..head),
+                "the head of the list frame with the operation {:?}",
+                snap.operation,
+            );
+            assert!(
+                testcolor::strip_ansi(status_painted[head - 1])
+                    .contains("last refresh: 12s ago, next refresh: 48s"),
+                "the separator of both frames carries the refresh clock: {:?}",
+                status_painted[head - 1],
+            );
+            assert_eq!(
+                list_painted.len(),
+                dims.height,
+                "the list frame is as tall as the pane with the operation {:?}",
+                snap.operation,
+            );
+            assert_eq!(list_frame.freshest_age, None, "nothing on the list ages");
+        }
+    }
+
+    #[test]
+    fn the_list_frame_marks_the_cursor_row_and_the_home_row_only() {
+        let entries = issue_worktrees();
+        let dims = watch::Dimensions {
+            width: 60,
+            height: 8,
+        };
+        let rows_with = |marker: &str, rows: &[String]| -> Vec<usize> {
+            rows.iter()
+                .enumerate()
+                .filter(|(_, row)| {
+                    if marker == "⌂" {
+                        row.ends_with("  ⌂")
+                    } else {
+                        row.starts_with(marker)
+                    }
+                })
+                .map(|(index, _)| index)
+                .collect()
+        };
+
+        // The cursor on the home row: the one row carries both marks.
+        let rows = list_frame_rows(&issue_snapshot(), dims, &list_at(&entries, 0, 0));
+        assert_eq!(
+            rows.get(2),
+            Some(&format!("  > {:<31}  [main]  ⌂", "/code/tools")),
+            "{rows:#?}",
+        );
+        assert_eq!(rows_with("  > ", &rows), [2]);
+        assert_eq!(rows_with("⌂", &rows), [2]);
+
+        // The cursor and the home worktree on two other rows.
+        let rows = list_frame_rows(&issue_snapshot(), dims, &list_at(&entries, 3, 2));
+        assert_eq!(rows_with("  > ", &rows), [5], "{rows:#?}");
+        assert_eq!(rows_with("⌂", &rows), [4], "{rows:#?}");
+
+        // A home worktree that is not in the list marks no row.
+        let away = WorktreeList::open(
+            entries.clone(),
+            &entries[1].path,
+            WorktreePath::fake("/elsewhere"),
+        )
+        .expect("a list with rows opens");
+        let rows = list_frame_rows(&issue_snapshot(), dims, &away);
+        assert_eq!(rows_with("⌂", &rows), Vec::<usize>::new(), "{rows:#?}");
+        assert_eq!(rows_with("  > ", &rows), [3], "{rows:#?}");
+    }
+
+    #[test]
+    fn the_list_frame_paints_the_cursor_row_bold_and_the_hint_dim() {
+        const BOLD: &str = "\x1b[1m";
+        const DIM: &str = "\x1b[2m";
+        let entries = issue_worktrees();
+        let list = list_at(&entries, 1, 0);
+        let dims = watch::Dimensions {
+            width: 60,
+            height: 8,
+        };
+        let painted = testcolor::with_forced_ansi(|| {
+            render_list_frame(&issue_snapshot(), dims, issue_timing(), &list).output
+        });
+        let rows: Vec<&str> = painted.split('\n').collect();
+
+        assert!(
+            rows.get(3).is_some_and(|row| row.starts_with(BOLD)),
+            "the cursor row is bold: {rows:#?}",
+        );
+        for row in [2, 4, 5] {
+            assert!(
+                rows.get(row).is_some_and(|row| !row.contains('\x1b')),
+                "row {row} has no cursor and no paint: {rows:#?}",
+            );
+        }
+        assert!(
+            rows.get(7).is_some_and(|row| row.starts_with(DIM)),
+            "the hint is dim: {rows:#?}",
+        );
+    }
+
+    #[test]
+    fn the_list_frame_shows_the_window_of_a_long_list_that_holds_the_cursor() {
+        // Ten worktrees in a pane with three rows for the list. The window
+        // holds the cursor row, and it moves only when the cursor leaves it.
+        let entries: Vec<WorktreeEntry> = (0..10)
+            .map(|n| WorktreeEntry {
+                path: WorktreePath::fake(format!("/code/wt-{n}")),
+                label: format!("b{n}"),
+            })
+            .collect();
+        let snap = issue_snapshot();
+        let dims = watch::Dimensions {
+            width: 40,
+            height: 6,
+        };
+        let mut list = list_at(&entries, 7, 0);
+
+        let rows = list_frame_rows(&snap, dims, &list);
+        assert_eq!(
+            rows.get(2..).unwrap_or_default(),
+            [
+                "    /code/wt-5  [b5]",
+                "    /code/wt-6  [b6]",
+                "  > /code/wt-7  [b7]",
+                ISSUE_HINT,
+            ],
+            "the window that holds the cursor on row 7: {rows:#?}",
+        );
+
+        list.settle(list_rows(&snap, dims));
+        for _ in 0..3 {
+            list.up();
+        }
+        let rows = list_frame_rows(&snap, dims, &list);
+        assert_eq!(
+            rows.get(2..).unwrap_or_default(),
+            [
+                "  > /code/wt-4  [b4]",
+                "    /code/wt-5  [b5]",
+                "    /code/wt-6  [b6]",
+                ISSUE_HINT,
+            ],
+            "the window moves up only as far as the cursor went: {rows:#?}",
+        );
+    }
+
+    #[test]
+    fn the_list_frame_with_one_row_under_the_separator_shows_the_cursor_row_alone() {
+        let entries = issue_worktrees();
+        let list = list_at(&entries, 2, 0);
+        let dims = watch::Dimensions {
+            width: 60,
+            height: 3,
+        };
+
+        let rows = list_frame_rows(&issue_snapshot(), dims, &list);
+        assert_eq!(rows.len(), 3, "{rows:#?}");
+        assert_eq!(
+            rows[2],
+            format!("  > {:<31}  [issue-498]", "/code/tools-worktrees/issue-498"),
+        );
+    }
+
+    #[test]
+    fn the_list_frame_of_a_pane_with_no_row_under_the_separator_draws_the_head_alone() {
+        // The loop closes the list before it asks for such a frame. A frame
+        // that is asked for all the same shows no row of the list and no
+        // hint.
+        let entries = issue_worktrees();
+        let list = list_at(&entries, 1, 0);
+        let dims = watch::Dimensions {
+            width: 60,
+            height: 2,
+        };
+
+        let rows = list_frame_rows(&issue_snapshot(), dims, &list);
+        assert_eq!(rows.len(), 2, "{rows:#?}");
+        assert_eq!(rows[0], "gsw ⌂ 1/4 • main • 0 commits ahead of main");
+        assert!(rows[1].contains("last refresh:"), "{rows:#?}");
+    }
+
+    /// The display width of `text`: the columns that a terminal gives it.
+    fn columns(text: &str) -> usize {
+        unicode_width::UnicodeWidthStr::width(text)
+    }
+
+    /// A directory name and a branch name with multi-byte characters: three
+    /// bytes and two columns, four bytes and two columns, and an accent.
+    const MULTIBYTE: &str = "日本語-🎉-café";
+
+    /// The worktrees of the issue, and one more whose path and label hold
+    /// [`MULTIBYTE`]. Its path sorts last, because every byte of `日` is
+    /// higher than the first byte of each other name.
+    fn multibyte_worktrees() -> Vec<WorktreeEntry> {
+        let mut entries = issue_worktrees();
+        entries.push(WorktreeEntry {
+            path: WorktreePath::fake(format!("/code/tools-worktrees/{MULTIBYTE}")),
+            label: MULTIBYTE.to_string(),
+        });
+        assert!(
+            entries.is_sorted_by(|left, right| left.path < right.path),
+            "the list takes worktrees sorted by path",
+        );
+        entries
+    }
+
+    #[test]
+    fn every_row_of_the_list_frame_fits_a_narrow_pane_and_the_labels_stay_aligned() {
+        // A row never wraps. The path column loses columns first, and for all
+        // rows alike, so the labels stay in one column while they fit. The
+        // widest label, `  [日本語-🎉-café]`, takes 18 columns and the marker
+        // takes 4, so from 22 columns on every label is whole. From 27
+        // columns on, the path column holds `…café`. A multi-byte path loses
+        // whole characters, by columns, and never panics. A wide character
+        // that does not fit stays out whole, and a blank pads the column: at
+        // 29 columns the cell is `…-café ` and not half of `🎉`.
+        let entries = multibyte_worktrees();
+        let list = list_at(&entries, 4, 0);
+        let snap = issue_snapshot();
+        for width in 0..=80 {
+            let dims = watch::Dimensions { width, height: 10 };
+            let rows = list_frame_rows(&snap, dims, &list);
+            for row in &rows {
+                assert!(
+                    columns(row) <= width,
+                    "a row of {} columns in a pane of {width}: {row:?}",
+                    columns(row),
+                );
+            }
+
+            let shown = rows.get(2..7).unwrap_or_default();
+            if width >= 22 {
+                let label_columns: Vec<usize> = shown
+                    .iter()
+                    .map(|row| row.split_once('[').map_or(0, |(before, _)| columns(before)))
+                    .collect();
+                assert!(
+                    label_columns.windows(2).all(|pair| pair[0] == pair[1]),
+                    "the labels line up at {width} columns: {shown:#?}",
+                );
+            }
+            if width >= 27 {
+                let label = format!("  [{MULTIBYTE}]");
+                assert!(
+                    shown.get(4).is_some_and(|row| row
+                        .strip_suffix(&label)
+                        .is_some_and(|cell| cell.trim_end().ends_with("café"))),
+                    "the multi-byte row keeps the end of its path at {width} columns: {shown:#?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_row_too_wide_for_the_pane_loses_columns_from_the_left_of_the_path() {
+        // The widest end of a row, `  [HEAD@9ba6951]`, takes 16 columns and
+        // the marker takes 4, so a pane of 40 columns leaves 20 for the path
+        // column. Each path keeps its end, which names the worktree, and the
+        // labels stay whole and in one column.
+        let entries = issue_worktrees();
+        let list = list_at(&entries, 1, 0);
+        let dims = watch::Dimensions {
+            width: 40,
+            height: 8,
+        };
+
+        let rows = list_frame_rows(&issue_snapshot(), dims, &list);
+        assert_eq!(
+            rows.get(2..6).unwrap_or_default(),
+            [
+                format!("    {:<20}  [main]  ⌂", "/code/tools"),
+                "  > …worktrees/issue-475  [issue-475]".to_string(),
+                "    …worktrees/issue-498  [issue-498]".to_string(),
+                "    …ols-worktrees/sweep  [HEAD@9ba6951]".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_pane_too_narrow_for_the_labels_cuts_each_row_and_the_hint_from_the_right() {
+        // At 16 columns the marker and the widest label leave no column for
+        // the path. A row that still does not fit loses columns from the
+        // right, as the hint does, so no row wraps.
+        let entries = issue_worktrees();
+        let list = list_at(&entries, 1, 0);
+        let dims = watch::Dimensions {
+            width: 16,
+            height: 8,
+        };
+
+        let rows = list_frame_rows(&issue_snapshot(), dims, &list);
+        assert_eq!(
+            rows.get(2..).unwrap_or_default(),
+            [
+                "      [main]  ⌂",
+                "  >   [issue-47…",
+                "      [issue-49…",
+                "      [HEAD@9ba…",
+                "",
+                "↑↓ move · Enter…",
+            ],
         );
     }
 
@@ -758,6 +1953,7 @@ mod tests {
                     hash: "abc1234".into(),
                     subject: "the newest commit".into(),
                     age: Some(age),
+                    on_branch: false,
                 }]
             })
             .unwrap_or_default();
@@ -782,9 +1978,14 @@ mod tests {
             commits_behind: 0,
             files,
             log,
+            log_complete: false,
+            log_start: None,
             upstream: None,
             operation: None,
             push_remote: None,
+            worktree: None,
+            off_start_branch: false,
+            pull: None,
         }
     }
 
@@ -854,11 +2055,13 @@ mod tests {
                 hash: "abc1234".into(),
                 subject: "the newest commit".into(),
                 age: Some(Duration::from_secs(10)),
+                on_branch: false,
             },
             LogEntry {
                 hash: "def5678".into(),
                 subject: "an older commit".into(),
                 age: Some(Duration::from_secs(900)),
+                on_branch: false,
             },
         ];
         assert_eq!(
@@ -903,16 +2106,22 @@ mod tests {
                 hash: "abc1234".into(),
                 subject: "the newest commit".into(),
                 age: Some(Duration::from_secs(10)),
+                on_branch: false,
             }],
+            log_complete: false,
+            log_start: None,
             upstream: None,
             operation: None,
             push_remote: None,
+            worktree: None,
+            off_start_branch: false,
+            pull: None,
         };
         let cfg = RenderConfig {
             base: None,
             max_files: None,
             bar_width: 6,
-            log_lines: 1,
+            log: LogDemand::AtMost(1),
             truecolor: false,
             refresh_interval: None,
             width_offset: 0,

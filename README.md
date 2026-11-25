@@ -35,10 +35,13 @@ A shared Rust library that derives a deterministic, unprivileged TCP port from a
 current branch, and the current user (or, with no git, a directory name plus the user). Mixing in the user means
 two people on the same machine get different ports for the same repo and branch, so they can run the same project
 side by side without colliding. It hides SHA-256 hashing, `gix` repository discovery, and user detection behind a
-single `derive()` entry point. Used by `portplz` (which prints the port) and `sirn` (which serves on it), so both
-agree on the same port for a given project and user without `portplz` needing to be installed. Set `PORTPLZ_UID`
-to a fixed integer to override the detected user (handy for reproducing a teammate's port or pinning one in
-containers/CI).
+single `derive()` entry point. `derive()` also takes an optional name. The name tells one application of a project
+apart from another, so a repo holding a site and an API gives each its own port. The name sits between two NUL bytes
+at the head of the hash input, and no unnamed input can start with a NUL. So a named derivation never hashes the same
+input as an unnamed one. Every port derived without a name keeps the value it has today. Used by `portplz` (which
+prints the port) and `sirn` (which serves on it), so both agree on the same port for a given project and user without
+`portplz` needing to be installed. Set `PORTPLZ_UID` to a fixed integer to override the detected user (handy for
+reproducing a teammate's port or pinning one in containers/CI).
 
 ### gitscratch
 A shared Rust library that owns the hardened "dry-run a git operation without touching anything real" harness.
@@ -93,6 +96,11 @@ directory is merely missing right now. Used by `grist`, `grind` and `grime`.
 
 See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of guarantees.
 
+### runlimit
+A shared Rust library that runs a child program with a time limit. It drains stdout and stderr on reader threads,
+so a chatty child cannot fill a pipe. It kills and reaps a child that does not finish in time, so a hung child
+cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
+
 ## The tools
 
 - dirhash
@@ -104,7 +112,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     - To install: `cargo install --git https://github.com/timmattison/tools dirhash`
 - prcp
     - Copies files with a beautiful progress bar using Unicode block characters. Supports wildcards, multi-file copy,
-      and move mode (`--rm`) that verifies SHA256 before removing source. Press space to pause/resume, Ctrl+C to cancel.
+      directory trees (`-R`), and move mode (`--rm`) that removes each source only after every copy of that source
+      passed its Blake3 check. After the last copy, a final check reports each change that another program or person
+      made to the source or the destination during the run. Press space to pause/resume, Ctrl+C to cancel.
     - To install: `cargo install --git https://github.com/timmattison/tools prcp`
 - prgz
     - Similar to `prcp` but instead of copying a file it gzip compresses it. It draws the same one-line progress bar
@@ -118,6 +128,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
 - update-aws-credentials
     - Takes AWS credentials from your clipboard in the format provided by AWS SSO and writes it to
       your AWS config file. This is useful if you're using AWS SSO and you want to use the AWS CLI locally.
+    - In a mosh-rs session, it reads the clipboard of your client computer through the `pbpaste` shim that the
+      mosh-rs server puts on `PATH`. That read needs `MOSH_ALLOW_PASTE=1` on the client. When paste is off, the shim
+      runs the next `pbpaste` on `PATH`, which is the `pbpaste` of the server.
     - To install: `cargo install --git https://github.com/timmattison/tools update-aws-credentials`
 - sf (size of files)
     - Shows you the total size of files in the specified directories (and subdirectories) in a human-readable format. 
@@ -148,9 +161,13 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     - To install: `cargo install --git https://github.com/timmattison/tools thermal-watch`
 - htmlboard
     - Waits for HTML to be put on the clipboard and then pretty prints it and puts it back in the clipboard.
+    - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
+      reads the clipboard each 500 ms, and the mosh-rs client allows only 5 pastes in each 10 seconds.
     - To install: `cargo install --git https://github.com/timmattison/tools htmlboard`
 - jsonboard
     - Waits for JSON to be put on the clipboard and then pretty prints it and puts it back in the clipboard.
+    - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
+      reads the clipboard each 500 ms, and the mosh-rs client allows only 5 pastes in each 10 seconds.
     - To install: `cargo install --git https://github.com/timmattison/tools jsonboard`
 - bm
     - Bulk Move - recursively find and move files matching a pattern to a destination directory. Named "bm" because
@@ -171,6 +188,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     - To install: `cargo install --git https://github.com/timmattison/tools localnext`
 - unescapeboard
     - Waits for text with `\\"` in it to be put on the clipboard and then unescapes one level of it.
+    - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
+      reads the clipboard each 500 ms, and the mosh-rs client allows only 5 pastes in each 10 seconds.
     - To install: `cargo install --git https://github.com/timmattison/tools unescapeboard`
 - prhash
     - Hashes files with the requested hashing algorithm (MD5, SHA1, SHA256, SHA512, Blake3) and shows the progress
@@ -204,6 +223,12 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       deployments, instances, or VMs run the service under different uids and so land on different ports. To get a port
       that stays consistent across deployments and separate instances/VMs — say, for a service living behind a reverse
       proxy — set `PORTPLZ_UID` to the same fixed integer on each, which overrides the detected user and pins the port.
+        - `-n/--name <NAME>` names one application apart from the others in the same repo, so a project that holds a
+          site and an API gives each of them its own port: `portplz --name api` and `portplz --name tim.mattison.org`
+          differ from each other and from the plain `portplz`. The name is a third component beside the repo and the
+          branch and replaces neither, so the same name in two repos still gives two ports. Every port derived without
+          a name keeps the value it has today. An empty name is refused, so `portplz -n "$APP"` with `APP` unset gives
+          an error and not a different port.
     - To install: `cargo install --git https://github.com/timmattison/tools portplz`
 - sirn
     - Serve It Right Now — a tiny, zero-config HTTP file server. Run `sirn <file>...` to serve each file at
@@ -226,12 +251,16 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     - Waits for text that looks like a YouTube video URL to be put on the clipboard and then extracts the video ID from
       it.
       I use this for deep linking videos to my Roku TVs through their APIs.
+    - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
+      reads the clipboard each 500 ms, and the mosh-rs client allows only 5 pastes in each 10 seconds.
     - To install: `cargo install --git https://github.com/timmattison/tools tubeboard`
 - safeboard
     - Monitors clipboard for dangerous Unicode characters that could be used in copy-paste attacks. Detects invisible 
       characters like zero-width spaces, directional overrides, and private use area characters that attackers use to 
       hide malicious code or commands. Options include `--audible` for sound alerts and `--modify` to prepend a warning 
       to dangerous content. Includes a test script to verify functionality.
+    - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
+      reads the clipboard each 500 ms, and the mosh-rs client allows only 5 pastes in each 10 seconds.
     - To install: `cargo install --git https://github.com/timmattison/tools safeboard`
 - gitrdun
     - Shows your recent git commits across multiple repositories. Useful for finding what you've been working on
@@ -247,6 +276,14 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       whose name reads like a credential is hidden, and `--show-secrets` prints it in full. A section that cannot be
       read says why, and a run that touches a process belonging to another user says that sudo is needed. Examples:
       `spv 77763`, `spv node`, `spv --regex 'node.*'`, `spv --cwd --lsof zsh`, `spv --all --full deploy.sh`.
+    - A pattern of exactly one PID (`spv 77763`) prints a detail card instead of the table. The card shows the whole
+      command line, the executable, the working directory, the start time with the elapsed time, and the chain of
+      parents up to PID 1, each parent with its full command line. The table has one `Parent <pid>` row for each
+      parent, nearest first, and a long command wraps inside its own row. No value is truncated: a long value wraps at
+      the width of the terminal. `--raw` prints the card as `key: value` lines, with one `parent: <pid> <command>` line
+      for each parent. A row that the kernel withholds says `(needs sudo)` for a process of another user. The other
+      section flags add their sections under the card. A list of PIDs (`spv 77763,82313`) and a name pattern print
+      the table, also when only one process matches.
     - This tool replaces `procinfo`, which was removed. `procinfo` did not work on macOS. A `procinfo` user meets
       three changes:
         - A search that matches nothing exits 1. `procinfo` exited 0.
@@ -321,6 +358,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       one does not, so an alias written for the Go version needs the second dash.
     - Set `DIRC_CLIPBOARD_FILE` to the path of a file to read and write that file in place of the clipboard of the
       machine. This is what lets the tests of `dirc` run without touching the clipboard of the person at the keyboard.
+    - In a mosh-rs session, `dirc` copies to the clipboard of your client computer, and `dirc --paste` reads it. Both
+      go through the `pbcopy` and `pbpaste` shims that the mosh-rs server puts on `PATH`. A read needs
+      `MOSH_ALLOW_PASTE=1` on the client. When paste is off, the shim runs the next `pbpaste` on `PATH`, which is the
+      `pbpaste` of the server. Outside mosh-rs, `dirc` uses the clipboard of the machine, and it runs `pbcopy` or
+      `pbpaste` from `PATH` when that clipboard does not open.
     - To install: `cargo install --git https://github.com/timmattison/tools dirc`
 - gitdiggin
     - Recursively searches Git repositories for commits containing a specific string. Can search in commit messages by
@@ -342,6 +384,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     - Generates random data and copies it to the clipboard. Supports two modes: binary data (with hex, base64, or raw 
       output formats) and text with diacritics (Zalgo text). Features include customizable parameters, presets for 
       text generation (mild, scary, insane, zalgo, doom), and a dry run mode to preview without copying.
+    - In a mosh-rs session, the data goes to the clipboard of your client computer, through the `pbcopy` shim that the
+      mosh-rs server puts on `PATH`.
     - To install: `cargo install --git https://github.com/timmattison/tools clipboard-random`
 - freeport
     - Finds a free TCP port on localhost (127.0.0.1) quickly and cross-platform. Supports random or sequential port 
@@ -358,6 +402,17 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
 - wl
     - Shows which process is listening on a given port. Useful for identifying what program is using a specific port
       on your system. Supports verbose output to show detailed socket information.
+    - Without root, `wl` sees only the processes that you own. Run it under `sudo` for a complete answer. When a run
+      without root names no process, `wl` writes a note about this limit to standard error, unless the port is
+      free.
+    - `wl` gives one of these answers:
+        - `PID: … Process: … Socket: …`, one line for each process that it sees on the port.
+        - `Port <port> is in use, but no owning process is visible to the current user.` The kernel's list of
+          listening sockets holds the port, and a process that `wl` cannot see owns it.
+        - `No processes listening on port <port>`. A complete read of that list found no listener on the port.
+        - `Cannot tell whether port <port> is in use`. `wl` reads that list on macOS and Linux only, so this is the
+          answer on each other platform, and also when the read does not complete.
+        - `Error getting listeners`, with exit status 1, when `wl` cannot list the processes at all.
     - To install: `cargo install --git https://github.com/timmattison/tools wl`
 - wolly
     - Wake-on-LAN tool to remotely wake computers by sending magic packets. Features automatic subnet broadcast
@@ -420,12 +475,6 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       parallel deletion with 10 concurrent operations, automatic pagination handling with the `--all` flag, 
       and progress tracking. Includes safety confirmation prompts and retry logic for reliability.
     - To install: `cargo install --git https://github.com/timmattison/tools r2-bucket-cleaner`
-- org-borg
-    - Assimilate GitHub organization repositories - resistance is futile. Clone and manage repositories from 
-      GitHub organizations with bulk operations. Features automatic authentication via GitHub CLI (`gh`), 
-      concurrent cloning, smart updates for existing repos, and optional archiving. Supports cloning from 
-      specific organizations or all accessible organizations at once.
-    - To install: `cargo install --git https://github.com/timmattison/tools org-borg`
 - aws2env
     - Converts AWS credentials from `~/.aws/credentials` and `~/.aws/config` files into environment variable 
       export commands. Supports multiple profiles, lists available profiles, and generates exports for 
@@ -441,16 +490,18 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
 - nwt
   - New Worktree - Creates a new git worktree with a randomly generated Docker-style name
     (e.g., "absurd-rock", "zesty-penguin"). Supports config files (~/.nwt.toml), custom branch
-    names, checking out existing refs, running commands after creation, and opening worktrees
-    in new tmux windows. Worktrees are created in a `{repo-name}-worktrees` directory alongside
-    the repository.
+    names, checking out existing refs, running commands after creation, and sparse worktrees
+    without a heavy tracked directory (`--sparse-exclude`). Worktrees are created in a
+    `{repo-name}-worktrees` directory alongside the repository. In a container repository,
+    nwt links each child repository of the main worktree into the new worktree.
   - To install: `cargo install --git https://github.com/timmattison/tools nwt`
 - cwt
   - Change Worktree - Navigate between the git worktrees of a repository and of the
-    repositories inside it. Shows a list of all worktrees with the current one highlighted,
-    or cycle through them with `-f` (forward) and `-p` (previous). Can also jump directly to
-    a worktree by directory name or branch name. Use `--no-family` to stay inside one
-    repository, and `--shell-setup` to automatically add shell integration to your config.
+    repositories inside it. Shows a list of all worktrees with the current one highlighted
+    and the number of each open pull request after its branch, or cycle through them with
+    `-f` (forward) and `-p` (previous). Can also jump directly to a worktree by directory
+    name or branch name. Use `--no-family` to stay inside one repository, and
+    `--shell-setup` to automatically add shell integration to your config.
   - To install: `cargo install --git https://github.com/timmattison/tools cwt`
 - gitnuke
   - Removes a git worktree and deletes the branch it had checked out, resolved as one
@@ -458,18 +509,28 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     path, a directory name, or a branch name (exact matches only). A worktree with
     submodules checked out - which plain `git worktree remove` refuses outright - or with
     uncommitted changes needs `--force`. `--dry-run` reports the plan as a preflight, and
-    `--safe` keeps the branch unless it is fully merged.
+    `--safe` keeps the branch unless it is fully merged. Before it deletes a branch that no
+    message of the last 10 commits of the main branch or its upstream names, it asks. Thus a
+    mistyped issue number does not delete unmerged work. `--yes` skips the question. Without
+    a terminal, gitnuke cannot ask, and it refuses with exit code `10`.
   - To install: `cargo install --git https://github.com/timmattison/tools gitnuke`
 - crap (Claude, Resume Anywhere Please)
   - Resume a Claude Code session from wherever you are. Given a session id, `crap` looks the
     session up under `~/.claude/projects`, recovers the directory it originally ran in, `cd`s
-    there, and re-launches Claude with `--resume <id>` — preferring your `clauded` alias if you
-    have one, otherwise plain `claude`. If the original directory no longer exists — or exists but
-    can't be entered from your account — it tells you and stops, pointing you at `crap --here <id>`
-    to fork it where you stand instead; and it refuses to resume a session that's already open in
-    another running process (pass `--force` to override) so two processes can't corrupt the same
-    session log. With `--here` it brings the session into the *current* directory instead, resuming
-    it as a forked (new-id) session so you can carry its context into a different working tree. If
+    there, and re-launches Claude with `--resume <id>` — through the launcher that you name in
+    `CRAP_LAUNCHER` (for example `export CRAP_LAUNCHER=c`), otherwise through plain `claude`. If
+    the original directory no longer exists — or exists but can't be entered from your account —
+    it tells you and stops,
+    pointing you at `crap --here <id>` to fork it where you stand instead; and it refuses to
+    resume a session that's already open in another running process (pass `--force` to override)
+    so two processes can't corrupt the same session log. With `--here` it brings the session into
+    the *current* directory instead, resuming it as a forked (new-id) session so you can carry its
+    context into a different working tree.
+    After you gave the fork new input, the shell function prints
+    `Resume this fork with: crap <new-id>` when Claude exits. Thus you know the id of the fork and
+    not only the id of the original. `--expand` forks a session with each compaction undone, thus
+    `/rewind` in the fork lists the prompts from before each `/compact`. The original transcript is
+    only read. If
     the id belongs to another account on the machine, `crap` finds it automatically — searching your
     own sessions first, then other users' as a self-first fallback — and resumes a private fork of
     it (or target a specific account with `--user <name>`, which fails up front and lists the real
@@ -497,7 +558,16 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - Compact pretty output of branch state: a self-refreshing live watch on a TTY, and a single
     render when its output is piped or `--one-shot` is given — so it needs no `viddy`/`watch`
     wrapper, but still works under one. Shows branch, ahead/behind, working-tree changes, and
-    a `git log --oneline` tail. Ages use two units and get coarser as they grow — `5m23s`,
+    a `git log --oneline` tail. The log fills the rows that the header and the file list leave,
+    so a tall window shows more history. A blue `▎` in the left column of a log row marks a commit
+    that is only on the current branch: the commits that the ahead count counts. The mark goes
+    by which commits the base cannot reach, not by row position. So a branch that merged its
+    base marks its own commits and the merge, and not the commits that came in from the base.
+    Other rows show a blank there, so the hashes stay aligned. The mark is a glyph, so it stays
+    visible with no color and in piped output. A single render on a terminal leaves its last row free
+    for the shell prompt, so the prompt does not push the header off the screen. `--log-lines N`
+    caps the log at N rows. Under the live watch, a window that grows reads more commits, and it
+    reads none when the history is already all on the screen. Ages use two units and get coarser as they grow — `5m23s`,
     `2h14m`, `3d12h`, `5y6mo` — so a repo untouched for years stays readable. Every age sits on
     the row of the thing it ages, a file or a commit, and each is shown exactly once: the newest
     commit's age is on the first log row, not also in the header (so `--no-log` takes the commit
@@ -527,8 +597,41 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     gsw purely event-driven. On a repository where a status walk is expensive, the 1% duty-cycle
     budget pushes the timed refresh out past the interval, and the countdown shows the longer wait
     rather than promising one it will not keep.
-  - Watch-mode keys: `q` or Ctrl-C quits, `r` forces an immediate refresh, and `p` pushes the
-    current branch. Ctrl-C quits from anywhere, including while a push is in flight.
+  - Under the live watch, the right end of the header row shows whether the branch on the screen
+    has an open pull request on GitHub:
+
+    ```
+    gsw ⌂ 1/4 • issue-681 • 3 commits ahead of main • ↑0 ↓0 origin/issue-681        PR #690
+    ```
+
+    | State | Text | Style |
+    | --- | --- | --- |
+    | One open pull request | `PR #690` | green, bold |
+    | Two or more open pull requests | `PR #690 +1` (the lowest number, then the count of the others) | green, bold |
+    | No open pull request | `no PR` | dim |
+    | No answer yet, or the last lookup failed | `PR ?` | dim |
+
+    A draft pull request counts as open, and the text carries the meaning without color. The pull
+    request is the one whose head is the branch that `branch.<name>.merge` names, in the repository
+    of the remote of the branch. A branch that tracks nothing asks about its own name, in the
+    remote that `p` pushes a new branch to. gsw asks through `gh api` with REST and an `ETag`, so
+    an answer that did not change costs nothing against the GitHub rate limit. It asks after the
+    first frame, at each timed refresh, when `r` refreshes, and when the branch or the worktree on
+    the screen changes — never because of a filesystem event, so a build that writes many files
+    sends no requests. One lookup runs at a time, on a thread of its own, for at most 10 seconds,
+    and the screen never waits for it. A rate limit shows `PR ?` and stops the lookups until GitHub
+    lets them start again. The name of the branch outranks the indicator: in a pane too narrow for
+    both, the indicator goes. One-shot mode, `--no-pr`, a machine with no `gh` on `PATH`, a
+    detached HEAD, and a remote that is not on GitHub show no indicator, and the header is then
+    the same as before. `GH_HOST` names one more GitHub host, for GitHub Enterprise.
+  - Watch-mode keys: `q` or Ctrl-C quits, `r` forces an immediate refresh, `p` pushes the
+    current branch, `P` pushes it without the `pre-push` hook, `G` opens the pull request of the
+    branch (or the issue the branch names when
+    there is no pull request), `T` puts the number of the pull request of the branch on the
+    zellij tab title, `R` rebases the branch onto the base
+    and pushes it, `M` merges the base into the branch and pushes it, `m` measures a rebase and
+    a merge against the default branch, and the arrow keys move the watch between the worktrees
+    of the repository. Ctrl-C quits from anywhere, including while a push is in flight.
   - `p` always asks first, and the question names the branch, the remote, and how much is going —
     so what you confirm is what runs. If the checkout moves in another pane between the question
     and your answer, the push is refused rather than redirected at the branch that is there now:
@@ -547,6 +650,19 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       the remote and refspec. The remote for a new branch is `remote.pushDefault` if set, else the
       only remote whatever it is called, else `origin` — and gsw refuses rather than guess when a
       repository has several remotes and none of them settles it. `p` never force-pushes.
+    - `P` (Shift+p) does the same push with `git push --no-verify`, so the `pre-push` hook of the
+      repository does not run. Use it when you know that the hook is not necessary for one push,
+      and you do not have to leave gsw for a shell. `P` asks first, as `p` does, and its question
+      is yellow and names the skipped hook: `Push 3 commits to origin/my-branch without the
+      pre-push hook?`, or `Create new remote branch origin/my-branch without the pre-push hook?`
+      for a branch that is not on the remote yet, which then gets
+      `git push --no-verify -u <remote> <branch>`. The notice says `Pushing without the pre-push
+      hook…`, and the report says `Pushed 3 commits to origin/my-branch, pre-push hook skipped
+      (12s ago)`, so you can see after the push which kind of push ran. `P` refuses in the same
+      cases as `p`, with the same messages, and a `P` while a run is in flight does nothing. All
+      the other guarantees of `p` stay: the branch check, the detached child, the shed `GIT_`
+      environment, the live window, and no force push. `--no-verify` skips only the local hook.
+      Server-side hooks and branch protection still apply.
     - While the push runs, gsw shows what it says. A `Pushing… (1m12s)` notice reports how long
       the push has taken. Up to six rows under it carry the newest output from git and from any
       `pre-push` hook. The rows are indented and dimmed, because they are another program speaking
@@ -565,15 +681,29 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       stays there until you press a key. Those are the **last** three lines, not the first: a
       `pre-push` hook prints its whole run before it fails and git adds its verdict after, so the
       reason a push failed is at the end of what was said. A plain rejection reads the same either
-      way, because git writes exactly three non-hint lines for one. A push that succeeds re-walks
-      the repository immediately, so the ahead/behind arrows match what just happened. Nothing the
-      push runs can prompt at the terminal — it would be reading the same keystrokes gsw is. The
-      push is started detached from the terminal — its own session on Unix, no inherited console
-      on Windows — so nothing in its process tree can reach the keyboard gsw is reading, not git,
-      not ssh, and not anything below them: an HTTPS remote that wants a password, a
-      passphrase-protected key with no agent, and an unknown host key all fail fast and say so
-      under the frame instead of hanging behind a question gsw never drew. Credential helpers and
-      a GUI askpass still work — neither needs the terminal.
+      way, because git writes exactly three non-hint lines for one. The one exception is a
+      `CONFLICT` line of git: it keeps a row above the last line, because it names the file that
+      conflicted. A push that succeeds re-walks the repository immediately, so the ahead/behind
+      arrows match what just happened. Nothing the push runs can prompt at the terminal — it would
+      be reading the same keystrokes gsw is. The push is started detached from the terminal — its
+      own session on Unix, no inherited console on Windows — so nothing in its process tree can
+      reach the keyboard gsw is reading, not git, not ssh, and not anything below them: an HTTPS
+      remote that wants a password, a passphrase-protected key with no agent, and an unknown host
+      key all fail fast and say so under the frame instead of hanging behind a question gsw never
+      drew. Credential helpers and a GUI askpass still work — neither needs the terminal.
+    - **The push goes to the repository on the screen, whatever gsw was started from.** git obeys
+      the environment before it obeys the directory it was pointed at. So a gsw started from
+      inside a pre-commit hook would otherwise push the repository being committed to. The push
+      gets no `GIT_` variable out of gsw's own environment, and neither does the check that reads
+      which branch is checked out. The rule there is the prefix and never a list of names. That
+      check is why the rule matters more here than anywhere else: it refuses a push whose branch
+      changed since the question. A check that reads the same wrong repository as the push agrees
+      with itself, and refuses nothing — which is worse than no check, because it reports
+      success. The six variables you state on purpose stay: `GIT_CONFIG_GLOBAL`,
+      `GIT_CONFIG_SYSTEM`, `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_ASKPASS` and `GIT_TERMINAL_PROMPT`.
+      So your key and your identity still reach the remote. A pre-commit hook exports none of
+      those. Your shell or direnv does. After that sweep gsw sets `GIT_TERMINAL_PROMPT=0`, so its
+      own value wins over yours.
     - Everything gsw says itself goes away on its own: `Pushed 3 commits to origin/my-branch
       (12s ago)` counts up in place, fades toward black as it goes, and takes itself off the
       screen after a minute — the frame gets the row back with no key pressed. Refusals
@@ -583,6 +713,313 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       the way it always has. The fade is the 24-bit gradient the commit log uses, under the same
       `--truecolor`/`--no-truecolor` control; without truecolor the message simply dims halfway
       through its life instead.
+  - `G` opens the pull request of the branch. Where the branch has no pull request, `G` opens the
+    issue that the branch names — `issue-475` names issue 475. The commands that find these pages
+    are yours, not gsw's: `G` runs them in your own interactive shell, with the work tree as their
+    current directory.
+    - `GSW_PR_COMMAND` holds the command that `G` runs first, and it defaults to `ggsp`.
+      `GSW_ISSUE_COMMAND` holds the command that `G` runs second, and it defaults to `ggs`. This
+      repository ships neither one. The defaults are the names these plans are written with.
+    - **The first command that exits 0 completes the press.** Where the pull request command exits
+      with a different status, gsw runs the issue command in the same work tree. On a branch with
+      no pull request, the first step always fails. That failure is the usual path and not an
+      error, so gsw shows nothing of it: where the issue command opens the page, the frame gets no
+      row. Where both steps fail, the row shows the last line of the issue command, because that
+      line gives the last reason that no page opened.
+    - Set a variable to an empty string to remove its step. An empty `GSW_PR_COMMAND` gives the `G`
+      of earlier versions, which opens the issue. An empty value in both variables turns the key
+      off, which is also what to do if you have neither command.
+    - **Each value is a whole command line, so it can carry arguments.**
+      `GSW_ISSUE_COMMAND='gh issue view --web'` works, the way `WN_START_COMMAND` takes
+      `gh issue develop`. gsw asks your shell about the first word and runs the whole line, so
+      the first word is the part that has to exist and everything after it is yours: the shell
+      reads those arguments the way it reads arguments at an interactive prompt.
+    - Each command is usually a shell function, and a function lives only inside a shell. So gsw
+      asks your shell once, at startup, about each command, with
+      `$SHELL -ic 'command -v <first word>'` —
+      `command -v` reports a function and an alias in both bash and zsh, and `-i` is what makes
+      the rc file load. Each answer arrives on the watch loop's own channel, so nothing waits for
+      it: until one comes, `G` does nothing. An rc file that never returns is given five seconds,
+      after which the command is treated as absent and the whole process group of that shell is
+      killed — the shell itself and anything it started, because an rc file that hangs hangs
+      inside some command it ran, not inside a builtin. So a slow rc file cannot leave a process
+      behind for the life of the session.
+    - **Where only one of the two commands exists, `G` runs that command alone.** A shell that has
+      `ggs` but not `ggsp` thus keeps the `G` of earlier versions.
+    - **Where neither command exists, `G` does nothing and says nothing** — the way an
+      unbound key does. That is the one silent case the key has: every other outcome speaks.
+      Because the question is asked once, a function you add to your rc file after gsw started
+      needs a restart.
+    - **On a remote shell, `G` asks once more.** The browser opens on the machine that runs gsw, and
+      on a remote shell nobody sits at that machine — so the first `G` runs nothing and puts
+      `remote shell — press G again to run ggsp, then ggs` under the frame, where the commands
+      named are whatever the two variables hold. Where only one command exists, the message names
+      only that command. The second `G` runs the steps, for as long as that message is on the
+      screen. gsw decides once, at start, whether the shell is remote: it is remote when
+      `SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY` is in the environment, or when a `mosh-server`
+      stands above the process — mosh carries none of those variables into the shell it starts, so
+      the process tree is the only place that says so. The message fades off the screen after a
+      minute. Any other key takes the offer of the second press away, so a `G` a minute later asks
+      again, and so does a `G` after any other key. The offer stands exactly as long as the message
+      does, so a `G` pressed while a push owns the row offers nothing: that message waits for the
+      row the way any other does, and the offer starts when it gets there. The limit is a
+      multiplexer that starts its server as a daemon: that server reparents to PID 1, and the walk
+      up the process tree stops there. gsw answers that for Zellij through the Zellij client, which
+      keeps the chain. A session viewed through tmux reports whatever stands above the tmux server.
+    - A press that opens a page costs the frame no row: the browser is the answer. A press that
+      fails puts the last line of the last command that ran under the frame, where it waits for a
+      key the way git's error text does — `ggs` refuses on a branch that names no issue, and that
+      refusal is the whole reason no page opened. `G` works while a push runs, and a message that arrives then
+      waits for the row rather than taking it from the push. A push takes minutes, so a second
+      `G` can refuse while the first refusal is still waiting: the messages queue up, and each
+      one takes the row in the order it arrived and waits for a key of its own. Four wait at
+      most. Past that the message that arrives is the one dropped, because the first refusal
+      says what went wrong and the ones after it repeat it. Each child gets no terminal, so it
+      cannot read the keyboard gsw reads, and it gets no `GIT_` variable out of gsw's own
+      environment, so it cannot be aimed at another repository. The rule there is the `GIT_`
+      prefix and never a list of names: `GIT_DIR` aims git elsewhere, and so do `GIT_COMMON_DIR`
+      and `GIT_CEILING_DIRECTORIES`, while `GIT_CONFIG_PARAMETERS` sets any key at all. The six
+      variables you state on purpose stay: `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_SSH`,
+      `GIT_SSH_COMMAND`, `GIT_ASKPASS` and `GIT_TERMINAL_PROMPT`. A pre-commit hook exports
+      none of those. Your shell or direnv does.
+    - A press gets a minute, and its two steps share that minute, so `G` never stays busy for
+      more than 60 seconds. One run at a time is the rule, so a run that never ends would hold `G`
+      for the rest of the session — and a key that does nothing and says nothing is exactly what
+      an unbound key looks like. So after 60 seconds gsw stops waiting, says
+      `ggsp has not finished after 60s` under the frame (it names the step that is still running,
+      with the last line that command wrote after it, where there is one), and gives the key back.
+      Where the first step is still running at that point, gsw does not start the second step:
+      the first step can still open the pull request after the minute, and a second step then
+      opens a second page.
+    - **gsw stops waiting; it does not stop the command.** Your rc file is gsw's own question and
+      gsw ends it — that shell and its whole process group — which is the five seconds above.
+      The run is *your* command: a command that
+      hands the page to `xdg-open` holds a browser in the foreground, and to end that process
+      group is to close the page you asked for. So the command keeps running, and gsw only collects it
+      when it ends. Your rc file cannot be what hangs a run, because the question above loaded the
+      same rc file under its own five seconds.
+    - The two output streams go to files rather than pipes. A pipe is read to its end, and the end
+      arrives only when the last writer lets go — so a background child your command leaves behind
+      would hold the run open long after your shell exited, which is the same held key by another
+      road. A file has no such end to wait for.
+  - `m` measures, in gsw's own process, what `grind` and `grime` measure: a rebase of HEAD onto
+    the default branch and a merge of that branch into HEAD. The default branch is `main`, else
+    `master`, chosen by the same call both tools make. gsw does not need either tool on the `PATH`.
+    - While the run is in flight, the bottom row says `Running grind and grime against main…`.
+      That notice does not fade, and a key does not remove it, because it tells you that `m` does
+      nothing now. One run at a time is the rule, so ten presses start one run. A question or a
+      push in flight owns the row, so a run that starts then shows no notice.
+    - When the run ends, one line takes the place of the notice and fades off the screen after a
+      minute, like the result of a push: `main: rebase clean · merge clean`, or
+      `main: rebase 3 hunks in 2 files, 2 stops · merge 1 hunk in 1 file`. The counts are conflict
+      hunks, the number both tools report. The words for them come from `gitscratch`, so gsw,
+      `grind`, and `grime` never name one number in two ways. The merge half names no stops,
+      because a merge stops once or never. A dirty work tree adds `· uncommitted work not
+      included`. A half that fails shows its reason and no number — `merge failed: <reason>` —
+      and the other half still shows its result. The line is cut to the pane width and never
+      wraps.
+    - On the default branch itself, `m` runs no replay and says `on main — nothing to compare`. A
+      repository with no default branch, or with no commit at HEAD, gets the reason as a fading
+      line, and `m` works again at once. A detached HEAD is measured, as `grind` measures one.
+    - The two replays run one after the other on a thread of their own, in the scratch worktrees
+      of `gitscratch`: no hook runs, and your refs do not move. The replay is read-only for your
+      repository, so `m` works while a push is in flight. A replay starts from HEAD, and `R` and
+      `M` move HEAD, so `m` does nothing while one of them runs, and a run that one of them
+      overlaps shows no line. A quit during a run shows
+      `Waiting for grind and grime to finish…` and waits for the replay in flight to remove its
+      scratch worktree. The second replay does not start. A scratch worktree that a quit abandoned
+      would stay registered in your repository and point at a deleted directory.
+  - `R` rebases the branch onto the base and pushes it, and `M` merges the base into the branch
+    and pushes it. They are the two answers to the behind count the header already shows. Neither
+    act is gsw's own: each key runs one command that you supply, in your own interactive shell,
+    with the work tree as its current directory, and that command pushes the branch itself once it
+    has finished.
+    - `GSW_REBASE_COMMAND` holds the command of `R` and defaults to `grp`. `GSW_MERGE_COMMAND`
+      holds the command of `M` and defaults to `gmp`. This repository ships neither one: both are
+      shell functions of one person, which is why each name is yours to set. Set a variable to an
+      empty string to turn that key off, and gsw then asks no shell about it.
+    - **The value is a whole command line**, as the value of `GSW_ISSUE_COMMAND` is, so it can
+      carry arguments. gsw asks your shell about the first word and runs the whole line.
+      **gsw puts the base on the end of that line as one quoted word**, so `grp --fork-point` runs
+      `grp --fork-point 'main'`. The base goes on the line because the question names it and what
+      you confirm is what runs, and because `grp` and `gmp` fall back on `main`, which fails in a
+      repository whose base is `master`. **A command that replaces `grp` or `gmp` must therefore
+      take the base as its last argument.**
+    - **Where the command does not exist, the key does nothing and says nothing** — the way `G`
+      does, and the way an unbound key does. gsw asks your shell about the command of each key
+      once, at startup, so a function you add to your rc file after gsw started needs a restart.
+    - Each key asks first, and the question names the act, the branch, the base, how far behind it
+      is, and the command: `Rebase issue-12 onto main (5 commits behind), then push with grp?`, or
+      `Merge main (1 commit behind) into issue-12, then push with gmp?`. Answer with `y`/Enter, or
+      with `n`/Esc/`q`. The hint names the act rather than the push, because the act is what Enter
+      starts. **`p` never force-pushes, but `R` runs your command, and `grp` force-pushes** — so
+      the `R` question takes the yellow of a question to read twice, the way the question that
+      creates a remote branch does, because a rebase rewrites every commit of the branch. The `M`
+      question takes the routine color. In a pane with no row to spare, neither key asks at all,
+      for the reason `p` does not.
+    - Where the repository gives the key nothing to do, it asks nothing and posts a fading line
+      instead. An operation that git is still holding gets
+      `a rebase is in progress — finish it first`, a detached HEAD gets
+      `HEAD is detached — check out a branch to rebase`, a base that is neither `main` nor
+      `master` gets `no main or master branch to rebase onto`, HEAD on the base itself gets
+      `on main — nothing to rebase`, and a branch that is behind by nothing gets
+      `issue-12 already contains main`. The first line that applies is the one you get. So a
+      rebase stopped on a conflict reports the rebase, and not the detached HEAD it left: that
+      HEAD goes back to the branch when you finish or abort the rebase. `M` says `merge` where
+      `R` says `rebase`, except in the line about an operation in progress: that one names the
+      operation git holds, whichever key you pressed. gsw refuses no other case: a dirty work
+      tree reaches your command, and git says what it thinks of one. gsw fetches nothing and
+      neither command fetches, so the base is your local branch.
+    - A checkout in another pane between the question and your answer refuses the run and starts
+      no shell, as it refuses a push: gsw says the branch changed, and you press `R` again for a
+      question about the branch that is there now. A rebase or a merge that starts in that gap
+      refuses the run too, with the line of the question,
+      `a merge is in progress — finish it first`, and gsw leaves that operation as it is. gsw
+      reads the operation before the branch, so a rebase that another pane started is named as
+      the rebase, and not as a change of branch.
+    - While the command runs, its output shows live under the frame, in the window a push uses: a
+      `Rebasing issue-12 onto main with grp… (1m12s)` notice, and up to six indented rows carrying
+      the newest lines. **The run has no deadline**, because a pre-push hook of this workspace
+      builds and tests every crate and runs for minutes — the notice counts the time, so a run
+      that hangs shows as a run that hangs. The run holds the row: `p`, `P`, `R`, `M`, and `m` do
+      nothing until it ends, while `G` still acts. The child gets no terminal, and no `GIT_`
+      variable out of gsw's own environment but the six you state on purpose, so your SSH key
+      and your identity still reach the push. After that sweep gsw sets `GIT_TERMINAL_PROMPT=0`,
+      so nothing the child starts can prompt behind a question gsw never drew.
+    - A run that worked leaves gsw's own sentence and, under it, the last line your command wrote
+      — `Rebased issue-12 onto main with grp (4s ago)`, then
+      `grp: rebased onto 'main'; 'issue-12' has no upstream - skipping push`. That second row is
+      necessary: `grp` and `gmp` report a push they skipped only in their last line. Both rows age
+      and fade off the screen after a minute. A run that failed leaves the last lines of the
+      output in red, where they wait for a key, as git's error text does. Any `CONFLICT` line of
+      git keeps a row above them, so the rows name the file that conflicted.
+    - **A rebase or a merge that the run leaves stopped is aborted.** The run has no terminal, so
+      nobody can resolve a conflict inside it. When your command exits, gsw reads the worktree of
+      the run. If git holds a rebase or a merge there that the run started, gsw runs
+      `git rebase --abort` or `git merge --abort` in that worktree, and the branch is back at its
+      commit from before the run. The run is then a failure, whatever the exit status of your
+      command, because a command can stop a rebase and still exit 0. The red rows keep the
+      `CONFLICT` line of git that names the file, then the last lines of your command, and the
+      last row is gsw's own:
+      `rebase stopped on 2 conflicts — gsw aborted it` (`1 conflict` for one, and no count for a
+      stop with no conflict). The abort gets no terminal, and no `GIT_` variable out of gsw's own
+      environment but the six you state on purpose, as the run does.
+    - **gsw aborts only an operation that it can show the run started**: the operation is on the
+      branch of the question, and it started from the commit that HEAD held just before the shell
+      started. gsw leaves any other operation as it is, and the last row says
+      `a rebase is in progress that gsw did not start — left as it is`. That includes a command
+      that makes a commit or checks out another branch before it starts its rebase or merge,
+      because gsw cannot tell that command apart from another pane. An abort that git refuses
+      leaves git's reason above the last row,
+      `rebase stopped on 1 conflict — gsw could not abort it, and it is still in progress`, and
+      the `⚠ rebase` row then shows the rebase.
+    - **A quit does not stop the command.** A rebase that gsw stopped in the middle would leave a
+      repository you must repair, and nobody saw it stop. So gsw exits and your command runs on.
+      **gsw aborts only while it runs**: a rebase that stops on a conflict after the quit stays in
+      progress, and it shows in the `⚠ rebase` row the next time you start.
+    - Every outcome walks the repository at once, and not success alone: a command that failed can
+      have changed the branch before it failed, and a walk during the run can have drawn the
+      `⚠ rebase` row of a rebase that gsw then aborted. Only a walk puts the header right again.
+  - `T` puts the number of the open pull request of the branch at the front of the zellij tab
+    title, and keeps the rest of the title. As with `G`, the work is not gsw's own: `T` runs one
+    command that you supply, in your own interactive shell, with the worktree on the screen as
+    its current directory.
+    - `GSW_TAB_COMMAND` holds the command, and it defaults to `stp`. This repository ships no
+      `stp`. It is a shell function of one person: it finds the open pull request of the branch
+      with `gh`, and it renames the tab with `zellij action rename-tab-by-id`. Set the variable to
+      an empty string to turn the key off, and gsw then asks no shell about it.
+    - **The value is a whole command line**, as the value of `GSW_ISSUE_COMMAND` is, and gsw adds
+      no argument to it. gsw asks your shell about the first word at startup, with the commands of
+      the other keys, and runs the whole line. Where the command does not exist, `T` does nothing
+      and says nothing, the way `G` does.
+    - `T` asks nothing first, because a tab title is not the repository. Unlike `G`, it asks for no
+      second press on a remote shell, because the rename goes through the zellij server and is
+      correct for a remote client too.
+    - One run at a time: `T` does nothing while a run of `T` is in flight. It acts while a push,
+      `R`, or `M` runs, as `G` does, and it does nothing while a question is up or the list is
+      open.
+    - A run that worked puts the last line the command wrote under the frame, where it fades after
+      a minute. `stp` writes `stp: the tab already starts with 57` there when the tab already
+      carries the number, and it writes its notice about a follow-up pull request there too. A
+      run that wrote nothing posts nothing. A run that failed puts its last line under the frame
+      in red, where it waits for a key. The refusals of `stp` explain themselves: no pull request,
+      two or more follow-up pull requests, or no `gh`.
+    - A press gets a minute, as a press of `G` does. After that, gsw stops waiting, says
+      `stp has not finished after 60s` under the frame, and gives the key back. The command keeps
+      running, because it is yours.
+    - A press that started before a move to another worktree posts nothing when it ends, because
+      a line under the frame describes the worktree in the frame. The tab still changes.
+    - The child keeps `ZELLIJ`, `ZELLIJ_PANE_ID`, and `ZELLIJ_SESSION_NAME` from the environment of
+      gsw, because gsw removes only the `GIT_` variables. So `stp` finds the tab that holds the
+      gsw pane.
+    - **Zellij only.** In tmux and in a bare terminal, `st` sets the title with an escape sequence
+      on its standard output. gsw reads that output from a file and removes every escape sequence
+      from it, so the title does not change, and gsw does not forward the sequence. In a bare
+      terminal `stp` refuses, because a new shell cannot read the title of the terminal.
+    - **The worktree on the screen gives the number.** The tab is always the tab of the gsw pane.
+      So after Left or Right moves the watch to another worktree, `T` puts the number of the pull
+      request of that worktree on the tab of gsw.
+  - The arrow keys move the watch between the worktrees of the repository: the main worktree and
+    every linked worktree, such as the ones `nwt` makes for each issue. The worktree where you
+    started gsw is the **home worktree**.
+    - Up goes to the home worktree. Left and Right go to the previous and the next worktree in
+      path order, which is the order of `cwt`, and they wrap as `cwt -p` and `cwt -f` do. Down
+      opens a list of the worktrees. In the list, Up and Down move the cursor, Page Up and Page
+      Down move it one page, Enter goes to the worktree under the cursor, and Esc or `q` closes
+      the list and leaves you where you were. A page is one row less than the rows of the list
+      that the pane shows, so the row at the edge of the old page stays in view, and the cursor
+      stops on the first and the last row. Nothing else acts while the list is open, except Ctrl-C.
+      The list opens on the worktree that is on the screen, marks the home worktree with `⌂`, and
+      scrolls when it is longer than the pane. The frame does not change while the cursor moves:
+      gsw walks a worktree only after Enter.
+    - A worktree whose directory is gone is not in the list, and neither is a bare main
+      repository: gsw cannot show either one. A worktree whose HEAD gsw cannot read is in the list
+      with `?` in place of a branch. gsw reads the list again at each press, in its own process
+      through gix, so a worktree that `nwt` adds or `swt merge` removes while gsw runs is counted
+      at once. In a pane too short to show one row of the list, Down opens nothing, so Enter can
+      never pick a row that you did not see. A pane made that short while the list is open closes
+      the list.
+    - While the repository has more than one worktree, the header says which one you watch:
+      `gsw ⌂ 1/4 • main • 0 commits ahead of main` on the home worktree, and
+      `gsw 3/4 • issue-475 • 2 commits ahead of main` on another. A detached worktree shows
+      `HEAD@9ba6951` in place of a branch, in the header and in the list. With one worktree, the
+      header does not change. The segment shrinks with the rest of the header, and the header
+      still never wraps.
+    - The name in the header is red while it is not the branch where you started gsw: after a
+      `git switch` in the watched worktree, after a move to a worktree on another branch, and
+      when HEAD becomes detached. When the header shows that branch again, the name is bold
+      again. Only the name is red. A rebase of the start branch keeps the name bold, so `R` does
+      not make it red, but a rebase of another branch does. A session that starts in a rebase
+      takes the branch of that rebase as its start branch. Any other session that starts on a
+      detached HEAD has no start branch, and its name is never red. One-shot mode never paints
+      it red.
+    - While the name is red, two presses of Esc go back to the start branch. The first Esc puts
+      `Hit Escape again to go back to <start branch>` under the frame for 3 seconds. An Esc in
+      that time goes to the home worktree when it is on the start branch, or else to the
+      worktree that is on it. When no worktree is on it, gsw goes to the home worktree and runs
+      `git switch --no-guess <start branch>` there, with the output of git live under the
+      frame, as a push shows its output. gsw never forces the switch. When git refuses, for
+      example because the switch would overwrite a local change, the last lines that git wrote
+      stay under the frame in red until you press a key, and HEAD does not move. The line is
+      the offer of the second press. Any other key between the two presses takes the line away,
+      and so does any other line that takes its place, such as the result of an `m` run. The
+      next Esc is then a first press again. While the name is bold, Esc only clears the line
+      under the frame, as before.
+    - A switch walks the new worktree at once and starts the refresh clock again. It moves the
+      filesystem watcher to the new worktree, and `p`, `P`, `G`, and `m` then act on the worktree
+      that is on the screen. Every line under the frame goes, because each one described the old
+      worktree. A worktree that gsw cannot open leaves you where you are, and the reason is a
+      fading line.
+    - The arrow keys do nothing while a push runs or while the push question is up: the push
+      belongs to the worktree it started in. An `m` or `G` run that is in flight at a switch goes
+      on in the worktree where it started, and the one-run rule of each key holds across the
+      switch. The result of that run is dropped when it arrives, because a line under the frame
+      must describe the worktree in the frame, and the key is free again then.
+    - When the worktree on the screen is removed — `git worktree remove`, `swt merge` — gsw goes
+      back to the home worktree and says `<path> no longer exists — back to the home worktree`.
+      While a push runs, the return waits for the push to end.
+    - gsw does not change the directory of the shell that started it. When gsw quits, the shell
+      is where it was. `cwt` changes the directory of a shell.
   - To install: `cargo install --git https://github.com/timmattison/tools gsw`
 - seescc (sccache stats viewer)
   - Self-refreshing terminal viewer for [sccache](https://github.com/mozilla/sccache) statistics —
@@ -617,14 +1054,64 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - To install: `cargo install --git https://github.com/timmattison/tools beta`
 - vpn-tunnel
   - Generates Docker-based VPN tunnels using gluetun + ProtonVPN + WireGuard. Produces a ready-to-run
-    `docker-compose.yml` plus helper scripts; pulls the WireGuard credential from 1Password via
-    op-cache. Supports per-city pinning or US-wide IP diversity and configurable container prefixes.
+    `docker-compose.yml` plus helper scripts. Reads the `credential*` fields of a 1Password item
+    through op-cache and picks the first WireGuard credential that no running tunnel holds. A
+    regenerated directory keeps the credential that its `.env` names, unless a tunnel of another
+    container name holds it. A directory whose `.env` names no credential, for example one generated
+    before that line existed, keeps the credential whose key its own running tunnel holds.
+    `generate` stops when docker cannot report the running tunnels.
+    Supports per-city pinning or US-wide IP diversity and configurable container prefixes.
   - To install: `cargo install --git https://github.com/timmattison/tools vpn-tunnel`
 - op-cache
   - 1Password credential cache with retry logic, atomic writes, and worktree support. Wraps `op read`
     so repeated calls don't re-hit 1Password (or trigger Touch ID) for every secret. Supports text and
     binary secrets, env-var overrides, cache invalidation, and includes worktree hooks for automatic
-    setup. Required by other tools in this repo (e.g. `vpn-tunnel`).
+    setup. Its `list-fields` subcommand lists the fields of a 1Password item whose label matches a
+    prefix, which is how `vpn-tunnel` finds the several WireGuard credentials that live on one item.
+    Required by other tools in this repo (e.g. `vpn-tunnel`).
+  - The 1Password prompt names only the application above the caller. In a zellij pane, it names
+    "zellij", whichever of the sessions asked. Thus, before each run of `op`, op-cache names the
+    caller itself. A cache hit and an `--env-var` override run no `op`, thus they do neither step.
+    A failure of either step prints one warning on stderr and never stops the read. The stdout of
+    op-cache does not change.
+  - On macOS, op-cache shows a notification at the same time as the 1Password prompt:
+
+    ```text
+    op-cache → 1Password
+    earth-science-d4 · earth-science
+    op://Private/cloudflare-fastip-deploy/credential
+    ```
+
+    The subtitle is the Claude Code session and the zellij session. When both are absent, it is the
+    name of the repo directory. A retry adds `(attempt 2 of 3)` to the title. Set
+    `OP_CACHE_NOTIFY=0` to turn the notification off. macOS shows the notification under Script
+    Editor, because `osascript` posts it as `com.apple.ScriptEditor2`. If no notification appears,
+    allow notifications for Script Editor in System Settings → Notifications.
+  - op-cache writes an audit trail to `$XDG_STATE_HOME/op-cache/audit.jsonl`. When
+    `XDG_STATE_HOME` is unset, empty, or relative, the file is `~/.local/state/op-cache/audit.jsonl`.
+    The audit trail has no switch. Each line is one JSON record, of one of two kinds:
+    - `op_start`, before `op` runs: the time, the `request_id`, the attempt, the operation (`read`,
+      `read-binary`, or `item-get` for `list-fields`), the reference, the working directory, the
+      cache file, the zellij session and pane, `TERM_PROGRAM`, the Claude Code session, and the chain
+      of ancestor processes (at most 32, each command line cut to 1024 bytes). The Claude Code
+      session is the nearest ancestor that has a file `sessions/<pid>.json` in `$CLAUDE_CONFIG_DIR`,
+      else in `~/.claude`. A file whose `startedAt` is earlier than the start of that ancestor is
+      skipped, because that PID now belongs to a different process. The lookup then continues to the
+      next ancestor.
+    - `op_end`, after `op` returns, with the same `request_id`: the `outcome` (`ok`, `empty`,
+      `failed`, or `spawn_error`), the `exit_code`, and the `duration_ms`. An `empty` outcome means
+      `op` exited 0 but gave no value, and op-cache tries again as after a failure. An `empty` or a
+      `failed` record holds the first 512 bytes of the stderr of `op`, in `op_stderr`. That text
+      shows if the person denied or dismissed the prompt. A `spawn_error` record holds the reason
+      in `error`.
+  - The audit trail never holds a secret or the stdout of `op`. But a command line of an ancestor can
+    hold a secret of a different program, thus the directory has mode 0700 and the file mode 0600.
+    To see who asked recently:
+
+    ```sh
+    jq -c 'select(.event=="op_start") | {time, reference, claude: .claude.name, zellij_session}' ~/.local/state/op-cache/audit.jsonl | tail
+    ```
+
   - To install: `cargo install --git https://github.com/timmattison/tools op-cache`
 - kitchen-sync
   - Installs every Rust binary from a git repository with a single command. Clones the repo, parses
@@ -644,6 +1131,41 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     directory *shared* by every worktree of the repo (`git rev-parse --git-common-dir`), so two merges
     launched from two different worktrees of one repo contend for the same lock. Drop an executable
     `.swt-check` at the parent repo root to override the default green check.
+  - A SIGHUP, SIGINT, or SIGTERM removes what the run holds: the unverified worktree and its branch of
+    `swt create`, or the merge lock of `swt merge`. The run then exits 128 + the signal (129, 130, or
+    143). A closed terminal window, a dropped SSH session, or a killed tmux pane sends SIGHUP. A
+    signal that arrives while `swt` holds nothing keeps its default action. If a signal arrives while
+    `swt` removes the worktree and the branch of a red check, `swt` finishes both removals first. The
+    run then exits 1 or ends by the signal. A signal that the parent set to ignore stays ignored, so
+    `nohup swt merge <path> &` survives a closed terminal. A signal to the whole process group also
+    stops the green check, and the run can then exit 1 in place of 128 + the signal. Nothing stays
+    behind in that case either.
+  - In a parent worktree on the branch `<branch>`, `swt create <name>` makes the branch
+    `swt/<branch>/<name>-<token>` and the directory `<parent-worktree-name>--<name>-<token>.swt`
+    beside the parent. One token keys both names, and `ls` shows each child next to its parent.
+    `swt create` refuses a detached HEAD before it creates anything, because a detached HEAD has no
+    branch to relate the child to.
+  - `swt list` prints the child worktrees of the branch that is checked out where it runs. Each child
+    is one line on stdout, sorted by path: the path, a tab, and the branch. The path can go directly
+    to `swt merge`. A child whose directory is gone gets a third field, `prunable`. With no children,
+    stdout is empty, a note goes to stderr, and the exit status is 0. On a detached HEAD, `swt list`
+    exits 1 and says why. A failure also leaves stdout empty, for example on a detached HEAD, or
+    when `swt` is not on the `PATH` of a hook. Thus a check must read the exit status before it
+    reads stdout. This check gives 0 for children, 1 for no children, and 2 for a failure:
+    `children="$(swt list)" || exit 2; [ -n "$children" ]`. `swt list` shows a child only when the
+    parent in the branch of the child is equal to the current branch. A prefix is not sufficient:
+    the children of `feat/foo` are not children of `feat`. Worktrees in the old format
+    `swt/<name>-<token>` have no parent in their branch, so `swt list` does not show them.
+  - A hook or a skill can find the child branches with plain git, without `swt`:
+
+    ```sh
+    git for-each-ref --format='%(refname:short)' "refs/heads/swt/$(git branch --show-current)/*"
+    ```
+
+    In `git for-each-ref`, `*` does not match `/`, so the pattern for `feat` leaves out the children
+    of `feat/foo`. Do not use `git branch --list 'swt/feat/*'`, where `*` matches `/`. Do not get the
+    branch from `git symbolic-ref --short HEAD`, which prints `heads/feat` when a tag `feat` exists.
+    This command finds child branches, and `swt list` finds child worktrees.
   - To install: `cargo install --git https://github.com/timmattison/tools swt`
   - Upgrading from the old TypeScript version: it was installed by symlinking `swt/swt.ts` into your
     `PATH`. That file is gone, so the symlink now dangles — and depending on `PATH` order it can keep
@@ -689,12 +1211,18 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     nothing to measure). A dirty tree isn't an error — it notes on stderr that uncommitted work isn't
     included and leaves the verdict alone. Nothing in your repo moves; the safety guarantees are the
     shared `gitscratch` harness's, not a second copy of them.
-  - Usage: `grind [BRANCH]`, `grind -q main && git rebase main`. `BRANCH` is optional: leave it out
-    for `main`, or `master` in a repository with no `main`, and a repository holding neither name is
-    refused with exit 2 rather than measured against HEAD. `-q` silences everything grind says, on
-    both streams, since the exit code is the whole answer — but it stops at the argument parser, so
-    `grind -q --onto main` still prints a usage error and `grind -q --version` still prints the
-    version.
+  - Usage: `grind [-q | --diff] [BRANCH]`, `grind -q main && git rebase main`, `grind --diff main`,
+    `grind --onto main parent`.
+    `BRANCH` is optional: leave it out for `main`, or `master` in a repository with no `main`, and a
+    repository holding neither name is refused with exit 2 rather than measured against HEAD.
+    `--onto NEWBASE BRANCH` measures `git rebase --onto NEWBASE BRANCH`: it replays only
+    `BRANCH..HEAD` onto NEWBASE, which is how a stacked branch moves after its parent got a squash
+    merge. A plain `grind main` there replays the commits of the parent too and reports false
+    conflicts. `--onto` needs BRANCH, and a NEWBASE that does not resolve is refused with exit 2.
+    `--diff` prints the diff of each stop after the breakdown, in color on a terminal, and changes
+    no exit code. `-q` silences everything grind says, on both streams, since the exit code is the
+    whole answer — but it stops at the argument parser, so `grind -q --onto main` (no BRANCH) and
+    `grind -q --diff` still print a usage error and `grind -q --version` still prints the version.
   - To install: `cargo install --git https://github.com/timmattison/tools grind`
 
 - grime (Git ReadIness for Merging Externally)
@@ -711,10 +1239,14 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     error — it notes on stderr that uncommitted work is not included and leaves the verdict alone.
     Nothing in your repo moves; the safety guarantees are the shared `gitscratch` harness's, not a
     second copy of them.
-  - Usage: `grime <BRANCH>`, `grime -q feature && git merge feature`. `-q` silences everything grime
+  - Usage: `grime [-q | --diff] [BRANCH]`, `grime -q feature && git merge feature`,
+    `grime --diff feature`. `BRANCH` is optional: leave it out to merge `main`, or `master` in a
+    repository with no `main`, and a repository holding neither name is refused with exit 2 rather
+    than measured against HEAD. `--diff` prints the diff of the one halt of the merge after the
+    breakdown, in color on a terminal, and changes no exit code. `-q` silences everything grime
     says, on both streams, since the exit code is the whole answer — but it stops at the argument
-    parser, so `grime -q` with no branch still prints a usage error and `grime -q --version` still
-    prints the version.
+    parser, so `grime -q --onto main` and `grime -q --diff` still print a usage error and
+    `grime -q --version` still prints the version.
   - To install: `cargo install --git https://github.com/timmattison/tools grime`
 
 - krt (Knights of the Round Trip)
@@ -957,22 +1489,31 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     run stands leaves the frame at the size it started with. A frame taller than that window keeps
     its head, its column header, the mark of the pause, and the list of the keys. The rows of the
     path take the lines that those leave, first hop first, and one line under the last row of them
-    counts the rows that went out of the frame, as in `+12 rows`. A run that measures no terminal
-    draws every line of the frame. The table folds every round that arrives and draws the frame of
-    that fold, so the count of the rounds in its head is the count that the table folded, and the
-    size in that same head is the size the recorded file holds at that draw. The first frame draws
-    at the moment the run takes the terminal, in front of the first round. It counts no round, and
-    its head already names the destination, the address, the source, the period, and the recorded
-    file, so a run of `--interval 2m` says that it started and holds no empty screen for those two
-    minutes.
-  - Five keys drive the live table. `q` and Ctrl-C stop the run, write the record that closes it,
+    counts the rows that went out of the frame, as in `+12 rows`. Page Down and Page Up scroll the
+    rows of the path by one page, and the head and the footer stay where they stand. While rows are
+    above the window, one line above the first row counts them in the same form, so the TTL of each
+    row tells which side each count is on. One page is the rows that the frame shows, less one, so
+    one row stays on the screen across each move, and Page Up goes back to the page that Page Down
+    left. The scroll stops at the first hop and at the last full window. A run that measures no
+    terminal draws every line of the frame, and a frame that fits its window does not scroll. The
+    scroll also needs three lines that the head, the column header, the mark of the pause, and the
+    list of the keys leave free. Thus a short window can scroll while `?` hides the list, and not
+    while `?` shows it. The table folds every round that arrives and draws the frame of that fold,
+    so the count of the rounds in its head is the count that the table folded, and the size in that
+    same head is the size the recorded file holds at that draw. The first frame draws at the moment
+    the run takes the terminal, in front of the first round. It counts no round, and its head
+    already names the destination, the address, the source, the period, and the recorded file, so a
+    run of `--interval 2m` says that it started and holds no empty screen for those two minutes.
+  - These keys drive the live table. `q` and Ctrl-C stop the run, write the record that closes it,
     give the terminal back, and exit with success. `p` holds the table where it stands, and a
     second press lets it move again. A held table holds the display alone: the file still takes
     every round, and the table still folds every round into its numbers, so the frame that follows
     the pause holds every round of that pause. `n` shows the names of the hosts, and a second press
     shows the raw addresses. `r` empties the table and counts its rounds from zero, and it touches
-    neither the recorded file nor the count of the rounds that the closing record carries. `?`
-    shows the list of the keys under the table, and a second press hides it.
+    neither the recorded file nor the count of the rounds that the closing record carries. After
+    `r`, the frame shows the first hop again. Page Up and Page Down scroll the rows of the path one
+    page, and they also act while `p` holds the table. `n` and `?` keep the scroll. `?` shows the list of
+    the keys under the table, and a second press hides it.
   - Ctrl-C reaches the live table as a key and not as a signal. The table holds the terminal in raw
     mode, which clears `ISIG`, so the terminal sends the byte to `krt` and the process takes no
     `SIGINT`. A run that draws no table keeps the signal handler of the platform.
@@ -1149,6 +1690,15 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     different one, and it goes in as it is written, whole command lines included:
     `export WN_START_COMMAND='gh issue develop'` makes the answer read
     `Start #278 next with 'gh issue develop 278'`. An empty value falls back to `si`.
+  - An open pull request is work that exists already, so the answer names no start command for
+    it, and none for the issue it closes. It tells the reader to finish the pull request instead,
+    and it names the issue that pull request closes when the plan names one:
+    `Finish PR #515 (closes #512) next: review it and merge it`. The summary of a plan writes the
+    same step as `→ PR #515 (closes #512)  review it and merge it`, with its words in the column
+    where the other streams write their start commands. A plan that says `#4 (in flight, PR #15)`
+    thus sends the reader to review and merge `#15`, and not to start `#4` a second time. A step
+    that names only the issue of an open pull request, such as `#512`, gets the same answer, in
+    whichever stream it stands.
   - Every separator means the same thing: the issue on the left comes before the issue on the
     right. `→`, `->`, `∥`, `||`, `─`, `━`, `═`, a comma, and a semicolon all read as "then", so a
     chain pasted out of a plan works whichever way it was typed. The double bar is read as an
@@ -1167,19 +1717,24 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     variable is a common accident. The clipboard is also the cache a run of `claude` writes its
     plan to, so a reader who turns the clipboard off turns that cache off with it: every bare
     `wn` then pays for a new run and keeps nothing.
-  - The whole chain is one GraphQL query through `gh`, so a chain of six issues costs one round
-    trip and one unit of the rate limit, and the credential is the one `gh` already holds. Pull
-    request numbers work too: merged counts as done, and closed without a merge counts as
-    dropped. An issue closed as not planned or as a duplicate is marked `⊘` rather than `✓`,
-    because the chain walked past it rather than through it.
+  - In a mosh-rs session, the clipboard is the clipboard of your client computer. `wn` reads the
+    chain through the `pbpaste` shim that the mosh-rs server puts on `PATH`, and it keeps a plan
+    through the `pbcopy` shim. A read needs `MOSH_ALLOW_PASTE=1` on the client. When paste is
+    off, the shim runs the next `pbpaste` on `PATH`, which is the `pbpaste` of the server.
+  - One GraphQL query through `gh` answers every number of the chain, so a chain of six issues
+    costs one round trip and one unit of the rate limit, and the credential is the one `gh`
+    already holds. Each round of blockers that stand nowhere in the chain costs one query more, as
+    the order check below says. Pull request numbers work too: merged counts as done, and closed
+    without a merge counts as dropped. An issue closed as not planned or as a duplicate is marked
+    `⊘` rather than `✓`, because the chain walked past it rather than through it.
   - Two things earn a note under the answer. A number the repository does not have is reported
-    and never named as the next issue, and the run exits `1` — a typo in a chain of six is
-    otherwise invisible, because the other five still name an issue to start. An issue that is
+    and never named as the next step, and the run exits `1` — a typo in a chain of six is
+    otherwise invisible, because the other five still name a step to take. An issue that is
     closed after the next one is reported as done out of order, because the plan in your head is
     then wrong and nothing else would say so.
   - A plan of parallel work is a second shape of input, and it is not a change to the first one.
     The `plan-parallel-work` skill writes a plan as a set of streams, each with an `Order` field,
-    and the streams run at the same time. `wn` reads the whole plan and names the issue to start
+    and the streams run at the same time. `wn` reads the whole plan and names the step to take
     in every stream, under one summary that carries all of them. All three written forms work: the
     records a terminal prints, the Markdown table a file holds, and the box-drawn table the report
     arrives on the clipboard as. No flag says which shape the text is, because the shape of the
@@ -1214,27 +1769,29 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     the first step of another stream of that same plan. The digits alone cannot part a count of
     lines from the number of an issue. Only the field they stand in can.
   - A pull request and the issue it closes are one step, not two. `PR#344 (#341)` gets one row,
-    `#344 (#341)`, and the state of that row is the state of the pull request, because the pull
-    request is the work. `wn` asks GitHub about both numbers, and a pair whose two states disagree
-    earns a note — a merged pull request whose issue is still open is a real condition, and
-    nothing else reports it.
+    and the row writes the pair the same way, so the reader sees which number is the work. A pull
+    request alone writes `PR#344`, and an issue writes the bare `#344`. The state of that row is
+    the state of the pull request, because the pull request is the work. `wn` asks GitHub about
+    both numbers, and a pair whose two states disagree earns a note — a merged pull request whose
+    issue is still open is a real condition, and nothing else reports it.
   - A plan writes that pair the other way round as well, and it writes prose beside it: `#4 (in
     flight, PR #15)` is the issue `#4` whose work is the pull request `#15`, and `#12 (human)` is
     one issue with a note about who does it. So a group in parentheses annotates the step to its
     left and never opens one. Inside a group, only a word carrying the `#` is a number, and a `PR`
     in front of one marks that number as the work — which is why `#4 (in flight, PR #15)` gives the
-    row `#15 (#4)`, the same step `PR#344 (#341)` gives. Every other word is prose that `wn` drops,
-    so `#4 (30-line window)` holds one number: the `30` carries no hash. That prose holds a
+    row `PR#15 (#4)`, the same step `PR#344 (#341)` gives. Every other word is prose that `wn`
+    drops, so `#4 (30-line window)` holds one number: the `30` carries no hash. That prose holds a
     parenthesis as readily as a word, so a group counts its depth and the parenthesis that brings
     the depth to zero is the one that closes it: `#4 (a note (see the docs)) → #7` is two steps,
-    and `#4 (in flight (rebasing), PR #15)` still gives the row `#15 (#4)`. A group that never
+    and `#4 (in flight (rebasing), PR #15)` still gives the row `PR#15 (#4)`. A group that never
     closes is refused, because where it ends is a guess — and a nested parenthesis closes the group
     it opened and no other, so `#4 (a (b) c` is refused as well.
-  - The whole plan is one GraphQL query, as one chain is. A plan of seven streams and eighteen
-    numbers costs one round trip and one unit of the rate limit, and a number that stands in two
-    streams is asked about once and reported in both. A stream that names a number the repository
-    does not have keeps its row and its note, the other streams still answer, and the run exits
-    `1`.
+  - One GraphQL query answers every number of the plan, as it does for one chain. A plan of seven
+    streams and eighteen numbers costs one round trip and one unit of the rate limit, and a number
+    that stands in two streams is asked about once and reported in both. Each round of blockers
+    that stand nowhere in the plan costs one query more, as the order check below says. A stream
+    that names a number the repository does not have keeps its row and its note, the other streams
+    still answer, and the run exits `1`.
   - A fifth column carries the one edge a table of streams could not: one stream that waits for a
     step of another. `Waits for` stands beside `Stream`, `Order`, `Zone`, and `Notes`, it is
     matched with the case ignored as those four are, and the record form writes it as the field
@@ -1265,9 +1822,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     thus draws `#96 → #91`, `#96 → #89`, `#91 → #89`, and `#89 → #94`. That is a graph, and it is
     the graph a picture draws, so a plan that carries such an edge answers the way a picture
     answers and earns no second report: one row for each step in a topological order, `→` on every
-    ready step and `·` on a blocked one, `waits for #96, #91` on the row of `#89`, and one start
-    line for each issue somebody can begin now. The plan above names `#96` and `#86` while every
-    issue is open, and it names `#91` and `#86` once `#96` is closed.
+    ready step and `·` on a blocked one, `waits for #96, #91` on the row of `#89`, and one line
+    for each step somebody can take now. The plan above names `#96` and `#86` while every issue is
+    open, and it names `#91` and `#86` once `#96` is closed.
   - An empty cell is a stream nothing outside it blocks, and it is the common case. An absent
     column is a plan with no cross-stream edge at all, which is every plan written before this
     landed: such a plan still answers as one block for each stream under one summary, and
@@ -1284,6 +1841,41 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     stream while `Order` says the opposite, and one half of a contradiction is no answer. A
     blocker the repository does not have keeps its row and its note, and the run exits `1`,
     because a blocker that is a typo is a stream that waits forever.
+  - Every plan is held to what its own issues say comes first, because a person or a run of a
+    model writes the plan and either can get the order wrong. The query asks for the body of
+    every issue, and a body names a blocker in the shape the `to-issues` skill writes: a list item
+    or a paragraph under a `Blocked by` or `Depends on` heading, or a block that starts with that
+    label, as in `**Blocked by:** #12`. A heading is a block too, so `## Blocked by #12` names #12
+    on the line of the heading. The URL of an issue or a pull request of the repository, as in
+    `https://github.com/owner/name/issues/12`, names #12 the same way, and so does `owner/name#12`.
+    Both forms ignore the case of the owner and the name, and either form of another repository
+    names nothing. Only the numbers at the start of a block count, so `It can run beside #169.`
+    under the heading blocks nothing. A paragraph after the list names nothing when words follow its
+    numbers, because an author writes notes on a list after it. So `#79 also changes the view.`
+    under the list blocks nothing. But `#79` alone, a paragraph with its own label, and a paragraph
+    under a later heading still name their numbers. In a section that holds no list, `#79 also
+    changes the view.` names #79. A phrase in the middle of a sentence counts
+    for nothing either, because a line of a tracker such as `#12 (blocked by #11)` says what blocks
+    another issue. A number struck through, as in `~~#21~~`, counts for nothing, because an author
+    strikes a blocker through to take it back. A number inside an HTML comment, as in
+    `<!-- - #31 -->`, counts for nothing, because GitHub does not show a comment and an issue
+    template writes its examples in one.
+  - A plan that puts an issue before its own blocker is refused, and the run exits `2`: `the order
+    puts #170 before #168, but #170 says it is blocked by #168`. That is the plan that sent a
+    reader to #170. A blocker the plan leaves out joins the answer instead, and the answer then
+    reads the way a picture reads, with `waits for #168` on the row and the note `#170 waits for
+    #168: the issue says so, and the order does not.` A blocker that stands nowhere in the plan
+    costs one more query for each round of such blockers. Only an open issue names a blocker, and
+    a finished blocker changes nothing, so work that is already done never refuses a plan. Any
+    other blocker holds work back. An open one joins the answer with the blockers it names in
+    turn, and a number the repository does not have joins it as a step that nobody can start,
+    because nothing is known about it. A chain goes through the same check, so `wn "#170"` names #168 first. A blocker that
+    the order holds only through finished work, or only in another stream, joins the answer the
+    same way. Without that wait, the answer names the issue while its blocker is open. A plan of
+    streams that names one number in two orders answers while no issue adds a wait to it and
+    neither order puts an issue before its own blocker, and once an issue adds a wait, the answer
+    must be a graph and a graph cannot hold that cycle, so the run exits `2` and names both: `the
+    order returns to #1 and #2, and #5 waits for #6`.
   - A plan drawn as a picture is a third shape of input, and it says the one thing that no chain
     and no table says: two streams that join.
 
@@ -1335,9 +1927,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - The answer names a state for every step. A step is ready when it is open and every step before
     it is finished, blocked when it is open and one step before it is not, and finished when it is
     done or dropped. `→` marks every ready step and `·` marks a blocked one, which is what those
-    two marks already mean. Every ready issue gets its own start line — `Start #242 next with 'si
-    242'` and `Start #246 next with 'si 246'` — because two streams that join are two people who
-    work at the same time, and an answer that names one issue loses that. A blocked row names
+    two marks already mean. Every ready step gets its own line — `Start #242 next with 'si 242'`
+    and `Start #246 next with 'si 246'` — because two streams that join are two people who work at
+    the same time, and an answer that names one step loses that. A blocked row names
     every step it waits for and never the first one alone: `waits for #247, #248`. That column
     takes its columns out of the window before the title does, because it is what the reader of a
     blocked row came for. The rows print in a topological order, and a tie goes to the step that
@@ -1354,11 +1946,13 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     nobody can guess. A cycle is refused and its numbers are named, because a cycle has no
     step to start and an answer of "nothing is ready" hides the reason. A net with no port at all
     is dropped without a word, which is why the border of a box-drawn table costs nothing.
-  - The whole picture is one GraphQL query, as one chain and one plan are, so a step that stands
-    in two places is asked about once and reported in both. The run exits `0` when the repository
-    holds every number of the picture, `1` when the picture names a number the repository does not
-    have, and `2` for a picture `wn` could not read and for a cycle. `wn` draws no graph back: the
-    answer is the rows and what each row waits for, because a layout engine is a separate decision.
+  - One GraphQL query answers every number of the picture, as it does for one chain and one plan,
+    so a step that stands in two places is asked about once and reported in both. Each round of
+    blockers that stand nowhere in the picture costs one query more, as the order check above
+    says. The run exits `0` when the repository holds every number of the picture, `1` when the
+    picture names a number the repository does not have, and `2` for a picture `wn` could not read
+    and for a cycle. `wn` draws no graph back: the answer is the rows and what each row waits for,
+    because a layout engine is a separate decision.
   - A plan written as JSON is a fifth shape of input, and it is the shape a program hands back.
     The four written forms were each written for a person to read, and three of them carry layout
     the reader has to undo — a column width, a border, a cell that wrapped onto a second line.
@@ -1379,10 +1973,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       ]
     }
     ```
-  - `wn` reads `streams` and nothing else. The `order` array of a stream is a chain, so each step
+  - `wn` reads `streams` for the answer. The `order` array of a stream is a chain, so each step
     of it comes before the step after it. In one step, `issue` is the issue number, `pr` is the
     pull request that does the work of that issue — the same pair `PR#344 (#341)` writes, and it
-    reaches the report as the row `#102 (#94)` — and `waitsFor` is the set of numbers that come
+    reaches the report as the row `PR#102 (#94)` — and `waitsFor` is the set of numbers that come
     before that step. `waitsFor` is the JSON spelling of the `Waits for` cell, and it reaches the
     same graph. A cell writes the pair as `PR#102 (#94)` and a `waitsFor` holds bare numbers, so
     a `waitsFor` that names the issue of a pair reaches that pair. One piece of work is one row
@@ -1409,15 +2003,16 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     run and names the version it read beside the version `wn` knows, because a consumer that
     guesses at a schema it does not know answers with the wrong plan. A document that is not the
     schema — a missing `streams`, a stream with no `order`, a step with no `issue`, a number that
-    is not a number — names the path in the document, so `streams[1].order[0].issue` says where to
-    look. A cycle names the numbers that hold the knot, as it does for a picture and for a `Waits
-    for` column. A `waitsFor` that names a step of its own stream is refused by none of those: it
-    is an edge `order` already carries.
+    is not a number, a `repo` not written as `owner/name` in ASCII letters, digits, `-`, `_` and
+    `.`, with at most 39 characters in the owner and 100 in the name — names the path in the
+    document, so `streams[1].order[0].issue` says where to look. A cycle names the numbers that
+    hold the knot, as it does for a picture and for a `Waits for` column. A `waitsFor` that names
+    a step of its own stream is refused by none of those: it is an edge `order` already carries.
   - An empty `streams` array is a plan with no work in it, and that is not an error. The answer
     reads `The plan holds no work. Nothing to start.` and the run exits `0`, and it asks GitHub
     nothing at all. Every other JSON plan earns the report a picture earns: one row for each step
     in the order of the work, `→` on every ready step and `·` on a blocked one, the work each
-    blocked row waits for, and one start line for each issue somebody can begin now. A JSON plan
+    blocked row waits for, and one line for each step somebody can take now. A JSON plan
     is a graph, a table with a `Waits for` column is the same graph, and one report answers both,
     because two reports of one question drift apart.
   - A run of `claude` is the fourth input, after the argument, standard input, and the clipboard.
@@ -1485,6 +2080,33 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     Run wn --refresh to build a new one.` — because a plan is a claim about a backlog, a backlog
     moves, and that note is the only thing that would tell the reader. `wn` reads the `generated`
     field of the document for it, and a document that names no moment says nothing about its age.
+  - A plan on the clipboard is for one repository. A JSON plan names that repository in `repo`,
+    written as `owner/name`, and the `plan-parallel-work` skill writes it into every JSON plan.
+    `wn` compares it with the repository of the run, which is the repository `--repo` names, or
+    else the repository of the current directory. Letter case does not count, because GitHub
+    names a repository without regard to it. When the two are not the same, `wn` stops before it
+    asks GitHub about any issue and exits `2`:
+
+    ```
+    $ wn
+    wn: the plan on the clipboard is for owner/a, and this run is for owner/b.
+    CAUTION: wn --refresh REPLACES WHAT IS ON THE CLIPBOARD. WHAT IS ON IT NOW IS LOST.
+    Run wn --refresh to build a new plan, or run wn --repo owner/a to answer the plan on the clipboard.
+    ```
+
+    Issue numbers repeat across repositories. When `wn` answers a stale plan against another
+    repository, it names real issues of that repository. The rows show the wrong titles and the
+    wrong states, and the start line sends the reader to an issue that is not in the plan. The
+    message writes nothing out of the clipboard except the repository the plan names, because a
+    clipboard holds a password as readily as it holds a plan.
+  - Only a text from the clipboard gets that check. A plan the reader passes as an argument or on
+    standard input is not refused, because the reader chose it on purpose and `wn --refresh` does
+    not replace it. A plan this run built is not refused either, because a run that builds refuses
+    a `--repo` for another repository before it runs `claude` (see the refusals below). A text
+    that names no repository gets no check and answers as before: a chain, the records of a plan,
+    a Markdown table, a box-drawn table, a picture, and a JSON document without `repo`. The run
+    asks the skill for `--json`, so a plan `wn` built and kept names its repository in the usual
+    case.
   - Set `WN_NO_CLAUDE` to any value with a character in it to turn the run off, which gives back
     the error a run with no chain printed before. An empty value leaves it on, because an exported
     but empty variable is a common accident. `WN_PLAN_TIMEOUT` names the seconds a run may take,
@@ -1537,9 +2159,14 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     refused before the run, not after it: the skill plans the repository of the directory `wn` was
     run in, and its gather script turns a `gh` or a `git` failure into a warning rather than a
     crash, so a run there would spend a minute and real money and would then answer that the plan
-    holds no work. One cheap `gh repo view` refuses it first. For the same reason `--repo` names
-    the repository `wn` asks about and never the one the run plans, so a build in one checkout with
-    `--repo` naming another gives numbers of two repositories. `wn --refresh` with `WN_NO_CLAUDE`
+    holds no work. One cheap `gh repo view` refuses it first. That same call names the repository
+    of the directory, and a run that builds refuses a `--repo` that names another repository,
+    before it runs `claude`. The plan is always for the repository of the directory, and `wn` asks
+    GitHub about the repository `--repo` names, so such a run would answer the numbers of one
+    repository with the issues of the other. Letter case does not count. The message names both
+    repositories and two repairs: run `wn` in a checkout of the `--repo` repository, or leave
+    `--repo` out to plan and answer the repository of the directory. It names no `wn --refresh`,
+    because that run builds for the directory as well. `wn --refresh` with `WN_NO_CLAUDE`
     set asks for two things at once — `--refresh` builds a plan by running `claude`, and the
     variable turns that run off — so the message names both and says to unset the variable. A
     `WN_PLAN_TIMEOUT` that names no number of seconds is refused and named back:
@@ -1584,6 +2211,644 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     `WN_NO_CLAUDE=1 wn`, `WN_PLAN_TIMEOUT=900 wn`, `WN_PLAN_EFFORT=high wn`,
     `WN_PLAN_MODEL=opus wn`
   - To install: `cargo install --git https://github.com/timmattison/tools wn`
+- popstop (pop stop)
+  - Keeps the default audio output device awake with a signal that is too small to hear, so USB
+    speakers do not pop and do not lose the start of a sound. macOS stops the audio stream to an
+    output device a few seconds after the last sound, and the next sound starts the stream again.
+    On USB speakers that restart costs the first 200 ms to 500 ms of the sound, and the speakers
+    make a pop. `popstop` holds one stream open, so the device never goes to sleep and never
+    restarts. macOS only.
+  - The signal is a constant offset at 2^-12 of full scale, which is about -72 dBFS, with a 50 ms
+    ramp at the start and at the stop. The offset is at 0 Hz, which is outside the range of hearing
+    at any level, and a sample-rate converter cannot remove it the way it removes a tone near the
+    Nyquist frequency. The ramps remove the step that a start or a stop makes, because a step is a
+    click, and a click is the failure that popstop exists to remove. The level is not zero, because
+    a device can treat a stream of exact zeros as no signal.
+  - **This Mac does not idle sleep while popstop runs**, and popstop says so at every start. The
+    process holds no power assertion of its own. `coreaudiod` holds one for the open stream:
+    `pmset -g assertions` names it `PreventUserIdleSystemSleep` with the device in the name, and it
+    names popstop as the process it was created for. The display still sleeps, and a sleep from the
+    Apple menu still works. That effect is the reason the foreground run is the default: a copy that
+    holds a terminal is a copy that nobody forgets.
+  - popstop follows the default output device. A change of the device moves the stream, and the
+    power assertion follows it, with no restart. Measured on a Mac mini: 0.0% CPU over 66 s, and
+    17.3 MB resident.
+  - Only one copy runs for each user. The copy holds an exclusive lock on a file in
+    `~/Library/Application Support/popstop/`, and it writes its PID, its mode, and its start time
+    into that file. The kernel releases the lock when the process ends for any cause, `SIGKILL`
+    included, so a crash leaves no lock to clean up by hand. A second start refuses with exit status
+    3, names the copy that runs, and gives the command that stops it. `--stop` compares the start
+    time of that PID before it sends a signal, so a PID that the system gave to another process
+    never gets one.
+  - Exit status: 0 success, 1 an error, 2 a usage error, 3 another copy runs, 4 `--status` with no
+    copy. `--stop` gives 0 when no copy runs, so a stop is idempotent, and a script reads
+    `--status` through its exit status and parses no text.
+  - Usage: `popstop` (runs in the foreground until Ctrl-C, and stops when the terminal closes),
+    `popstop --background` (starts a copy that has no terminal and returns only after that copy
+    plays), `popstop --stop`, `popstop --status`. A background copy writes its output to
+    `popstop.log` beside the lock file. Each copy that takes the lock empties that log, and a
+    background start that another copy refused leaves the log of that copy as it is.
+  - The idea comes from [eamq/mac-audio-keepalive](https://github.com/eamq/mac-audio-keepalive)
+    (MIT), which solves the same problem with a clone, a shell script, and a `launchd` service.
+    popstop is new code with the same purpose, and it installs with `cargo install`.
+  - To install: `cargo install --git https://github.com/timmattison/tools popstop`
+
+- faulte (fault rate)
+  - Ranks the processes of a Mac by page faults per second over an interval, and gives a total
+    line for the Claude Code sessions. The header adds the swap traffic, the size of the
+    compressor, and the swap in use over the same sample. `faulte check` says in seconds if the
+    system time is high, and if memory churn or process churn occurs at the same time.
+    `faulte kill` stops the old idle Claude Code sessions after a question. It supports macOS
+    only. See below for the full entry.
+  - To install: `cargo install --git https://github.com/timmattison/tools faulte`
+
+- ha (hot actions)
+  - Shows the GitHub Actions workflow runs of many repositories and owners in one terminal view
+    that refreshes itself. The GitHub web interface and `gh run list` show one repository at a
+    time, and `gh run list` does not refresh. When a repository has a merge queue, the view also
+    shows the pull requests in the queue and the pull requests that left it.
+  - The section "Running" shows the active runs, the oldest first. `🏃` is a run that has a
+    job in progress. `⏳` is a run that waits and has no job in progress: its jobs wait for a
+    runner, for an approval, or for another run. GitHub reports a run as queued
+    while one of its jobs waits for a runner, also when other jobs of the run are in progress.
+    Thus `ha` reads the jobs of each active run to choose the marker, and the marker is the same
+    when the run is expanded and when it is collapsed. A finished run always shows the marker of
+    its GitHub state. Each row shows the start time in the local time zone and the elapsed time,
+    which increases each second. A run that is active for too long is often a stuck runner.
+    "Running" does not show a run that waits (`⏳`) for more than 8 hours. The wait starts at the end
+    of the newest finished job of the run, or at the start of the run when no job finished. A
+    GitHub outage left many runs queued that never start, and they pushed the live runs below the
+    bottom of the screen. Such a run shows again when one of its jobs starts. The header does not
+    count it. To cancel it, use the GitHub web interface or `gh run cancel`. This rule is
+    temporary.
+  - The header of "Running" counts the jobs of the active runs that show by state: the jobs
+    that wait (`⏳`), run (`🏃`), passed (`✅`), or failed (`❌`), the jobs that GitHub skipped
+    (`💨`), and the cancelled jobs (`🪦`). An active run can hold cancelled jobs, for example the
+    jobs of a matrix that `fail-fast` cancelled. The counts include a collapsed run and a run
+    below the bottom of the screen. Each count shows also when it is 0. After the counts, the
+    header names the runners of the jobs that wait or run, in cyan, each name one time, for example
+    `Running · 2 ⏳ · 3 🏃 · 7 ✅ · 1 ❌ · 2 💨 · 1 🪦 · pi5, mini, GitHub Actions 1001`. The
+    shortest name comes first, thus the names of the local runners show before the names of the
+    GitHub-hosted runners. The right edge of the screen can cut the last names. Before the first
+    refresh ends, the header shows only `Running`.
+  - The bottom section shows the runs that passed (`✅`), failed (`❌`), or were cancelled (`🪦`)
+    in the last 8 hours, the newest first, with how long each run took. A run that timed out or
+    that failed to start counts as failed. The header counts the three apart, for example
+    `Last 8h · 3 passed · 1 failed · 2 cancelled`. A skipped run does not show.
+    - The started column of each row in this section shows when the run finished, not when it
+      started. The rows are in order of finish time, thus the times in the column decrease from
+      the top down. The time column still shows how long the run took, thus you can calculate
+      when the run started.
+    - A run finishes when its last job finishes. GitHub can change the `updated_at` of a run
+      after that time. On 2026-11-06, 4 of the 29 finished runs of one repository since
+      2026-10-25 had an `updated_at` from 59 seconds to 18 minutes after their last job
+      finished. Thus `ha` reads the finish time of a run from its jobs. The started column, the
+      time column, the order of the rows, and the fade all use that time.
+    - `ha` uses `updated_at` until it holds the jobs of the run, and also while a job of the run
+      waits or runs in the jobs that it holds. Thus a row can move down when its jobs arrive. The
+      highlight stays on its run.
+    - The window still uses `updated_at`: a run shows while its `updated_at` is in the last 8
+      hours. If the window used the finish time from the jobs, a run at the oldest edge of the
+      window can leave the section when its jobs arrive. Then `ha` drops the jobs of the run, and
+      the run comes back with `updated_at` as its finish time. Thus a row at the bottom of the
+      section can show a finish time that is older than the window.
+    - When no merge queue shows, the header of the section shows the word `FINISHED` in that
+      column, below the `STARTED` of the column header. When the merge queue sections show, the
+      word stands in the header of "Merge history" instead, because one word heads the two
+      sections of finished rows below it.
+    - A job row of an expanded run in this section shows when its job finished. A job with no
+      finish time has an empty cell.
+    - On a narrow terminal, the text of a header that shows `FINISHED` ends in `…`, and the word
+      stays whole above its column.
+  - When a watched repository has a merge queue, two more sections show. From the top down, the
+    board then shows "Merge queue", "Running", "Merge history", and "Last 8h". Thus the work that
+    waits or runs stands at the top, and the two sections of finished work stand together below
+    it. `ha` asks GitHub which repositories have a queue at the start and every 10 minutes. When
+    no watched repository has a queue, the board does not change. GitHub gives a merge queue only
+    to a repository that an organization owns, and a private repository also needs GitHub
+    Enterprise Cloud.
+    - "Merge queue" shows the pull requests in the queue of the default branch of each repository,
+      in queue order. A pull request has no workflow, thus the `WORKFLOW` cell shows what the entry
+      waits for: `⏳ waiting` for its turn, `🏃 checks` while the checks of its merge group run,
+      `✅ ready` when its checks passed, `🔒 merging` while GitHub merges it, and `❌ blocked` when
+      it cannot merge and GitHub removes it soon. The ID column shows the number of the pull
+      request, for example `#16012`, and the numbers end in the column of the run IDs. The started
+      column shows when the pull request joined the queue, and the time column shows how long it
+      has waited. That time increases each second.
+    - "Merge history" shows the pull requests that left a queue in the window, the newest first:
+      `✅ merged`, `❌ failed` when the queue removed it (for example its checks failed, or a merge
+      conflict), and `🪦 removed` when a person removed it. The started column shows when the pull
+      request left the queue, and the header of the section shows the word `FINISHED` above that
+      column. The rows are in order of that time, thus the times decrease from the top down, as in
+      "Last 8h". The time column shows how long the pull request stayed in the queue. The header
+      counts the three apart, for example
+      `Merge history · Last 8h · 5 merged · 1 failed · 0 removed`. A pull request that left the
+      queue two times has two rows.
+    - These rows show no workflow runs and no jobs. The runs of a merge group show in "Running"
+      and in "Last 8h", on a branch that starts with `gh-readonly-queue/`.
+    - When the queue merges a pull request, `github-merge-queue[bot]` removes it from the queue, and
+      GitHub writes the `merged` event in the same second or the next second. `ha` reads the two
+      events as one merge. A merge more than 60 seconds after a removal by the queue, or after a
+      removal by a person, did not come through the queue, and the history does not show it.
+    - The branch of a pull request in the history comes from its row in the queue, when `ha` saw
+      it there. Else `ha` asks GitHub for the branch one time. When that request fails, the cell
+      stays empty, and the next refresh asks again.
+    - `ha` reads the events of the window and one more hour. It reads at most 10 pages of 100 issue
+      events of each repository, and the events are of every kind. On a busy repository, 1,000
+      events can span less than the window. On 2026-10-22, one page of 100 events spanned about
+      21 hours on bevyengine/bevy and about 26 hours on rust-lang/rust-clippy. Then the history
+      shows only the span in which the events of each repository are whole, and the header names
+      that span, for example `Merge history · Last 21h 13m of 14d`. A pull request that joined
+      the queue before the events start has an empty time column. Its started column shows when
+      it left the queue, as each row does.
+    - `🔒` is the one marker that only the merge queue uses. It is one code point, 2 columns wide,
+      as each other marker is.
+  - Each marker is one emoji, 2 columns wide. The terminal draws each emoji in its own colors.
+    `🪦` is from Unicode 13 (2020), thus a terminal with an older emoji font can show it as a box.
+    macOS 11 and later has it.
+  - Each run row and each job row shows its marker two times: in the first column, and after
+    the time column. Thus the marker is next to the time that it explains, and on a wide terminal
+    you do not have to read across the full row. The two markers of a row are always the same.
+  - The `JOB SUM` column, after the second marker, shows the sum of the job times of each run.
+    It shows how much runner time the run used. The `TIME` column shows the wall-clock time of
+    the run. A run with two parallel jobs of 15 minutes shows `15m 00s` under `TIME` and
+    `30m 00s` under `JOB SUM`. Thus you can find the runs that use many runners in parallel,
+    and how much runner time a change costs.
+    - The time of one job is the time that its job row shows after the job starts: from its
+      start to its finish, or to now while it runs. Thus the sum of an active run increases
+      each second. A job that waits for a runner or for an approval (`⏳`) adds nothing, because
+      a wait uses no runner. A job that did not start adds nothing, for example a skipped job.
+    - The sum covers the jobs of the latest attempt of the run, the jobs that an expanded run
+      shows. The `TIME` cell starts at the start of the latest attempt too, thus the two cells
+      cover the same attempt.
+    - The sum uses whole seconds. It is not the billed time, because GitHub rounds each job up
+      to a whole minute. A job on a self-hosted runner counts too, because the column shows
+      runner time, not cost.
+    - The cell is empty until `ha` has the jobs of the run, and when GitHub gives no job for the
+      run. When a later request for the jobs fails, the cell keeps the sum of the last good jobs.
+      A merge queue row and a merge history row show an empty cell. A job row shows the time
+      left of its job, as the next item tells.
+    - `ha` reads the jobs of each finished run in "Last 8h" one time, also when you do not
+      expand the run, thus each row of the section gets a sum. It reads at most 32 new runs in
+      each refresh, the newest finish first, thus the top rows fill first. At the start, the
+      rows fill from the second refresh on.
+    - The cell has the color of its row, thus it fades with a finished row. The column is 7
+      columns wide, the width of the `TIME` column. On a narrow terminal, the text columns give
+      up their columns first.
+    - A job row of a running job shows `~` and the time that the job has left, for example
+      `~3m 02s`. A job past its estimate shows `+` and the time over the estimate. For example,
+      `+1m 10s` means 1 minute 10 seconds more than the estimate. A negative time never shows.
+      - The estimate is the mean time of the newest 5 jobs that passed in the window ("Last 8h"
+        by default) with the same repository, the same workflow, the same job name, and the
+        same runner name. A matrix job such as `test (ubuntu, 18)` matches only the same
+        matrix entry. A failed, cancelled, or skipped job does not count.
+      - The text gets less precise as the time increases: seconds below 1 minute, minutes and
+        seconds below 10 minutes, minutes below 1 hour, hours and minutes below 10 hours, hours
+        below 100 hours, and `>99h` above. The text fits the 7 columns of the cell.
+      - These rows show a blank cell: a job that waits for a runner, a job that finished, and a
+        job with no match. Each job on a GitHub-hosted runner shows a blank cell too. GitHub
+        gives such a runner a different name for each job, for example
+        `GitHub Actions 1000001050`, thus no job matches. A self-hosted runner keeps its name,
+        thus its jobs get an estimate.
+      - The estimate needs no more request to GitHub. It reads the jobs that `ha` already loads
+        for the job sum. `ha` keeps no history after it stops. Thus after a start, the
+        estimates fill in over the first refreshes, as the jobs of the recent runs load.
+    - A finished run can show a `JOB SUM` smaller than its `TIME`, also when its jobs ran in
+      parallel. The `TIME` cell of a finished run ends at the last update of the run, and GitHub
+      sometimes makes that update some minutes after the last job finished.
+  - The `COST` column, after `JOB SUM`, shows what each job and each run costs at list price.
+    The cost is an estimate, not the bill. GitHub gives no cost for one job, thus `ha`
+    calculates it from the jobs and the billing data that it already reads.
+    - The cost of one job is its billed minutes times the price of one minute of its runner. The
+      billed minutes are the time from the start of the job to its finish, rounded up to a whole
+      minute, because GitHub bills each job that way. A job that runs uses the time until now,
+      thus its cost increases at the start of each minute.
+    - The labels of a job tell which runner it used, for example `ubuntu-latest` is Linux and
+      `windows-latest` is Windows. `ha` holds a table of the labels of the GitHub-hosted runners.
+      The table comes from the
+      [GitHub-hosted runners reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+      and the
+      [larger runners reference](https://docs.github.com/en/actions/reference/runners/larger-runners),
+      read on 2026-11-07.
+    - The price of one minute comes from the billing data of the account: the `pricePerUnit` of
+      each SKU, when `ha` can read the account (see the "Actions billing" box below). Else the
+      price comes from a table in `ha`, from the
+      [Actions runner pricing](https://docs.github.com/en/billing/reference/actions-runner-pricing)
+      page, read on 2026-11-07:
+
+      | SKU | Runner | Price for each minute |
+      |---|---|---|
+      | `actions_linux_slim` | Linux, 1 core (`ubuntu-slim`) | $0.002 |
+      | `actions_linux` | Linux | $0.006 |
+      | `actions_linux_arm` | Linux arm64 | $0.005 |
+      | `actions_windows` | Windows | $0.010 |
+      | `actions_windows_arm` | Windows arm64 | $0.010 |
+      | `actions_macos` | macOS | $0.062 |
+      | `macos_l` | macOS large (`-large`) | $0.077 |
+      | `macos_xl` | macOS xlarge (`-xlarge`) | $0.102 |
+
+      On 2026-11-07, the billing data gave the same prices for Linux, Windows, and macOS. With
+      `--no-billing`, each price comes from the table.
+    - A job costs `$0` when it ran on a standard runner of a public repository, when it ran on a
+      self-hosted runner (the label `self-hosted`), and when it had no runner or did not start,
+      for example a skipped job. A macOS large or xlarge runner costs money also on a public
+      repository.
+    - A job shows `?` when none of its labels is in the table, for example a job on a larger
+      runner of an organization. `ha` never guesses a price.
+    - A job row shows the cost of its job, for example `$0.16`. A cost above $0 and below one
+      cent shows `<$0.01`.
+    - A run row shows the sum of its jobs. The sum covers the jobs of the latest attempt, the
+      jobs that an expanded run shows. A sum that includes a `?` is a lower bound: it starts
+      with `≥`, and it rounds down to cents. The cell is empty until `ha` has the jobs of the
+      run, and when GitHub gives no job for the run. A merge queue row and a merge history row
+      show an empty cell.
+    - The cost is the list price, not the bill. The included minutes of an account can make the
+      bill $0. For example, Lock-Free-Labs used $5.81 at list price in the 30 days to
+      2026-11-06, and GitHub billed $0.00.
+    - The cell has the color of its row, thus it fades with a finished row. The column is 8
+      columns wide, and each amount aligns on the right. On a narrow terminal, the text columns
+      give up their columns first.
+  - The text of each finished row fades from light gray to dark gray as the row gets older, as
+    the commit rows of `gsw` do. Thus a new result is bright, and you can tell the age of a row
+    before you read the finish time under `FINISHED`. The age of a run is the time since it
+    ended. The age of a pull request in "Merge history" is the time since it left the queue. The
+    job rows of an expanded finished run have the gray of their run.
+    - The fade is one ramp over 2 hours, as the fade of `gsw` is. It starts at index 253 of the
+      gray ramp of the 256-color palette, and it stops at index 238 at an age of 2 hours. The
+      gray changes every 8 minutes. A row older than 2 hours keeps index 238, thus the oldest row
+      stays readable. The fade does not change with `--window`, because the rows on the screen
+      of a busy repository span only the first hour or two of the window. The fade advances with
+      each frame, and it needs no new read from GitHub.
+    - Active runs, the pull requests in a merge queue, and the highlighted row keep the color of
+      the terminal. Thus live work never looks old, and the highlight is easy to see at each age.
+      The markers and `💤` keep the colors of the terminal, and a runner name stays cyan.
+    - The fade assumes a dark background, as the fade of `gsw` does.
+  - Until the first refresh ends, an empty section shows `Loading…` and the section headers
+    show no counts. Thus a board that did not load yet does not look like a board with no runs.
+  - The status line shows how long ago the last refresh ended (`updated 1m 05s ago`), in the
+    units of the time column. While a refresh runs, `refreshing…` shows at the right end of the
+    status line. The other parts of the status line do not move.
+  - Each row shows the repository, the workflow, the run ID, the branch, and the run title. The
+    run ID stands at the right end of the `WORKFLOW` cell, for example `39149840084`. It is the
+    number in the URL of the run page (`/actions/runs/39149840084`), and the `gh run` commands
+    take it. Thus you can find the row of a run that a URL or a message names. The workflow name
+    has at most 8 columns, the width of the header `WORKFLOW`, because most workflow names are
+    short, for example `CI`. The branch has at most 12 columns, because you read the start of a
+    branch name, for example `issue-577`, to find a run. The title gets each column that these
+    two limits take from the workflow name and the branch. A short name, such as the workflow
+    `CI` or the branch `main`, does not make its cell narrower. Thus the title starts in the same
+    column on each row. A long repository name keeps its end and starts with `…`, because the end
+    tells the repositories of one owner apart. For example, `Lock-Free-Labs/expert-witness`
+    becomes `…-Labs/expert-witness` at 128 columns. Each other long name keeps its start and ends
+    in `…`, for example `Release builds` becomes `Release…`, and the ID stays whole. The cut is by
+    display width, thus `日本語` and emoji do not break a row. The columns fit the terminal again
+    when its size changes.
+  - Right expands the highlighted run, and Left collapses it again. An expanded run shows one row
+    for each job of its latest attempt, below the run row. Each job row shows the state marker of
+    the job, the same emoji as for a run, the name of the job, its job ID, and when it started, if
+    it started. Below a finished run, the job row shows when the job finished. A cancelled job
+    shows `🪦`. A skipped job shows `💨`, for example a job whose `if:` condition is false, or a
+    job that needs a failed job. The job ID is the number in the URL of the job page
+    (`/job/107851237794`). It stands in the columns of the run ID, thus all IDs on the board end
+    in one column. The time column of an active job has two meanings.
+    A job that waits for a runner or for an approval (`⏳`) did not start, thus its started column
+    is empty, and its time column shows how long it waited, from its creation until now. A running
+    job (`🏃`) shows the time since a runner started it, without the wait before that start. Both
+    times increase each second. The marker after the time tells the two meanings apart: `⏳` is a
+    wait, and `🏃` is a run. A finished job shows how long it took. Thus you can find the job that
+    holds a slow run.
+    - Each job row also names the runner that has the job, after the job name, in cyan, for
+      example `e2e-remotesensing (2) m1-ts`. Thus you can find the machine of a slow or failed job
+      without the browser, and you can tell the jobs of one matrix apart. The color shows that the
+      runner name is not part of the job name. A finished job keeps its runner name, thus a failed
+      job names the machine where it failed. A job that has no runner shows no runner name. This
+      occurs while the job waits for a runner, and when the job ended before a runner took it, for
+      example a skipped job.
+    - The job name and the runner name share one text cell. Thus the job ID and the time columns
+      do not move when a runner takes a job. The **runner floor** is the part of the runner name
+      that a job row must always show. A name of 6 characters or fewer is its own floor. A longer
+      name has a floor of its first 6 characters and `…`, for example `GitHub…`. The floor counts
+      characters, not columns. If the cut saves no column, for example in a name of 7 ASCII
+      characters, the whole name is the floor. The first rule that applies gives the row:
+      1. If the job name and the whole runner name fit, both show whole.
+      2. If the job name and the runner floor fit, the job name shows whole. The runner name keeps
+         its start and gets the columns that the job name leaves, and it ends in `…`.
+      3. If the cell can hold the tree glyph, one space, `…`, one space, and the runner floor, the
+         runner name shows as its floor. The job name gets the other columns. It keeps its end and
+         starts with `…`, for example `…e-remotesensing (2) m1-ts`. Thus the part that divides the
+         jobs of a matrix stays.
+      4. In a narrower cell, the text keeps its start, and no runner name shows. The text ends in `…`
+         only when it is wider than the cell.
+
+      A job with no runner keeps the start of its text. On a highlighted job row, the runner name
+      stays cyan, also its `…`.
+    - The jobs are sorted by name, with no difference between capital and small letters. Thus the
+      order stays the same through each refresh and each re-run, and the jobs of one matrix stay
+      together. GitHub gives the jobs in the order of their IDs, which has no meaning that you can
+      see.
+    - `Loading jobs…` shows until the first answer comes, and `No jobs yet` shows when GitHub did
+      not make the jobs of the run yet. When a request for the jobs fails, the error shows below
+      the last good job rows. The next refresh asks for the jobs again.
+    - More than one run can be expanded at one time. A run stays expanded through each refresh, and
+      also when it moves from "Running" to the section of the finished runs. When a run leaves the
+      board, its jobs go too.
+    - The jobs load at once when you expand a run, and then refresh with the board. The jobs of an
+      active run refresh with the board also while the run is collapsed, thus Right shows them at
+      once. The jobs of a finished run load one time only, until a re-run changes the run. If
+      GitHub still shows an active job in a finished run, the jobs of that run refresh with the
+      board until each job finishes. Left removes the job rows, and the board keeps the jobs.
+      The jobs of a run in "Last 8h" also load one time for its `JOB SUM` while the run is
+      collapsed, thus Right then shows them at once.
+    - Press Right two times fast, on any row, to expand every run on the board. Press Left two
+      times fast to collapse every run. Two presses are fast when the second press comes 500 ms
+      or less after the first, with no other key between them. The first press acts at once on the
+      highlighted run, and the second press then acts on every run. A third fast press is a single
+      press again. A run that comes to the board later arrives collapsed.
+  - Keys: Up and Down move the highlight through the pull request rows, the run rows, and the job
+    rows of the expanded runs. They skip the `Loading jobs…`, `No jobs yet`, and error rows. Page
+    Down and Page Up move the highlight one page, which is the height of the board area minus one
+    row. They skip the same rows, and they stop on the first and the last row. When the page holds
+    no row that the highlight can go to, they move the highlight one row. Right expands the jobs
+    of the highlighted run. Left collapses them, also from a job row, and the highlight goes back
+    to the run row. One press of Right on a job row does nothing, and one
+    press of Right or Left on a pull request row does nothing. Two fast presses of Right expand
+    every run, and two fast presses of Left collapse every run, also from a pull request row. A
+    held Right or Left does the same, because the terminal sends each repeat as a new press. Enter
+    opens the highlighted pull request, run, or job in the browser, and `ha` keeps running. The
+    page of a job shows its log. A job that has no address opens the page of its run. The highlight
+    stays on the same job through each refresh. It also stays on the same pull request. When a pull
+    request leaves the queue, the highlight stays at the same position.
+    When a re-run gives the jobs new IDs, the highlight stays at the same position, thus on the
+    job of the same name in most re-runs. When no browser opens, the status line shows the URL
+    and then the reason, for example a `BROWSER` command that this host does not have, for 30
+    seconds. The message fades out, and a key press removes it sooner. `r` refreshes now.
+    - `c` asks to cancel the highlighted run. A box over the board names the repository, the
+      workflow, the run ID, the branch, and the title. On a job row, `c` asks to cancel the run
+      of that job, and the box also names the job. GitHub cannot cancel one job, thus `y` cancels
+      every job of the run.
+    - Only `y` cancels. Every other key closes the box and cancels nothing, also Enter, `q`, and
+      Esc. Ctrl-C still quits.
+    - While the box shows, the status line shows no key hints, because the box names its keys.
+    - The board continues to refresh while the box shows. The box stays on the run that you
+      chose, also when the highlight moves under it.
+    - The status line shows `cancelling run …`, and then that GitHub accepted the cancel or the
+      reason that GitHub refused it, for example `409` for a run that finished. After GitHub
+      accepts, `ha` refreshes at once. GitHub stops the jobs of the run first, and that can take
+      some seconds, thus the run can show as running after that refresh. At the first refresh after
+      GitHub finishes the cancel, the run moves to the bottom section with `🪦`, and the highlight
+      stays on it.
+    - On a finished run, `c` shows no box. The status line says that there is nothing to cancel.
+      On a pull request row, `c` also shows no box, and the status line says that a pull request
+      is not a run.
+    - `R` (Shift-R) asks to re-run the highlighted row, and the row picks the scope. On a run
+      row, `R` asks to re-run all jobs of the workflow. On a job row, `R` asks to re-run only that
+      job, and the box says that GitHub also re-runs each job that needs this job. To re-run the
+      whole workflow from a job row, move the highlight to the run row. The box names the
+      repository, the workflow, the run ID, the branch, and the title. The box of a job row also
+      names the job.
+    - `y` or `Y` sends the re-run. Every other key closes the box and sends nothing, also Enter,
+      `q`, Esc, and `R`. Ctrl-C still quits. `r` continues to refresh. With Caps Lock on, `r` gives
+      `R`, and the box stops that press.
+    - The status line shows `re-running …`, and then that GitHub accepted the re-run or the reason
+      that GitHub refused it. After GitHub accepts, `ha` refreshes at once, the run moves to the
+      top section, and the highlight stays on it. GitHub permits a re-run up to 30 days after the
+      first run, and at most 50 times. `ha` does not do a check of these limits.
+    - On an active run, and on a job row where the run or the job is active, `R` shows no box. The
+      status line says that there is nothing to re-run yet. On a pull request row, `R` also shows
+      no box, and the status line says that a pull request is not a run.
+    - When no box shows, `q`, Esc, or Ctrl-C quits and gives back the terminal.
+  - Enter runs the command that `BROWSER` names when that variable is set and not empty. Thus a
+    forwarder that sets `BROWSER`, for example the opener of mosh-rs, opens the page on your local
+    computer from a mosh-rs session. `ha` splits the value into words as a POSIX shell does, and
+    each `%s` in an argument takes the URL. When no argument holds `%s`, the URL is the last
+    argument. When `BROWSER` is not set, `ha` uses the opener of the system (`/usr/bin/open` on
+    macOS). A command that fails in its first 20 s shows the URL and the reason in the status line.
+    A forwarder can need some seconds to report a failure, and `ha` does not wait for the command,
+    thus the view goes on and a browser that stays open does not stop it.
+  - A target is a repository (`owner/name`) or an owner (`owner`, an organization or a user). An
+    owner target means every repository of that owner that is not archived. `ha` watches up to
+    1,000 repositories of one owner, and when an owner has more, the status line says that the
+    list is cut. A repository that you name and that an owner also holds shows once.
+  - Usage: `ha timmattison/tools Lock-Free-Labs`, or `ha` alone with a configuration file at
+    `<config_dir>/ha/config.toml` (on macOS, `~/Library/Application Support/ha/config.toml`):
+
+    ```toml
+    repos = ["timmattison/tools", "Lock-Free-Labs/nvr-tools"]
+    owners = ["Lock-Free-Labs"]
+    window = "8h"
+    interval = "60s"
+    billing = true
+
+    [billing_enterprises]
+    "some-org" = "some-enterprise"
+    ```
+
+    Targets on the command line replace all the targets of the file. `--config <PATH>` reads
+    another file, and `--window`, `--interval`, and `--no-billing` replace the values of the
+    file. A duration is a whole number and a unit: `s`, `m`, `h`, or `d`. An unknown key or a
+    bad value stops `ha` with a message that names the key and the file.
+  - The "Actions billing" box shows what the GitHub Actions runs cost. It stands in the lower
+    right corner, above the status line, and its title is `Actions billing · UTC days`.
+    - The box has one row for each billing account: the owner of each target, one time. Each row
+      shows the amount that GitHub bills for `today`, `yesterday`, `7d`, and `30d`. The `billed`
+      row is the sum of the accounts. It is the sum of `netAmount`, which is the amount that
+      GitHub bills after the included minutes. The `list price` row is the sum of
+      `grossAmount`, which is the price before the included minutes. Only the product `actions`
+      counts. Copilot, Codespaces, and Packages do not count.
+    - The windows are UTC days. `today` is the current UTC date and `yesterday` is the day before
+      it. `7d` is today and the 6 days before. `30d` is today and the 29 days before. GitHub
+      gives no billing data for a period shorter than one UTC day. An hour filter gives
+      `400 Hourly time period filtering is deprecated`.
+    - The usage of a job shows in the report with a lag of minutes, not of a day. On 2026-11-06, a
+      poll every 2 minutes found the usage of each of 9 jobs at most 28 minutes after the job ended.
+      Thus the `today` column can miss the jobs of the last half hour. The `date` of an item is
+      the end of the first job of that UTC day.
+    - A row shows `loading…` until the first answer comes. An account with no usage shows
+      `$0.00`. An account that `ha` cannot read shows the reason, never `$0.00`. A total that
+      does not include all accounts shows `≥` after its label. When a refresh fails, the row
+      keeps the last good numbers, and a line under it shows `⚠` and the error.
+    - The board gives up the rows of the box, thus no row hides behind the box. Page Up and Page
+      Down use the smaller board height. The box does not show when the terminal cannot hold the
+      box and 10 board rows, or when the terminal is too narrow. A long account name keeps its
+      start and ends in `…`.
+    - `--no-billing` and the key `billing = false` hide the box and send no billing request. The
+      flag replaces the key of the file.
+    - Each item of the usage report also gives the `pricePerUnit` of its SKU. The `COST` column
+      of the board uses that price for the runs of the account. When the report holds two prices
+      for one SKU, the price of the newest item wins.
+  - Billing accounts. `ha` asks `GET /users/{owner}` one time for each owner that is not in
+    `billing_enterprises`, and again after a failed lookup, to learn if the owner is an
+    organization or a user. Then it reads the usage report of the account:
+
+    | Account | Endpoint | Accepted scopes | Role |
+    |---|---|---|---|
+    | Organization | `GET /organizations/{org}/settings/billing/usage` | `repo`, `admin:org` | owner or billing manager of the organization |
+    | User | `GET /users/{username}/settings/billing/usage` | `user` | the user |
+    | Enterprise | `GET /enterprises/{enterprise}/settings/billing/usage` | `admin:enterprise`, `manage_billing:enterprise` | admin or billing manager of the enterprise, or an owner of an organization in it |
+
+    These endpoints work only for an account on the enhanced billing platform. Fine-grained
+    personal access tokens do not work with them.
+  - Billing errors. A missing scope gives `404 Not Found`, not `403`. `ha` compares the headers
+    `X-OAuth-Scopes` and `X-Accepted-OAuth-Scopes` to name the missing scope.
+    - The row then gives `gh auth refresh -h github.com -s <scope>`. When `GH_TOKEN` or
+      `GITHUB_TOKEN` is set, the row says to make a new token with that scope instead, because
+      `gh auth refresh` does not change a token that comes from `GH_TOKEN`.
+    - The `user` scope also lets the token change the profile. GitHub accepts no narrower scope
+      for the user endpoint.
+    - When the token has the scope and GitHub still refuses, the row says that the login has no
+      billing role for the account, or that the account is not on the enhanced billing platform.
+  - `billing_enterprises`. No REST endpoint tells a member which enterprise owns an
+    organization. Thus the configuration file names it:
+
+    ```toml
+    [billing_enterprises]
+    "some-org" = "some-enterprise"
+    ```
+
+    - An organization in this table reads the enterprise endpoint and keeps only its own items.
+      Two organizations of one enterprise share one read.
+    - Owner names do not depend on case. Two keys that name one owner, such as `Acme` and `acme`,
+      stop `ha` with a message that names both entries.
+    - An organization that is not in the table reads the organization endpoint. There is no
+      fallback from one endpoint to another.
+    - The enterprise endpoint gives only the usage that has no cost center. An enterprise that
+      uses cost centers thus shows less than its bill.
+  - `ha` uses the GitHub CLI, `gh`, and its login and host. It does not keep a second token. When
+    `gh` is missing or not logged in, `ha` stops with a message before it draws. Only the cancel
+    of a run, the re-run of a run, and the re-run of a job change something on GitHub. These
+    requests need the `repo` scope on an OAuth token or a classic token. The default login of
+    `gh auth login` has it. A login without write access to the repository gets `403`, and the
+    status line shows it.
+  - API budget: GitHub gives 5,000 requests each hour. An organization of 200 repositories at a
+    60 s interval asks for 12,000 requests each hour. Thus `ha` sends the `ETag` of each answer
+    back in `If-None-Match`, and GitHub does not count a `304 Not Modified` answer. The lookback
+    of a query starts on the hour, so the request stays the same and its `ETag` can match. The
+    repository list of an owner and the sweep for runs older than the lookback refresh every
+    10 minutes. An owner with no good list, with an empty list, or whose last list failed or was
+    suspect is listed again on each refresh, so `r` tries it again at once. A failed or suspect
+    sweep, and a due sweep that a failed read of the recent runs skipped, run again on the next
+    refresh. A direct read of a missing run or repository costs one
+    request, and only when a list leaves out an item. The read of the newest run of a repository
+    with an empty list sends the `ETag` too, thus it costs nothing while that run does not change.
+    On each refresh, `ha` also asks for the jobs of each active run, one
+    request for each page of 100 jobs, also when the run is collapsed. The requests for jobs also
+    send the `ETag`, thus an answer that did not change costs nothing. With 8 active runs at a
+    60 s interval, the worst case is 480 more requests each hour. A finished run gets one more
+    request for its jobs, and then no more until a re-run changes it. For the `JOB SUM` column,
+    each finished run in "Last 8h" gets one request for its jobs, also when `ha` did not see it
+    active and the run is collapsed. A refresh sends at most 32 of these one-time requests, the
+    newest finish first. Thus at a start with 200 finished runs in the window, the 7 refreshes
+    after the first one send the 200 requests. A later refresh sends one only for a new run in
+    the section whose jobs `ha` does not have yet. A failed request of a finished run goes again
+    on the next refresh, under the same limit of 32.
+    The `COST` column sends no request. It uses the jobs above and the prices of the billing
+    reads below. `ha` sends no request to the `timing` endpoint of a run, because GitHub is
+    closing that endpoint down, and its `billable` data is already empty.
+    At most 8 `gh` children run at the same time, for runs and jobs together. The status line
+    shows the remaining budget. When less than 10% remains, `ha` waits until the reset of the budget and says so.
+  - Billing budget: the billing refreshes at start, every 10 minutes, and when you push `r`.
+    Each read costs one request every 10 minutes, or two when the last 30 days cross a month.
+    Two organizations of one enterprise share one read. At start, `ha` also sends one
+    `GET /users/{owner}` for each owner that is not in `billing_enterprises`. It sends the
+    request again after a failed lookup, at the next billing refresh. That request sends no
+    `ETag`. Each billing read sends the `ETag`, thus a `304` answer costs nothing. The kind
+    lookups and the billing reads share the limit of 8 `gh` children with the other requests.
+  - Merge queue budget: GitHub gives the live queue and the head branch of a pull request only
+    through GraphQL, which has its own budget of 5,000 points each hour. The check for queues is
+    one GraphQL query for each 100 repositories, 1 point, at the start and every 10 minutes. A
+    repository whose check failed is checked again on the next refresh. On each refresh, `ha`
+    reads the issue events of each repository that has a queue through REST, with the `ETag`. A
+    page that did not change costs nothing. A new event moves each older event one place down,
+    thus each page changes. A refresh after a new event costs one request for each page that it
+    reads: up to 10 for each repository with a queue, which is 600 requests each hour at a 60
+    second interval. `ha` reads the live queue through GraphQL only while the queue can hold a pull request: the events
+    show a pull request that joined and did not leave, the last read held a pull request or
+    failed, or the events could not be read. A busy queue thus costs 1 GraphQL point on each
+    refresh, and an empty queue costs none. The status line shows the core budget only. A GraphQL
+    answer does not change it.
+  - `ha` does not trust each answer that GitHub gives with success. GitHub can answer a list with
+    success and still give a list that is empty or short. On 2026-10-22, `gh repo list` exited 0
+    with `[]` about one time in 20, and the next call gave the full list. Thus `ha` compares each
+    list with the last good list of the same query:
+    - When a list leaves out a run or a repository that the last good list held, `ha` reads that
+      item directly. When the item is still there, the list is suspect. When GitHub answers `404`,
+      or the run does not match the query now, or the repository is archived or moved, `ha`
+      accepts the shorter list. Thus a deleted run or repository leaves the board.
+    - When a list of runs is empty, `ha` reads the newest run of the repository. When that run
+      matches the query, the empty list is suspect. This covers the first refresh after a start,
+      which has no last good list.
+    - A GraphQL answer that holds an error of another type than `NOT_FOUND` or `FORBIDDEN` counts
+      as a failed read, also when it holds data, because GitHub gives `null` for a field that
+      failed.
+    - A run created before the lookback is not missing, because the query does not ask for it. A
+      run older than the oldest run of a list that GitHub cut at 1,000 runs is not missing either.
+  - A failed read and a suspect read of the recent runs have the same result. The board keeps the
+    last good runs of the repository, and the status line names the repository and the reason, for
+    example `⚠ acme/widgets: GitHub left out run 39149840084`. A suspect sweep for active runs
+    does not throw away a good recent answer. The board then shows the recent runs and the active
+    runs of the last good sweep, and the status line names the reason. The sweep runs again on
+    the next refresh. The next refresh asks GitHub again with no
+    `If-None-Match`, thus a suspect answer does not come back as a free `304`. A suspect or failed
+    owner list keeps the last good list of the owner.
+  - The run rows of a repository whose last read failed or was suspect show `💤` before the
+    repository name, because those rows are the last good runs and can be old. After a suspect
+    sweep with a good recent answer, the rows are the recent runs and the runs of the last good
+    sweep, and they show the mark too. While a repository
+    or an owner is stale, the status line shows `💤 stale since 11:42 (2 repos, 1 owner)` in place
+    of `updated … ago`. The time is the earliest last good read or list of the stale targets,
+    `11:42` for today and `10-21 11:42` for an earlier day. After a suspect sweep, the time stays
+    the time of the last read in which both answers were good. A status message does not hide this
+    part. The mark and the part go away after the next good read.
+  - A failed read of a merge queue shows after the name of its repository as `merge queue: …` (the
+    entries) or `merge history: …` (the events), and the board keeps the last good rows. A failed
+    check for queues shows as `merge queues: …`.
+  - When the first refresh can read no target, `ha` does not show an empty board. It restores the
+    terminal, names each repository and each owner that failed with its error, and stops with exit
+    status 1. A repository whose fetch succeeds with no runs is a target that `ha` read. An owner
+    list that GitHub cut at the limit is a warning, not a failure. When one of the errors is a
+    404, `ha` adds a hint: GitHub answers 404 for a repository that does not exist, and also for a
+    private repository that this `gh` account cannot read. `gh auth status` shows the account. A
+    later refresh in which each request fails does not stop `ha`, because the board keeps the
+    last good runs. When the first refresh ends with no request left in the API budget, each
+    failure can be the spent budget. Then `ha` keeps the view and waits for the reset, and the
+    first refresh after the reset decides.
+  - The view clears the whole screen when it starts. Thus no text of the shell shows under the
+    view, also in a terminal that has no alternate screen, for example mosh. The clear does not
+    ask the terminal for the cursor position, thus `ha` also starts on a terminal that does not
+    answer that query.
+  - `ha` needs a terminal. When its standard output is not a terminal, it stops with exit
+    status 2. Exit status: 0 success, 1 a failure of `gh` or of the terminal, or a first refresh
+    that read no target, 2 a usage or configuration error.
+  - The Home Assistant CLI also installs a binary named `ha`. When you have both tools, the one
+    that comes first on `PATH` runs.
+  - To install: `cargo install --git https://github.com/timmattison/tools ha`
+- sidecar (data repositories beside a host repository)
+  - Makes, clones, and links the private data repositories (sidecars) of a host repository. The host lists its sidecars in `sidecar.toml`.
+  - `sidecar setup` clones each sidecar once and links it into the worktree. `sidecar setup --hook` never fails, for a post-checkout hook.
+  - `sidecar add <name>` makes a private sidecar on GitHub, registers it, clones it, and links it.
+  - `sidecar status` shows the state of each clone and link, and the sidecars that `sidecar.toml` does not name.
+  - `sidecar path <name>` prints the path of a link, or stops with a message that names the fix.
+  - `sidecar worktree <name> [<branch>]` points a link at a worktree of the sidecar for a branch.
+  - `sidecar` never deletes a repository, a main clone, a worktree, a branch, or a change. It removes only its own scratch clones.
+  - See [docs/sidecar.md](./docs/sidecar.md) for the pattern, the rules, and the setup of a host.
+  - To install: `cargo install --git https://github.com/timmattison/tools sidecar`
+- whyslow (why slow)
+  - Takes one sample of 1 s and prints a short summary of the likely cause when a Mac is slow. It
+    names which resource is short (CPU, memory, or both), and the groups of processes that use it.
+  - Puts each process into one group and adds the CPU and the memory of each group. Many small
+    processes, such as 176 Claude Code sessions, then count as one cause. It uses no language
+    model. It supports macOS only. See below for the full entry.
+  - To install: `cargo install --git https://github.com/timmattison/tools whyslow`
+- portcul (portcullis)
+  - Shows each process that listens on a port in a table in the terminal. Move with the arrow keys or `j`/`k`.
+    Press `d` or Enter to send SIGTERM to the selected process after a confirmation, and press `r` to read the
+    table again. The table refreshes each 2 s, and `--refresh <seconds>` changes the interval (0.1 s or more).
+  - `portcul list [port]` prints one line for each process and address. `portcul kill <port>` sends SIGTERM to
+    each process on the port after a confirmation, and `--yes` skips the confirmation. After the confirmation,
+    `kill` reads the list again, and it sends nothing to a process that no longer listens on the port. `list`
+    and `kill` exit with status 1 when no process listens on the port, and `kill` also exits with status 1 when a
+    kill fails or a process no longer listens.
+  - To install: `cargo install --git https://github.com/timmattison/tools portcul`
 - workit
   - Builds a Cargo workspace manifest out of a directory tree. It walks the tree, finds every
     `Cargo.toml` that declares a package and no workspace of its own, and writes those directories
@@ -1729,9 +2994,131 @@ Copy files with a beautiful progress bar: `prcp <source>... <destination>`
 - Preserves file permissions
 - Wildcard/glob support (e.g., `prcp *.txt backup/`)
 - Multi-file copy with overall progress tracking
-- Move mode with `--rm` flag (verifies SHA256 hash before removing source)
+- A final check after every copy and move. `prcp` walks the source and the destination again, and reports each
+  change that it did not make: a file that appeared, changed, was removed, or was renamed while it ran (see below)
+- Move mode with the `--rm` flag. `prcp` removes no source while it copies. After the last copy, it removes the
+  originals of each source that passed every Blake3 check and the final check. A source stays whole, and the run
+  exits with an error, when a file did not copy, a hash did not match, or the final check found a problem
 - `--continue-on-error` to keep going if some files fail
-- `-y` to skip confirmation prompts
+- `-y` to skip confirmation prompts, also the question after the preview of a recursive run
+- Directory trees with `-R`/`--recursive` (see below)
+
+**Directories (`-R`, `--recursive`)**
+
+`prcp -R src dest` copies a directory and everything in it. Each file goes through the same copy, progress bar, and
+Blake3 check as a single file. The short form is `-R` only. In `prcp`, `-r` is `--rm`, so `cp -r` habits make a move,
+not a copy.
+
+- **Destination.** `prcp` decides every destination before the first copy, the same way as `cp -r`:
+  - If `dest` is a directory, the tree goes to `dest/src/...`.
+  - If `dest` does not exist, `dest` becomes the copy of `src`.
+  - A slash at the end of `src` changes nothing. `rsync` and BSD `cp` read `src/` and `src/.` as "only the contents
+    of `src`", but `prcp` copies the directory itself.
+  - With more than one source, `dest` is always a directory. If it does not exist, `prcp` makes it.
+- **Preview.** Before the first copy, `prcp` shows where each source lands, as an absolute path with the symlinks
+  above it resolved. A directory source also shows if its landing directory is new or already exists, how many files
+  it holds, and one example file. A source with a slash or a `/.` at its end gets a note. Then, when standard input is
+  a terminal, `prcp` asks `Continue? (y/N)`. Only `y` starts the run. Any other answer stops it before any byte is
+  written, and a move keeps every original. `-y` skips the question. A run with no terminal on standard input (a
+  script, a pipe) shows the preview and starts. `-q` does not hide the preview. More than 20 sources show as one
+  count after the first 20.
+
+  ```text
+  $ prcp -R photos/ /Volumes/Backup
+  prcp will copy:
+    photos/ -> /Volumes/Backup/photos/  (new directory, 1204 files)
+      for example: photos/cover.jpg -> /Volumes/Backup/photos/cover.jpg
+  Note: a '/' or a '/.' at the end of a source changes nothing.
+        prcp copies the directory itself, not only its contents.
+  Continue? (y/N):
+  ```
+- **Empty directories** are made at the destination.
+- **Symlinks** in the tree are copied as symlinks with the same target, and `prcp` never follows them. Thus a link
+  that points back up the tree cannot make the copy loop. A source that you name on the command line and that is a
+  symlink to a directory is also copied as a symlink. A symlink to a file that you name is copied as a file, as before.
+- **Special files** (FIFOs, sockets, devices) are not copied. `prcp` prints a warning for each one.
+- **Metadata.** Files and directories keep their mode bits. Modification times and owners are not kept, the same as
+  for a single file.
+- **Refusals.** `prcp` refuses to copy a directory into itself, and to replace a file with a directory. It also refuses
+  to copy a file or a link onto itself. This includes a destination that reaches its source through a symlink or a
+  hard link. The error says `are the same file`, and the run stops before the first copy. If it cannot
+  read a part of the tree, it stops before the first copy. With `--continue-on-error`, it copies the rest.
+- **Without `-R`**, a directory source is an error that names `--recursive`. A glob that matches a directory, for
+  example `prcp 'dir/*' dest/`, copies the files and prints a warning for each directory that it skips.
+
+**The final check (every run)**
+
+The Blake3 check proves each copy at the moment that `prcp` makes it. It cannot see a person or a program that works
+in the source or the destination later in the run. Thus `prcp` takes a snapshot of the destination right before the
+first copy, and after the last copy it checks the whole run again:
+
+- It walks each source directory again. A file that appeared after the copy started was not copied. A file that left
+  the source, or that changed after its copy, no longer matches its copy.
+- It walks each destination directory again and compares it with the snapshot. A path that `prcp` did not write, and
+  that was not there before, appeared during the run. A path from before that changed or left is also a change.
+- It compares each file that it wrote with the stamp that it took right after the Blake3 check: the size, the
+  modification time, and the identity of the file (the device and the inode number). A file that replaced the copy
+  has another identity, also when its size and time are the same. Each link must keep its target, and each directory
+  must still be the directory that `prcp` made.
+- A file or a directory that left one path and appeared at another, with the same identity, was renamed or moved.
+  The report names both paths. A whole tree that appeared, left, or moved is one line, at its top.
+- A `.DS_Store` file has its own line. Finder writes that file into a folder when a person opens the folder.
+
+When the check finds a change, the run exits with an error, and the report ends with a note that something outside
+`prcp` made the change:
+
+```text
+$ prcp -R photos backup
+...
+prcp found problems with the copy of 'photos':
+  'backup/photos/a.jpg' was renamed or moved to 'backup/photos/a-renamed.jpg' during the run
+  'backup/photos/notes.txt' appeared at the destination during the run, and prcp did not make it
+Something outside prcp changed the source or the destination while prcp ran.
+Another program or a person made those changes, not prcp. Make sure that nothing else uses these paths, then run prcp again.
+Error: The copy did not pass its final check: 1 source(s) have problems.
+```
+
+`prcp` also looks before it writes. When the copy gets to a destination path that somebody made, changed, or removed
+after the snapshot, `prcp` does not ask to overwrite it and does not write over it. It stops with an error that names
+the source and the destination. With `--continue-on-error`, it goes on with the next file, and the run fails at the
+end.
+
+A copy does not report a problem again that it already reported when it occurred: a failed copy, a skipped special
+file, or a part of the source that it could not read. A file that `--skip-existing` kept is compared with the
+snapshot too. When two sources of one run land on the same path, the later copy replaces the earlier one. `prcp` made
+that change itself, so it is not a change from outside.
+
+The check has these limits:
+
+- A source that is a file or a link is checked at its own destination path only. `prcp a.txt ~/Downloads/` does not
+  walk all of `~/Downloads`.
+- An edit that keeps the size, the modification time, and the inode number of a file passes. Only a second Blake3
+  read of every file finds it, and that read doubles the read time.
+- A file system that gives no inode numbers (it reports 0), and every file system on Windows, is compared by size
+  and modification time only. A file system that changes the inode number of a file that nobody touched makes the
+  check report that file as changed. That false report costs a failed run, never a lost original.
+- A change after the final check cannot be found.
+
+**Moves (`--rm`)**
+
+A move is a copy first. `prcp --rm` removes nothing until the last copy of the run is done and verified. Then, for
+each source on the command line, it removes the originals only when all of these are true:
+
+- Each file of that source copied and passed its Blake3 check.
+- No file was skipped (`--skip-existing`, a declined prompt, or a special file).
+- The final check (above) found no change in that source or at its destination.
+- No later source of the same run replaced its copy at the destination.
+
+If a check fails, that source keeps **all** of its originals, also the files that copied correctly. `prcp` lists the
+files that caused the failure, and the run exits with an error. Other sources still move. `prcp` checks every source before it removes any, so the removal of one source never
+changes the check of another. If the run stops early
+(Ctrl+C, or an error without `--continue-on-error`), `prcp` removes no source at all. A directory is removed only when
+it is empty, so a file that appears at the last moment also keeps its directory.
+
+A move refuses, before the first copy, two sources that overlap. A source that is inside another source directory is
+one case, and a source given twice is the other. `prcp` names both paths and the fix: give only the outer directory,
+or give the source once. A `**` glob with `-R` can give such sources without you typing them. A copy (no `--rm`) does
+not refuse them.
 
 **Want a `prmv` shorthand?**
 
@@ -2390,18 +3777,19 @@ nwt                           # Create worktree with random name
 nwt -b feature-branch         # Create with specific branch name
 nwt -c main                   # Check out existing ref
 nwt --run "pnpm install"      # Run command after creation
-nwt --tmux                    # Open in new tmux window
+nwt --sparse-exclude assets   # Leave the tracked directory assets/ out
 ```
 
 ### Options
 
-- `-b, --branch <NAME>`: Create worktree with specific branch name instead of random name
+- `-b, --branch <NAME>`: Create worktree with specific branch name instead of random name. When no local branch of that name exists and the clone has a remote branch of that name, the new branch starts at the remote branch and tracks it. Run `git fetch` first (see Remote branches below)
 - `--random-directory`: Use a random directory name even when `--branch` is given (by default the branch name doubles as the directory name)
 - `-c, --checkout <REF>`: Check out an existing branch/tag/commit instead of creating a new branch
 - `--run <COMMAND>`: Run a command in the new worktree after creation
-- `--tmux`: Open the new worktree in a new tmux window (Unix only)
 - `--no-copy-env`: Skip copying untracked `.env` files from the main worktree into the new one
+- `--no-link-children`: Do not link the child repositories of the main worktree into the new worktree. By default, nwt links each child that git ignores in the new worktree, as a symlink to the child in the main worktree. `link_children = false` in `~/.nwt.toml` turns the links off by default (see Child Repository Links below)
 - `--no-bootstrap-hooks`: Skip the package-manager install that regenerates git hooks (see Hook Bootstrap below)
+- `--sparse-exclude <DIR>`: Make the new worktree a sparse checkout without the tracked directory `<DIR>`, a path relative to the root of the repository. Use the flag one time for each directory. Only the new worktree is sparse, and `git sparse-checkout disable` in it writes the directories back. nwt refuses a `<DIR>` that git does not track as a directory at the ref, with exit code 15, before it makes anything (see Sparse worktrees below)
 - `--shell-setup`: Install shell integration for auto-cd into new worktrees (conflicts with all other flags)
 - `-q, --quiet`: Suppress non-error messages
 
@@ -2419,14 +3807,14 @@ checkout = "main"
 # Default command to run after creation
 run = "pnpm install"
 
-# Open in tmux by default
-tmux = true
-
 # Suppress output by default
 quiet = false
 
 # Copy untracked .env files into new worktrees (default true)
 copy_env = true
+
+# Link each child repository of the main worktree into new worktrees (default true)
+link_children = true
 
 # Run the package manager's install to regenerate git hooks (default true)
 bootstrap_hooks = true
@@ -2454,6 +3842,139 @@ Three rules govern the value:
 
 nwt reads the key with `git config --get`, which reads every scope. The answer can therefore come from the repository's own configuration, from `~/.gitconfig`, or from the system configuration. The repository's own configuration is the place for it: it travels with the repository, and `yadm` already tracks that file.
 
+### Remote branches
+
+A run that makes a new branch first looks for a remote branch of that name. The name comes from `-b <name>`, from the shorthand `-b 33` (branch `issue-33`), or from `branch` in `~/.nwt.toml`. nwt finds it with the rules of `git checkout`. A remote holds the branch when a fetch refspec of that remote maps `refs/heads/<name>` to a ref that the clone holds. With the default refspec, that ref is `refs/remotes/<remote>/<name>`.
+
+| Remotes that hold the branch | What nwt does |
+|---|---|
+| One | The new branch starts at that remote branch, and it tracks it |
+| More than one, and `checkout.defaultRemote` names the remote of one of them | The new branch starts at the branch of that remote, and it tracks it |
+| More than one, and `checkout.defaultRemote` picks none of them | nwt refuses with exit code 16, and it makes nothing |
+| None | The new branch starts at `HEAD`, as before |
+
+Thus after a fetch, `nwt -b 33` makes the worktree `issue-33` with the work of `origin/issue-33` in it. The branch has `origin/issue-33` as its upstream, so `git pull` and `git status` in the worktree use it with no more setup.
+
+**The refusal.** When more than one remote holds the branch, nwt cannot know which one to track. It does not start at `HEAD` in silence, because a silent fall back hides the mistake. It names each candidate and the command that sets the key:
+
+```text
+Error: more than one remote holds the branch 'issue-33', and checkout.defaultRemote picks none of them:
+  origin/issue-33
+  upstream/issue-33
+Name the remote to track, and run nwt again:
+  git config checkout.defaultRemote <remote>
+```
+
+**Output.** Stdout holds only the path of the worktree. After a run that tracks a remote branch, nwt prints this line to stderr:
+
+```text
+Tracking origin/issue-33
+```
+
+Git writes its own report (`branch 'issue-33' set up to track 'origin/issue-33'.`) to stdout, and nwt keeps stdout for the path. So this line is the only report of the start point. `-q`/`--quiet` hides it.
+
+**Fetch first.** nwt does not fetch. It reads only the remote branches that the clone already holds. Run `git fetch` first:
+
+```bash
+git fetch
+nwt -b 33
+```
+
+A fetch needs the network, and it can stop to ask for credentials, so nwt leaves the fetch to you. A branch that the remote got after your last fetch is not in the clone, and the new branch then starts at `HEAD`.
+
+**Sparse worktrees.** With `--sparse-exclude`, nwt checks each directory at the remote branch, because the files of the new worktree come from it (see Sparse worktrees below). A refusal names the remote branch, for example `origin/issue-33`.
+
+**What stays the same.**
+
+- When a local branch of that name exists, nwt does not look. It refuses with the error that it gave before, that the branch already exists, and it exits 7.
+- The directory name does not change. `nwt -b issue-33` makes the directory `issue-33`.
+- A run with a random name does no lookup, and `-c <ref>` does not change.
+
+**Fetch refspec.** nwt reads the fetch refspecs of each remote from the git configuration, as `git checkout` does. With `+refs/heads/*:refs/remotes/mirror/heads/*`, nwt finds the branch at `refs/remotes/mirror/heads/issue-33`, and the `Tracking` line names it `mirror/heads/issue-33`. nwt names a ref outside `refs/remotes/` in full. When the name of a candidate in the refusal does not start with the name of its remote, the refusal adds the remote, so that you know what to give `checkout.defaultRemote`:
+
+```text
+  mirror/heads/issue-33 (remote origin)
+```
+
+A remote branch that no fetch refspec maps is stale, for example after `git remote set-branches`. nwt ignores it, as git does, and a remote without a fetch refspec gives no branch.
+
+**Negative refspecs.** A negative refspec such as `^refs/heads/issue-33` keeps its remote from giving the branch, and the new branch then starts at `HEAD`. `git checkout` differs here: after a pattern refspec, it takes the stale `origin/issue-33` and sets no upstream. `git worktree add --track`, which nwt runs, refuses that ref, so nwt honors the negative refspec. For `-c <name>` with `--sparse-exclude`, nwt then finds no remote branch, and the run exits 7, where `-c <name>` without the flag takes the stale ref.
+
+### Child Repository Links
+
+Some repositories are containers. A container tracks the map of a workspace. Each real repository sits one level below it, and `.gitignore` keeps that repository out of the history of the container. Such a repository is a child repository, or a child. `cwt` calls a container and its children a [family](#families-of-repositories), with `keyboards/` as the example.
+
+`git worktree add` writes only tracked files, so a new worktree of a container holds no child. Relative paths in the README of the container then point at nothing, and a script or an agent that reads a child finds nothing.
+
+Thus after `git worktree add`, and before the `.env` copy, nwt links each child of the main worktree into the new worktree. Each link is a symbolic link:
+
+```text
+<new worktree>/<name> -> <main worktree>/<name>
+```
+
+The link gives the new worktree the one real checkout of each child. nwt makes no clone, no branch, and no remote. A branch then exists only in a repository that the work changes.
+
+**Which entries are children.** A child is a directory one level below the main worktree that holds a `.git` entry. The entry is a `.git` directory, or the `.git` file of a linked worktree of another repository. `cwt` finds its candidates with the same rule. nwt then skips each worktree of this repository and each submodule, because neither is a child. `git worktree list` names those worktrees, and `git ls-files` names those submodules. These entries get no link and no line:
+
+- A directory without a `.git` entry
+- A file
+- A child of a child
+- A worktree of this repository. `nwt.worktreesDir` set to `.` (see [Where worktrees go](#where-worktrees-go)) puts each worktree one level below the main worktree, the new worktree too. Without this rule, the new worktree gets a link to itself, and a tool that follows links reads that loop without end.
+- A submodule. It holds a `.git` file, but this repository tracks it, so this repository is not a container of it. `git worktree add` makes an empty directory for each submodule. Without this rule, each run in such a repository prints a line about a link that nwt never makes. The index of the main worktree holds each submodule as a gitlink (mode `160000`). A child that git ignores is not in the index, so it stays a child.
+
+**When a child gets a link.** A link that git does not ignore shows as untracked in `git status`, and `git add -A` commits it into the container. So nwt asks git in the new worktree if git ignores `<name>`. The new worktree can hold a `.gitignore` that is different from the one in the main worktree, so nwt asks there. Git gives the same answer before the link exists. Thus nwt asks first, and it never makes a link that git does not ignore.
+
+**The trailing slash.** A pattern with a trailing slash matches only a directory. Git sees a link as a file, also when the link points at a directory. Thus `vial/` ignores the child in the main worktree, but it does not ignore the link in the new worktree:
+
+| Pattern in `.gitignore` | Ignores the child `vial` | Ignores the link `vial` |
+|---|---|---|
+| `vial/` | Yes | No |
+| `/vial` | Yes | Yes |
+| `vial` | Yes | Yes |
+
+To link a child, write the pattern as `/<name>`. The warning below gives this fix.
+
+**A path that is already there.** When the new worktree already holds something at `<name>`, nwt does not change it, and it asks git nothing. The new branch can track that path, or a `post-checkout` hook can make it. A broken link also counts. nwt prints one line. The line is not a warning, because nothing is wrong:
+
+```text
+Not linked: vial (the new worktree already holds this path)
+```
+
+**The target.** The target of each link is absolute. It is the main worktree that git names, joined with the name of the child. Thus nwt in a linked worktree links the children of the main worktree, and each link stays correct when that linked worktree goes away. Git keeps worktree paths absolute too, so a relative link gives no more safety.
+
+A repository that keeps its git directory apart from the work tree (see [Where worktrees go](#where-worktrees-go)) gets no link. A bare repository gets no link either. Git names the git directory as the main worktree of each, and a git directory holds no child. nwt then links nothing and prints nothing.
+
+**Output.** Stdout holds only the path of the worktree. nwt prints one line to stderr for each link, and a summary when it makes at least one link:
+
+```text
+Linked vial-qmk -> /Users/me/code/keyboards/vial-qmk
+Linked zmk-config-corne -> /Users/me/code/keyboards/zmk-config-corne
+Linked 2 child repositories from the main worktree
+```
+
+A repository without children gets no link and no line.
+
+A child that gets no link gets a warning, and the other children still get their links. When the pattern for the child matches only a directory, the warning names that pattern, its file, and its line. When no pattern matches, the warning says so. Both warnings give the fix:
+
+```text
+Warning: not linked: vial (.gitignore:1 has 'vial/', which matches only a directory, and git sees a symlink as a file. Write '/vial' to link it)
+Warning: not linked: vial (git does not ignore this path. Add '/vial' to .gitignore to link it)
+```
+
+When git gives no answer, the warning repeats the first line of the error of git, after `git check-ignore failed:`. When nwt cannot make the link, the warning gives the error of the operating system.
+
+When git gives no list of the worktrees or of the submodules, nwt cannot tell a child from an entry that is not a child. nwt then makes no link, and it prints one warning that repeats the first line of the error of git, after `git worktree list failed:` or `git ls-files failed:`:
+
+```text
+Warning: no child linked, because nwt cannot tell which directories are children (git worktree list failed: fatal: not a git repository)
+```
+
+`-q`/`--quiet` removes the `Linked` lines, the summary, and the `Not linked:` lines. It does not remove a warning, because a warning names a defect in the repository.
+
+**Removal.** `git worktree remove`, `git worktree remove --force`, and `rm -rf` of the worktree each delete the link only. The child and its files stay unchanged.
+
+To turn the links off for one run, use `--no-link-children`. To turn them off by default, set `link_children = false` in `~/.nwt.toml`.
+
 ### Env File Copying
 
 After creating the worktree, nwt copies untracked `.env` files from the main worktree into the new one, preserving their relative paths, so development settings that aren't committed to git are there immediately. Two patterns are copied: `.env` exactly, and anything starting with `.env.` (`.env.local`, `.env.development`, and so on). Nothing else is — `.envrc` (direnv) and `.environment` don't match the pattern, and any file tracked by git is skipped, since git already puts it in the new worktree.
@@ -2472,13 +3993,74 @@ On Unix, copied `.env` files are created at mode `0600` — owner read/write onl
 
 Some repositories keep the git directory apart from the work tree, which the *Where worktrees go* section above describes. Git names the git directory itself as the main worktree of such a repository, and no work tree is below that path. nwt finds no `.env` file there and copies none. This is deliberate: the work tree of such a repository is your home directory, and the `.env` files there are not the new worktree's to take.
 
+The copy does not go into a nested repository: a directory below the root of the main worktree that holds a `.git` entry. The `.env` files of a child belong to that child, and they reach the new worktree through the link (see [Child Repository Links](#child-repository-links)). This rule applies with `--no-link-children` too. A copy into a child makes a directory that holds only `.env` files, and such a directory is not a usable child.
+
 Disable copying for a single invocation with `--no-copy-env`, or set `copy_env = false` in `~/.nwt.toml` to disable it by default.
 
 ### Hook Bootstrap
 
 After creating the worktree, if `package.json` at the worktree root declares a `prepare` script (the husky convention), nwt runs the project's package manager install so git-hook managers regenerate their hooks directory. This matters because `core.hooksPath` often points at a gitignored, generated directory (e.g. `.husky/_`) that a freshly created worktree doesn't have — without the install, git finds no hooks directory and silently runs nothing, so every commit bypasses lint/typecheck/test gates. The package manager is chosen by the `packageManager` field, then a lockfile, then pnpm. Repos without a `prepare` script are unaffected — no install is run.
 
-Disable the install for a single invocation with `--no-bootstrap-hooks`, or set `bootstrap_hooks = false` in `~/.nwt.toml` to disable it by default. When a synchronous `--run` command (without `--tmux`) already invokes a package manager install (e.g. `--run "pnpm install"`), nwt skips its own bootstrap install so dependencies are installed once, not twice. As a safety net, nwt verifies the effective `core.hooksPath` directory actually exists and prints a loud warning if it doesn't — whether bootstrap was skipped, failed, or didn't apply — since that missing directory is the only signal that commits in the new worktree would otherwise be ungated. When you pass a synchronous `--run` command (without `--tmux`), this check runs *after* that command finishes, so a `--run` that installs hooks (e.g. `pnpm install`) can create the directory before the check looks — no false alarm. With `--tmux`, the `--run` command runs asynchronously inside the new window, so the check necessarily runs before tmux is spawned.
+Disable the install for a single invocation with `--no-bootstrap-hooks`, or set `bootstrap_hooks = false` in `~/.nwt.toml` to disable it by default. When a `--run` command already invokes a package manager install (e.g. `--run "pnpm install"`), nwt skips its own bootstrap install so dependencies are installed once, not twice. As a safety net, nwt verifies the effective `core.hooksPath` directory actually exists and prints a loud warning if it doesn't — whether bootstrap was skipped, failed, or didn't apply — since that missing directory is the only signal that commits in the new worktree would otherwise be ungated. When you pass a `--run` command, this check runs *after* that command finishes, so a `--run` that installs hooks (e.g. `pnpm install`) can create the directory before the check looks — no false alarm.
+
+### Sparse worktrees
+
+`--sparse-exclude <DIR>` makes the new worktree a sparse checkout without the tracked directory `<DIR>`. Use the flag one time for each directory:
+
+```bash
+nwt -b issue-12 --sparse-exclude assets/video --sparse-exclude fixtures/large
+```
+
+`<DIR>` is relative to the root of the repository, and `heavy` and `heavy/` are the same directory. Each directory becomes the non-cone pattern `!/<DIR>/`, after the pattern `/*`. Thus `--sparse-exclude heavy` excludes only the top-level directory `heavy`. It does not exclude the file `heavy.txt` or the directory `src/heavy/`. nwt escapes the glob characters of each name, so the pattern matches the name literally. The flag has no `~/.nwt.toml` key, because a heavy directory belongs to one repository.
+
+**Checks.** nwt checks each value before it makes anything. A refused value makes no directory and no branch.
+
+| Value | Exit code |
+|---|---|
+| An absolute path, a path with a `..` component, an empty value, or a value with a control character | 15 |
+| A path that is not a directory that git tracks at the ref the worktree checks out: a missing path, a file, or a directory that is only on disk | 15 |
+| A value that passes the first row, when git cannot read the ref (for example, a `-c <ref>` that does not exist) | 7 |
+
+The check reads the ref and not the disk, because the files of the new worktree come from the ref. For a `-c <branch>` that only a remote holds, git makes a local branch that tracks the remote branch. nwt then checks the remote branch that git picks: the branch of the one remote that holds it, or of the remote that `checkout.defaultRemote` names. For a `-b <name>` that tracks a remote branch, nwt checks the remote branch where the new branch starts. In both cases, nwt finds the remote branch through the fetch refspec of each remote (see Remote branches above).
+
+**Scope.** Only the new worktree is sparse. Git keeps its sparse settings in `.git/worktrees/<name>/config.worktree` and `.git/worktrees/<name>/info/sparse-checkout`. The main worktree, the other worktrees, and later worktrees that nwt makes without the flag stay full.
+
+There is one exception. When the **main** worktree is sparse, git copies its patterns into each new worktree, with the flag or without it. With the flag, `--sparse-exclude` replaces the copied patterns and does not add to them. A directory that only the main worktree excludes is then present in the new worktree. nwt runs `git worktree add` in the main worktree, so a sparse linked worktree never gives its patterns to a new worktree.
+
+**One shared change.** The sparse checkout writes `extensions.worktreeConfig=true` into the shared `.git/config`. This setting does not make other worktrees sparse. It stays after you remove the worktree.
+
+**The way back.** Run `git sparse-checkout disable` in the worktree. Git then writes the excluded directories.
+
+**Output.** Stdout holds only the path of the worktree. After nwt makes the worktree, it prints this line to stderr:
+
+```text
+Excluded heavy/ (sparse checkout). Run 'git sparse-checkout disable' in the worktree to get it.
+```
+
+The `.env` copy does not take an untracked `.env` under an excluded directory, because a copy writes that directory into the worktree again. nwt prints this line for each such file:
+
+```text
+Skipped: heavy/.env (under excluded heavy/)
+```
+
+`-q`/`--quiet` hides both lines.
+
+**The post-checkout hook.** `git worktree add --no-checkout` runs no hook. So nwt runs the `post-checkout` hook of the repository after it writes the files. The hook gets the arguments of a plain add: the null object id, the new `HEAD`, and `1`. It sees the sparse tree. It also sees `GIT_DIR` and `GIT_WORK_TREE` set, and a plain add sets neither.
+
+**Git version.** `--sparse-exclude` needs git 2.36.0 or later. nwt runs the `post-checkout` hook with `git hook run`, and git 2.36.0 added that command. On an older git, nwt reports that the post-checkout hook failed and exits 7, though the repository has no hook.
+
+**Failures.**
+
+- A hook that fails keeps the worktree and the branch, and nwt exits 7, as after a plain add. The error names the exit status of the hook and the path of the worktree.
+- When git cannot start the hook step, the worktree and the branch stay, and nwt exits 6.
+- When `git sparse-checkout set`, `git read-tree -mu HEAD`, or `git rev-parse HEAD` fails, the worktree is broken. nwt removes the worktree, the branch that the run made, and the empty directories that the run made, and exits 7. When nwt cannot remove one of them, it names what is left and the command that removes it.
+
+**Limits.**
+
+- The flag saves disk space in the worktree only. All worktrees share one object store, so the blobs of the excluded directory stay in `.git`. Only a partial clone (`git clone --filter=blob:none`) keeps them out, and that applies to the whole clone.
+- Commits and diffs still include the excluded directory. Git does not write it to disk, but it does not delete it from the branch.
+- A build or a test that reads the excluded directory fails in that worktree.
+- When an excluded directory holds a workspace package, the install of Hook Bootstrap can fail. nwt then warns and continues.
 
 ### Examples
 
@@ -2492,9 +4074,10 @@ Create a worktree from an existing branch:
 nwt -c feature-branch
 ```
 
-Create worktree and open in tmux:
+Create a worktree for issue 33 whose branch `issue-33` tracks `origin/issue-33`:
 ```bash
-nwt --tmux --run "code ."
+git fetch
+nwt -b 33
 ```
 
 ## cwt (change worktree)
@@ -2504,7 +4087,7 @@ Navigate between the git worktrees of a repository and of the repositories insid
 ### Basic Usage
 
 ```bash
-cwt                           # Show list of worktrees with current highlighted
+cwt                           # Show list of worktrees with current highlighted, and open PR numbers
 cwt -f                        # Go to next worktree (wraps around)
 cwt -p                        # Go to previous worktree (wraps around)
 cwt -m                        # Go to the main worktree, or up a level when you are at its root
@@ -2615,7 +4198,8 @@ cd keyboards && cwt
 
 The family is the same from anywhere inside it, so `cwt` gets you out of a child
 repository as easily as it gets you in. Only one level is scanned: a child of a child
-is that child's business.
+is that child's business. `nwt` links the children into each new worktree of the parent
+(see [Child Repository Links](#child-repository-links)).
 
 A directory that looks like a repository but has no worktree to offer — a bare
 repository, which git lists without a HEAD — cannot join the family, because there is
@@ -2683,6 +4267,44 @@ cwt keyboards/keyboards:inner  # a worktree of that child
 `--no-family` confines the listing, the cycling, and the name search to the repository
 you are standing in. Set `CWT_NO_FAMILY` to any value other than `0` to make that the
 default.
+
+### Open pull requests
+
+The list shows the number of each open pull request after the branch that is its head.
+The numbers are in ascending order, and a row with no open pull request does not change:
+
+```text
+> /code/tools-worktrees/issue-546 [issue-546] #547
+  /code/tools-worktrees/170 [170]
+  /code/tools-worktrees/ic-xtermjs [ic-xtermjs] #512 #519
+```
+
+The current row paints the numbers green, as it paints its branch. Other rows paint them
+dimmed. A draft pull request is open, so it shows. Closed and merged pull requests do not
+show.
+
+`cwt` asks GitHub through [`gh`](https://cli.github.com/), about the repository that
+`origin` names. That is also true in a fork that has an `upstream` remote. A pull request
+shows only when its head is a branch of the repository that `origin` names, so the `main` or
+`patch-1` of a fork never attaches to your branch of the same name. `cwt` sends one query for
+each repository of the family, and up to 32 queries run at a time.
+
+- Only the list asks GitHub. `cwt NAME`, `-f`, `-p`, `-m`, and the error lists stay
+  offline, because the `wt` function waits for the path that they print.
+- A repository whose `origin` is not on `github.com`, or on the host that `GH_HOST` names,
+  shows no numbers, and `cwt` does not run `gh` for it. `ssh.github.com`, the SSH host of
+  GitHub on port 443, counts as `github.com`. An SSH host alias from `~/.ssh/config`, such
+  as `git@github-work:owner/name.git`, is a different host to `cwt`, so it shows no numbers.
+- A machine with no `gh` shows no numbers and prints nothing more.
+- If `gh` fails or does not answer in time, that repository shows no numbers, and `cwt`
+  prints one warning line that names the repository and the cause. `--quiet` removes the
+  line.
+- `CWT_PR_TIMEOUT` sets the time limit in seconds, for example `10` or `0.5`. The default
+  is 3. The queries run in groups of up to 32, and the limit applies to each group, not to
+  each repository. Thus a family of up to 32 repositories waits for the limit once at most.
+  A larger family can wait once for each group of 32.
+- `cwt` asks for up to 1000 open pull requests of each repository. A repository that has
+  1000 or more gets a warning that some numbers can be missing.
 
 ### Shell Integration
 
@@ -2792,8 +4414,52 @@ gitnuke issue-42              # by branch name
 gitnuke --force issue-42      # worktree has submodules or uncommitted changes
 gitnuke --dry-run issue-42    # report the plan, change nothing
 gitnuke --safe issue-42       # keep the branch unless it is fully merged
+gitnuke --yes issue-42        # do not ask about a branch that no recent commit names
 gitnuke wt-a wt-b wt-c        # nuke several; each is reported independently
 ```
+
+### A branch that no recent commit names
+
+The normal flow is: the PR merges, then you nuke its branch. gitnuke counts on a merge
+convention that this repository obeys: each squash commit names its branch on a
+`Branch: <branch>` line. Thus the recent commits of the main branch name each branch that is
+safe to nuke, and a mistyped issue number gives a name that they do not name.
+
+GitHub does not write that line. Its default squash message holds no branch name, and its
+default merge commit names `owner/branch`, which is not a whole-token match for `branch`. In
+a repository that does not obey the convention, no recent commit names a branch, so gitnuke
+asks before each nuke. Use `--yes` there.
+
+Before gitnuke removes a worktree that has a branch, it looks for the branch name in the
+messages of the last 10 commits of the main worktree's branch. It also reads the last 10
+commits of the upstream of that branch (`origin/main`), because `gh pr merge` in a worktree
+does not move the local `main`. If no message names the branch, gitnuke asks:
+
+```text
+gitnuke: no commit in the last 10 of main or origin/main names branch 'issue-42'.
+  If you typed the wrong name, answer n. If its PR merged moments ago, run git fetch and try again.
+  Remove worktree /code/repo-worktrees/issue-42 and delete branch issue-42? [y/N]
+```
+
+- Only `y` or `yes`, in any case, continues. Each other answer, an empty line, and the end
+  of the input keep the worktree and the branch, with exit code `10`.
+- The name must be a whole token. The character before it and the character after it must
+  not be a letter, a digit, `.`, `_`, `/` or `-`. Thus `issue-70` does not match
+  `Branch: issue-704`.
+- gitnuke does not fetch, and it uses no network. If the PR merged moments ago, run
+  `git fetch` first.
+- When stdin is not a terminal, gitnuke cannot ask. It refuses with exit code `10`, and it
+  does not continue silently. An agent that runs gitnuke through a tool can type the wrong
+  number too.
+- `--yes` skips the question. `--force` does not skip it: `--force` overrides git's refusals
+  about the content of a worktree, but this question is about which worktree you named.
+- A detached-HEAD worktree has no branch, so gitnuke asks nothing about it.
+- A target that an earlier gate refuses (locked, submodules, uncommitted changes) gets that
+  refusal, with no question first.
+- `--dry-run` asks nothing. It reports that a real run asks, and it exits `10`. With `--yes`,
+  the dry run exits `0`.
+- Each target gets its own question. A "no" keeps that target only, and the run continues
+  with the next target.
 
 ### Worktrees with submodules
 
@@ -2873,18 +4539,25 @@ out when the lock has none. This is exit code `8`, and `--dry-run` reports it to
 - **A lock is honoured, not overridden.** A worktree locked with `git worktree lock` is
   refused even with `--force`, quoting the lock reason if git recorded one and handing back
   the `git worktree unlock` command to run.
+- **A mistyped branch gets a question.** gitnuke asks before it deletes a branch that no
+  recent commit names, and it refuses with exit `10` when it cannot ask. See
+  [A branch that no recent commit names](#a-branch-that-no-recent-commit-names).
 - **`--dry-run` is a real preflight.** It runs every check a real run runs — submodules,
-  uncommitted changes, and under `--safe` whether the branch is merged — and exits with the
-  same status that run would, so `gitnuke -n x` failing means `gitnuke x` would fail too.
+  uncommitted changes, whether a recent commit names the branch, and under `--safe` whether
+  the branch is merged — and exits with the same status that run would, so `gitnuke -n x`
+  failing means `gitnuke x` would fail too.
 
 ### Options
 
 - `-f, --force`: Nuke the worktree despite the two refusals it overrides — submodules checked
   out, or uncommitted changes. It does not override a locked worktree; that is refused
-  separately, with instructions to unlock it
+  separately, with instructions to unlock it. It does not skip the question about a branch
+  that no recent commit names
 - `-s, --safe`: Keep the branch unless it is fully merged (`git branch -d` semantics instead
   of the default force-delete). Only affects the branch; the worktree is still removed
 - `-n, --dry-run`: Report what would happen without removing or deleting anything
+- `-y, --yes`: Do not ask about a branch that no recent commit names. Without a terminal,
+  gitnuke needs this flag to delete such a branch
 - `[TARGETS]...`: One or more worktrees, each given as a path, directory name, or branch name
 
 ### Exit Codes
@@ -2899,6 +4572,7 @@ out when the lock has none. This is exit code `8`, and `--dry-run` reports it to
 - `7`: The worktree was removed but its branch could not be deleted
 - `8`: The worktree is locked, which `--force` does not override
 - `9`: The worktree contains modified or untracked files and `--force` was not given
+- `10`: No recent commit names the branch, and nobody answered yes
 
 ### Replacing the shell functions
 
@@ -2930,7 +4604,22 @@ crap 57570685-2d64-4431-8ab6-c021a12fa1af   # cd into that session's dir and res
 
 The session id is the name of the `.jsonl` file under `~/.claude/projects/<project>/`. `crap` reads the directory from the session log itself (the sanitized project folder name is lossy), so it always lands in the real original path.
 
-If you have a `clauded` alias or command (e.g. `claude --dangerously-skip-permissions`), `crap` uses it; otherwise it falls back to plain `claude`. If the session's original directory no longer exists, `crap` prints an error and stops without launching anything.
+If the session's original directory no longer exists, `crap` prints an error and stops without launching anything.
+
+### Choose the launcher: `CRAP_LAUNCHER`
+
+The `crap` shell function starts Claude through a launcher. Each time it runs, it picks the launcher in this order:
+
+1. `CRAP_LAUNCHER`, when you set it and it is not empty. The value is shell text, and the function evaluates it when it runs. Thus an alias, a shell function, or a command with flags of its own (for example `claude --model opus`) works. Claude gets its arguments after the value.
+2. Plain `claude`.
+
+```bash
+export CRAP_LAUNCHER=c   # start Claude through your `c` alias
+```
+
+`crap` does not guess at a short name such as `c`. Many users give `c` to a command that is not Claude, for example `clear`, `code`, or a `cd` helper. Set `CRAP_LAUNCHER` to use such a name.
+
+A fork always passes `--session-id <new-id>`. Thus a launcher that keeps the session id in its own argv lets a Zellij resurrect resume the fork, and not fork the original session again.
 
 ### Resume in the current directory: `--here`
 
@@ -2940,26 +4629,86 @@ Sometimes you don't want to go back to where a session started — you want to b
 crap --here 57570685-2d64-4431-8ab6-c021a12fa1af   # resume it right here
 ```
 
-Claude resolves `--resume <id>` only against the project folder that matches your current directory, so a plain `claude --resume <id>` from anywhere else fails with *"No conversation found with session ID"*. `crap --here` gets around that: it symlinks the session's transcript into the current directory's project folder so Claude can find it, then resumes it with `--fork-session`. Forking means Claude continues with the **full prior context under a brand-new session id**, so the original transcript is never modified.
+Claude resolves `--resume <id>` only against the project folder that matches your current directory, so a plain `claude --resume <id>` from anywhere else fails with *"No conversation found with session ID"*. `crap --here` gets around that: it symlinks the session's transcript into the current directory's project folder so Claude can find it, then resumes it with `--fork-session --session-id <new-id>`. Forking means Claude continues with the **full prior context under a brand-new session id**, so the original transcript is never modified.
 
 The symlink is only needed while Claude reads the transcript at startup. A background watcher removes it the moment the forked session file appears — typically within a second — so it doesn't linger for the whole session, and a final `rm` after the session ends serves as a safety net.
 
 A couple of things to know:
 
 - The replayed history still references the *original* directory's paths. Claude works in your current directory from here on, but the conversation it inherits talks about the old one.
-- It still won't resume a session that's open elsewhere unless you pass `--force` (forking reads the live transcript, which can be mid-write).
+- A live original never blocks `--here`, because the fork only reads the original transcript. Thus `--here` ignores `--force`.
 
 `--here` also accepts a cross-user source. Combine it with [`--user`](#resume-another-users-session---user) — `crap --here <id> --user alice` — to fork another account's session right here in your current directory. Because a transcript in someone else's home can never be found by a `claude --resume` you run yourself, `crap` **copies** it into your own tree rather than symlinking (nothing is ever linked into another user's home), then forks and cleans the copy up the same way it removes the symlink. A same-user `--here` still symlinks exactly as before. This is the escape hatch when the session's original directory is gone or you can't enter it: `--here` ignores that directory entirely.
 
-#### Choosing the forked session's id
+#### The forked session's id
 
-By default the fork gets a random new id, which you only learn after Claude starts. Pass a second argument to choose it yourself:
+The fork gets a new id, and `crap` chooses that id before Claude starts. When Claude exits, the shell function tells you the id:
+
+```text
+Resume this session with:
+claude --resume 9f8e7d6c-5b4a-3210-fedc-ba9876543210
+Resume this fork with: crap 9f8e7d6c-5b4a-3210-fedc-ba9876543210
+```
+
+The first two lines come from Claude, and the last line comes from `crap`. `crap <new-id>` resumes the fork from any directory. Use it, not the id you gave to `crap --here`: that id is the original session, which does not contain the work you did in the fork.
+
+`crap` prints its line only when Claude saved the fork. Claude writes the fork transcript only after your first new input, so if you exit the fork at once, there is no fork to resume, and neither Claude nor `crap` prints a resume line. The line from `crap` is also the one to trust when the session has a custom title (from `/rename`). Claude then prints `claude --resume "<title>"`, but the fork inherits the title, so that command opens a picker that lists both the fork and the original.
+
+Without a second argument, `crap` generates a UUID v4 for the fork. Pass a second argument to choose the id yourself:
 
 ```bash
 crap --here 57570685-2d64-4431-8ab6-c021a12fa1af 9f8e7d6c-5b4a-3210-fedc-ba9876543210
 ```
 
-The new id must be a valid UUID, and `crap` refuses it if it already names a session (so the fork can never overwrite an unrelated transcript). This is handy when a script needs to know the resumed session's id in advance — generate a UUID, hand it to `crap --here`, and you already know where the new transcript will live. Omit it to keep the random-id behavior.
+The new id must be a valid UUID, and `crap` refuses it if it already names a session, so the fork can never overwrite an unrelated transcript. A generated id gets the same checks. Choose the id yourself when a script must know the new id before Claude starts.
+
+The cross-user resume (below) forks too, so it gets a generated id and the same line.
+
+After you upgrade `crap`, run `crap --shell-setup` again. The resume line comes from the shell function, and an older function does not print it.
+
+### Resume with the full history: `--expand`
+
+`/compact` does not delete history. It adds a compact boundary and a summary to the end of the transcript, and the messages from before the compaction stay in the file. But a resume loads only the summary and the messages after it. Thus `/rewind` cannot go back to a prompt from before the compaction, and a plain resume cannot get the full history back.
+
+`--expand` resumes a fork of the session with each compaction undone:
+
+```bash
+crap --here --expand 57570685-2d64-4431-8ab6-c021a12fa1af   # fork it in the current directory
+crap --expand 57570685-2d64-4431-8ab6-c021a12fa1af          # fork it in its original directory
+```
+
+In the fork, `/rewind` lists every prompt of the session, also the prompts from before each compaction. A short alias helps: `alias che='crap --here --expand'`.
+
+`crap` writes an **expanded import**: a new transcript under a new id, in the project folder where the fork runs. The import is the original transcript with these changes:
+
+1. The boundary and the summary of each compaction are removed. Each message that came after them is linked to the last message before the compaction (the `logicalParentUuid` of the boundary).
+2. The `sessionId` of each line is the id of the import.
+3. The `bridge-session` lines are removed, so the fork does not attach to the Remote Control session of the original, which can be live.
+4. The `queue-operation` lines are removed, so old queued input does not play again.
+
+Each other line stays byte-identical. The shell function resumes the import with `--fork-session`, and it removes the import when the fork appears, the same as the symlink of `--here`. Thus the shell function needs no change.
+
+- The original transcript is only read. Thus `--expand` works also when the original session is live, and it ignores `--force`.
+- `crap --expand <id>` forks too, at the original directory. A plain resume writes to the original transcript, and `--expand` never changes the original.
+- `--expand` works with `--user <name>`, with the automatic cross-user fallback, and with the second argument of `--here`. For a cross-user source, the expanded import replaces the plain copy, and `crap` writes nothing in the other home.
+- If the session has no compaction, `crap` says so on stderr and does the same as the command without `--expand`.
+
+The expanded history can be larger than the context window. `crap` prints its size on stderr:
+
+```text
+Note: crap expanded 1 compaction of session 57570685-2d64-4431-8ab6-c021a12fa1af.
+      Before the last compaction, the context held 480231 tokens.
+      The expanded history can be larger than the context window.
+      If it is larger, use /rewind before you send the first message.
+```
+
+`crap` refuses a transcript that it cannot expand, and it writes no import (exit code `13`). It names the boundary or the summary that stopped it. The causes are:
+
+- A boundary has no `logicalParentUuid`, or no line of the transcript has that uuid.
+- A boundary has no summary, or a summary has no boundary. A boundary or a summary has no `uuid`.
+- The transcript does not hold the messages from before a compaction. This occurs in a fork that Claude made after the compaction, because Claude copies only the summary and the messages after it into the fork. Expand the session that the fork came from. `crap --forks <id>` names that session when `crap` made the fork.
+
+Two limits: "Restore code" in the fork does not find the file backups, because they are under the id of the original session (`--here` has the same limit). `crap` does not expand subagent transcripts.
 
 ### Resume another user's session: automatic, or `--user`
 
@@ -3108,19 +4857,90 @@ crap --status --json | jq -r '.[] | select(.state == "waiting-for-user") | .sess
 
 `started` and `last` are `null` when the transcript records no timestamps.
 
+### Find the forks of a session: `--forks`
+
+Each fork that `crap` starts adds one line to a fork log. That is each `crap --here <id>` (an alias such as `ch` for `crap --here` too), each `--expand` fork, and each cross-user resume. Claude Code records no link between a fork and its source, so without the log you cannot find which sessions came from a session, or which session a fork came from.
+
+The log is `forks.jsonl` in the `crap` directory of your data directory: `~/Library/Application Support/crap/forks.jsonl` on macOS, and `$XDG_DATA_HOME/crap/forks.jsonl` (else `~/.local/share/crap/forks.jsonl`) on Linux. Each line is one JSON object:
+
+```json
+{"time":"2026-10-28T01:51:22Z","source_id":"57570685-2d64-4431-8ab6-c021a12fa1af","fork_id":"9f8e7d6c-5b4a-4210-8edc-ba9876543210","source_user":"me","source_dir":"/Users/me/code/app","fork_dir":"/Users/me/code/app-worktrees/issue-7","kind":"here"}
+```
+
+- `time`: when `crap` started the fork, in RFC 3339 and UTC.
+- `source_id`: the session that was forked. `fork_id`: the new session. For an `--expand` fork, `source_id` is the original session, not the expanded import.
+- `source_user`: the account that owns the source transcript.
+- `source_dir`: the directory that the source transcript records, or `null` when it records none.
+- `fork_dir`: the directory where the fork runs.
+- `kind`: `here` for `--here`, and `fork-at` for a fork in the original directory (a cross-user resume, or `crap --expand <id>`).
+- `expanded`: `true` for an `--expand` fork. The other lines do not have this key, and a line without it reads as `false`.
+
+A cross-user fork writes to your own log, never into the other home. If `crap` cannot write the log, it shows a warning and starts the fork, because the log must not stop a resume. `crap` writes each line with one `write` call in append mode, so two forks at the same time cannot mix their lines. `crap` writes the line before Claude starts, but Claude writes the fork transcript only after your first new input. Thus the log can name a fork that has no transcript.
+
+To read the log for one session:
+
+```bash
+crap --forks 9f8e7d6c-5b4a-4210-8edc-ba9876543210
+```
+
+```text
+Forks of 9f8e7d6c-5b4a-4210-8edc-ba9876543210 in the fork log:
+  3c2b1a09-8f7e-4d6c-9b5a-4f3e2d1c0b9a  2026-10-28T03:00:41Z  not saved  /Users/me/code/app-worktrees/issue-8
+
+Sources of 9f8e7d6c-5b4a-4210-8edc-ba9876543210 in the fork log:
+  9f8e7d6c-5b4a-4210-8edc-ba9876543210 is a fork of 57570685-2d64-4431-8ab6-c021a12fa1af, made 2026-10-28T01:51:22Z (here) in /Users/me/code/app-worktrees/issue-7
+  57570685-2d64-4431-8ab6-c021a12fa1af is not a fork in the fork log.
+```
+
+- If the session is a source, the report lists each fork with its time, `saved` or `not saved`, and its directory. `saved` means that `crap --status <fork-id>` finds the fork transcript, so `crap <fork-id>` can resume the fork. An `--expand` fork has `(expanded)` after its directory.
+- If the session is a fork, the report shows its source, then the source of that source, up to a session that is not a fork. An `--expand` fork shows `(here, expanded)` or `(fork-at, expanded)`.
+- If the session is both, the report shows both sections.
+
+`--forks` resumes nothing and writes nothing. It exits `1` when no transcript and no line of the log has the id. If a line of the log cannot be read, `--forks` shows a warning and uses the other lines.
+
+#### Find forks that are not in the log: `--scan`
+
+The log has only the forks that `crap` started after the log existed. Older forks, and forks that another tool made (for example `claude --fork-session` without `crap`), have no line. `--scan` finds them in the transcripts:
+
+```bash
+crap --forks 4cf057cc-eaa4-4e2b-b10d-60f031d545bd --scan
+```
+
+```text
+The fork log has no fork of 4cf057cc-eaa4-4e2b-b10d-60f031d545bd, and 4cf057cc-eaa4-4e2b-b10d-60f031d545bd is not a fork in the fork log.
+
+Transcripts that share uuid values with 4cf057cc-eaa4-4e2b-b10d-60f031d545bd (scan of /Users/me/.claude/projects):
+  f7e903d0-5884-42c6-ae33-20a8763e5083  fork         23 shared  /Users/me/.claude/projects/-Users-me/f7e903d0-5884-42c6-ae33-20a8763e5083.jsonl
+```
+
+When Claude forks a session, it copies lines of the session into the new transcript, and each copied line keeps its `uuid`. The scan reads the `uuid` values of the transcript of the id. Then it reads each transcript in your own `~/.claude/projects` tree, skips the subagent transcripts, and reports each transcript that has one or more of those values. The relation column shows the direction:
+
+- `fork`: the other transcript is a fork of the id. The id has lines older than the first shared line, and the other transcript has none.
+- `source`: the other transcript is the source of the id.
+- `related`: the two transcripts share lines, but the data does not show the direction. For example, a fork of a session that never compacted copies every line, so neither transcript has older lines.
+
+The scan parses each line as JSON and reads only the top-level `uuid` key. Thus a transcript that holds a `uuid` value only in a tool result (the output of a `cat` of another transcript, for example) is not a pair. For speed, the scan first finds the files that hold one of the values as text, and then parses only those files. On 2026-10-28, a scan of 24 GB of transcripts took 26 seconds.
+
+The scan reads only your own tree. A cross-user fork removes its copy of the foreign transcript when Claude writes the fork, so the scan cannot find the source of a cross-user fork. The log has that source.
+
+If you installed the shell function before `--forks` existed, run `crap --shell-setup` again. The old function does not send `--forks` to the binary, so it reads the report as a resume target and stops at the `cd`. Until you run the setup again, `command crap --forks <id>` works.
+
 ### Options
 
 - `[SESSION_ID]`: The Claude session id to resume (optional with `--status`, which then lists every session for the current directory). The lookup is **self-first** — your own tree first, then, only on a miss, every sibling home that has run Claude — so an id belonging to another account is found and forked automatically, with no flag
 - `-f, --force`: Resume even if the session appears to be running in another process
 - `--here`: Resume the session in the current directory (as a forked, new-id session) instead of its original one; also accepts a cross-user source (combined with `--user`), which is copied into your own tree rather than symlinked
+- `--expand`: Resume a fork of the session with each compaction undone, so `/rewind` in the fork lists the prompts from before each compaction. With `--here`, the fork runs in the current directory. Without it, the fork runs in the original directory. It works with `--user`, it ignores `--force`, and it prints the size of the history on stderr. See [Resume with the full history](#resume-with-the-full-history---expand)
 - `--user <name>`: Resume another user's session from a specific account — **not required** for a cross-user resume, since the no-flag path already falls back on its own; reach for it when you want to force one account in particular. `<name>` is resolved as a sibling of your home (`<home>/../<name>` — `/Users/<name>` on macOS, `/home/<name>` on Linux), and only that user's `~/.claude/projects` tree is searched (your own is skipped, so `--user` also disambiguates an id on purpose). The foreign transcript is copied into your own tree and resumed as a fork (fresh id) at its original directory — or in the current directory instead when combined with `--here` — the original is only ever read. Naming your own account is a same-user hit and resumes in place
 - `--status`: Print the session's conversational state (`waiting-for-user`, `busy`, `awaiting-assistant`, or `empty`; or `<status> (live, pid <pid>)` when open elsewhere) and exit, without resuming. With no id, lists every session for the current directory with its state and start/last times
 - `--json`: With `--status`, emit JSON instead of text (one object for an id, an array for the directory listing)
+- `--forks`: Show what the fork log knows about the session — each fork of it, with `saved` or `not saved`, and the chain of sessions it was forked from — and exit, without resuming
+- `--scan`: With `--forks`, also read every transcript in your own `~/.claude/projects` tree and report each one that shares a top-level `uuid` value with the session, with the count and the relation (`fork`, `source`, or `related`)
 - `--shell-setup`: Add the `crap` shell function to your ~/.zshrc or ~/.bashrc
 
 ### Shell Integration
 
-Because a program can't change its parent shell's working directory — and can't see shell aliases such as `clauded` — `crap` ships as a shell function. Install it once:
+Because a program can't change its parent shell's working directory — and can't see the shell alias that `CRAP_LAUNCHER` can name — `crap` ships as a shell function. Install it once:
 
 ```bash
 crap --shell-setup
@@ -3135,21 +4955,57 @@ Then run `source ~/.zshrc` (or `~/.bashrc`), or open a new terminal. After that,
 If you prefer to add it manually, add this to your `~/.bashrc` or `~/.zshrc`:
 
 ```bash
+# Start Claude with the argv in "$@". CRAP_LAUNCHER holds the launcher as shell
+# text: an alias, a function, or a command with flags. When it is empty, plain
+# claude starts Claude. A shell does not expand an alias in a function body
+# that it parsed before the alias existed, and eval parses the text when this
+# function runs.
+function __crap_launch() {
+    eval "${CRAP_LAUNCHER:-claude}"' "$@"'
+}
 function crap() {
-    # --status only queries; it never changes the parent shell. Run it straight
-    # through so its output (a token, or a multi-line listing) reaches the
-    # terminal instead of being parsed as a "<session-id>\n<dir>" resume target.
+    # These flags make the binary print to stdout and exit 0 without mutating
+    # the parent shell: --status queries, --forks prints a report from the fork
+    # log, --help/-h/--version/-V emit
+    # informational text, and --shell-setup writes the rc file (not the live
+    # shell) and prints activation instructions. Run them straight through so
+    # their output reaches the terminal instead of being parsed as a
+    # "<session-id>\n<dir>" resume target (which would otherwise `cd` into that
+    # text and mangle it). --shell-setup matters on upgrades, when this very
+    # function is already loaded and would otherwise swallow its instructions.
     case " $* " in
-        *" --status "*) command crap "$@"; return $? ;;
+        *" --status "*|*" --forks "*|*" --help "*|*" -h "*|*" --version "*|*" -V "*|*" --shell-setup "*)
+            command crap "$@"; return $? ;;
     esac
     local __crap_out
     __crap_out=$(command crap "$@") || return $?
-    if [ "${__crap_out%%$'\n'*}" = "__CRAP_HERE__" ]; then
-        local __crap_rest __crap_session __crap_link __crap_folder __crap_n0 __crap_watcher
+    local __crap_mode
+    __crap_mode=${__crap_out%%$'\n'*}
+    if [ "$__crap_mode" = "__CRAP_HERE__" ] || [ "$__crap_mode" = "__CRAP_FORK_AT__" ]; then
+        # A fork. Both wire shapes start "<mode>\n<session>\n<new-id>\n<link>".
+        # A cross-user resume (__CRAP_FORK_AT__) adds a trailing <dir>: the
+        # session's ORIGINAL directory, where the fork must run. The field that
+        # can hold any text is always last (the link for --here, the dir for a
+        # cross-user fork), so a path that contains newlines survives intact.
+        local __crap_rest __crap_session __crap_newid __crap_link __crap_dir __crap_folder __crap_n0 __crap_watcher
         __crap_rest=${__crap_out#*$'\n'}
         __crap_session=${__crap_rest%%$'\n'*}
-        __crap_link=${__crap_rest#*$'\n'}
+        __crap_rest=${__crap_rest#*$'\n'}
+        __crap_newid=${__crap_rest%%$'\n'*}
+        __crap_rest=${__crap_rest#*$'\n'}
+        if [ "$__crap_mode" = "__CRAP_FORK_AT__" ]; then
+            __crap_link=${__crap_rest%%$'\n'*}
+            __crap_dir=${__crap_rest#*$'\n'}
+            cd -- "$__crap_dir" || return 1
+        else
+            __crap_link=$__crap_rest
+        fi
         if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
+            # Claude only needs the import (a symlink, or a copy for a
+            # cross-user source) while it reads the transcript at startup;
+            # once it writes the forked session file, the import is
+            # vestigial. Watch the folder and drop it the moment a new .jsonl
+            # appears, rather than letting it linger for the whole session.
             __crap_folder=$(dirname -- "$__crap_link")
             __crap_n0=$(find "$__crap_folder" -maxdepth 1 -name '*.jsonl' 2>/dev/null | wc -l | tr -dc '0-9')
             (
@@ -3166,14 +5022,25 @@ function crap() {
             __crap_watcher=$!
             disown 2>/dev/null
         fi
-        if command -v clauded >/dev/null 2>&1; then
-            eval 'clauded --resume "$__crap_session" --fork-session'
-        else
-            claude --resume "$__crap_session" --fork-session
-        fi
+        # Build the resume argv: always --fork-session, so the original
+        # transcript is left untouched, and always --session-id with the id
+        # that the binary supplied, so the fork id is known after Claude exits.
+        # A launcher in CRAP_LAUNCHER that keeps that id in its own argv then
+        # resumes the fork after a Zellij resurrect, not the original.
+        # The earlier "command crap" call has already consumed the function's
+        # own arguments, so reusing the positional parameters here is safe.
+        set -- --resume "$__crap_session" --fork-session --session-id "$__crap_newid"
+        __crap_launch "$@"
         if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
             kill "$__crap_watcher" 2>/dev/null
             rm -f -- "$__crap_link"
+        fi
+        # Claude writes the fork transcript only after the first new input, so
+        # a fork that the user leaves at once is not saved. --status finds the
+        # fork exactly when "crap <new-id>" can resume it, so tell the id only
+        # then.
+        if command crap --status "$__crap_newid" >/dev/null 2>&1; then
+            printf 'Resume this fork with: crap %s\n' "$__crap_newid"
         fi
         return
     fi
@@ -3181,31 +5048,44 @@ function crap() {
     __crap_session=${__crap_out%%$'\n'*}
     __crap_dir=${__crap_out#*$'\n'}
     cd -- "$__crap_dir" || return 1
-    if command -v clauded >/dev/null 2>&1; then
-        eval 'clauded --resume "$__crap_session"'
-    else
-        claude --resume "$__crap_session"
-    fi
+    __crap_launch --resume "$__crap_session"
 }
 ```
 
-The binary speaks one of three output shapes. By default it prints the session id on the first line and the original directory on the rest; the function takes the first line as the session id and everything after it as the directory (so a path containing a newline stays intact), `cd`s there, and resumes. For `--here` it leads with a `__CRAP_HERE__` marker — having already imported the session into the current directory's project folder (a symlink for a same-user source, or a copy for a cross-user source) — so the function stays put and resumes with `--fork-session`. A backgrounded watcher counts the `.jsonl` files in that folder and removes that import as soon as a new (forked) one appears, so it doesn't linger for the whole session; a `kill` plus `rm` after Claude exits stops the watcher and serves as a safety net. If the link field is `__CRAP_NO_LINK__`, no symlink was needed and the watcher is skipped. For a cross-user resume — whether `--user` asked for one or the automatic fallback found it — it leads with a `__CRAP_FORK_AT__` marker instead — the binary has already *copied* the foreign transcript into your own tree, and the wire layout appends the session's original directory as a trailing field, so the function `cd`s into that original directory and then runs the same `--fork-session` plus background-watcher cleanup sequence as `--here`. Forwarding `"$@"` lets flags like `--force` and `--here` reach the binary. The `eval` is intentional: shell aliases aren't expanded inside function bodies, so it ensures a `clauded` alias is honored at call time. The `command crap` calls reach the binary past the function of the same name.
+If you add the function manually, paste it again after each upgrade of `crap`. An older copy does not read the output of a newer binary correctly.
+
+The binary prints one of three output shapes on stdout:
+
+- **Default:** `<session-id>\n<dir>`. The function uses the first line as the session id and all of the remaining text as the directory. Thus a path that contains a newline stays whole. The function goes into that directory with `cd` and resumes the session.
+- **`--here`:** `__CRAP_HERE__\n<session-id>\n<new-id>\n<link-or-__CRAP_NO_LINK__>`. The binary already put the session into the project folder of the current directory. This import is a symlink for a same-user source, or a copy for a cross-user source. With `--expand`, the import is an expanded import, and `<session-id>` is the id of the import, not of the original. The function stays in the current directory.
+- **Cross-user:** `__CRAP_FORK_AT__\n<session-id>\n<new-id>\n<link-or-__CRAP_NO_LINK__>\n<dir>`. The binary already copied the transcript of the other user into your own tree. A cross-user resume from `--user` or from the automatic fallback gives this shape, and so does `crap --expand <id>`, with the id of the expanded import as `<session-id>`. The function goes into `<dir>` with `cd`. `<dir>` is the original directory of the session.
+
+The two fork shapes use one path through the function. The only difference is the `cd` for the cross-user shape. The field that can hold any text is always the last field, so a newline in a path does not break the fields.
+
+If the link field is not `__CRAP_NO_LINK__`, a watcher in the background counts the `.jsonl` files in the project folder. When a new file (the fork) appears, the watcher removes the import. Thus the import does not stay for the full session. After Claude exits, the function stops the watcher with `kill`. Then it removes the import with `rm`, in case the watcher did not. If the link field is `__CRAP_NO_LINK__`, the binary made no import, and the function starts no watcher.
+
+The function always resumes a fork with `--resume <session-id> --fork-session --session-id <new-id>`. `--fork-session` keeps the original transcript unchanged. `--session-id` gives the fork the id that the binary chose, so the function knows the fork id after Claude exits.
+
+After the cleanup, the function prints `Resume this fork with: crap <new-id>`. It prints this line only when `crap --status <new-id>` finds the fork. Claude saves the fork only after your first new input. Thus, if you exit a fork at once, the function prints no line.
+
+The function sends `--status`, `--forks`, `--help`, `-h`, `--version`, `-V`, and `--shell-setup` directly to the binary. These flags do not change the parent shell, and their output must go to the terminal. The function forwards `"$@"`, so flags such as `--force` and `--here` get to the binary. Both paths start Claude through `__crap_launch`, so the launcher choice is in one place. The `eval` in `__crap_launch` is intentional. A shell does not expand an alias in a function body that it parsed before the alias existed. `eval` parses the launcher text when the function runs, so an alias that `CRAP_LAUNCHER` names expands, and the flags of a launcher become separate words. The `command crap` calls get to the binary, not to the function of the same name.
 
 ### Exit Codes
 
 - `0`: Success
-- `1`: No session found with that id
+- `1`: No session found with that id (for `--forks`: no transcript and no line of the fork log has that id)
 - `2`: Session has no recorded working directory
 - `3`: The session's original directory no longer exists
 - `4`: Invalid session id
 - `5`: Shell setup failed
 - `6`: Could not determine your home directory
 - `7`: The session is already running in another process (use `--force` to override)
-- `8`: `--here` or a cross-user resume (whether `--user` asked for one or the automatic fallback found it): could not import the session into the project folder (create the folder, or make the symlink for a same-user source / copy the transcript for a cross-user source)
+- `8`: `--here`, `--expand`, or a cross-user resume (whether `--user` asked for one or the automatic fallback found it): could not import the session into the project folder (create the folder, or make the symlink for a same-user source / copy the transcript for a cross-user source / read the transcript and write the expanded import for `--expand`)
 - `9`: `--here`: could not determine the current working directory
 - `10`: `--here`: the requested new session id already names an existing session (choose a fresh id so the fork can't overwrite it)
 - `11`: The session's original directory exists but can't be entered from this account (a sealed parent, or a missing search bit) — use `crap --here <id>` to fork it in the current directory instead
 - `12`: `--user <name>` named no account with a `.claude/projects` tree (a typo, or an account that never ran Claude); the message lists the accounts you can resume from
+- `13`: `--expand`: the transcript has a compaction that `crap` cannot undo; the message names the boundary or the summary, and no import was written
 
 ## bm (bulk move)
 
@@ -3393,3 +5273,812 @@ A session that wrote no record is left blank and counted in the footer. Seven of
 - **Support processes.** The background daemon, pty hosts, and spares run the same executable but are not sessions. They are counted in the footer, not listed.
 - **Spawned tools.** A tool a session starts, such as a search, can still be holding the Claude Code executable at the moment the process table is sampled. It reports its own name in `argv[0]`, which is how `occ` tells it apart from a session.
 - **Other accounts' sessions.** They appear in the process table but give up no arguments, no working directory, and no start time without privileges `occ` does not ask for. They are counted in the footer. Reporting a clean machine while sixty unreadable sessions run on it would be worse than saying they cannot be read.
+
+## faulte (fault rate)
+
+Rank every process of this Mac by the page faults that it makes per second, and say what the memory of the Mac did over the same sample. `faulte kill` stops the old idle Claude Code sessions, after it shows the plan and asks.
+
+On 2026-09-17 and 2026-09-18, this Mac spent 78% of its time in the kernel. 34 MB of memory was unused, the compressor held 32 GB, and 20 seconds of that state counted 46,564 swap-ins. The kernel did almost nothing but move pages between memory, the compressor and the swap file.
+
+213 Claude Code processes made 90% of all page faults in that sample. No single one of them was the cause: the median session made 23,000 faults in the 20 seconds, and the `node` and `vitest` processes of a running pre-commit hook made 0.4% together. The answer was the sum of 213 small rates, and no row of a table says a sum. That is why `faulte` prints one total line for the Claude Code sessions, above the table. 86 of the 213 sessions were older than 7 days, and that is why `faulte kill` exists.
+
+### Is this the problem now?
+
+`faulte check` gives one verdict in 5 seconds. It reads the CPU counters and the compressor counters of the kernel, and it starts one short process to learn the newest process number. It runs no `top` and no `ps`, thus it works when one `ps` takes 13 seconds.
+
+| Verdict | Meaning | Exit code |
+| --- | --- | --- |
+| `OK` | System time is below 30% of all CPU time. | 0 |
+| `MEMORY CHURN` | System time is at least 30%, and the compressor compresses and decompresses at least 50,000 pages each second. | 1 |
+| `PROCESS CHURN` | System time is at least 30%, the compressor does not reach its limit in both directions, and at least 150 processes start each second. | 1 |
+| `OTHER SYSTEM TIME` | System time is at least 30%, the compressor does not reach its limit in both directions, and fewer than 150 processes start each second. | 1 |
+
+An error gives the exit code 2. `faulte check --watch` prints one line for each interval until you stop it.
+
+On 2026-11-08, at 0% idle, this Mac showed two states. With 32 GB in the compressor, system time was 52% to 66%, and it followed the rate of compressions (correlation 0.88, over 12 samples of 5 seconds). It did not follow the load average (0.32). Each second, 193 to 444 new processes started. With 16 GB in the compressor and at most 51,323 compressions each second, system time was still 42% to 56%, with 257 to 490 new processes each second. The limits come from the bad samples of that day. No sample of a quiet period set them.
+
+### Basic Usage
+
+```bash
+faulte
+faulte --interval 20s --limit 40
+faulte check
+faulte check --watch --interval 10s
+faulte kill
+faulte kill --older-than 3d --idle-for 1h --max 5
+```
+
+### Options
+
+- `--interval <DURATION>`: The length of the sample, for example `5s`, `10m`, `2h`, or `7d`. A bare number is a number of seconds. The ranking and `faulte kill` count the page faults of each process over this time. `faulte check` reads the kernel counters at the start and at the end of this time. Defaults to `5s`. Zero is refused, because a sample of no time measures nothing.
+- `--limit <N>`: The number of rows that the table shows. Defaults to 25. One line under the table counts the rows that the limit hid, and gives their share of all faults, because the limit hides the small rates and the small rates were the load. The flag belongs to the ranking alone: `faulte kill` shows every candidate of its plan, and refuses `--limit` rather than take it and ignore it.
+- `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
+- `-h`, `--help`: Print the usage.
+
+`faulte kill` samples the page faults as well, so it takes `--interval`, and three flags of its own:
+
+- `--older-than <DURATION>`: Select a session only when it is older than this time. Defaults to `7d`.
+- `--idle-for <DURATION>`: Select a session only when it became idle more than this time ago. Defaults to `10m`.
+- `--max <N>`: Stop no more than N sessions. `faulte` keeps the N oldest, and the plan counts the rest.
+
+### What it prints
+
+```
+$ COLUMNS=150 faulte --interval 2s --limit 10
+1,744 processes over a 2.0 s window (interval 2s) — 9,158 faults, 4,579/s
+swap: 4 in, 0 out in 3.6 s · compressor 15.0 GB · swap in use 8.4 GB of 10.0 GB
+Claude: 37 sessions made 0.2% of all faults (9 of another account)
+skipped: 1 exited before faulte read it (19.6% of the faults), 77 zombies, 2 were not in the top sample
+
+┌───────┬───────────────┬──────────┬───────┬────────┬─────────┬────────────────────────────────────────────────────────┬─────────┬───────┬───────────┐
+│ PID   ┆ OWNER         ┆ FAULTS/S ┆ SHARE ┆ RSS    ┆ AGE     ┆ COMMAND                                                ┆ SESSION ┆ STATE ┆ DIRECTORY │
+╞═══════╪═══════════════╪══════════╪═══════╪════════╪═════════╪════════════════════════════════════════════════════════╪═════════╪═══════╪═══════════╡
+│ 33899 ┆ root          ┆ 1,271    ┆ 27.8% ┆ 50 MB  ┆ 7h 35m  ┆ /System/Library/PrivateFrameworks/XprotectFramework.fr ┆         ┆       ┆           │
+│       ┆               ┆          ┆       ┆        ┆         ┆ amework/Versions/A/XPCServices/XprotectService.xpc/Con ┆         ┆       ┆           │
+│       ┆               ┆          ┆       ┆        ┆         ┆ tents/MacOS/…                                          ┆         ┆       ┆           │
+├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ 39450 ┆ timmattison   ┆ 689      ┆ 15.0% ┆ 19 MB  ┆ 3s      ┆ /Volumes/SamsungSSDs/code/tools-worktrees/issue-510/ta ┆         ┆       ┆           │
+│       ┆               ┆          ┆       ┆        ┆         ┆ rget/debug/deps/repository-e0e5ec02b6d5fc96            ┆         ┆       ┆           │
+├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ 40242 ┆ scyloswork    ┆ 573      ┆ 12.5% ┆ 29 MB  ┆ 5h 3m   ┆ gsw                                                    ┆         ┆       ┆           │
+├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ 66335 ┆ timmattison   ┆ 296      ┆ 6.5%  ┆ 8 MB   ┆ 5h 52m  ┆ mosh-server new -c 256 -s -l LANG=en_US.UTF-8 -l       ┆         ┆       ┆           │
+│       ┆               ┆          ┆       ┆        ┆         ┆ MOSH_CLIENT_IMAGES=kitty,sixel,iterm2                  ┆         ┆       ┆           │
+├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ 659   ┆ _windowserver ┆ 129      ┆ 2.8%  ┆ 191 MB ┆ 24d 0h  ┆ /System/Library/PrivateFrameworks/SkyLight.framework/R ┆         ┆       ┆           │
+│       ┆               ┆          ┆       ┆        ┆         ┆ esources/WindowServer -daemon                          ┆         ┆       ┆           │
+├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ 908   ┆ root          ┆ 88       ┆ 1.9%  ┆ 42 MB  ┆ 24d 0h  ┆ /opt/homebrew/opt/tailscale/bin/tailscaled             ┆         ┆       ┆           │
+├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ 26222 ┆ scyloswork    ┆ 54       ┆ 1.2%  ┆ 58 MB  ┆ 4h 12m  ┆ /Applications/Stats.app/Contents/MacOS/Stats           ┆         ┆       ┆           │
+├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ 68603 ┆ scyloswork    ┆ 47       ┆ 1.0%  ┆ 43 MB  ┆ 8h 3m   ┆ /Applications/Wispr Flow.app/Contents/Resources/swift- ┆         ┆       ┆           │
+│       ┆               ┆          ┆       ┆        ┆         ┆ helper-app-dist/Wispr Flow.app/Contents/MacOS/Wispr    ┆         ┆       ┆           │
+│       ┆               ┆          ┆       ┆        ┆         ┆ Flow                                                   ┆         ┆       ┆           │
+├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ 88885 ┆ _coreaudiod   ┆ 44       ┆ 1.0%  ┆ 43 MB  ┆ 10d 19h ┆ /usr/sbin/coreaudiod                                   ┆         ┆       ┆           │
+├╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌┤
+│ 7205  ┆ timmattison   ┆ 34       ┆ 0.8%  ┆ 11 MB  ┆ 3d 0h   ┆ mosh-server new -c 256 -s -l LANG=en_US.UTF-8 -l       ┆         ┆       ┆           │
+│       ┆               ┆          ┆       ┆        ┆         ┆ MOSH_CLIENT_IMAGES=kitty,sixel,iterm2                  ┆         ┆       ┆           │
+└───────┴───────────────┴──────────┴───────┴────────┴─────────┴────────────────────────────────────────────────────────┴─────────┴───────┴───────────┘
+… 1,734 more processes made 10.0% of all faults
+```
+
+The first line gives the window that `faulte` measured, beside the interval that the command line asked for. The second line gives the swap traffic, the size of the compressor, and the swap in use. The third line is the total for Claude Code. This Mac was not short of memory at that moment, so the Claude Code share is 0.2%. On 2026-09-18 the same line said 90%.
+
+The last header line counts the processes that got no row, and it is there only when there is one to count. Each process of the Mac is a row of the table or a member of one of those counts: a process that exited between the two reads, a zombie, or a process that `top` did not sample. A tool that drops a process without a word reports a clean Mac that is not clean.
+
+Each row gives the PID, the owner, the faults per second, the share of all faults, the resident memory, the age, and the command. A row of a Claude Code session gives the session ID, the state (`busy`, `waiting`, or `idle` with the time since it became idle), and the directory as well.
+
+### Why a rate, and not a counter
+
+`top -o faults` sorts by the counter since each process started. The oldest process of the Mac ranks first on that counter, whatever it does now. The first analysis of the incident read the resident memory of each process, and then those counters, and neither number named the cause.
+
+So `faulte` runs `top -l 2 -s <interval> -c d` and reads the **second** sample only. The first sample holds the counter since each process started. The second holds the change over the interval, which is the live rate.
+
+`faulte` divides that change by the window that it measured, and not by the interval that the person asked for. Under `-s 2`, the two timestamps of a loaded Mac were 4 seconds apart. An interval is what `top` waits for, and a window is what it delivered, so the header prints both.
+
+### Why the swap traffic comes from the system, and not from the processes
+
+The per-process page-in counter does not count swap. In the 20 seconds that measured 46,564 swap-ins, the per-process page-in counters added up to about 1,000. A tool that ranks by that counter reports a quiet Mac while the swap file takes all of the time.
+
+`faulte` reads `host_statistics64(HOST_VM_INFO64)` before the sample and after it. The swap-ins, the swap-outs and the size of the compressor come from those two reads, and the swap in use comes from `vm.swapusage`. The ranking of the processes comes from the fault counters of `top`. The two questions have two sources, and each source answers the question that it can answer.
+
+### Why it runs `/usr/bin/top` and `/bin/ps`
+
+Two accounts share this Mac, and each one ran about 100 Claude Code processes. A third-party binary reads almost nothing about the processes of another account: `proc_pidinfo(PROC_PIDTASKINFO)` and `proc_pid_rusage` return `EPERM`, so a crate such as `sysinfo` gives no owner, no parent, no start time, and no memory for them.
+
+`/usr/bin/top` and `/bin/ps` both carry the entitlement `com.apple.system-task-ports.read`, and `/bin/ps` is setuid root as well. Each one therefore reads the processes of every account, for an account that holds no privileges at all. No third-party binary can get that entitlement. So `faulte` runs the two commands of the system and parses what they print: the fault counters come from `top`, and the owner, the parent, the memory, the start time and the command line come from `ps`.
+
+Both parsers fail closed. A header row that is not the one `faulte` asked for, a sample with no row, and a row that is not a number all print an error and exit 2. An empty ranking looks the same as a Mac that does nothing, so `faulte` never prints one.
+
+The registry of Claude Code is the one fact that stays out of reach. The `~/.claude/sessions` directory of the other account has the mode `0700`. A Claude Code process of another account therefore gives its fault rate, its memory and its age, and `other account — run with sudo` in place of the session, the state and the directory. Under `sudo`, `faulte` reads the registry in the home directory of each owner, and `faulte kill` can stop the sessions of every account. `faulte` never runs `sudo` itself, the same as `crap`.
+
+### `faulte kill`
+
+`faulte kill` stops Claude Code sessions, and it never selects another kind of process. `pk` does that job. A session is a candidate when all four of these rules are true:
+
+1. The process is older than `--older-than` (7 days by default).
+2. The registry status is `idle`, and the session became idle more than `--idle-for` ago (10 minutes by default). A session whose idle time is unknown fails this rule. A session with no registry record fails it too, because nothing proves that it is idle.
+3. No descendant of the session is alive. A background shell or a running tool call makes a session active, whatever its status says.
+4. The session is not the `faulte` process and not an ancestor of it. A session that runs `faulte kill` is never a candidate.
+
+A `busy` session and a `waiting` session fail rule 2. `waiting` means that the session waits for an answer from its user, and a stop discards the question.
+
+The plan comes before the question. It lists the candidates oldest first, in the columns of the ranking, and it counts every session that it refused under the first rule that the session failed:
+
+```
+$ COLUMNS=150 faulte kill --interval 2s
+0 Claude sessions are older than 7d, idle for more than 10m, and have no live descendant
+
+not selected: 1 runs faulte, 26 younger than 7d, 1 not idle
+faulte stops nothing.
+```
+
+That run found nothing to stop, so it asked nothing. When the plan names a session, `faulte` prints the table of the candidates and then asks on the last line:
+
+```
+Stop 19 sessions? [y/N]
+```
+
+- Only `y` and `yes` confirm, in any case, after the spaces come off. An empty answer, any other answer, and the end of the input all stop nothing. **No flag skips the question.**
+- A run whose input is not a terminal prints the plan, stops nothing, and exits 1. A script, a pipe and a hook answer nothing, and a stop is not reversible.
+- `--max N` keeps the N oldest candidates. The plan counts the ones that it held back.
+
+A person takes minutes to answer, so the plan is old by then. Immediately before it signals a session, `faulte` reads the process table and the registry again. The check drops a session whose status changed, a session that started a process since the plan, a PID that is gone, and a PID that another process took. A session that the person started to use again in those minutes survives, and the report names it and the reason.
+
+`SIGTERM` goes first, so that Claude Code closes its transcript. `SIGKILL` goes 30 seconds later, and only to a target that is still the same process. The grace period is long because of the Mac that this tool is for: a Mac that is short of memory is slow to page a process in, and a process handles no signal until it is in memory. After `SIGKILL`, `faulte` waits up to 10 seconds for the session to go, and the report names a session that is still there then as one that did not stop.
+
+For each session that it stopped, `faulte` prints one line:
+
+```
+crap 34ffff5a-3324-4038-89bb-d5cc5972cfd0
+```
+
+The transcript of a session stays on disk after the stop, so `crap` takes that session up again in the directory that it ran in. Nothing that `faulte kill` stops is lost.
+
+### What it leaves out, and says so
+
+- **A scheduled wake-up.** A session can be idle and hold a scheduled wake-up, for example a `/loop`. The registry records no wake-up, so `faulte` cannot see one. This is why the plan shows every candidate before the question: `faulte` gives the facts that it has, and the person decides.
+- **The sessions of another account, without root.** They get a row and a fault rate, and `other account — run with sudo` in place of the session fields. In the plan, they get a block of their own with the `sudo faulte kill` command line that includes them, and `faulte kill` never signals them. A count of unreadable sessions is a better answer than silence about them.
+- **A process that the two sources disagree about.** `top` lists no zombie, and `ps` lists no PID 0. A process can also start or stop between the two reads. `faulte` gives PID 0 a row that names `kernel_task`, and it gives every other such process a count in the header. Nothing falls out of the report.
+- **A live display, and another platform.** The ranking and `faulte kill` take one sample and exit. `faulte check --watch` adds one line for each interval, and it redraws nothing. It supports macOS only, because the fault sampler and the counters of the memory system are those of macOS. On another platform it prints `faulte supports macOS only.` and exits 1.
+
+### Exit codes
+
+- `0`: Success. A question that the person declined is a success as well, because `faulte` did what the answer said. For `faulte check`, the verdict is `OK`, or the reader of a `--watch` left.
+- `1`: The platform is not macOS, or `faulte check` found a problem, or `faulte kill` found candidates and its input is not a terminal.
+- `2`: A source of this Mac failed, or its output failed a parser, or a stop did not do what the plan said that it would do, or `faulte check` could not write its output. `faulte` prints the reason, and it never prints an empty ranking.
+
+## wdid (what do i do)
+
+Count which tools of this workspace you really use. `wdid` reads the whole shell history through atuin. It gives each tool a use count, the date of the first use and of the last use, and the way you ran it. It also lists the tools that you never used, and the tools that you stopped using.
+
+`atuin stats` cannot answer this question. It ranks the first word of each command. A tool that you run through an alias (`wtm`), through a function (`wt`), after a pipe, or after `sudo` has no count under its own name. `wdid` parses each command line, finds each word in command position, and follows aliases and functions down to the tool.
+
+### How it reads the history
+
+`wdid` runs one command:
+
+```bash
+atuin search --filter-mode global --include-duplicates --print0 --timezone +0 \
+  --format '{time}\t{exit}\t{host}\t{user}\t{command}' ''
+```
+
+It does not use `atuin history list`. That command obeys `filter_mode` of your atuin config, and a config with `filter_mode = "session"` gives one row. The search above always gives every row. The times are in UTC.
+
+`wdid` reads the aliases and the functions from your interactive shell (`$SHELL`, zsh or bash). It starts `$SHELL -i -c` with a script that prints them between two unique markers, so text from your startup files does no damage. The shell has 30 seconds. `--no-shell` skips this step.
+
+### What counts
+
+- A tool name in command position: the first word of a command, a word after `|`, `&&`, `||`, `;` or `&`, a word in a subshell, a brace group, `if`, `for`, `while`, `until` or `case`, and a word in a `$(...)` or backtick substitution or in `<(...)`.
+- A word that follows a wrapper: `sudo`, `doas`, `time`, `nice`, `nohup`, `env`, `command`, `exec`, `noglob`, `builtin`, `caffeinate`, `xargs`, `watch`, `timeout` and `gtimeout`. `wdid` skips the options of the wrapper and their arguments (`sudo -u root`, `env -u NAME`, `nice -n 10`), the assignments of `env` and `sudo` (`env FOO=1`), and the duration of `timeout`. `command -v tool` is a lookup and does not count. A wrapper that is not in this list makes a count too low, never too high.
+- An alias, as the shell expands it. `wtm` with `alias wtm='wt --main'` counts for `wt`. A zsh global alias counts in every position, thus `ls PH` with `alias -g PH='| prhash'` counts for `prhash`. A zsh suffix alias counts for a command word with its suffix, thus `README.md` with `alias -s md=glow` counts for `glow`. The report shows the alias in the column `Through an alias or a function`, and it shows a suffix alias as `*.md`.
+- A function, through its body, to any depth. A function that calls `cwt` gives `cwt` a use through that function. An autoloaded zsh function counts too, because `wdid` loads its body first with `autoload +X`, which runs nothing. A function whose name starts with `_` (a completion function) stays unloaded.
+- A path in a `bin` directory. `~/.cargo/bin/prcp` is a use of `prcp`. A path anywhere else is not a use: each crate directory has the name of its tool, and zsh changes into a directory that you type alone, so `src/prcp` is a `cd`.
+- `cargo run --bin <tool>` and `cargo run -p <tool>` count as a development run. The report shows them in the column `Dev runs`. They are not uses, and they do not change the first use or the last use. A path with a `target` directory (`./target/release/prcp`) is a development run as well.
+
+### What does not count
+
+- Quoted text. `git commit -m "fix prcp"` does not use `prcp`.
+- A row with exit code 127. The shell did not find the command.
+- A line that does not parse. `wdid` does not guess. The report counts these rows, and `wdid --unparsed` lists them, with the number of rows for each command. It also lists the functions whose body did not parse, and the alias lines that did not parse.
+- Uses by scripts and by agents. atuin records only what you type in an interactive shell. A tool that a script runs for you has no count here.
+
+### Basic Usage
+
+```bash
+wdid
+wdid --json
+wdid --since 2026-01-01
+wdid --unparsed
+wdid --repo ~/code/tools --no-shell
+```
+
+### Options
+
+- `--repo <PATH>`: The cargo workspace to report on. Without it, `wdid` uses the git work tree that holds the current directory. The workspace must have a `Cargo.toml`.
+- `--since <YYYY-MM-DD>`: Count only the rows from this date on. A row on this date counts. The report says how many rows it left out.
+- `--json`: Print the whole report as one JSON document. It conflicts with `--unparsed`.
+- `--unparsed`: Print the commands that `wdid` could not parse, one line for each (`<rows>`, a tab, the command), the functions that it could not parse, and the alias lines that it could not parse, one line for each. Print no report. In the `--json` document, `shell.unparsed_aliases` is a list of those alias lines.
+- `--no-shell`: Do not start your shell. Aliases and functions then do not count.
+- `--new-days <DAYS>`: A tool that never ran is new when it is younger than this. Defaults to 90.
+- `--idle-days <DAYS>`: A tool is idle when its last use is older than this. Defaults to 180.
+- `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
+- `-h`, `--help`: Print the usage.
+
+The table fits `COLUMNS` when that variable is set, else the width of the terminal. An error prints `wdid: <reason>` on standard error and exits 1. A usage error exits 2.
+
+### The three groups
+
+After the table, `wdid` prints three groups, with one tool on each line:
+
+- **Never used, old.** No use, and the tool was added `--new-days` days ago or more. A tool with an unknown age is old. These are the candidates to delete.
+- **Never used, new.** No use, and the tool was added less than `--new-days` days ago. It has had no time yet. The group shows the date of each tool.
+- **Idle.** The tool has uses, and the last use is older than `--idle-days` days. The group shows the uses and the date of the last use.
+
+The date that a tool was added is the date of the oldest commit that touches its crate directory. A use before that date still counts, because the tool can have existed in another form before.
+
+### The column `Notes`
+
+- `not installed`: `cargo install --list` does not list the binary. A tool that is not installed has no uses for that reason.
+- `<path> runs first`: another program with the same name comes first in `PATH`, so the tool does not run when you type its name. On one Mac, `/usr/bin/aa` (Apple Archive) comes before `~/.cargo/bin/aa`.
+- `not on PATH`: the tool is installed, but no directory of `PATH` holds it.
+
+`wdid` compares `PATH` with the directory where `cargo install` puts binaries. That directory is `$CARGO_INSTALL_ROOT/bin`, else `$CARGO_HOME/bin`, else `~/.cargo/bin`. `wdid` does not read `install.root` from the cargo config file.
+
+### Example
+
+An excerpt of a real run on 2026-10-14, against 347,212 rows of history:
+
+```text
+┌────────────────────────┬───────┬───────┬───────────────────────────────────────┬──────────┬────────────┬────────────┬────────────┬────────────────────────┐
+│ Tool                   ┆  Uses ┆ Typed ┆ Through an alias or a function        ┆ Dev runs ┆ First use  ┆ Last use   ┆ Added      ┆ Notes                  │
+╞════════════════════════╪═══════╪═══════╪═══════════════════════════════════════╪══════════╪════════════╪════════════╪════════════╪════════════════════════╡
+│ cwt                    ┆ 7,003 ┆    32 ┆ wtm 3,068, wt 3,035, wtf 727, wtb 141 ┆        0 ┆ 2026-01-08 ┆ 2026-10-14 ┆ 2026-01-08 ┆                        │
+│ gsw                    ┆ 4,073 ┆ 4,073 ┆                                       ┆        0 ┆ 2026-05-14 ┆ 2026-10-14 ┆ 2026-05-14 ┆                        │
+│ nwt                    ┆ 2,094 ┆ 1,031 ┆ si 1,063                              ┆        0 ┆ 2025-12-17 ┆ 2026-10-14 ┆ 2025-12-17 ┆                        │
+│ gitnuke                ┆ 1,710 ┆ 1,549 ┆ gitclean 161                          ┆        0 ┆ 2026-04-14 ┆ 2026-10-14 ┆ 2026-07-30 ┆                        │
+│ ic                     ┆   363 ┆   363 ┆                                       ┆      225 ┆ 2025-06-01 ┆ 2026-10-09 ┆ 2025-06-01 ┆                        │
+│ update-aws-credentials ┆   218 ┆   218 ┆                                       ┆        0 ┆ 2024-03-05 ┆ 2025-11-13 ┆ 2025-06-01 ┆                        │
+│ aa                     ┆    26 ┆    26 ┆                                       ┆        0 ┆ 2025-09-17 ┆ 2026-07-30 ┆ 2025-09-17 ┆ /usr/bin/aa runs first │
+│ goup                   ┆     0 ┆     0 ┆                                       ┆        0 ┆ -          ┆ -          ┆ 2025-08-26 ┆                        │
+└────────────────────────┴───────┴───────┴───────────────────────────────────────┴──────────┴────────────┴────────────┴────────────┴────────────────────────┘
+
+Never used, old (added 90 or more days ago):
+  goup
+  htmlboard
+  sirn
+Never used, new (added less than 90 days ago):
+  faulte (added 2026-09-18)
+  localnext (added 2026-09-04)
+  occ (added 2026-08-14)
+Idle (no use in the last 180 days):
+  update-aws-credentials (218 uses, last use 2025-11-13)
+  repotidy (105 uses, last use 2025-05-15)
+
+History: 347,212 rows. 4,385 not counted (exit 127). 13 did not parse (wdid --unparsed prints them).
+Shell: 276 aliases, 1,267 functions (24 did not parse).
+```
+
+The excerpt leaves out rows of the table and entries of the groups. `si` is a shell function that runs `nwt -b <branch>`, so each `si` is a use of `nwt`.
+
+### Install
+
+```bash
+cargo install --git https://github.com/timmattison/tools wdid
+```
+
+## bibibi (bye bye bye)
+
+Find the commit that caused a regression, with a test from a later commit. The name is a reference to the NSYNC song "Bye Bye Bye": `bibibi` finds the bad commit, and then you can say goodbye to it.
+
+TDD gives a red commit that proves a bug. The next question is often "which commit caused this bug?" `git bisect` answers that question, but it cannot use the red test. At each step, bisect puts the tree of an older commit in the working directory, and the red test is part of a newer tree. `git help bisect` gives a workaround ("Automatically bisect with temporary modifications"), and each person writes that script again. A script written by hand blames an unrelated commit when the build fails there, stops when a signal kills the test, never tests the two ends of the range, and can leave the tree dirty for the next checkout.
+
+`bibibi` makes that procedure one command:
+
+1. It takes the change of the test commit one time, as a patch (`git diff-tree -p --binary --full-index`).
+2. It refuses a test commit that is a merge or a root commit or that changes no file, and a `--good` commit that is not an ancestor of the bad commit.
+3. It makes a scratch worktree in a temporary directory. Your checkout does not change.
+4. At each commit that it tests, it checks out the commit, applies the patch (`git apply`, then `git apply --3way`), runs the build, runs the test, and restores the tree (`git reset --hard`, then `git clean -fd`).
+5. Before the search, it runs the test at each `--good` commit and at the bad commit (the pre-flight). If a good commit does not pass or the bad commit does not fail, it refuses, and the output of the build and the test is already on standard error.
+6. It chooses each next commit from `git rev-list --bisect-all`, and keeps the search state in memory. It never runs `git bisect`, so a Ctrl-C leaves no `refs/bisect/*` and no `BISECT_LOG`.
+
+### Basic Usage
+
+```bash
+# HEAD is the red commit that adds the test, and v1.4.0 is a release where the test passes
+bibibi --good v1.4.0 -- cargo test -q --test regression_add
+
+# Build first. A commit that does not build is a skip, not a bad commit
+bibibi --good v1.4.0 --build 'cargo test --no-run -q' -- cargo test -q --test regression_add
+
+# The test commit is not HEAD, the bad commit is not its parent, and two branches merged
+bibibi 3f2a1bc --good a1b2c3d --good d4e5f6a --bad 9e8d7c6 -- sh tests/add.sh
+
+# A test that can hang
+bibibi --good v1.4.0 -- timeout 60 cargo test -q --test regression_add
+```
+
+### Options
+
+```text
+bibibi [<test-commit>] --good <commit>... [--bad <commit>] [--build <command>] -- <test-command>...
+```
+
+- `<test-commit>`: The commit that adds the test. Defaults to `HEAD`, which is usually the red commit that you just made. It must have one parent and change at least one file. If the test is in more than one commit, squash it into one red commit first.
+- `--good <commit>`: A commit where the test passes. Necessary. Give the flag more than once for more than one good commit, for example one on each branch of a merge.
+- `--bad <commit>`: A commit where the test fails. Defaults to the parent of the test commit, which has the bug but not the test.
+- `--build <command>`: A shell command that runs before the test, through `sh -c`. If it exits non-zero or a signal stops it, `bibibi` skips the commit.
+- `-- <test-command>...`: The test. `bibibi` runs it as an argument vector, without a shell. Write `-- sh -c '...'` when you need a shell.
+- `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
+- `-h`, `--help`: Print the usage.
+
+The build and the test run in the root of the scratch worktree, with `/dev/null` as standard input. Their standard output and standard error go to the standard error of `bibibi`, so the standard output of `bibibi` holds only the result. They get your environment without the `GIT_` variables that a git hook exports (`GIT_DIR`, `GIT_INDEX_FILE`, and the others), so a `bibibi` that a hook starts does not aim the test at a different repository. The six variables that a person sets on purpose stay: `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_ASKPASS`, and `GIT_TERMINAL_PROMPT`.
+
+### The verdict at one commit
+
+| Result | Verdict |
+| --- | --- |
+| The patch does not apply, also with `--3way` | skip |
+| The build exits non-zero, or a signal stops it | skip |
+| The test exits 0 | good |
+| The test exits 125 | skip |
+| The test exits with a different code | bad |
+| A signal stops the test | bad |
+
+A skip never blames a commit. If skips leave more than one commit that can be the first bad commit, `bibibi` names each of them and exits 1.
+
+### What it prints
+
+Standard error has one line for each commit that `bibibi` tests: the short id, the verdict, the subject, the reason for a skip, and the approximate number of steps left. The subject gets shorter to fit the terminal. Standard output has only the result: the full id and the subject of the first bad commit.
+
+```
+$ COLUMNS=80 bibibi --good 0ea2e3d -- sh tests/add.sh
+test: add(2, 2) must be 4
+bibibi: 0ea2e3d good add the add function - pre-flight
+test: add(2, 2) must be 4
+bibibi: 9e5dd09 bad  write note 10 - pre-flight
+test: add(2, 2) must be 4
+bibibi: 40b0a0f bad  simplify the arithmetic - about 1 step left
+test: add(2, 2) must be 4
+bibibi: 50ce507 good write note 3 - about 1 step left
+test: add(2, 2) must be 4
+bibibi: 5a88026 good write note 5 - about 0 steps left
+40b0a0f0eb62646296305a44a2183e911ccfe825 simplify the arithmetic
+```
+
+The `test:` lines are the output of the test script. When the build fails at the culprit and at its parent, skips leave more than one candidate. Standard output then has one line for each candidate:
+
+```
+$ COLUMNS=80 bibibi --good 0ea2e3d --build 'test ! -f note-5.txt || test -f note-7.txt' -- sh tests/add.sh
+...
+bibibi: 40b0a0f skip simplify the ari… - the build exited 1 - about 2 steps left
+bibibi: 5a88026 skip write note 5 - the build exited 1 - about 2 steps left
+...
+40b0a0f0eb62646296305a44a2183e911ccfe825 simplify the arithmetic - skipped: the build exited 1
+5a88026130fe71a05742aca6276ffccf7f34c215 write note 5 - skipped: the build exited 1
+d09208ec7eea6e59b1a2c6b2e4df85a21c7c4708 write note 7 - bad
+bibibi: skips leave 3 candidates for the first bad commit
+```
+
+### Exit codes
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | The search found one first bad commit. |
+| 1 | Skips leave more than one candidate. |
+| 2 | Usage error, refusal, or git error. |
+| 128 + signal | A signal ended the run: 129 for SIGHUP (the terminal closed), 130 for SIGINT (Ctrl-C), 143 for SIGTERM. |
+
+### Notes
+
+- **Your checkout does not change.** HEAD, the index, your uncommitted files, and the `refs/bisect/*` of a `git bisect` that you have in progress stay as they are. The scratch worktree and the patch file go away after each end of the run: a result, a refusal, an error, a panic, SIGHUP, SIGINT, or SIGTERM.
+- **A Ctrl-C never counts as a verdict.** The build and the test run in a session of their own. On SIGHUP, SIGINT, or SIGTERM, `bibibi` stops the process group of the build or the test (SIGTERM, then SIGKILL after 2 seconds), removes the scratch worktree, and exits 128 + signal. A Ctrl-C or a hangup of the terminal also reaches a git command of `bibibi`. If that git command fails first, the run can exit 2 in place of 130 or 129, and the cleanup still occurs. A second Ctrl-C during the cleanup can stop the `git worktree remove` of `bibibi` and leave the scratch worktree behind. It is in your temporary directory, and `git worktree list` shows it. Remove it with `git worktree remove --force <path>`. If its directory is already gone, run `git worktree prune`.
+- **The build and the test have no terminal.** They run with no controlling terminal, as under CI. A command that opens `/dev/tty` (a password prompt, a pager, a terminal interface) fails at once, so the commit counts as bad, or as a skip when the build fails. Wrap such a command, or give it its input in another way.
+- **The first build is cold.** Each worktree has its own `./target`, so the first build in the scratch worktree compiles everything. The restore never runs `git clean -x`, so ignored build output stays, and each build after the first is incremental. To share a build cache with your checkout, set `CARGO_TARGET_DIR`.
+- **There is no `--timeout` flag.** If a test can hang, wrap it: `-- timeout 60 cargo test ...`. `timeout` exits 124, which counts as bad.
+- **Limits.** `bibibi` does not support a test that is in more than one commit (squash it first), repositories with submodules, or Windows (`--build` runs through `sh -c`).
+
+### Install
+
+```bash
+cargo install --git https://github.com/timmattison/tools bibibi
+```
+
+## whyslow (why slow)
+
+`whyslow` answers one question: why is this Mac slow? It takes one sample of 1 s, puts each process into a group, adds the CPU and the memory of each group, and prints a short summary of the likely cause. It uses no language model.
+
+On 2026-11-15 at 13:17, the load average was 152 on 14 processors, and the CPU was 0% idle. The memory was full: 63 of 64 GiB used, 26 GiB in the compressor, and 3.9 of 5 GiB of swap in use. No row of `ps` or `top` showed the cause. These were the causes:
+
+| Group | Processes | CPU | Memory |
+| --- | --- | --- | --- |
+| Claude Code sessions, 2 accounts | 176 | 288% | 24.2 GiB RSS |
+| `clang` for the C++ code of DuckDB (`libduckdb-sys`), in 2 worktrees | 12 | 284% | 2.7 GiB RSS |
+| `kernel_task`, for memory compression and swap | 1 | 245% | — |
+| `WindowServer` | 1 | 75% | 3.0 GiB footprint |
+
+It took about 10 commands to find them. Some facts mislead when a person reads them alone:
+
+- Sorted by CPU, the list shows 12 `clang` rows at about 20% each. The 176 Claude Code rows, at about 1.6% each, are far down the list. But the sums of the two groups are about equal.
+- The parent of each `clang` is the `sccache` server, and the parent of that server is `launchd`. Thus the ancestry does not lead to the build.
+- The working directory of each `clang` is the crate source in `~/.cargo/registry`, not the worktree. Only the output path in the arguments (`-o <worktree>/target/...`) names the worktree.
+- `top` names each Claude Code process `2.1.325`, the file name of its version. `ps` names it `claude`.
+- RSS does not include compressed memory. For `WindowServer`, `ps` gave 94 MiB of RSS, and `top` gave 2,990 MiB of footprint.
+- `memory_pressure` said "free percentage: 49%". At the same time, `top` said "91M unused".
+
+`faulte` answers a different question: which processes make page faults. Its table has 25 rows or more, and the person must still find the cause in that table.
+
+### Basic Usage
+
+```bash
+whyslow
+whyslow --interval 5s
+```
+
+- `--interval <DURATION>`: The time between the two samples of the process table, for example `1s`, `5s`, or `2m`. A bare number is a number of seconds. Defaults to `1s`. Zero is refused, because a sample of no time measures nothing.
+- `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
+- `-h`, `--help`: Print the usage.
+
+`whyslow` has no `--shell-setup`. It needs nothing from the shell.
+
+This is the output for the sample of 2026-11-15. It is the fixture of the tests of `render`, and it has 18 lines:
+
+```
+Likely cause: the CPU is full, and the memory is short.
+CPU     0% idle, 44% system, load 152 on 14 processors
+        High system time and short memory: likely compression and swap.
+  Compilers and linkers        68 processes       322%
+    prediction-markets-worktrees/issue-17         166%
+    prediction-markets-worktrees/issue-36         118%
+    1 more worktree                                38%
+  Claude Code                 176 processes       290%   2 accounts
+  WindowServer                  1 process          75%
+  Kernel and short-lived processes                688%
+Memory  pressure warning, 26.0 GiB compressed, swap 3.9 of 5.0 GiB in use
+  Claude Code                 176 processes  ≥24.2 GiB   2 accounts
+  wezterm-gui                   1 process      3.4 GiB
+  Compilers and linkers        68 processes    2.7 GiB
+    prediction-markets-worktrees/issue-17      1.5 GiB
+    prediction-markets-worktrees/issue-36      0.8 GiB
+    1 more worktree                            0.4 GiB
+≥ counts the RSS of other accounts. Run with sudo for the footprint.
+```
+
+Each line has 80 columns or fewer. Each value ends at display column 54. A name that is too wide ends with `…`, and the cut is on a character boundary. The widths come from the display-width function of `termbar`, thus Japanese, emoji, and accented names stay aligned.
+
+If no resource is short, `whyslow` prints two lines: the idle share and the pressure level, and then the tools for the other causes. For the disk, run `diskhog`. For the clock speed, run `thermal-watch`.
+
+```
+The CPU and the memory are not short: 85% idle, pressure normal.
+For the disk, run diskhog. For the clock speed, run thermal-watch.
+```
+
+### The groups
+
+Each process goes into exactly one group. The first rule that matches decides.
+
+1. **Claude Code**: each process that `occ::classify` gives the role `Session`, `Unreadable`, or `Support`. The name does not count, because `top` gives the version (`2.1.325`) as the name.
+2. **Compilers and linkers**: `clang`, `clang++`, `cc`, `c++`, `cc1`, `cc1plus`, `gcc`, `g++`, `ld`, `ld64`, `lld`, `ld.lld`, `rust-lld`, `rustc`, `clippy-driver`, `cargo`, `cargo-clippy`, `sccache`, `swift-frontend`, `swiftc`, `cmake`, `make`, `gmake`, `ninja`, and each name that starts with `build-script-`.
+3. **Spotlight**: `mds`, `mds_stores`, `mdworker`, `mdworker_shared`, `corespotlightd`, and each name that starts with `spotlightknowledged`.
+4. **Each other process** goes into a group of its name. The name is the last part of `argv[0]`, as the `comm` column of `ps` prints it. `whyslow` removes the `-` in front of a login shell (`-zsh`), so `-zsh` and `zsh` are one group. Thus 40 copies of an unknown tool add up, and a new cause shows.
+
+The group of compilers divides by worktree. `whyslow` reads the arguments of each compiler process and takes the candidate paths in this order: the value of `-o`, the value of `--out-dir`, and then each other absolute path of the arguments from left to right. The program path (`argv[0]`) is not an argument, so it is not a candidate: the `sccache` server runs as `/opt/homebrew/bin/sccache`, and Homebrew keeps a git checkout at `/opt/homebrew`. A path after an `=` counts too, for example `dependency=/x`. A relative path is skipped, because `whyslow` never reads the working directory. For each candidate, `whyslow` looks for the nearest parent directory that holds `.git`. The first candidate that lies in a worktree gives the worktree. If a candidate lies in no worktree (for example a header path under `/Applications/Xcode.app`), `whyslow` tries the next candidate. A process with no such candidate goes into "no worktree". A worktree shows as the last two parts of its path.
+
+### The sources
+
+The measurements are from 2026-11-15, at a load of 81 to 96.
+
+| Fact | Source | Reason |
+| --- | --- | --- |
+| CPU of each process | Two snapshots of `ps -A -ww` with `pid`, `uid`, `lstart`, `time`, `rss`, and `comm`, one interval apart. The CPU of a process is the change of `time`. | `ps` is setuid root, reads each account, and took 0.11 s. `top -l 2 -s 1` took 8.8 s. |
+| The identity of a process | The PID and the start time (`lstart`) | A reused PID is a different process. |
+| The arguments of a compiler | `proctree::ps_arguments`, which runs `ps -eo pid=,args=` | `proctree` is the shared reader of the process table. |
+| Footprint of each process | `proc_pid_rusage` with `RUSAGE_INFO_V4`, field `ri_phys_footprint` | RSS does not include compressed memory (94 MiB of RSS against 2,990 MiB of footprint for `WindowServer`). If the kernel refuses a process (another account and no root), `whyslow` uses its RSS and marks its group with `≥`. A process that exits before the read of its footprint counts 0 bytes and gets no `≥`, because `sudo` does not help there. |
+| CPU of the machine | `host_statistics` with `HOST_CPU_LOAD_INFO`, over the same interval | `ps` does not list `kernel_task`. `top` took 4.9 s for PID 0 alone. |
+| Memory of the machine | `kern.memorystatus_vm_pressure_level` (1 normal, 2 warning, 4 critical), the compressor pages and the swapouts of `host_statistics64` over the interval, and `vm.swapusage` | These are the numbers of the kernel. The free percentage of `memory_pressure` is not used. |
+| Load and processors | `getloadavg` and `hw.ncpu` | — |
+
+`ps` runs with `LC_ALL=en_US.UTF-8` and `TZ=UTC`, not with `LC_ALL=C`. The C locale makes `ps` print each non-ASCII byte of a name as an escape (`é` is `M-CM-)`). In `en_US.UTF-8`, the name prints as UTF-8, and `lstart` is the same English text. `whyslow` does not run `top`, because one sample of `top -l 1` took 4.7 s.
+
+### The verdict
+
+All thresholds are named constants in `src/whyslow/src/verdict.rs`, and a test holds each one at the limit and one step on each side.
+
+- The CPU is **full** if it is less than 10% idle over the interval, and **busy** if it is less than 40% idle.
+- The memory is **short** if the pressure level is warning or critical, or if the interval had swapouts.
+- The first line names the resources that are short. Each short resource then lists its 3 largest groups. A compiler group also lists its 2 largest worktrees, and then one line for the rest. The compiler group lists its worktrees in the memory block too. That is why the summary of 2026-11-15 has 18 lines.
+- If the system time is 30% or more, and the memory is short, the CPU block says that the likely cause is memory compression and swap.
+- The CPU that no group explains is the CPU of the machine minus the sum of the groups. If it is 100% (one processor) or more, the CPU block shows it as `Kernel and short-lived processes`. `ps` does not list `kernel_task`, and the kernel refuses `proc_pid_rusage` for PID 0 without root, so this CPU holds the kernel as well as the processes that start and stop between the two snapshots. On 2026-11-15, `kernel_task` alone used 245%.
+- If no resource is short, the summary is the two lines above.
+
+### Exit codes
+
+- `0`: A summary was printed.
+- `1`: The platform is not macOS. `whyslow` prints `whyslow supports macOS only.`
+- `2`: A source failed, or its output failed a parser, or the CPU counters of the kernel did not move. `whyslow` prints `whyslow: <the reason>` on the error output and no summary, because a summary with a missing source can look like a quiet Mac. A bad `--interval` also gives 2, from the parser of the command line.
+
+### Limits
+
+- **macOS only.** The process table, the CPU ticks, and the footprint come from `ps` and from calls of macOS.
+- **One sample.** The summary is what the Mac did in one interval. The numbers come from one Mac on one day, and the thresholds are a first choice.
+- **`≥` and sudo.** Without root, the kernel refuses the footprint of each process of another account. `whyslow` then uses the RSS, which is a lower bound, and it marks the value with `≥`. Run with `sudo` to get the footprint.
+- **The kernel line.** `kernel_task` has no row of its own. Its CPU is part of `Kernel and short-lived processes`.
+- **The arguments have no boundaries.** `ps` prints the arguments of a process as one line of words with spaces between them. A path with a space in it is read as two words, so such a path can fail to find its worktree. The process then goes into the next candidate path, or into "no worktree".
+- **Out of scope:** a language model, a live view and a history (issue #669 makes a live view for `faulte`), an action on a process (`faulte kill` stops old idle Claude Code sessions), disk I/O and the clock speed (the summary only names `diskhog` and `thermal-watch`), JSON output, and a platform other than macOS.
+
+### Install
+
+```bash
+cargo install --git https://github.com/timmattison/tools whyslow
+```
+
+## glance (CPU and memory at a glance)
+
+Show two small charts in the macOS menu bar: the share of the CPU time that the system processes and the user processes use, and the memory pressure. In local mode, the status item reads each value from the kernel in one call, starts no child process, and draws its charts into a pixel buffer itself. Thus the monitor adds almost nothing to the load that it shows.
+
+`glance --host <destination>` shows the same charts for a second Mac, through one SSH connection that stays open. See [Show a second Mac](#show-a-second-mac).
+
+`glance` starts the status item in the background and returns to the shell. A second run of the same command stops it. `glance -f` keeps the status item in the foreground. See [Start and stop](#start-and-stop).
+
+### What it shows
+
+- **The left chart is the CPU.** Each column is one sample. The red part at the bottom is the system share, and the blue part above it is the user share. A nice process counts as a user process. These are the colors of the CPU chart in Activity Monitor.
+- **The right chart is the memory pressure.** The height of each column is the memory in use as a percentage, and its color is the pressure level of that sample: green for normal, orange for warn, and red for critical. A level that `glance` does not know is gray, never green.
+- **Each chart is as high as the menu bar**, inside a thin frame, and the two charts share one border. Thus a low load is easy to see: on a menu bar of 22 points, each chart has 20 rows, and a CPU share of 10% fills 2 of them.
+- **The charts show the last 32 samples.** At the default interval, that is the last 32 seconds. The newest column is at the right edge, so a short spike stays visible after it ends.
+- **The name of the Mac is in small text at the top of the charts.** In local mode, it is the short name of the Mac: the name before the first `.`, as `hostname -s` gives it (`M4-Pro-Mac-Mini`, not `M4-Pro-Mac-Mini.local`). In remote mode, it is the destination of `--host` as you typed it, or, with `--resolve`, the name that the second Mac reports after the first line arrives (see [Show a second Mac](#show-a-second-mac)). The name goes across both charts, over the columns. Each pixel of the name is black or white, whichever contrasts more with the pixel behind it. Thus the name is black where it crosses a column, and it has the text color of the menu bar where the chart is empty. The charts are wide enough for a name such as `M4-Pro-Mac-Mini`. A longer name ends in an ellipsis, and the status item does not grow. If the menu bar is too thin for the name, the name goes away.
+- **A click on the charts opens a menu** with the host (`Host: <name>`, the full name, or `Host: <destination> (ssh)` in remote mode, or `Host: <name> (ssh <destination>)` with `--resolve` when the reported name differs from the destination), the current values (user %, system %, idle %, the pressure level, and the percentage in use), and a **Quit glance** item.
+- `glance` has no Dock icon and no window.
+
+### Basic Usage
+
+```bash
+glance                         # start the status item in the background; a second run stops it
+glance -f                      # start it in the foreground, where it keeps the terminal
+glance --interval 2            # one sample every 2 seconds
+glance --sample                # print one reading as JSON, then stop
+glance --stream --count 3      # print 3 JSON lines, one each interval, then stop
+glance --host m1-ts            # show the charts of the Mac that ssh calls m1-ts; a second run stops only m1-ts
+glance --host m1-ts --resolve  # the same, with the name that the second Mac reports
+```
+
+### Options
+
+- `--interval <SECONDS>`: The time between two samples, in seconds. A decimal number is permitted. Defaults to `1`. A value below `0.25` is a usage error. A longer interval uses less CPU time and shows a longer history.
+- `--sample`: Take two readings one interval apart, print one JSON object, and stop. This mode needs no window server.
+- `--stream`: Print one JSON line for each interval until the standard output closes. A closed pipe stops the stream with status 0. This mode needs no window server, thus it runs in an SSH session. It cannot go with `--sample`.
+- `--count <N>`: Stop the stream after `N` lines. It needs `--stream`. With no `--count`, the stream has no limit.
+- `--host <DESTINATION>`: Show the charts of a second Mac. `DESTINATION` is anything that `ssh` takes: an alias of `~/.ssh/config`, `user@host`, or an address. A destination that is empty or that starts with `-` is a usage error. It cannot go with `--stream` or `--sample`.
+- `--remote-binary <PATH>`: The path of `glance` on the second Mac. Defaults to `~/.cargo/bin/glance`. It needs `--host`.
+- `--resolve`: Show the name that the second Mac reports (`hostname -s` on that Mac), not the destination as you typed it. Before the first line arrives, the status item shows the destination. It needs `--host`.
+- `-f`, `--foreground`: Run the status item in the process of the run, which keeps the terminal until the status item stops. Give it to a LaunchAgent (see [Start at login](#start-at-login)). With no `-f`, `glance` starts the status item in a copy that has no terminal, and returns to the shell when the status item is up. It cannot go with `--stream` or `--sample`.
+- `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
+- `-h`, `--help`: Print the usage.
+
+### Start and stop
+
+Each Mac that `glance` shows has one status item: this Mac, and each destination of `--host`. A run of `glance` first looks for the status item of its own Mac. When that status item runs, the run stops it, starts nothing, and exits with status 0. Thus a second run of the same command closes the status item that the first run opened.
+
+```bash
+glance                    # glance: the status item runs as PID 4242. Run glance again to stop it.
+glance --host m1-ts       # glance: the status item of the host m1-ts runs as PID 4250. Run glance again with the same --host to stop it.
+glance --host m1-ts       # glance: stopped the status item of the host m1-ts that ran as PID 4250.
+glance                    # glance: stopped the status item that ran as PID 4242.
+```
+
+- **A run stops only the status item of its own Mac.** A plain run stops the local status item, never a status item of `--host`. A run with `--host m1-ts` stops only the status item of `m1-ts`.
+- **The Mac is the destination as you typed it.** `m1-ts` and `tim@m1-ts` are two different status items, even when they log in to the same Mac.
+- **A new status item runs in the background.** The start returns to the shell when the status item is up. `-f` keeps a new status item in the foreground.
+- **The default changed.** Before, a plain run kept the terminal, and `-b` started the status item in the background. Now a plain run starts it in the background. `-b` and `--background` are gone, and each one is a usage error. A LaunchAgent that runs a plain `glance` must get `--foreground` (see [Start at login](#start-at-login)).
+- **`--foreground` does not change which status item a run stops.** A run with or without `-f` stops the status item of its Mac. `-f` only decides where a new status item runs.
+- **`--resolve` does not change which status item a run stops.** `glance --host m1-ts` stops the status item that `glance --host m1-ts --resolve` started, and the reverse is also true.
+- **A background status item has no terminal.** It runs in a new session, thus the close of the terminal or Control-C does not stop it. Until the status item is up, the start shows what the copy writes to its standard error. After that, the standard output and the standard error of the status item go to `/dev/null`. The start returns when the status item is up, or it prints why the status item did not start and exits with status 1.
+- **A foreground status item (`-f`) keeps the terminal** until **Quit glance**, Control-C, or a second run. It prints the same line as a background start when it is up.
+- **`--sample` and `--stream` never stop a status item.**
+- **A stop is a quit.** The run sends `SIGTERM`, and the status item exits with status 0 at once, as **Quit glance** does. Thus a LaunchAgent does not start it again (see [Start at login](#start-at-login)). In remote mode, the `ssh` child then stops on its next write, as after `kill -9` (see [Show a second Mac](#show-a-second-mac)).
+- **A lock file marks each status item** in `~/Library/Application Support/glance/`: `local.lock`, and `host-<destination>.lock` for each destination. The name writes each byte of the destination as `%` and two hex digits, unless the byte is a lowercase letter, a digit, `.`, `-`, `_`, or `@`. The default file system of macOS folds case, so `Alpha` and `alpha` get two files. The kernel releases the lock when its status item ends, also after a crash or `kill -9`. Thus a lock file that stays behind stops nothing and blocks nothing. The files are not in `$TMPDIR`, because macOS deletes old files there, and the lock of a status item that runs for days must stay.
+
+### The `--sample` and `--stream` output
+
+`--sample` prints one JSON object, and `--stream` prints one for each line. The keys are `host` (the short host name of the Mac that read the kernel), `user`, `system`, and `idle` (fractions whose sum is 1), `pressure_level` (`normal`, `warn`, `critical`, or `unknown`), `pressure_level_raw` (the value of the kernel), and `pressure_percent` (the memory in use).
+
+```json
+{"host":"M4-Pro-Mac-Mini","user":0.08,"system":0.05,"idle":0.87,"pressure_level":"normal","pressure_level_raw":1,"pressure_percent":53}
+```
+
+In `--stream`, a failed read gives the line `{"host":"<name>","error":"<reason>"}`, and the stream continues.
+
+### Show a second Mac
+
+`glance --host <destination>` runs on the Mac at your desk. It starts one `ssh` child, and that child runs `glance --stream` on the second Mac. The connection stays open while the status item runs, thus each sample costs one line of text, not one SSH handshake. The charts, the colors, and the menu lines are the same as in local mode.
+
+1. Install `glance` on the second Mac: `cargo install --git https://github.com/timmattison/tools glance`.
+2. Make sure that `ssh <destination>` logs in with a key and asks for nothing. `glance` starts `ssh` with `BatchMode=yes`, thus a refused key gives an error line in the menu, never a password prompt.
+3. Start `glance --host <destination>` on the Mac at your desk. Run a second, local `glance` next to it to see both Macs.
+
+**The label shows the destination as you typed it**, for the full life of the status item. That is the name that you know the Mac by. `tim@m1-ts` stays `tim@m1-ts`, and `studio.example.com` is not cut at the first `.`. A destination that is too wide for the label ends in an ellipsis. The first line of the menu is `Host: <destination> (ssh)`.
+
+**This default changed.** Before, the label showed the name that the second Mac reports. To get that label, add `--resolve`. A wrong alias then cannot show a false name. Before the first line arrives, the label shows the destination. After that, it shows the name that the newest line reports, which is `hostname -s` on the second Mac. When that name is different from the destination, the first line of the menu is `Host: <name> (ssh <destination>)`.
+
+**The default remote binary is the full path `~/.cargo/bin/glance`**, where `cargo install` puts it. `sshd` runs the command through the login shell of the remote user with `-c`. zsh then reads `~/.zshenv`, but not `~/.zprofile` or `~/.zshrc`, thus a bare `glance` is often not on `PATH` there. For a different place, give `--remote-binary`:
+
+```bash
+glance --host m1-ts --remote-binary '~/bin/glance'      # ~/ is the home directory of the remote user
+glance --host m1-ts --remote-binary /opt/tools/glance   # an absolute path
+glance --host m1-ts --remote-binary glance              # a bare name: the remote PATH finds it
+```
+
+Put quotes around a value that starts with `~/`. Without the quotes, your local shell expands `~` to your local home directory before `glance` sees it. `glance` keeps a leading `~/` outside the quotes of the remote command, so that the remote shell expands it. It quotes the rest of the path, so a space or a quote in the path stays in one word.
+
+**When the connection stops**, the menu shows why, for example `Cannot read m1-ts: zsh:1: no such file or directory: /Users/tim/.cargo/bin/glance` or `Cannot read m1-ts: ssh: connect to host m1-ts port 22: Connection refused`. The reason is the last line that `ssh` wrote to its standard error, or its exit status. `glance` then connects again on its own: 5 seconds after the first stop, and twice as long after each failure, up to 60 seconds. The first sample of a connection sets the delay back to 5 seconds. The charts keep their history across a new connection.
+
+**No process stays behind.** **Quit glance** stops the `ssh` child before `glance` stops. When the connection closes, the remote `glance --stream` fails on its next write and stops. If the local `glance` stops with no clean-up (for example, `kill -9`), its end of the pipe closes, and `ssh` and then the remote `glance --stream` stop on their next write. If the network goes down, `ssh` finds the loss within about 45 seconds (`ServerAliveInterval=15`, `ServerAliveCountMax=2`), and the menu shows the error line.
+
+A remote `glance` that does not know `--stream` gives a usage error, and that error shows in the menu. Install the same version on both Macs.
+
+### Start at login
+
+`glance` has no "start at login" item. A LaunchAgent starts it instead. Write this file to `~/Library/LaunchAgents/com.timmattison.glance.plist`, and replace `YOU` with your account name. launchd does not expand `~`, thus the path must be complete.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.timmattison.glance</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOU/.cargo/bin/glance</string>
+        <string>--foreground</string>
+    </array>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+</dict>
+</plist>
+```
+
+Then load it:
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.timmattison.glance.plist
+```
+
+`RunAtLoad` starts `glance` at each login. `KeepAlive` with `SuccessfulExit` set to `false` starts it again after a crash, but not after **Quit glance**, which exits with status 0. `--foreground` is necessary. Without it, `glance` starts a copy in a new session and exits with status 0. launchd then watches no process, and it does not start the status item again after a crash. A run of `glance` in a terminal stops it the same way, with status 0. To stop it and keep it stopped until the next login, run `launchctl bootout gui/$(id -u)/com.timmattison.glance`.
+
+For the status item of a second Mac, write a second file with its own label, for example `~/Library/LaunchAgents/com.timmattison.glance.m1-ts.plist`. Replace `m1-ts` with your SSH destination:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.timmattison.glance.m1-ts</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOU/.cargo/bin/glance</string>
+        <string>--foreground</string>
+        <string>--host</string>
+        <string>m1-ts</string>
+    </array>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+</dict>
+</plist>
+```
+
+Load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.timmattison.glance.m1-ts.plist`. launchd starts `glance` with its own `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`), thus `glance` runs `/usr/bin/ssh`, which reads `~/.ssh/config` as in a terminal. launchd does not give `glance` the variables that your shell sets. If `ssh` needs one of them, the menu shows the error of `ssh`.
+
+### Notes
+
+- **The sources.** The CPU ticks come from `host_statistics(HOST_CPU_LOAD_INFO)`. The pressure level is `kern.memorystatus_vm_pressure_level` (1 is normal, 2 is warn, 4 is critical). The percentage in use is `100 - kern.memorystatus_level`, and `kern.memorystatus_level` is the free percentage that `memory_pressure` prints.
+- **The height of the memory chart can be different from Activity Monitor.** Activity Monitor computes its graph with a formula that Apple does not document. The color is the level of the kernel, which is the same value that Activity Monitor uses.
+- **Activity Monitor calls the warn level yellow.** `glance` shows it orange.
+- **Weeks of uptime are safe.** The tick counters are 32 bits wide and wrap after about 31 days on a Mac with 16 cores. `glance` subtracts them with wrapping arithmetic, so a wrap does not show a false spike.
+- **Child processes and threads.** In local mode, the status item starts no child process and no thread. A start with no `--foreground` starts one copy of `glance`, which runs the status item, and one thread that reads the standard error of the copy. The start then ends. In remote mode, it starts one `ssh` child at a time and two threads that read its pipes. The remote Mac sends samples, not raw tick counters, thus one sample line is the same object that `--sample` prints.
+- **macOS only.** On a different platform, `glance` prints `glance supports macOS only.` and exits with status 1. The second Mac of `--host` must be a Mac too.
+
+### Install
+
+```bash
+cargo install --git https://github.com/timmattison/tools glance
+```
+
+## cctop (Claude Code top)
+
+cctop shows one row for each live Claude Code session, with its state: working, needs-you, idle, agents, or shells. A row also shows `frozen` when the process of the session is stopped. It keeps a log of the changes, and it sends a macOS notification when a session needs you. Enter brings the Zellij pane and the WezTerm window of the session to the front.
+
+To install: `cargo install --git https://github.com/timmattison/tools cctop`
+
+See [src/cctop/README.md](src/cctop/README.md) for the keys, the focus steps, and the limits.
+
+## chf (ch find)
+
+Find a Claude Code session by the words in its messages, and resume it.
+
+The `/resume` picker of Claude Code shows the sessions of one worktree by default. It does not open the expanded version of a compacted session. A person who remembers a word from a session, but not its folder, cannot find it. `chf` searches the sessions of every folder. It then resumes the session you pick with `ch` or `che`.
+
+Run `chf` and type words. The list changes at each key press. A preview of the messages around the first match shows beside the list, or below it on a terminal narrower than 100 columns.
+
+```bash
+chf
+```
+
+### Keys
+
+| Key | Action |
+| --- | --- |
+| Up, Down, `Ctrl-P`, `Ctrl-N` | Move the selection. |
+| PageUp, PageDown | Move the selection by one page. |
+| Shift-Up, Shift-Down | Scroll the preview. |
+| `Ctrl-U` | Clear the query. |
+| Enter | Resume the selected session. |
+| Esc, `Ctrl-C` | Quit. |
+
+### Matching rules
+
+- Each word is a literal text. There is no fuzzy match.
+- Each word must occur in the session. Words can occur in different messages.
+- The case rule is "smart case" for each word. A word in lowercase matches text in any case. A word with a capital letter matches only that capital letter.
+- The case folding follows Unicode.
+
+### The row
+
+Each row shows the time of the last message, a `⇊` mark with the count of compactions for a session that Claude Code compacted, the folder, and the title of the session. The preview header shows the session id, the folder, and the git branch.
+
+### A compacted session
+
+When you press Enter on a compacted session, `chf` asks which version to resume. Press `c` for `ch`, the compacted version. Press `e` for `che`, the expanded version. The question shows the token count of the conversation before the last compaction. The expanded version holds all of those tokens. Thus it can fill the context window of Claude at once. The question also tells you when the first match is in a message from before the last compaction. The compacted version holds that message only as part of a summary.
+
+### Requirements
+
+`chf` runs `crap --here` through `$SHELL -ic`. Thus:
+
+- The `crap` shell function must exist. Run `crap --shell-setup` to install it.
+- `$SHELL` must be `bash` or `zsh`. For other shells, `chf` prints the command to paste.
+- `CRAP_LAUNCHER` applies, because the shell function starts Claude.
+
+### The cache
+
+`chf` keeps its index in `<cache dir>/chf`. It writes one file for each project folder. The directory has mode 0700 and each file has mode 0600. The first run reads every transcript and shows its progress. Later runs read only the files that changed. If `chf` cannot read a project folder or the store, it counts it as unreadable and keeps its cache files. If `chf` cannot stat a transcript, it counts it as unreadable and keeps its cache entry.
+
+### What `chf` does not search
+
+- Tool calls
+- Tool results
+- Thinking blocks
+- Transcripts of subagents
+
+### Exit codes
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | `chf --help` and `chf --version` print their text and exit with this code. |
+| 1 | A failure, or a `$SHELL` that is not `bash` or `zsh`. |
+| 2 | Standard input or standard output is not a terminal, or `chf` cannot find the home directory. |
+| 130 | You pressed Esc or `Ctrl-C`. |
+
+After Enter, `chf` replaces itself with the shell that runs `crap`. The exit status is then the status of that shell. This status can be any of the codes above or another code.
+
+### Install
+
+```bash
+cargo install --git https://github.com/timmattison/tools chf
+```

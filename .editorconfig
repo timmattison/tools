@@ -20,6 +20,11 @@ charset = utf-8
 # Markdown uses trailing spaces for line breaks
 trim_trailing_whitespace = false
 
+[src/faulte/tests/fixtures/**]
+# Each fixture is the output of a real command, byte for byte. `top` ends each
+# row with spaces, and the parser tests read those spaces.
+trim_trailing_whitespace = false
+
 [*.rs]
 indent_style = space
 indent_size = 4

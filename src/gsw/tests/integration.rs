@@ -6,36 +6,58 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
-/// Scrub the git-location env vars that git exports when it invokes a hook.
+/// Pin what these fixtures need. The command arrives swept from
+/// [`childenv::fixture_command`], so `cmd` takes its repository, and its
+/// configuration, from nothing it inherited.
 ///
-/// In a *worktree*, git exports absolute `GIT_DIR`/`GIT_WORK_TREE`/
-/// `GIT_INDEX_FILE` to the pre-commit hook. Those leak into child `git` and
-/// `gsw` processes (the latter via `gix::discover`) and pin them to the *real*
-/// repo regardless of `current_dir(tempdir)`, so fixture commits land in the
-/// real repo and `gsw` reports the real repo's status. Every git and gsw
-/// invocation here routes through this so the per-test tempdir is the target,
-/// in both the main checkout (relative env, harmless) and worktrees (absolute).
-fn scrub_git_env(cmd: &mut Command) -> &mut Command {
+/// Every git and gsw invocation here routes through this, so the per-test
+/// tempdir is the target. Without it, a run from inside this repo's pre-commit
+/// hook aims both at the *real* repo whatever `current_dir(tempdir)` says —
+/// git reads the environment ahead of the directory it was pointed at, and
+/// `gsw` reaches the same variables through `gix::discover`. Fixture commits
+/// then land in the real repo, and `gsw` reports the real repo's status.
+///
+/// **The rule is the `GIT_` prefix, and never a list of names.** This helper
+/// named three variables once — `GIT_DIR`, `GIT_WORK_TREE` and
+/// `GIT_INDEX_FILE`. A list of names removes nothing new the day git adds a
+/// variable, and from then on it gives the same clean-looking answer as a list
+/// that works. Two variables walked straight through that list, and neither is
+/// a location variable, so no number of location names catches either one.
+/// `GIT_OBJECT_DIRECTORY` moves the objects git writes into another store, so
+/// the fixture keeps an empty store of its own and every later read of it
+/// answers about another repository. `GIT_CONFIG_PARAMETERS` sets any key at
+/// all, and git exports it to every `pre-commit` hook.
+/// [`childenv::fixture_command`] enumerates the environment
+/// of this process instead of a list, so it takes whatever git invents next
+/// with no edit here.
+///
+/// **The two pins come after the sweep, and that order is the whole of why
+/// they survive it.** The sweep removes every `GIT_` variable this process
+/// holds. A pin after it wins, and a pin ahead of it leaves with the rest —
+/// which is also the rule every caller that sets a `GIT_` variable of its own
+/// obeys. The two pins hold the host's own global and system configuration
+/// away from the fixture, so a `user.email` or a `commit.gpgsign` the
+/// developer set never decides what a test reads.
+///
+/// Pinned by `hostile_environment::a_fixture_obeys_no_git_variable_out_of_a_hostile_environment`.
+fn pin_git_config(cmd: &mut Command) -> &mut Command {
     cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
 }
 
 /// Build a `gsw` binary command with the git env already scrubbed and
 /// `current_dir` set, ready for callers to add flags/env before running.
 fn gsw_command(dir: &Path) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_gsw"));
+    let mut cmd = childenv::fixture_command(env!("CARGO_BIN_EXE_gsw"));
     cmd.current_dir(dir);
-    scrub_git_env(&mut cmd);
+    pin_git_config(&mut cmd);
     cmd
 }
 
 fn run_git(dir: &Path, args: &[&str]) {
-    let mut cmd = Command::new("git");
+    let mut cmd = childenv::fixture_command("git");
     cmd.args(args).current_dir(dir);
-    let status = scrub_git_env(&mut cmd)
+    let status = pin_git_config(&mut cmd)
         .status()
         .expect("failed to invoke git");
     assert!(status.success(), "git {args:?} failed");
@@ -44,9 +66,9 @@ fn run_git(dir: &Path, args: &[&str]) {
 /// Like `run_git` but does NOT assert success — for commands that exit
 /// non-zero as part of normal operation (e.g. `git merge` on a conflict).
 fn run_git_allow_fail(dir: &Path, args: &[&str]) {
-    let mut cmd = Command::new("git");
+    let mut cmd = childenv::fixture_command("git");
     cmd.args(args).current_dir(dir);
-    let _ = scrub_git_env(&mut cmd)
+    let _ = pin_git_config(&mut cmd)
         .status()
         .expect("failed to invoke git");
 }
@@ -72,11 +94,18 @@ fn run_gsw_args(dir: &Path, extra: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).to_string()
 }
 
+/// The address every fixture commit carries.
+///
+/// Spelled once, because [`setup_repo`] writes it into the repository and a
+/// test reads it back off a commit. Two spellings that drifted apart would
+/// leave a test that asserts an address nothing sets.
+const FIXTURE_EMAIL: &str = "test@example.com";
+
 fn setup_repo() -> TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     let p = dir.path();
     run_git(p, &["init", "-q", "-b", "main"]);
-    run_git(p, &["config", "user.email", "test@example.com"]);
+    run_git(p, &["config", "user.email", FIXTURE_EMAIL]);
     run_git(p, &["config", "user.name", "Test"]);
     run_git(p, &["config", "commit.gpgsign", "false"]);
     fs::write(p.join("a.txt"), "initial\n").unwrap();
@@ -433,6 +462,282 @@ fn log_lines_flag_caps_visible_commits() {
     );
 }
 
+/// The start of the subject of each commit that [`add_history`] makes. A line
+/// that holds it is a log row, so a test counts the log rows with no parse of
+/// the frame.
+const HISTORY_PREFIX: &str = "history-commit-";
+
+/// The commits that a long history adds to the [`setup_repo`] commit. The
+/// number is larger than the rows of [`PANE_ROWS`], so the history is longer
+/// than the pane.
+const LONG_HISTORY_COMMITS: usize = 60;
+
+/// The rows of the pane that the tests of the log height state.
+const PANE_ROWS: usize = 40;
+
+/// The columns of the pane that the tests of the log height state.
+const PANE_COLUMNS: usize = 80;
+
+/// The rows above the log of a frame with no merge or rebase in progress: the
+/// header and the separator. The tests state this number apart from the code
+/// under test, as an oracle.
+const HEADER_ROWS: usize = 2;
+
+/// Add `count` empty commits to the repository at `dir`. Each subject starts
+/// with [`HISTORY_PREFIX`].
+fn add_history(dir: &Path, count: usize) {
+    for i in 0..count {
+        run_git(
+            dir,
+            &[
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                &format!("{HISTORY_PREFIX}{i:02}"),
+            ],
+        );
+    }
+}
+
+/// Run `gsw --no-color <extra…>` in `dir` in a pane of [`PANE_ROWS`] rows and
+/// [`PANE_COLUMNS`] columns, and give its stdout.
+///
+/// The output goes to a pipe, as under a watch wrapper. A wrapper states the
+/// full height of its terminal in `LINES`, and gsw takes
+/// [`termwindow::WRAPPER_CHROME_ROWS`] off that height for the chrome of the
+/// wrapper. So `LINES` holds the pane and that chrome. The test states both
+/// sizes, so the result does not change with the terminal of the person who
+/// runs the test.
+fn run_gsw_in_pane(dir: &Path, extra: &[&str]) -> String {
+    let output = gsw_command(dir)
+        .arg("--no-color")
+        .args(extra)
+        .env("COLUMNS", PANE_COLUMNS.to_string())
+        .env(
+            "LINES",
+            (PANE_ROWS + termwindow::WRAPPER_CHROME_ROWS).to_string(),
+        )
+        .output()
+        .expect("failed to invoke gsw");
+    assert!(
+        output.status.success(),
+        "gsw exited non-zero: stderr = {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+/// The log rows of `out` whose commits [`add_history`] made.
+fn history_rows(out: &str) -> usize {
+    out.lines()
+        .filter(|line| line.contains(HISTORY_PREFIX))
+        .count()
+}
+
+/// The start of the name of each file that [`add_changed_files`] writes. A
+/// line that holds it is a file row.
+const CHANGED_FILE_PREFIX: &str = "changed-file-";
+
+/// The rows of the rule between the log and the file list.
+const SECTION_SEPARATOR_ROWS: usize = 1;
+
+/// Write `count` untracked files into the worktree at `dir`. Each name starts
+/// with [`CHANGED_FILE_PREFIX`].
+fn add_changed_files(dir: &Path, count: usize) {
+    for i in 0..count {
+        fs::write(
+            dir.join(format!("{CHANGED_FILE_PREFIX}{i}.txt")),
+            "changed\n",
+        )
+        .expect("write a changed file");
+    }
+}
+
+/// The file rows of `out` whose files [`add_changed_files`] wrote.
+fn changed_file_rows(out: &str) -> usize {
+    out.lines()
+        .filter(|line| line.contains(CHANGED_FILE_PREFIX))
+        .count()
+}
+
+#[test]
+fn a_clean_worktree_fills_the_pane_with_the_log() {
+    // Issue #521: the log showed 20 commits at most, and the rest of a tall
+    // pane stayed empty. With no changed file, the log takes every row under
+    // the header, so the frame is as tall as the pane.
+    let dir = setup_repo();
+    add_history(dir.path(), LONG_HISTORY_COMMITS);
+
+    let out = run_gsw_in_pane(dir.path(), &[]);
+
+    assert_eq!(
+        history_rows(&out),
+        PANE_ROWS - HEADER_ROWS,
+        "the log takes every row under the header:\n{out}",
+    );
+    assert_eq!(
+        out.lines().count(),
+        PANE_ROWS,
+        "the frame is as tall as the pane:\n{out}",
+    );
+}
+
+#[test]
+fn the_log_fills_the_rows_that_a_short_file_list_leaves() {
+    // A file list that fits shows every row and prints no `+N more files`
+    // footer. So the frame keeps no row for that footer, and the log takes
+    // the row. The log fills what the header, the rule, and the file rows
+    // leave, and the frame is as tall as the pane.
+    const CHANGED_FILES: usize = 3;
+    let dir = setup_repo();
+    add_history(dir.path(), LONG_HISTORY_COMMITS);
+    add_changed_files(dir.path(), CHANGED_FILES);
+
+    let out = run_gsw_in_pane(dir.path(), &[]);
+
+    assert_eq!(
+        changed_file_rows(&out),
+        CHANGED_FILES,
+        "every file row shows:\n{out}",
+    );
+    assert!(
+        !out.contains("more file"),
+        "a file list that fits shows no footer:\n{out}",
+    );
+    assert_eq!(
+        out.lines().count(),
+        PANE_ROWS,
+        "the frame is as tall as the pane:\n{out}",
+    );
+    assert_eq!(
+        history_rows(&out),
+        PANE_ROWS - HEADER_ROWS - SECTION_SEPARATOR_ROWS - CHANGED_FILES,
+        "the log takes every row that the header, the rule, and the file rows leave:\n{out}",
+    );
+}
+
+/// The rows of the `+N more files` footer.
+const FOOTER_ROWS: usize = 1;
+
+#[test]
+fn a_max_files_cap_keeps_the_footer_row_and_the_log_fills_the_rest() {
+    // `--max-files 2` hides 3 of 5 file rows, so the footer prints and keeps
+    // its row. The log fills what the header, the rule, the file rows, and
+    // the footer leave.
+    const CHANGED_FILES: usize = 5;
+    const MAX_FILES: usize = 2;
+    let dir = setup_repo();
+    add_history(dir.path(), LONG_HISTORY_COMMITS);
+    add_changed_files(dir.path(), CHANGED_FILES);
+
+    let out = run_gsw_in_pane(dir.path(), &["--max-files", &MAX_FILES.to_string()]);
+
+    assert_eq!(
+        changed_file_rows(&out),
+        MAX_FILES,
+        "the cap sets the file rows:\n{out}",
+    );
+    let footer = format!("+{} more files", CHANGED_FILES - MAX_FILES);
+    assert!(
+        out.lines().any(|line| line.trim() == footer),
+        "the footer {footer:?} prints:\n{out}",
+    );
+    assert_eq!(
+        out.lines().count(),
+        PANE_ROWS,
+        "the frame is as tall as the pane:\n{out}",
+    );
+    assert_eq!(
+        history_rows(&out),
+        PANE_ROWS - HEADER_ROWS - SECTION_SEPARATOR_ROWS - MAX_FILES - FOOTER_ROWS,
+        "the log takes every row that the file rows and the footer leave:\n{out}",
+    );
+}
+
+#[test]
+fn log_lines_caps_the_log_in_a_pane_with_more_rows() {
+    // An explicit `--log-lines N` stays a cap. The pane has rows for more
+    // commits, and the log shows N.
+    const LOG_LINES: usize = 30;
+    const {
+        assert!(
+            LOG_LINES < PANE_ROWS - HEADER_ROWS,
+            "the cap must be under the rows of the pane, or the test proves nothing",
+        );
+    }
+    let dir = setup_repo();
+    add_history(dir.path(), LONG_HISTORY_COMMITS);
+
+    let out = run_gsw_in_pane(dir.path(), &["--log-lines", &LOG_LINES.to_string()]);
+
+    assert_eq!(
+        history_rows(&out),
+        LOG_LINES,
+        "--log-lines {LOG_LINES} caps the log:\n{out}",
+    );
+}
+
+#[test]
+fn piped_output_with_no_stated_size_stays_within_the_fallback_height() {
+    // `gsw | cat` with no `LINES` has no pane size to fill. The frame then
+    // takes the fallback height, so a long history does not flood the pipe.
+    // The test removes `LINES` and `COLUMNS`, so a value that the shell of
+    // the person who runs it exports cannot change the result. Standard
+    // input, output, and error are no terminal here, so gsw measures no
+    // window either.
+    let dir = setup_repo();
+    add_history(dir.path(), LONG_HISTORY_COMMITS);
+
+    let output = gsw_command(dir.path())
+        .arg("--no-color")
+        .env_remove("LINES")
+        .env_remove("COLUMNS")
+        .output()
+        .expect("failed to invoke gsw");
+    assert!(
+        output.status.success(),
+        "gsw exited non-zero: stderr = {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let out = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        out.lines().count(),
+        termwindow::DEFAULT_TERMINAL_HEIGHT,
+        "a clean worktree fills the fallback height and no more:\n{out}",
+    );
+}
+
+/// The commits that [`setup_repo`] makes.
+const SETUP_COMMITS: usize = 1;
+
+#[test]
+fn a_short_history_shows_every_commit_and_no_blank_row() {
+    // A history shorter than the pane shows every commit. The frame ends
+    // under the last commit, with no blank row to fill the pane.
+    const SHORT_HISTORY_COMMITS: usize = 4;
+    let dir = setup_repo();
+    add_history(dir.path(), SHORT_HISTORY_COMMITS);
+
+    let out = run_gsw_in_pane(dir.path(), &[]);
+
+    assert_eq!(
+        history_rows(&out),
+        SHORT_HISTORY_COMMITS,
+        "every commit of the history shows:\n{out}",
+    );
+    assert_eq!(
+        out.lines().count(),
+        HEADER_ROWS + SHORT_HISTORY_COMMITS + SETUP_COMMITS,
+        "the frame is the header and one row for each commit:\n{out}",
+    );
+    assert!(
+        out.lines().all(|line| !line.trim().is_empty()),
+        "no row is blank:\n{out}",
+    );
+}
+
 #[test]
 fn shows_upstream_ahead_and_behind_counts_when_branch_tracks_remote() {
     // End-to-end: a repo whose local branch tracks an upstream should have
@@ -673,12 +978,16 @@ fn one_shot_flag_matches_default_piped_output() {
     // the formatter renders them as `XdYh` (smallest shown unit is hours);
     // sub-second drift between the runs then cannot change the bytes.
     const FIXED_PAST: &str = "2020-01-01T12:34:56 +0000";
-    let mut amend_cmd = Command::new("git");
+    let mut amend_cmd = childenv::fixture_command("git");
     amend_cmd
         .args(["commit", "--amend", "--no-edit", "--date", FIXED_PAST])
-        .env("GIT_COMMITTER_DATE", FIXED_PAST)
         .current_dir(dir.path());
-    let amend = scrub_git_env(&mut amend_cmd)
+    // The date goes on after the scrub, and that order is load-bearing. The
+    // scrub removes every `GIT_` variable this process holds, so a date set
+    // ahead of it leaves with the rest under this repo's pre-commit hook,
+    // which exports both date variables into `cargo test`.
+    let amend = pin_git_config(&mut amend_cmd)
+        .env("GIT_COMMITTER_DATE", FIXED_PAST)
         .status()
         .expect("failed to backdate commit");
     assert!(amend.success(), "git commit --amend (backdate) failed");
@@ -782,12 +1091,15 @@ fn shows_rebase_indicator_with_step_counts_during_a_conflicted_rebase() {
 /// Commit everything staged with both git dates pinned to `date`, so the
 /// commit's age is deterministic instead of "however old the fixture is".
 fn commit_dated(dir: &Path, message: &str, date: &str) {
-    let mut cmd = Command::new("git");
-    cmd.args(["commit", "-q", "-m", message])
+    let mut cmd = childenv::fixture_command("git");
+    cmd.args(["commit", "-q", "-m", message]).current_dir(dir);
+    // Both dates go on after the scrub, and that order is load-bearing. The
+    // scrub removes every `GIT_` variable this process holds, so a date set
+    // ahead of it leaves with the rest under this repo's pre-commit hook,
+    // which exports both date variables into `cargo test`.
+    let status = pin_git_config(&mut cmd)
         .env("GIT_AUTHOR_DATE", date)
         .env("GIT_COMMITTER_DATE", date)
-        .current_dir(dir);
-    let status = scrub_git_env(&mut cmd)
         .status()
         .expect("failed to invoke git commit");
     assert!(status.success(), "dated git commit failed");
@@ -917,4 +1229,461 @@ fn a_future_dated_commit_renders_an_unknown_log_age_not_zero_seconds() {
         !row.contains("0s"),
         "an unresolvable commit age must not be misrepresented as 0s: {row:?}",
     );
+}
+
+/// The one test that proves a fixture of this file sheds the whole git environment,
+/// and not the three names it once listed.
+mod hostile_environment {
+    use std::path::{Path, PathBuf};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    use tempfile::NamedTempFile;
+
+    use super::{pin_git_config, setup_repo, FIXTURE_EMAIL};
+
+    /// The variable that tells this test binary it is the child, and that the
+    /// child must do the work rather than start a child of its own.
+    ///
+    /// The name carries no `GIT_` prefix, so the sweep under test leaves it in
+    /// place and the child reads it.
+    const HOSTILE_MARKER: &str = "GSW_INTEGRATION_HOSTILE_GIT_ENVIRONMENT";
+
+    /// The line the child prints after its last assertion holds.
+    ///
+    /// libtest exits 0 when a filter names no test, so a child that ran no
+    /// test reads exactly like a child that passed. The parent looks for this
+    /// line as well as for the exit status.
+    const CHILD_RAN: &str = "gsw-integration-hostile-environment-child-ran";
+
+    /// How long the parent waits for the child.
+    ///
+    /// The child builds one small repository, so a healthy child takes well
+    /// under a second. The bound is here for the child that hangs: a test that
+    /// waits for such a child holds the run for the life of the session.
+    const CHILD_DEADLINE: Duration = Duration::from_secs(60);
+
+    /// How often the parent asks whether the child is done.
+    const CHILD_POLL: Duration = Duration::from_millis(25);
+
+    /// The variable that moves the objects git writes into another store.
+    ///
+    /// It is not a location variable in the sense the old list understood, so
+    /// no amount of names beside `GIT_DIR` catches it. Issue #415 aimed it at
+    /// a decoy and watched `git hash-object -w` write the object there.
+    const OBJECT_DIRECTORY: &str = "GIT_OBJECT_DIRECTORY";
+
+    /// The variable that injects configuration into every git command.
+    ///
+    /// Git exports it to every `pre-commit` hook, and it outranks each
+    /// configuration file. The two `/dev/null` pins therefore do nothing about
+    /// it.
+    const CONFIG_PARAMETERS: &str = "GIT_CONFIG_PARAMETERS";
+
+    /// The address the hostile configuration puts on every commit it reaches.
+    const INJECTED_EMAIL: &str = "injected@example.invalid";
+
+    /// The hostile value of [`CONFIG_PARAMETERS`], in the form git reads: one
+    /// pair, inside single quotes.
+    fn injected_config() -> String {
+        format!("'user.email={INJECTED_EMAIL}'")
+    }
+
+    /// The name of a test, the way libtest spells it.
+    ///
+    /// `module_path!` starts with the name of the crate and a test name does
+    /// not, so the first part goes. The rest of the path comes from the
+    /// compiler, so a module that moves needs no edit here.
+    fn test_name(function: &str) -> String {
+        let module = module_path!();
+        let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+        format!("{module}::{function}")
+    }
+
+    /// How many loose objects sit in the object store at `store`.
+    ///
+    /// A loose object lives in a directory named for the first two hex digits
+    /// of its id, so the count is the files under every such directory. A
+    /// store that does not exist holds none.
+    ///
+    /// The count is the measure rather than the presence of the directory,
+    /// because `git init` creates `info` and `pack` in whatever store it is
+    /// pointed at. Those two say where git wrote its administrative files. The
+    /// loose objects say where git wrote the content of the fixture.
+    fn loose_objects(store: &Path) -> usize {
+        let Ok(entries) = std::fs::read_dir(store) else {
+            return 0;
+        };
+
+        entries
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.chars().count() == 2 && name.chars().all(|digit| digit.is_ascii_hexdigit())
+            })
+            .map(|entry| {
+                std::fs::read_dir(entry.path())
+                    .map_or(0, |objects| objects.filter_map(Result::ok).count())
+            })
+            .sum()
+    }
+
+    /// Run git in `dir` through [`pin_git_config`] and hand back what it said.
+    ///
+    /// The read goes through the helper under test on purpose. A read through
+    /// a git invocation of its own would answer about a repository this test
+    /// never asked about.
+    fn read(dir: &Path, args: &[&str]) -> String {
+        let mut command = childenv::fixture_command("git");
+        command.args(args).current_dir(dir);
+        let output = pin_git_config(&mut command).output().expect("invoke git");
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Start this test binary again, with `test` named and the hostile
+    /// environment on it, and fail where that child fails.
+    ///
+    /// The hostile values go on the child and never on this process. A `GIT_`
+    /// variable is process-global state, and this binary runs many real git
+    /// commands at once, so a variable set here changes what an unrelated test
+    /// reads. A child holds an environment of its own, so the hostile values
+    /// reach the code under test and reach nothing else. That is also what
+    /// makes the answer the same under a shell and under the pre-commit hook
+    /// of this repository, which exports `GIT_` variables into `cargo test`.
+    ///
+    /// The decoy object store is a temporary directory of this process, and
+    /// the child learns where it is from the variable itself. This process
+    /// holds it until the child is done, so the child has a real directory to
+    /// write into. A decoy that git cannot write to fails the fixture for the
+    /// wrong reason.
+    ///
+    /// The child writes to two files rather than to two pipes, so the parent
+    /// never waits for an end of file a grandchild holds open.
+    ///
+    /// The wait is bounded. A child that hangs is killed and reaped, and the
+    /// test then fails, because a test that waits for such a child holds the
+    /// run for the life of the session.
+    fn a_child_of_this_test_passes(test: &str) {
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let decoy = tempfile::tempdir().expect("tempdir");
+        let stdout = NamedTempFile::new().expect("a file for what the child says");
+        let stderr = NamedTempFile::new().expect("a file for why the child stopped");
+        let mut child_command =
+            childenv::fixture_command(std::env::current_exe().expect("the path of this binary"));
+        child_command
+            .args(["--exact", "--nocapture", test])
+            .current_dir(workdir.path())
+            .env(HOSTILE_MARKER, "1")
+            .env(OBJECT_DIRECTORY, decoy.path())
+            .env(CONFIG_PARAMETERS, injected_config())
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(
+                stdout.as_file().try_clone().expect("clone the file"),
+            ))
+            .stderr(Stdio::from(
+                stderr.as_file().try_clone().expect("clone the file"),
+            ));
+        let mut child = child_command.spawn().expect("start this test binary again");
+
+        let give_up_at = Instant::now() + CHILD_DEADLINE;
+        let status = loop {
+            match child.try_wait().expect("ask about the child") {
+                Some(status) => break status,
+                None => {
+                    if Instant::now() >= give_up_at {
+                        // The kill comes before the panic. A panic ends the
+                        // test where it stands, and the process this test
+                        // started is the one thing that must not outlive it.
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!(
+                            "the child did not finish within {}s",
+                            CHILD_DEADLINE.as_secs(),
+                        );
+                    }
+                    std::thread::sleep(CHILD_POLL);
+                }
+            }
+        };
+
+        let said = format!(
+            "{}{}",
+            std::fs::read_to_string(stdout.path()).unwrap_or_default(),
+            std::fs::read_to_string(stderr.path()).unwrap_or_default(),
+        );
+        assert!(status.success(), "the child failed ({status}):\n{said}");
+        assert!(
+            said.contains(CHILD_RAN),
+            "the child ran no test, so it passed for the wrong reason. libtest exits 0 when a \
+             filter names no test, and the filter was {test:?}:\n{said}",
+        );
+    }
+
+    /// A fixture obeys no git variable out of a hostile environment.
+    ///
+    /// **The rule is the `GIT_` prefix, and never a list of names.** A list
+    /// strips nothing new the day git adds a variable, and from then on it
+    /// gives the same clean-looking answer as a list that works. The two
+    /// variables below walked straight through the three-name list this helper
+    /// carried, and neither one is a location variable, so no number of
+    /// location names catches them.
+    ///
+    /// **The two assertions are the two failures, not two guesses.**
+    /// [`OBJECT_DIRECTORY`] moves the content of the fixture into another
+    /// store, so the fixture ends with an empty store of its own and a decoy
+    /// full of its objects. [`CONFIG_PARAMETERS`] puts another address on the
+    /// commit, over the address the fixture writes into the repository,
+    /// because git reads the environment ahead of every configuration file.
+    ///
+    /// **The armed control comes first.** The child asserts that it really
+    /// holds both variables. An assertion that a variable did nothing passes
+    /// just as readily where there was nothing to do.
+    ///
+    /// **A test that reads the removals off the [`Command`] proves less.** A
+    /// sweep of the `GIT_` prefix records a removal only for a variable this
+    /// process holds, so such a test is empty under a shell and full under the
+    /// pre-commit hook of this repository. This test measures the repository
+    /// the fixture built instead, which is the same answer in both.
+    #[test]
+    fn a_fixture_obeys_no_git_variable_out_of_a_hostile_environment() {
+        if std::env::var_os(HOSTILE_MARKER).is_none() {
+            a_child_of_this_test_passes(&test_name(
+                "a_fixture_obeys_no_git_variable_out_of_a_hostile_environment",
+            ));
+            return;
+        }
+
+        let decoy = PathBuf::from(std::env::var_os(OBJECT_DIRECTORY).unwrap_or_else(|| {
+            panic!(
+                "the child must really hold {OBJECT_DIRECTORY}, or there is nothing here to \
+                 remove and the assertions below are measured against nothing",
+            )
+        }));
+        assert_eq!(
+            std::env::var(CONFIG_PARAMETERS).ok().as_deref(),
+            Some(injected_config().as_str()),
+            "the child must really hold {CONFIG_PARAMETERS}, or there is nothing here to remove \
+             and the assertion below is measured against nothing",
+        );
+
+        let fixture = setup_repo();
+        let store = fixture.path().join(".git").join("objects");
+
+        assert!(
+            loose_objects(&store) > 0,
+            "the fixture wrote no object of its own. {OBJECT_DIRECTORY} reached git, so the \
+             content of the fixture went to the store that variable names, and every later read \
+             of the fixture answers about another repository",
+        );
+        assert_eq!(
+            loose_objects(&decoy),
+            0,
+            "the fixture wrote its objects into the decoy store at {}. {OBJECT_DIRECTORY} \
+             reached git, and a run under the pre-commit hook of this repository aims that \
+             variable at the real repository",
+            decoy.display(),
+        );
+
+        assert_eq!(
+            read(fixture.path(), &["log", "-1", "--format=%ae"]),
+            FIXTURE_EMAIL,
+            "the fixture commit carries the injected address. {CONFIG_PARAMETERS} reached git, \
+             and git reads it ahead of every configuration file, so the two `/dev/null` pins do \
+             nothing about it",
+        );
+
+        println!("{CHILD_RAN}");
+    }
+}
+
+/// The pull-request indicator of watch mode, end to end against a stub `gh`.
+///
+/// Each test owns its temporary directories, and the stub `gh` writes only
+/// into a directory of its test, so the tests stay parallel-safe.
+#[cfg(unix)]
+mod pull_indicator {
+    use super::{gsw_command, run_git, setup_repo};
+
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    use tempfile::TempDir;
+
+    /// The branch of the fixture of [`setup_repo`].
+    const BRANCH: &str = "main";
+
+    /// The reply of GitHub that the stub gives: one open pull request.
+    const REPLY: &str =
+        r#"printf 'HTTP/2.0 200 OK\r\nEtag: "e1"\r\n\r\n[{"number":690,"head":{"ref":"main"}}]'"#;
+
+    /// Puts a 60 second alarm on the child, hands it the terminal as its
+    /// standard input and error, and starts it. The binary can never outlive
+    /// the test, whatever the test does.
+    const BOUND_ON_THE_TERMINAL: &str = r#"alarm(shift @ARGV); open(STDIN, '<&', \*STDOUT) or die "stdin: $!"; open(STDERR, '>&', \*STDOUT) or die "stderr: $!"; exec { $ARGV[0] } @ARGV or die "exec: $!";"#;
+
+    /// The fixture repository, with `origin` on GitHub and the branch tracking
+    /// `origin/<branch>` by configuration.
+    fn github_repo() -> TempDir {
+        let dir = setup_repo();
+        run_git(
+            dir.path(),
+            &["remote", "add", "origin", "git@github.com:owner/name.git"],
+        );
+        run_git(
+            dir.path(),
+            &["config", &format!("branch.{BRANCH}.remote"), "origin"],
+        );
+        run_git(
+            dir.path(),
+            &[
+                "config",
+                &format!("branch.{BRANCH}.merge"),
+                &format!("refs/heads/{BRANCH}"),
+            ],
+        );
+        dir
+    }
+
+    /// Writes `script` as the executable `gh` of a new `bin` directory in
+    /// `root`, and gives the directory.
+    fn stub_gh(root: &Path, script: &str) -> PathBuf {
+        let bin = root.join("bin");
+        fs::create_dir(&bin).expect("make the bin directory");
+        let gh = bin.join("gh");
+        fs::write(&gh, script).expect("write the gh stub");
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("make the stub run");
+        bin
+    }
+
+    /// A `PATH` value that puts `bin` before the inherited path.
+    fn path_with(bin: &Path) -> std::ffi::OsString {
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        std::env::join_paths(
+            std::iter::once(bin.to_path_buf()).chain(std::env::split_paths(&inherited)),
+        )
+        .expect("join the path")
+    }
+
+    /// One-shot mode, forced and by a pipe, starts no `gh` and draws no
+    /// indicator, even with `gh` on the path and a GitHub remote.
+    #[test]
+    fn one_shot_runs_no_lookup_and_draws_no_indicator() {
+        let repo = github_repo();
+        let state = tempfile::tempdir().expect("tempdir");
+        let ran = state.path().join("ran");
+        let script = format!(
+            "#!/bin/sh\ntouch {}\n{REPLY}\n",
+            shellquote::shell_quote(&ran.display().to_string())
+        );
+        let bin = stub_gh(state.path(), &script);
+
+        for extra in [&["--one-shot"][..], &[][..]] {
+            let output = gsw_command(repo.path())
+                .arg("--no-color")
+                .args(extra)
+                .env("PATH", path_with(&bin))
+                .env("COLUMNS", "100")
+                .output()
+                .expect("run gsw");
+            assert!(output.status.success(), "gsw failed with {extra:?}");
+            let text = String::from_utf8_lossy(&output.stdout);
+            for word in ["PR ?", "no PR", "PR #"] {
+                assert!(!text.contains(word), "{extra:?} drew {word:?}: {text}");
+            }
+            assert!(!ran.exists(), "{extra:?} started gh");
+        }
+    }
+
+    /// `--no-pr` is a flag of the binary.
+    #[test]
+    fn the_no_pr_flag_is_accepted() {
+        let repo = setup_repo();
+        let status = gsw_command(repo.path())
+            .args(["--no-pr", "--one-shot", "--no-color"])
+            .status()
+            .expect("run gsw");
+        assert!(status.success());
+    }
+
+    /// Watch mode in a pseudo-terminal. The first frame shows `PR ?`, the
+    /// answer of the first lookup makes the header show `PR #690`, and the
+    /// lookup runs the `gh` that the search found with the arguments and the
+    /// environment that the design states.
+    ///
+    /// The stub counts its runs. Runs 1 and 2 answer. Run 3 and every later run
+    /// end gsw with SIGTERM, so the test needs no deadline of its own: the loop
+    /// paints the frame of answer 1 before any wake that can start lookup 3.
+    /// The alarm of [`BOUND_ON_THE_TERMINAL`] is the safety bound.
+    #[test]
+    fn watch_mode_shows_unknown_first_and_then_the_pull_request() {
+        let repo = github_repo();
+        let state = tempfile::tempdir().expect("tempdir");
+        let quoted =
+            |name: &str| shellquote::shell_quote(&state.path().join(name).display().to_string());
+        let script = format!(
+            "#!/bin/sh\n\
+             n=$(cat {count} 2>/dev/null || echo 0)\n\
+             n=$((n + 1))\n\
+             echo \"$n\" > {count}\n\
+             case \"$n\" in\n\
+             1) printf '%s\\n' \"$@\" > {args}; env > {env}; {REPLY} ;;\n\
+             2) {REPLY} ;;\n\
+             *) kill -TERM $PPID; exit 0 ;;\n\
+             esac\n",
+            count = quoted("count"),
+            args = quoted("args"),
+            env = quoted("env"),
+        );
+        let bin = stub_gh(state.path(), &script);
+        let home = tempfile::tempdir().expect("tempdir");
+
+        let mut command = childenv::fixture_command("perl");
+        command
+            .arg("-e")
+            .arg(BOUND_ON_THE_TERMINAL)
+            .arg("60")
+            .arg(env!("CARGO_BIN_EXE_gsw"))
+            .args(["--refresh-interval", "1"])
+            .current_dir(repo.path())
+            .env_clear()
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path())
+            .env("TERM", "xterm-256color")
+            .env("COLUMNS", "100")
+            .env("GIT_CONFIG_NOSYSTEM", "1");
+
+        let output = gitscratch::testing::pty::Pty::open(100).run_with_stdout_on_terminal(command);
+        let raw = String::from_utf8_lossy(&output.stdout).into_owned();
+        let text = testcolor::strip_ansi(&raw);
+
+        let first = text.find("PR ?");
+        let later = text.find("PR #690");
+        assert!(
+            first.is_some() && later.is_some() && first < later,
+            "the first frame must show `PR ?` and a later frame `PR #690`. terminal: {text:?}",
+        );
+
+        let args = fs::read_to_string(state.path().join("args")).expect("the stub saw run 1");
+        let args: Vec<&str> = args.lines().collect();
+        for expected in ["api", "-i", "--hostname", "github.com"] {
+            assert!(
+                args.contains(&expected),
+                "{expected:?} missing from {args:?}"
+            );
+        }
+        assert!(
+            args.iter()
+                .any(|arg| arg.contains(&format!("head=owner:{BRANCH}"))),
+            "no argument names the head: {args:?}",
+        );
+        let env = fs::read_to_string(state.path().join("env")).expect("the stub saw its env");
+        assert!(
+            env.lines().any(|line| line == "GH_PROMPT_DISABLED=1"),
+            "gh must run with prompts off: {env}",
+        );
+    }
 }

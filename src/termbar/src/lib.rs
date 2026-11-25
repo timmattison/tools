@@ -963,7 +963,7 @@ mod tests {
     fn test_min_basename_chars_minimum_bound() {
         // Verify MIN_BASENAME_CHARS is at least 1 (mirrors compile-time assertion).
         // A value of 0 would produce truncated filenames with no visible content.
-        #[allow(
+        #[expect(
             clippy::assertions_on_constants,
             reason = "intentional change-detector test mirroring the compile-time assertion at the constant's definition"
         )]
@@ -1273,7 +1273,7 @@ mod tests {
 
         // Verify the actual truncation produces the expected result
         // min_with_ext = 1 + 2 + 4 = 7 for .txt; well within u16 range.
-        #[allow(
+        #[expect(
             clippy::cast_possible_truncation,
             reason = "min_with_ext is the sum of small constants (= 7 here) and cannot exceed u16::MAX"
         )]

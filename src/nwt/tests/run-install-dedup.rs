@@ -6,7 +6,7 @@
 //! git hooks by running the package manager's install. But a user who also
 //! passes `--run "pnpm install"` would, before this fix, install TWICE per
 //! worktree — once for the bootstrap and once for the run — roughly doubling
-//! creation time on Node repos. The fix: when the synchronous (non-tmux) run
+//! creation time on Node repos. The fix: when the synchronous run
 //! command already invokes a known package manager's install, skip nwt's own
 //! bootstrap install; the deferred ungated-worktree safety net still catches a
 //! run that fails to create the hooks dir.
@@ -24,7 +24,7 @@
 //!     present".
 
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use tempfile::TempDir;
 
@@ -46,7 +46,7 @@ const SKIP_NOTICE: &str = "Skipping hook bootstrap";
 
 /// Returns true if `pnpm --version` runs, i.e. pnpm is installed.
 fn pnpm_available() -> bool {
-    Command::new("pnpm")
+    childenv::fixture_command("pnpm")
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())

@@ -122,9 +122,12 @@ today; pinning the order means the two cannot disagree even if it did.
 
 Parse each as `u32`; if either file is missing or unparseable, `step` is `None`.
 Extract a small private helper, with the counter table as a module-level
-`REBASE_COUNTERS` constant — the single source of truth for the order. The prose
-above restates it, and that restatement is not checked automatically, so keep the
-two in step by hand:
+constant — the single source of truth for the order. The prose above restates
+it, and that restatement is not checked automatically, so keep the two in step
+by hand. (The constant was `REBASE_COUNTERS` here. #522 made it `REBASE_DIRS`, a
+table of the two directories with the counter files of each, because the run of
+`R` and `M` also reads `head-name` and `orig-head` from the same directories in
+the same order.)
 
 ```rust
 fn rebase_step(git_dir: &Path) -> Option<StepProgress>
