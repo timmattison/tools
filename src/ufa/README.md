@@ -490,8 +490,8 @@ and `ufa --output json devices list` are equivalent.
   dotted keys (`features.switching.enabled`) and array elements indexed (`uplinks[0]`).
 - `--output json`: machine-readable JSON, pretty-printed.
 
-Listings answer in JSON with the controller's own pagination envelope rather than a bare array, so
-nothing the API said is lost — the items are under `.data`:
+A listing of one page answers in JSON with the controller's own pagination envelope rather than a
+bare array, so nothing the API said is lost — the items are under `.data`:
 
 ```bash
 $ ufa devices list --output json
@@ -506,8 +506,14 @@ $ ufa devices list --output json
 $ ufa devices list --output json | jq '.data[] | select(.state == "OFFLINE")'
 ```
 
-Two commands answer with a bare array instead, because neither is paginated: `ufa cloud hosts` and
-`ufa devices stats --all`.
+These commands answer with a bare array instead, because none of them gives one page: each list
+command with `--all` (`ufa sites --all`, `ufa devices list --all`, `ufa clients list --all` and
+`ufa vouchers list --all`), `ufa cloud hosts` and `ufa devices stats --all`. Read their items with
+`jq '.[]'`:
+
+```bash
+$ ufa devices list --all --output json | jq '.[] | select(.state == "OFFLINE")'
+```
 
 A command that finds nothing still answers `--output json` with a document: `[]`. That is the
 answer of `ufa cloud hosts` for an account with no consoles, of `ufa devices stats --all` for a site
