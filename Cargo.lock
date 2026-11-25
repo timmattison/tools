@@ -9492,6 +9492,9 @@ dependencies = [
  "clap",
  "colored",
  "op-cache",
+ "serde_json",
+ "shellquote",
+ "tempfile",
  "which",
 ]
 
@@ -10370,7 +10373,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
+ "libc",
  "listeners",
 ]
 

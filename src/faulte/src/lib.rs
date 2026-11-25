@@ -24,6 +24,8 @@
 //!
 //! # The modules
 //!
+//! - [`check`] — the fast verdict of `faulte check`, from the CPU counters and
+//!   the compressor counters of the kernel, and the rate of new processes.
 //! - [`duration`] — a length of time on a command line, such as `5s` or `7d`.
 //! - [`pid`] — the numbers that name a process and an account.
 //! - [`top`] — the command line of the fault sampler, and the parser of its
@@ -52,6 +54,7 @@
 //!   `machine::macos` is the one part of `faulte` that runs a command or calls
 //!   the kernel.
 
+pub mod check;
 pub mod duration;
 pub mod history;
 pub mod machine;

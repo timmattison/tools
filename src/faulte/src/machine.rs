@@ -86,12 +86,16 @@ pub enum MachineError {
     /// A signal is not a read, and the message of a failed read names a fact
     /// that did not happen: `faulte cannot read kill(105, SIGTERM)`. A person
     /// reads this message in the report of a stop, beside the sessions that
-    /// stopped, so it names the call that failed and nothing else.
+    /// stopped, so it names the call that failed and nothing else. A call
+    /// that `faulte` refused to make, because its number names no single
+    /// process, is a call that failed too.
     #[error("{call} failed: {reason}")]
     SignalFailed {
-        /// The call that `faulte` made, for example `kill(105, SIGTERM)`.
+        /// The call that `faulte` made or refused to make, for example
+        /// `kill(105, SIGTERM)`.
         call: String,
-        /// What the operating system said.
+        /// What the operating system said, or why `faulte` refused the number
+        /// before the call.
         reason: String,
     },
 }
@@ -200,7 +204,9 @@ pub trait Machine {
     /// # Errors
     ///
     /// Gives an error when the operating system refuses the signal, for
-    /// example because another account owns the process.
+    /// example because another account owns the process. An implementation
+    /// refuses a number that names no single process, 0 or a number that does
+    /// not fit in a signed PID, before any signal goes out.
     fn signal(&self, pid: Pid, signal: Signal) -> Result<(), MachineError>;
 
     /// Waits for `how_long`.

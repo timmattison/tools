@@ -165,8 +165,8 @@ pub struct StopReport {
     /// what the plan said.
     pub survived: Vec<Candidate>,
     /// The candidates that `faulte` could not signal, or could not read
-    /// again, each with what the operating system said. One candidate in this
-    /// list makes a stop that did not do what the plan said.
+    /// again, each with the reason. One candidate in this list makes a stop
+    /// that did not do what the plan said.
     pub failed: Vec<(Candidate, MachineError)>,
 }
 

@@ -7,6 +7,8 @@ use buildinfo::version_string;
 use clap::error::ErrorKind;
 use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+#[cfg(target_os = "macos")]
+use faulte::check;
 use faulte::duration::Span;
 #[cfg(target_os = "macos")]
 use faulte::machine::{macos::Mac, observe, MachineError};
@@ -91,6 +93,14 @@ const TUI_NEEDS_A_TERMINAL: &str = "faulte tui draws a full-screen view, so it n
 #[cfg(target_os = "macos")]
 const LEAVING_SIGNALS: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGHUP, libc::SIGINT];
 
+/// The exit code when `faulte check` finds a problem.
+#[cfg(target_os = "macos")]
+const EXIT_PROBLEM: u8 = 1;
+
+/// The format of the time at the start of each line of a watch.
+#[cfg(target_os = "macos")]
+const CLOCK_FORMAT: &str = "%H:%M:%S";
+
 /// The name that each message on the error output starts with.
 #[cfg(target_os = "macos")]
 const TOOL: &str = "faulte";
@@ -119,6 +129,10 @@ const STOPPED_NOTHING: &str = "faulte stopped nothing.";
 /// What `faulte kill` says when it cannot write the question out.
 #[cfg(target_os = "macos")]
 const NO_QUESTION: &str = "the question did not reach the output, so faulte stopped nothing.";
+
+/// What `faulte check` says when a write of its output fails.
+#[cfg(target_os = "macos")]
+const NO_OUTPUT: &str = "the check did not write its output";
 
 /// The time that `faulte kill` gives a session between `SIGTERM` and
 /// `SIGKILL`.
@@ -156,8 +170,11 @@ const POLL: Duration = Duration::from_secs(1);
 #[derive(Parser)]
 #[command(name = "faulte", version = version_string!(), about = ABOUT)]
 struct Cli {
-    /// The time to sample the page faults of each process, for example 5s, 10m,
-    /// or 2h. A bare number is a number of seconds.
+    /// The length of the sample, for example 5s, 10m, or 2h. A bare number is a
+    /// number of seconds. The ranking, `faulte kill`, and each sample of
+    /// `faulte tui` count the page faults of each process over this time.
+    /// `faulte check` reads the kernel counters at the start and at the end of
+    /// this time.
     #[arg(long, global = true, value_name = DURATION_VALUE, default_value = DEFAULT_INTERVAL)]
     interval: Span,
 
@@ -196,6 +213,16 @@ enum Command {
     /// Show a full-screen view of the page faults of this Mac, with the
     /// history of the samples. Press q to leave.
     Tui,
+
+    /// Say if the system time of this Mac is high now, and if memory churn or
+    /// process churn occurs at the same time. The exit code is 0 for no problem,
+    /// 1 for a problem, and 2 for an error. It runs no `top` and no `ps`, thus it
+    /// works on a Mac that is too busy for them.
+    Check {
+        /// Print one line for each interval, until you stop the run.
+        #[arg(long)]
+        watch: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -247,6 +274,95 @@ fn run(cli: Cli) -> ExitCode {
                 max,
             },
         ),
+        Some(Command::Check { watch }) => check_now(interval, watch),
+    }
+}
+
+/// What happened to the lines that a check wrote.
+#[cfg(target_os = "macos")]
+enum Delivery {
+    /// Each line reached the output.
+    Written,
+    /// The reader of the pipe left, which is a normal end of a run that a
+    /// person pipes into `head`.
+    ReaderLeft,
+    /// The write failed for a different reason, for example a full disk.
+    /// [`deliver`] printed the reason on the error output.
+    Failed,
+}
+
+/// Writes `lines` to `output`, one line each, and stops at the first error.
+///
+/// `println!` panics on a write error, thus each line of a check goes through
+/// this function. It tells a reader that left from a write that failed.
+#[cfg(target_os = "macos")]
+fn deliver(output: &mut impl Write, lines: &[String]) -> Delivery {
+    for line in lines {
+        match writeln!(output, "{line}") {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return Delivery::ReaderLeft,
+            Err(error) => {
+                eprintln!("{TOOL}: {NO_OUTPUT}: {error}");
+                return Delivery::Failed;
+            }
+        }
+    }
+    Delivery::Written
+}
+
+/// Gives one verdict on this Mac, or one line for each interval with `watch`.
+///
+/// The exit code is 0 for no problem, 1 for a problem, and 2 when the kernel
+/// refuses a read or when a write of the output fails. A reader that left does
+/// not change the exit code.
+#[cfg(target_os = "macos")]
+fn check_now(interval: Span, watch: bool) -> ExitCode {
+    let interval = Duration::from(interval);
+    let mut sampler = match check::Sampler::start(Mac::new()) {
+        Ok(sampler) => sampler,
+        Err(error) => return failed(&error),
+    };
+    if watch {
+        return check_watch(&mut sampler, interval);
+    }
+    match sampler.sample(interval) {
+        Ok(result) => {
+            let mut output = io::stdout().lock();
+            if matches!(
+                deliver(&mut output, &check::report(&result)),
+                Delivery::Failed
+            ) {
+                return ExitCode::from(EXIT_ERROR);
+            }
+            if result.verdict.is_problem() {
+                ExitCode::from(EXIT_PROBLEM)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(error) => failed(&error),
+    }
+}
+
+/// Prints one line for each interval.
+///
+/// The watch ends with the exit code 0 when the reader of its output left, and
+/// with the exit code 2 when a read of the kernel or a write of the output
+/// fails.
+#[cfg(target_os = "macos")]
+fn check_watch(sampler: &mut check::Sampler<Mac>, interval: Duration) -> ExitCode {
+    let mut output = io::stdout().lock();
+    loop {
+        let result = match sampler.sample(interval) {
+            Ok(result) => result,
+            Err(error) => return failed(&error),
+        };
+        let clock = chrono::Local::now().format(CLOCK_FORMAT).to_string();
+        match deliver(&mut output, &[check::watch_line(&result, &clock)]) {
+            Delivery::Written => {}
+            Delivery::ReaderLeft => return ExitCode::SUCCESS,
+            Delivery::Failed => return ExitCode::from(EXIT_ERROR),
+        }
     }
 }
 
