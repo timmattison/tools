@@ -417,6 +417,21 @@ fn run_blocking_runs_the_work_on_another_thread() {
 }
 
 #[test]
+fn run_blocking_runs_the_work_on_the_blocking_pool_of_the_callers_runtime() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .thread_name("nle-run-blocking-test")
+        .enable_all()
+        .build()
+        .unwrap();
+    let name = runtime
+        .block_on(run_blocking(|| {
+            Ok(std::thread::current().name().map(str::to_owned))
+        }))
+        .unwrap();
+    assert_eq!(name.as_deref(), Some("nle-run-blocking-test"));
+}
+
+#[test]
 fn run_blocking_turns_a_panic_into_a_task_error() {
     let result: Result<(), NleError> =
         tauri::async_runtime::block_on(async { run_blocking(|| panic!("boom")).await });
