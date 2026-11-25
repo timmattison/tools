@@ -35,6 +35,9 @@ env:
   # Debug information is most of the size of the target directory, and the
   # disk of a Linux runner is small. CI reads no debug symbols.
   CARGO_PROFILE_DEV_DEBUG: "0"
+  # The version of Node.js that each job installs. The tests of nle need 22.18
+  # or later, and the package of the claude CLI needs 22 or later.
+  NODE_VERSION: "24"
 
 jobs:
   rust-checks:
@@ -55,10 +58,30 @@ jobs:
       - name: Install the system packages (Linux)
         if: runner.os == 'Linux'
         # alsa-sys (audio) and openssl-sys link against these libraries. The
-        # tests of crap run its shell function in zsh.
+        # tests of crap run its shell function in zsh. nle is a Tauri app, and
+        # Tauri on Linux links against WebKitGTK 4.1 and the libraries under
+        # it: GTK 3, libsoup 3, JavaScriptCore 4.1, and D-Bus (libdbus-sys).
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends libasound2-dev libssl-dev pkg-config zsh
+          sudo apt-get install --yes --no-install-recommends \
+            libasound2-dev \
+            libdbus-1-dev \
+            libgtk-3-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            pkg-config \
+            zsh
+
+      - name: Install Node.js
+        # The tests of nle run its dev script and the unit tests of that
+        # script under the real node, which must strip the TypeScript types
+        # itself. That needs Node.js 22.18 or later, and the version of the
+        # runner image can be older.
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Install the pinned Rust toolchain
         # With no argument, rustup installs the toolchain and the components
@@ -104,7 +127,7 @@ jobs:
         # The package of the claude CLI needs Node.js 22 or later.
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24"
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Install the claude CLI
         # npm comes with Node.js. It runs the postinstall script of the

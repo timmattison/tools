@@ -1246,16 +1246,21 @@ repository.
 Each job of the Rust checks does these steps:
 
 1. On Linux only, install the system packages with `apt-get`: the libraries
-   that some crates link against, and the tools that some tests run.
-2. Install the toolchain and the components that `rust-toolchain.toml` names.
-3. Install `cargo-machete`.
-4. Restore the Cargo cache. Only a run on `main` saves a cache, and a pull
+   that some crates link against, and the tools that some tests run. `nle` is
+   a Tauri app, and Tauri on Linux links against WebKitGTK 4.1.
+2. Install Node.js, at the version that `NODE_VERSION` in the workflow names.
+   The tests of `nle` run TypeScript under the real `node`, which needs
+   Node.js 22.18 or later.
+3. Install the toolchain and the components that `rust-toolchain.toml` names.
+4. Install `cargo-machete`.
+5. Restore the Cargo cache. Only a run on `main` saves a cache, and a pull
    request reads that cache.
-5. Run `scripts/rust-checks.sh`.
+6. Run `scripts/rust-checks.sh`.
 
 The job of the plugin checks does these steps:
 
-1. Install Node.js. The package of the claude CLI needs Node.js 22 or later.
+1. Install Node.js, at the same `NODE_VERSION`. The package of the claude CLI
+   needs Node.js 22 or later.
 2. Install the claude CLI with `npm`, at the version that
    `CLAUDE_CODE_VERSION` in the workflow names.
 3. Run `scripts/plugin-checks.sh`.
