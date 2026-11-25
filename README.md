@@ -3357,13 +3357,13 @@ version is the scaffold: it opens a `.json` or `.json.gz` recording and shows
 its metadata. The timeline (issue #150) and the preview pane (issue #151) are
 placeholders.
 
-The application is Tauri 2. The Rust side owns every recording, and the
-frontend reads one through typed commands. The backend also has commands that
-save a recording, list the recordings in a directory, and export a recording
-through the `beta` CLI as a video or a web player. The frontend does not call
-them yet. `ts-rs` generates a TypeScript type from each Rust struct that the
-commands use, and a test fails when the committed types drift from the Rust
-structs.
+The application is Tauri 2. The Rust side reads and writes every recording
+file, and the frontend reads one through typed commands. The backend also has
+commands that save a recording, list the recordings in a directory, and export
+a recording through the `beta` CLI as a video or a web player. The frontend
+does not call them yet. `ts-rs` generates a TypeScript type from each Rust
+struct that the commands use, and a test fails when the committed types drift
+from the Rust structs.
 
 `cargo install` does not build this tool, because the application carries a
 frontend that a bundler must build first. To run it from a checkout:
