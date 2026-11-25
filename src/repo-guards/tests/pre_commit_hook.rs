@@ -89,8 +89,9 @@ fn git_init_and_stage(dir: &Path, paths: &[&str]) {
     run_git(dir, &add);
 }
 
-/// Run `git -C <dir> <args>` and assert it succeeded.
-fn run_git(dir: &Path, args: &[&str]) {
+/// Run `git -C <dir> <args>`, assert it succeeded, and give back its standard
+/// output.
+fn run_git(dir: &Path, args: &[&str]) -> String {
     // Shed the whole inherited `GIT_` family so the fixture repo is the one git
     // operates on, even when this runs from inside the repo's own hook. The
     // rule is the prefix and never a list of names: `GIT_DIR` overrides `-C`,
@@ -110,6 +111,7 @@ fn run_git(dir: &Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 /// Both halves of one run of the hook. A test reads the half it needs, or both
@@ -698,14 +700,32 @@ fn staged_ic_inline_file_with_rust_runs_the_emit_rgba_tests_once() {
     );
 }
 
-/// The two ways that a commit takes a committed file away from its path.
+/// The three ways that a commit takes a committed regular file away from its
+/// path.
 #[derive(Clone, Copy, Debug)]
 enum Removal {
     /// `git mv` of the file to this path.
     MoveTo(&'static str),
     /// `git rm` of the file.
     Delete,
+    /// A symbolic link in place of the file, staged with `git add`. `git diff`
+    /// shows the path with the status `T`, a type change, and the
+    /// staging asserts that status.
+    ReplaceWithSymlink,
 }
+
+/// Each [`Removal`], with `destination` as the path of the move.
+fn each_removal(destination: &'static str) -> [Removal; 3] {
+    [
+        Removal::MoveTo(destination),
+        Removal::Delete,
+        Removal::ReplaceWithSymlink,
+    ]
+}
+
+/// The target of the symbolic link of [`Removal::ReplaceWithSymlink`]. Git
+/// stages a link whose target does not exist, and no fake program reads it.
+const SYMLINK_TARGET: &str = "elsewhere";
 
 /// Commit `committed` in a new repository in `dir`, then stage its removal.
 ///
@@ -744,22 +764,44 @@ fn commit_then_stage_removal(dir: &Path, committed: &str, removal: Removal) {
                 .unwrap_or_else(|e| panic!("create the directory of {destination}: {e}"));
             run_git(dir, &["mv", committed, destination]);
         }
-        Removal::Delete => run_git(dir, &["rm", "-q", committed]),
+        Removal::Delete => {
+            run_git(dir, &["rm", "-q", committed]);
+        }
+        Removal::ReplaceWithSymlink => {
+            let path = dir.join(committed);
+            fs::remove_file(&path).unwrap_or_else(|e| panic!("remove {committed}: {e}"));
+            std::os::unix::fs::symlink(SYMLINK_TARGET, &path)
+                .unwrap_or_else(|e| panic!("link {committed} to {SYMLINK_TARGET}: {e}"));
+            run_git(dir, &["add", committed]);
+            let status = run_git(
+                dir,
+                &[
+                    "diff",
+                    "--cached",
+                    "--name-status",
+                    "--no-renames",
+                    "--no-color",
+                ],
+            );
+            assert_eq!(
+                status,
+                format!("T\t{committed}\n"),
+                "a link in place of {committed} must stage as a type change"
+            );
+        }
     }
 }
 
-/// A move of a file of `plugins/ic-inline` to a different path, and a deletion
-/// of it, must run the test target of `ic` that reads the plugin. That target
-/// names the old path, so such a commit breaks it. `git diff` finds renames by
-/// default, and `--name-only` then prints only the new path, so a block that
-/// matches the old path misses the move.
+/// A move of a file of `plugins/ic-inline` to a different path, a deletion of
+/// it, and a symbolic link in its place must each run the test target of `ic`
+/// that reads the plugin. That target reads the old path as a regular file, so
+/// such a commit breaks it. `git diff` finds renames by default, and
+/// `--name-only` then prints only the new path, so a block that matches the
+/// old path misses the move.
 #[test]
 fn removed_ic_inline_file_runs_the_emit_rgba_tests() {
     let committed = IC_INLINE_FILES[0];
-    for removal in [
-        Removal::MoveTo("plugins/shared/fixture.png"),
-        Removal::Delete,
-    ] {
+    for removal in each_removal("plugins/shared/fixture.png") {
         let dir = unique_fixture_dir();
         write_files(&dir, &[committed]);
         commit_then_stage_removal(&dir, committed, removal);
@@ -787,12 +829,13 @@ fn removed_ic_inline_file_runs_the_emit_rgba_tests() {
 /// The cargo call of the tool-index block.
 const INDEX_GUARD_CARGO_CALL: &str = "test -p repo-guards --test tool_index_coverage";
 
-/// A move of a tool index to a different path, and a deletion of it, must run
-/// the tool-index guard. Both take the index away from the root, which is the
-/// fault that the guard catches.
+/// A move of a tool index to a different path, a deletion of it, and a
+/// symbolic link in its place must each run the tool-index guard. Each one
+/// takes the index away from the root, which is the fault that the guard
+/// catches.
 #[test]
 fn removed_tool_index_runs_the_index_guard() {
-    for removal in [Removal::MoveTo("docs/README.md"), Removal::Delete] {
+    for removal in each_removal("docs/README.md") {
         let dir = unique_fixture_dir();
         fs::write(dir.join("README.md"), "# fixture\n").expect("write README.md");
         commit_then_stage_removal(&dir, "README.md", removal);
@@ -819,12 +862,13 @@ fn removed_tool_index_runs_the_index_guard() {
 /// plugin block still finds the plugin.
 const FIXTURE_PLUGIN_MANIFEST: &str = "plugins/fixture/.claude-plugin/plugin.json";
 
-/// A move of a file of a plugin out of `plugins/`, and a deletion of it, must
-/// run the checks of the claude CLI. Each one takes the file away from the
-/// plugin, and that can break the plugin as surely as an edit can.
+/// A move of a file of a plugin out of `plugins/`, a deletion of it, and a
+/// symbolic link in its place must each run the checks of the claude CLI. Each
+/// one takes the file away from the plugin, and that can break the plugin as
+/// surely as an edit can.
 #[test]
 fn removed_plugin_file_runs_the_plugin_checks() {
-    for removal in [Removal::MoveTo("docs/README.md"), Removal::Delete] {
+    for removal in each_removal("docs/README.md") {
         let dir = unique_fixture_dir();
         write_fixture_plugin(&dir);
         write_files(&dir, &[FIXTURE_PLUGIN_MANIFEST]);
