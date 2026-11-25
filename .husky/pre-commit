@@ -42,6 +42,15 @@ set -euo pipefail
 # shellcheck source=scripts/without-git-environment.sh
 . "$(dirname "$0")/../scripts/without-git-environment.sh"
 
+# Each path that the commit adds, copies, changes or deletes, one on each line.
+# git diff finds renames by default, and --name-only then prints only the new
+# path of a move. --no-renames shows a move as a deletion of the old path and
+# an addition of the new path, so a block that matches the old path sees a move
+# out of it. Each block below whose path a removal can break reads this list.
+staged_paths_with_deletions() {
+    git diff --cached --name-only --no-renames --diff-filter=ACMD
+}
+
 if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$|(^|/)Cargo\.(toml|lock)$|^(rustfmt|rust-toolchain)\.toml$'; then
     echo "pre-commit: running cargo fmt --all -- --check"
     without_git_environment cargo fmt --all -- --check
@@ -98,11 +107,11 @@ fi
 # fraction of the Rust block. The rust_gate_ran guard keeps a commit that
 # touches Rust and an index from running the same test twice.
 #
-# --diff-filter carries D on top of ACMR: deleting an index outright is the
-# fault this catches, not only editing one. The same git-env scrub as the gate
-# above keeps the two symmetric.
+# The block reads staged_paths_with_deletions: deleting or moving an index is
+# the fault this catches, not only editing one. The same git-env scrub as the
+# gate above keeps the two symmetric.
 if [ "${rust_gate_ran:-}" != yes ] &&
-    git diff --cached --name-only --diff-filter=ACMRD | grep -qE '^(README|TLDR)\.md$'; then
+    staged_paths_with_deletions | grep -qE '^(README|TLDR)\.md$'; then
     echo "pre-commit: running cargo test -p repo-guards --test tool_index_coverage"
     without_git_environment cargo test -p repo-guards --test tool_index_coverage
 fi
@@ -119,12 +128,13 @@ fi
 # skips them reports a plugin it never read as clean. So that case fails the
 # commit and names the fix.
 #
-# --diff-filter carries D, as the index gate above does: deleting a file of a
-# plugin can break it as surely as an edit can. Each claude command runs
-# through `without_git_environment`, the same as each cargo command above. It
-# removes the whole GIT_ prefix, so GIT_CONFIG_PARAMETERS and each name that
-# git adds later stay out of the CLI too, not only the names of a list.
-if git diff --cached --name-only --diff-filter=ACMRD | grep -qE '^(plugins/|\.claude-plugin/)'; then
+# The block reads staged_paths_with_deletions, as the index gate above does:
+# deleting a file of a plugin, or moving it out, can break the plugin as surely
+# as an edit can. Each claude command runs through `without_git_environment`,
+# the same as each cargo command above. It removes the whole GIT_ prefix, so
+# GIT_CONFIG_PARAMETERS and each name that git adds later stay out of the CLI
+# too, not only the names of a list.
+if staged_paths_with_deletions | grep -qE '^(plugins/|\.claude-plugin/)'; then
     if ! command -v claude >/dev/null 2>&1; then
         echo "pre-commit: the claude CLI is not on PATH, and it runs the checks of plugins/. Install Claude Code, then commit again." >&2
         exit 1
@@ -150,9 +160,11 @@ fi
 # It runs the whole test target, not the one test by name: a filter that
 # matches no test passes, so a rename of the test would leave the block a
 # no-op. The rust_gate_ran guard keeps a commit that touches Rust from running
-# the target twice, because the workspace tests hold it.
+# the target twice, because the workspace tests hold it. The block reads
+# staged_paths_with_deletions, because the test names the old paths, so a
+# deletion or a move of a file of the plugin breaks it as an edit can.
 if [ "${rust_gate_ran:-}" != yes ] &&
-    git diff --cached --name-only --diff-filter=ACMRD | grep -qE '^plugins/ic-inline/'; then
+    staged_paths_with_deletions | grep -qE '^plugins/ic-inline/'; then
     echo "pre-commit: running cargo test -p ic --test emit-rgba"
     without_git_environment cargo test -p ic --test emit-rgba
 fi
