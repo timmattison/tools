@@ -117,9 +117,9 @@ pub fn controllers() {
 }
 ";
 
-/// The entrance behind an import with a new name.
+/// The entrance behind an import with a new name, inside a use group.
 const CHILDENV_RENAMED: &str = "\
-use childenv::fixture_command as spawn;
+use childenv::{fixture_command as spawn, inherited_git_variables};
 
 pub fn controllers() {
     let _ = spawn(\"op\").arg(\"whoami\").output();

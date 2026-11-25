@@ -18,11 +18,33 @@
 //!
 //! # The rule is one sentence
 //!
-//! A call to `Command::new` whose program is the `op` binary, in any crate but
-//! `op-cache`, is an offender. Locating `op` is not running it, so
+//! A call of a spawn entrance whose arguments name the `op` binary, in any
+//! crate but `op-cache`, is an offender. Locating `op` is not running it, so
 //! `which::which("op")` is nobody's business here. Running `op-cache` itself is
-//! the sanctioned route for a shell script, so `Command::new("op-cache")` is
-//! not an offender either.
+//! the sanctioned route for a shell script, so `childenv::command("op-cache")`
+//! is not an offender either.
+//!
+//! A spawn entrance is one of these callees:
+//!
+//! 1. **`childenv::command` and `childenv::fixture_command`.** `clippy.toml`
+//!    bans every raw constructor of a process, so these two are the spelling
+//!    that a new spawn of `op` arrives in. The last segment of the path
+//!    decides, so the call behind an import, `command("op")`, is the same
+//!    call. A method of the same name matches too.
+//! 2. **`Command::new` and `CommandBuilder::new`.** The ban lets a site that
+//!    states an exemption call them, and they started every spawn of this
+//!    workspace before `childenv` existed. The last two segments of the path
+//!    decide, so `std::process::Command::new`, `tokio::process::Command::new`
+//!    and `portable_pty::CommandBuilder::new` all match.
+//! 3. **A renamed import of one of those names.** `use childenv::command as
+//!    spawn` makes `spawn` an entrance of the file, and `use
+//!    std::process::Command as Process` makes `Process::new` one.
+//!
+//! The arguments name the `op` binary when they hold, at any depth, a string
+//! literal whose last path segment is `op`. Thus `"/opt/homebrew/bin/op"` runs
+//! the same binary, and `"op-cache"` runs a different one. A literal after the
+//! closing parenthesis is an argument of a later method, so
+//! `childenv::command("git").arg("op")` runs git.
 //!
 //! # Enumerate, never allowlist
 //!
@@ -36,40 +58,57 @@
 //! what each one costs.
 //!
 //! `op-cache` is recognised by its directory. If it ever moves, no member
-//! matches, `op-cache` is audited like everything else, and its own two calls
-//! are reported. The guard then fails loudly rather than quietly auditing one
-//! crate fewer.
+//! matches, `op-cache` is audited like everything else, and its own spawn of
+//! `op` is reported. The guard then fails loudly rather than quietly auditing
+//! one crate fewer.
 //!
-//! # Parse, never text-match
+//! # Parse to fail closed, then match over tokens
 //!
-//! "A call whose callee is `Command::new` and whose first argument is the
-//! string `op`" names a syntactic category, so [`syn`] answers it. A search for
-//! the text `Command::new("op")` answers only for the one spelling somebody
-//! thought of, and every other spelling reports *clean* — which reads exactly
-//! like a guard doing real work. The forms one fact arrives in:
+//! "A call whose callee is a spawn entrance and whose arguments name `op`"
+//! names a syntactic category, so a text search is the wrong tool. A search for
+//! `Command::new("op")` answers only for the one spelling somebody thought of,
+//! and every other spelling reports *clean*, which reads exactly like a guard
+//! doing real work. The first version of this guard matched only a callee that
+//! ended in `Command::new`. Then `clippy.toml` made `childenv::command` the one
+//! entrance, and the guard reported each new spawn of `op` clean.
 //!
-//! 1. **A call.** Any [`syn::ExprCall`] whose callee path ends with the two
-//!    segments `Command` and `new`. That covers `Command::new`,
-//!    `std::process::Command::new`, `tokio::process::Command::new`, and every
-//!    other module path in front of the same two names.
-//! 2. **A program named by its path.** `Command::new("/opt/homebrew/bin/op")`
-//!    runs the same binary. The last segment of the literal decides, so a
-//!    program named `op-cache` is still not `op`.
-//! 3. **A call inside a macro body.** [`syn`] hands a macro body over as
-//!    unparsed tokens, so the call check never sees
-//!    `println!("{:?}", Command::new("op").output())`. A macro body whose
-//!    tokens hold the identifier `Command` *and* a string literal naming the
-//!    `op` binary is an offender.
+//! Each file is parsed with [`syn::parse_file`] first. That is the fail-closed
+//! half: a file this guard cannot read as Rust is a refusal, because "no spawn
+//! here" and "I never understood this file" print identically.
 //!
-//! Check 3 can over-match: a macro body that names an unrelated `Command` type
-//! beside the string `"op"` is flagged, and it runs nothing. That trade is
-//! deliberate. An over-match fails loudly and a person corrects it in an hour.
-//! An under-match stays green for years.
+//! The verdict is then taken over the [`proc_macro2`] token stream of the file,
+//! as [`git_env_sweep`](crate::git_env_sweep) does. [`syn`] leaves the body of
+//! each macro invocation as unparsed tokens, so a walk of the syntax tree never
+//! sees `println!("{:?}", childenv::command("op").output())`. The token stream
+//! has no such blind spot, and one rule reads a macro body and a function body
+//! the same way. The token stream also keeps **prose as data**. A `//` comment
+//! never becomes a token, a doc comment becomes one string literal, and the
+//! text of a string is one token, not the words it spells.
 //!
-//! One thing no matcher here can see is a program named by a binding —
-//! `Command::new(program)`. Resolving that needs the name resolution a compiler
-//! does, which this guard is not. The literal is the shape every call in this
-//! workspace uses, and the shape the one offender used.
+//! The matched shape is an identifier followed immediately by a parenthesized
+//! group: a call. The path in front of the identifier is the run of
+//! `identifier ::` pairs before it. `command!(…)` puts a `!` between the two,
+//! so a macro of that name is not a call.
+//!
+//! # The limits
+//!
+//! The matcher reads the callee and the arguments that the call site writes.
+//! It does not see these spellings:
+//!
+//! - a program in a variable: `childenv::command(program)`.
+//! - an entrance in a variable: `let spawn = childenv::command; spawn("op")`.
+//! - a qualified path: `<Command>::new("op")`, whose tokens put `>` between
+//!   the type and `::new`.
+//!
+//! To resolve a binding needs the name resolution of a compiler, which this
+//! guard is not. A literal at the call, behind a plain path, is the shape of
+//! every spawn in this workspace, and the shape of the one offender.
+//!
+//! The matcher over-matches on purpose. Each function or method named
+//! `command` or `fixture_command` is an entrance, and so is each type named
+//! `Command`, `clap::Command` included. A rename is an entrance in the whole
+//! file, not only in the scope of its `use`. An over-match fails loudly, and a
+//! person corrects it in an hour. An under-match stays green for years.
 //!
 //! # Refuse rather than shrink
 //!
@@ -84,10 +123,9 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
-use proc_macro2::{Ident, Literal, TokenStream, TokenTree};
-use syn::visit::{self, Visit};
-use syn::{Expr, ExprCall, File, Lit, Macro};
+use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use thiserror::Error;
 
 use crate::workspace_lints::{self, WorkspaceLintsError};
@@ -98,11 +136,26 @@ const OP_CACHE: &str = "src/op-cache";
 /// The name of the 1Password CLI, as a program name.
 const OP: &str = "op";
 
-/// The type whose constructor starts a child process.
-const COMMAND: &str = "Command";
+/// The functions that start a child process: the two constructors of
+/// `childenv`.
+const SPAWNING_FUNCTIONS: [&str; 2] = ["command", "fixture_command"];
 
-/// The constructor of that type.
+/// The types whose constructor [`NEW`] starts a child process:
+/// `std::process::Command`, `tokio::process::Command`, and
+/// `portable_pty::CommandBuilder`.
+const SPAWNING_TYPES: [&str; 2] = ["Command", "CommandBuilder"];
+
+/// The constructor of each of [`SPAWNING_TYPES`].
 const NEW: &str = "new";
+
+/// The keyword that gives an import a new name.
+const AS: &str = "as";
+
+/// The character that `::` is two of, in a token stream.
+const PATH_COLON: char = ':';
+
+/// The separator of the segments of a rendered callee path.
+const PATH_SEPARATOR: &str = "::";
 
 /// The extension of a Rust source file.
 const RS: &str = "rs";
@@ -353,12 +406,17 @@ pub fn audit_sources(dir: &Path) -> Result<Report, OpWallError> {
             path: path.clone(),
             source,
         })?;
-        let file = syn::parse_file(&text).map_err(|error| OpWallError::Unparsable {
+        let unparsable = |message: String| OpWallError::Unparsable {
             path: path.clone(),
-            message: error.to_string(),
-        })?;
+            message,
+        };
 
-        let spawns = spawns_of_op(&file);
+        // The fail-closed half. `syn` returns an error rather than recovering
+        // silently, so no verdict is taken from a partial read.
+        syn::parse_file(&text).map_err(|error| unparsable(error.to_string()))?;
+        let tokens = TokenStream::from_str(&text).map_err(|error| unparsable(error.to_string()))?;
+
+        let spawns = spawns_of_op(tokens);
         if spawns.is_empty() {
             continue;
         }
@@ -430,113 +488,182 @@ fn is_not_a_source_directory(name: &std::ffi::OsStr) -> bool {
     name == TARGET || name == FIXTURES
 }
 
-/// Every spawn of the `op` binary one parsed file holds, sorted and
+/// Every spawn of the `op` binary that the tokens of one file hold, sorted and
 /// deduplicated.
-fn spawns_of_op(file: &File) -> BTreeSet<String> {
-    let mut spawns = Spawns {
-        found: BTreeSet::new(),
-    };
-    spawns.visit_file(file);
-    spawns.found
+///
+/// The walk reads the file twice. The first pass learns the renamed imports of
+/// the file, and the second pass reads each call. A `use` can come after the
+/// call that it renames, so one pass is not sufficient.
+fn spawns_of_op(tokens: TokenStream) -> BTreeSet<String> {
+    let mut entrances = Entrances::new();
+    entrances.learn_renames(tokens.clone());
+
+    let mut found = BTreeSet::new();
+    entrances.collect_spawns(tokens, &mut found);
+    found
 }
 
-/// The walk that reads one file.
-struct Spawns {
-    /// What the file runs, rendered for the report.
-    found: BTreeSet<String>,
+/// The names that a call of one file can start a process through.
+///
+/// The set starts as [`SPAWNING_FUNCTIONS`] and [`SPAWNING_TYPES`]. Each
+/// `use … as` of one of those names adds its new name.
+struct Entrances {
+    /// The functions that start a process, the renamed ones included.
+    functions: BTreeSet<String>,
+    /// The types whose [`NEW`] starts a process, the renamed ones included.
+    types: BTreeSet<String>,
 }
 
-impl<'ast> Visit<'ast> for Spawns {
-    fn visit_expr_call(&mut self, call: &'ast ExprCall) {
-        if let Some(spawn) = spawn_of_op(call) {
-            self.found.insert(spawn);
+impl Entrances {
+    /// The entrances of a file that renames nothing.
+    fn new() -> Self {
+        Self {
+            functions: SPAWNING_FUNCTIONS.into_iter().map(String::from).collect(),
+            types: SPAWNING_TYPES.into_iter().map(String::from).collect(),
         }
-        visit::visit_expr_call(self, call);
     }
 
-    fn visit_macro(&mut self, macro_call: &'ast Macro) {
-        if let Some(spawn) = spawn_inside_tokens(&macro_call.tokens) {
-            self.found.insert(spawn);
-        }
-        visit::visit_macro(self, macro_call);
-    }
-}
+    /// Add the new name of each renamed import of an entrance in `tokens`, at
+    /// any depth.
+    ///
+    /// The shape is three identifiers: an entrance, `as`, and the new name.
+    /// `use childenv::{command as spawn, fixture_command}` puts that shape
+    /// inside a brace group, so the walk follows every group.
+    fn learn_renames(&mut self, tokens: TokenStream) {
+        let trees: Vec<TokenTree> = tokens.into_iter().collect();
 
-/// The spawn of `op` a call holds, when it holds one.
-///
-/// The callee is read from the end, so every module path in front of the two
-/// segments `Command` and `new` reads the same: `Command::new`,
-/// `std::process::Command::new`, and `tokio::process::Command::new`.
-fn spawn_of_op(call: &ExprCall) -> Option<String> {
-    let Expr::Path(callee) = call.func.as_ref() else {
-        return None;
-    };
-    let mut segments = callee.path.segments.iter().rev();
-    if segments.next()?.ident != NEW || segments.next()?.ident != COMMAND {
-        return None;
-    }
-
-    let Some(Expr::Lit(literal)) = call.args.first() else {
-        return None;
-    };
-    let Lit::Str(program) = &literal.lit else {
-        return None;
-    };
-    let program = program.value();
-
-    names_the_op_binary(&program).then(|| format!("{COMMAND}::{NEW}(\"{program}\")"))
-}
-
-/// The spawn of `op` a macro body holds, when it holds one.
-///
-/// A macro body arrives as unparsed tokens, and a token stream that holds
-/// nothing but a fragment of an expression cannot be parsed as one. So the test
-/// is looser than the one on a call: the identifier `Command` and a string
-/// literal that names the `op` binary, anywhere in the same body. The looseness
-/// costs an over-match nobody has hit and answers a spelling a stricter test
-/// never sees.
-fn spawn_inside_tokens(tokens: &TokenStream) -> Option<String> {
-    let mut names_command = false;
-    let mut program = None;
-    read_tokens(tokens, &mut names_command, &mut program);
-
-    match (names_command, program) {
-        (true, Some(program)) => Some(format!("{COMMAND} … \"{program}\" in a macro body")),
-        _ => None,
-    }
-}
-
-/// Read every token of `tokens`, at any depth inside its groups.
-///
-/// A group is a bracketed run of tokens, and a macro body is full of them, so a
-/// walk that reads only the top level reads almost nothing.
-fn read_tokens(tokens: &TokenStream, names_command: &mut bool, program: &mut Option<String>) {
-    for token in tokens.clone() {
-        match token {
-            TokenTree::Group(group) => read_tokens(&group.stream(), names_command, program),
-            TokenTree::Ident(ident) => *names_command |= names_the_command_type(&ident),
-            TokenTree::Literal(literal) => {
-                if program.is_none() {
-                    *program = op_binary_literal(&literal);
-                }
+        for window in trees.windows(3) {
+            let [TokenTree::Ident(original), TokenTree::Ident(keyword), TokenTree::Ident(renamed)] =
+                window
+            else {
+                continue;
+            };
+            if keyword != AS {
+                continue;
             }
-            TokenTree::Punct(_) => {}
+
+            let original = original.to_string();
+            if self.functions.contains(&original) {
+                self.functions.insert(renamed.to_string());
+            }
+            if self.types.contains(&original) {
+                self.types.insert(renamed.to_string());
+            }
+        }
+
+        for tree in trees {
+            if let TokenTree::Group(group) = tree {
+                self.learn_renames(group.stream());
+            }
+        }
+    }
+
+    /// Record each spawn of `op` in `tokens`, at any depth.
+    ///
+    /// The recursion follows every group, so a call in a block, in a closure,
+    /// in the arguments of another call, or in the body of a macro invocation
+    /// is read the same way as a call at the top.
+    fn collect_spawns(&self, tokens: TokenStream, found: &mut BTreeSet<String>) {
+        let trees: Vec<TokenTree> = tokens.into_iter().collect();
+
+        for (index, tree) in trees.iter().enumerate() {
+            match tree {
+                TokenTree::Ident(_) => {
+                    // An identifier followed immediately by a parenthesized
+                    // group is a call. `command!(…)` puts a `!` between the
+                    // two, so a macro of that name is not read as one.
+                    let Some(TokenTree::Group(arguments)) = trees.get(index.saturating_add(1))
+                    else {
+                        continue;
+                    };
+                    if arguments.delimiter() != Delimiter::Parenthesis {
+                        continue;
+                    }
+
+                    let callee = callee_path(&trees, index);
+                    if !self.is_entrance(&callee) {
+                        continue;
+                    }
+                    if let Some(program) = op_program(arguments.stream()) {
+                        found.insert(format!("{}(\"{program}\")", callee.join(PATH_SEPARATOR)));
+                    }
+                }
+                TokenTree::Group(group) => self.collect_spawns(group.stream(), found),
+                TokenTree::Punct(_) | TokenTree::Literal(_) => {}
+            }
+        }
+    }
+
+    /// Whether a callee path starts a process.
+    ///
+    /// A function decides by its last segment, so `childenv::command` and an
+    /// imported `command` read the same. A constructor decides by its last two
+    /// segments, so every module path in front of `Command::new` reads the
+    /// same.
+    fn is_entrance(&self, callee: &[String]) -> bool {
+        match callee {
+            [.., function] if self.functions.contains(function) => true,
+            [.., spawning_type, constructor] => {
+                constructor == NEW && self.types.contains(spawning_type)
+            }
+            _ => false,
         }
     }
 }
 
-/// Whether an identifier names the type whose constructor starts a process.
-fn names_the_command_type(ident: &Ident) -> bool {
-    ident == COMMAND
+/// The path of the callee whose last segment is the identifier at `index`.
+///
+/// The path is read back through each `identifier ::` pair in front of that
+/// identifier, and it is given in source order: `childenv::command`, or
+/// `std::process::Command::new`.
+fn callee_path(trees: &[TokenTree], index: usize) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut position = index;
+
+    while let Some(TokenTree::Ident(segment)) = trees.get(position) {
+        segments.push(segment.to_string());
+
+        let separated = position
+            .checked_sub(2)
+            .and_then(|start| trees.get(start..position))
+            .is_some_and(is_path_separator);
+        match position.checked_sub(3) {
+            Some(previous) if separated => position = previous,
+            _ => break,
+        }
+    }
+
+    segments.reverse();
+    segments
 }
 
-/// The program a literal names, when the literal is a string that names the
-/// `op` binary.
-fn op_binary_literal(literal: &Literal) -> Option<String> {
-    let tokens = TokenStream::from(TokenTree::Literal(literal.clone()));
-    let program = syn::parse2::<syn::LitStr>(tokens).ok()?.value();
+/// Whether two tokens are the `::` between two segments of a path.
+fn is_path_separator(tokens: &[TokenTree]) -> bool {
+    matches!(
+        tokens,
+        [TokenTree::Punct(first), TokenTree::Punct(second)]
+            if first.as_char() == PATH_COLON && second.as_char() == PATH_COLON
+    )
+}
 
-    names_the_op_binary(&program).then_some(program)
+/// The first string literal in the arguments of a call, at any depth, that
+/// names the `op` binary.
+///
+/// The whole of the arguments is read, not only the first token, so a literal
+/// behind a reference or inside a nested call is found. That over-matches a
+/// call that names `op` in an argument and runs something else, which is the
+/// safe direction.
+fn op_program(arguments: TokenStream) -> Option<String> {
+    arguments.into_iter().find_map(|tree| match tree {
+        TokenTree::Literal(literal) => match syn::Lit::new(literal) {
+            syn::Lit::Str(text) => {
+                Some(text.value()).filter(|program| names_the_op_binary(program))
+            }
+            _ => None,
+        },
+        TokenTree::Group(group) => op_program(group.stream()),
+        TokenTree::Ident(_) | TokenTree::Punct(_) => None,
+    })
 }
 
 /// Whether a program name names the 1Password CLI.

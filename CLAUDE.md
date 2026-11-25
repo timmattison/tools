@@ -1057,14 +1057,26 @@ puts a plaintext key where nothing ignores it, and a `git add -A` stages it.
 
 ### The Trap: A Text Search Finds One Spelling
 
-`Command::new("op")` is one of five spellings, and the other four report
-*clean* to a text search — the import, the `tokio` type, the program named by
-its path, and the call inside a macro body. So the guard **parses** each source
-and reads the shape of the call. It refuses a file it cannot parse, rather than
-reporting it clean.
+`Command::new("op")` is one spelling of many, and a text search reports each of
+the others *clean*. A new spawn of `op` arrives as `childenv::command("op")` or
+`childenv::fixture_command("op")`, because "Spawning Git" makes those two the
+only constructors that clippy permits. The first version of the guard matched
+only a callee that ends in `Command::new`, so it reported each of those spawns
+clean. Other spellings are the call behind an import, the call behind a
+`use … as` rename, the `tokio` type, `portable_pty::CommandBuilder::new`, the
+program named by its path, and the call inside a macro body.
 
-Clippy cannot express this rule: `disallowed-methods` bans `Command::new` for
-every program, not for one.
+So the guard **parses** each source first, and it refuses a file it cannot
+parse, rather than reporting it clean. Then it reads **tokens**, as
+`repo_guards::git_env_sweep` does, because `syn` leaves the body of a macro
+invocation unparsed. A token walk reads a macro body and a function body with
+one rule, and a comment or a string stays data. The module doc of `op_wall`
+states the spellings that the walk does not see, for example a program or an
+entrance that reaches the call through a binding.
+
+Clippy cannot express this rule. `disallowed-methods` matches a method path and
+ignores its arguments, so it can ban `childenv::command` only for every
+program, not for one.
 
 ### Guards Enforcing This
 
