@@ -451,8 +451,11 @@ ufa cloud --site-manager-api-key YOUR_KEY hosts
 ```
 
 The listing shows each host ID whole, so you can copy an ID from a row into `ufa cloud host <id>`.
-The Site Manager API answers 25 hosts to a request, so `ufa cloud hosts` follows the page token of each answer until the last page, and the listing holds every console. An ID has about 70 characters, so the table is wide. `--output json` answers with the hosts exactly
+An ID has about 70 characters, so the table is wide. `--output json` answers with the hosts exactly
 as the API reported them, every field intact, rather than only the columns the table shows.
+
+The Site Manager API answers 25 hosts to a request. `ufa cloud hosts` follows the page token of
+each answer until the last page, so the listing holds every console.
 
 See [CLOUD.md](CLOUD.md) for console IDs, the full setup options, and example output, and
 [USAGE-EXAMPLES.md](USAGE-EXAMPLES.md) for scripting recipes.
