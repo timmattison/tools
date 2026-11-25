@@ -58,11 +58,14 @@ const UNKNOWN_FLAG = /unexpected argument '--emit-rgba'/
 /**
  * The argument vector that decodes `path` with the ic at `icPath`.
  *
+ * The path goes after `--`, so a path that starts with `-` stays a path and
+ * clap does not read it as options.
+ *
  * @param icPath the ic executable
  * @param path the file, absolute or relative to the session's directory
  */
 export function icArguments(icPath: string, path: string): string[] {
-  return [icPath, '--emit-rgba', DECODE_BOX, path]
+  return [icPath, '--emit-rgba', DECODE_BOX, '--', path]
 }
 
 /**

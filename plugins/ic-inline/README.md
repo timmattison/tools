@@ -29,7 +29,7 @@ claude --plugin-dir ~/code/tools/plugins/ic-inline
 
 ## How it draws
 
-Claude Code owns every cell of its screen, and it draws each cell again when something changes. An image that `ic photo.png` writes lands at a position that the next frame paints over. Thus the plugin does not let `ic` write to the terminal. It runs `ic --emit-rgba 720x720 <file>`, which prints the pixels as JSON, and it draws the pixels with the elements of Claude Code:
+Claude Code owns every cell of its screen, and it draws each cell again when something changes. An image that `ic photo.png` writes lands at a position that the next frame paints over. Thus the plugin does not let `ic` write to the terminal. It runs `ic --emit-rgba 720x720 -- <file>`, which prints the pixels as JSON, and it draws the pixels with the elements of Claude Code:
 
 | Terminal | What you see |
 | --- | --- |
