@@ -258,6 +258,32 @@ impl Api {
     }
 }
 
+/// Turn off each proxy of the environment, in a build for the tests.
+///
+/// reqwest reads `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` when it builds a
+/// client. A test talks to a `TestServer` on the loopback address, so a proxy
+/// that the shell of a developer exports gets each request of that test, and
+/// the test fails. A build that is not a test keeps the proxy of the user.
+///
+/// # Arguments
+///
+/// * `builder` - The builder of a client.
+///
+/// # Returns
+///
+/// The builder, with no proxy in a build for the tests, and as it was in any
+/// other build.
+pub(crate) fn without_proxy_in_tests(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    #[cfg(test)]
+    {
+        builder.no_proxy()
+    }
+    #[cfg(not(test))]
+    {
+        builder
+    }
+}
+
 /// Build the HTTP client that talks to `api`.
 ///
 /// This is the one place a client that carries the user's API key is built.
@@ -328,7 +354,7 @@ pub fn build_client(api: Api, api_key: &str, insecure: bool, timeouts: Timeouts)
     )]
     let builder = Client::builder();
 
-    builder
+    without_proxy_in_tests(builder)
         .default_headers(headers)
         .redirect(redirect::Policy::none())
         .timeout(timeouts.request)
