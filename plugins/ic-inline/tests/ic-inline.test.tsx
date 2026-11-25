@@ -339,6 +339,25 @@ describe('/ic reports', () => {
 
     expect(text).toContain('could not read the output of ic')
   })
+
+  /** The JSON of grayJson(2, 2), with `fields` in place of its own. */
+  const grayWith = (fields: object) => `${JSON.stringify({ ...JSON.parse(grayJson(2, 2)), ...fields })}\n`
+
+  for (const [wrong, stdout] of Object.entries({
+    'a side above 720': grayJson(721, 1),
+    'a side of 0': grayJson(0, 1),
+    'a side that is not whole': grayJson(1.5, 2),
+    'a source side of 0': grayWith({ source_width: 0 }),
+    'an rgba that is not a string': grayWith({ rgba: 16 }),
+    'an rgba that is not base64': grayWith({ rgba: '@@@@' }),
+    'pixels that the size does not give': grayWith({ height: 3 }),
+  })) {
+    test(`output with ${wrong}`, async ($, on) => {
+      stubIc(on, { [FIXTURE_PATH]: printed(stdout) })
+
+      expect(await runIc($, FIXTURE_PATH)).toContain('could not read the output of ic')
+    })
+  }
 })
 
 describe('show_image', () => {
