@@ -392,25 +392,33 @@ mod tests {
         hosts.iter().map(|host| host.id.as_str()).collect()
     }
 
-    /// The listing example of the spec is one page, and it reads as one.
+    /// The listing example of the spec is one page, and it reads as one. A
+    /// page with an empty `nextToken` is the last page too, because the spec
+    /// sends an empty string for a value that it does not know.
     #[tokio::test]
     async fn the_last_page_of_the_spec_example_is_read_as_the_listing() {
-        let body = spec_page(None).to_string();
-        let server = TestServer::replying(&json_response(&body)).await;
-        let client = client_talking_to(server.origin());
+        for token in [None, Some("")] {
+            let body = spec_page(token).to_string();
+            let server = TestServer::replying(&json_response(&body)).await;
+            let client = client_talking_to(server.origin());
 
-        let hosts = client
-            .get_hosts()
-            .await
-            .expect("the answer of the spec must be readable");
+            let hosts = client
+                .get_hosts()
+                .await
+                .expect("the answer of the spec must be readable");
 
-        assert_eq!(server.requests().len(), 1, "a last page needs one request");
-        assert_eq!(ids(&hosts), [SPEC_CONSOLE_ID]);
-        let shown = serde_json::to_value(&hosts[0]).expect("a host is JSON");
-        assert_eq!(
-            shown["registrationTime"], "",
-            "the time stays as the API sent it"
-        );
+            assert_eq!(
+                server.requests().len(),
+                1,
+                "a last page needs one request, token {token:?}"
+            );
+            assert_eq!(ids(&hosts), [SPEC_CONSOLE_ID]);
+            let shown = serde_json::to_value(&hosts[0]).expect("a host is JSON");
+            assert_eq!(
+                shown["registrationTime"], "",
+                "the time stays as the API sent it"
+            );
+        }
     }
 
     /// The walk sends each `nextToken` back as one percent-encoded value, and
@@ -436,11 +444,19 @@ mod tests {
         assert_eq!(ids(&hosts), [SPEC_CONSOLE_ID, "second-host"]);
     }
 
-    /// A server that gives the token it was sent again would send the walk
-    /// round forever. The walk refuses the answer instead.
+    /// A server that gives a token the walk already sent would send the walk
+    /// round forever. The walk refuses the answer instead. The pages give
+    /// the tokens A, B, and A again, so a walk that keeps only the last token
+    /// does not stop.
     #[tokio::test]
     async fn a_page_token_that_comes_back_is_refused() {
-        let server = TestServer::replying(&json_response(SPEC_HOSTS_PAGE)).await;
+        let first = json_response(&spec_page(Some("token-a")).to_string());
+        let second = json_response(&spec_page(Some("token-b")).to_string());
+        let routes: Vec<(String, String)> = vec![
+            ("nextToken=token-a".to_string(), second),
+            ("nextToken=token-b".to_string(), first.clone()),
+        ];
+        let server = TestServer::routing(&routes, &first).await;
         let client = client_talking_to(server.origin());
 
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(60), client.get_hosts())
@@ -450,6 +466,11 @@ mod tests {
         let error = outcome.expect_err("a repeated token is not a listing");
         let report = format!("{error:#}");
         assert!(report.contains("a second time"), "got: {report}");
+        assert_eq!(
+            server.requests().len(),
+            3,
+            "the walk must stop when A comes back after B"
+        );
     }
 
     /// `GET /v1/hosts/{id}` gives the host inside `data`, for each example
