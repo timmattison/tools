@@ -243,6 +243,29 @@ fn diff_refuses_a_text_file() {
     );
 }
 
+/// A file whose name gives no format that `ic` lists is still an image when its
+/// first bytes name a format, as `--emit-rgba` reads it. The run compares it,
+/// and it does not call the file text.
+#[test]
+fn diff_reads_an_image_whose_name_has_no_extension() {
+    let scratch = Scratch::new(TARGET_NAME, "no-extension");
+    let (first, second) = fixtures(&scratch);
+    let bare = scratch.file(
+        "screenshot",
+        &std::fs::read(&first).expect("a.png must read"),
+    );
+
+    let emit = |path: &std::path::Path| {
+        run(ic(TERM_XTERM_256COLOR)
+            .arg(FLAG)
+            .args(["--emit-rgba", BOX])
+            .arg(path)
+            .arg(&second))
+    };
+
+    assert_eq!(emitted(&emit(&bare)), emitted(&emit(&first)));
+}
+
 /// The flag beside another input mode or an option of a video is a mistake of
 /// usage, and the refusal of clap names the flag.
 #[test]
