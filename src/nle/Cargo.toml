@@ -8,30 +8,17 @@ description = "Non-linear editor for terminal recordings"
 
 [lib]
 name = "nle_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
-
-[build-dependencies]
-tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
-tauri-plugin-dialog = "2"
-tauri-plugin-shell = "2"
+dioxus = { version = "0.7", features = ["desktop"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 flate2 = "1.0"
 buildinfo = { workspace = true }
-ts-rs = { version = "10", features = ["serde-compat"] }
 tempfile = { workspace = true }
 tokio = { workspace = true }
-
-[dev-dependencies]
-# The `test` feature gives `tauri::test::mock_builder`, a mock app that the
-# tests of `beta_command` build the shell plugin command on.
-tauri = { version = "2", features = ["test"] }
-yaml-rust2 = { workspace = true }
-# The tests start node through childenv::fixture_command, because clippy.toml
+# Every child process starts through childenv::command, because clippy.toml
 # bans std::process::Command::new.
 childenv = { workspace = true }
 

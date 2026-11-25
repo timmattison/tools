@@ -1,8 +1,6 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use tauri_plugin_shell::ShellExt;
-
 use crate::error::NleError;
 use crate::types::{ExportFormat, ExportOptions, LoadedRecording, Recording, RecordingMetadata};
 
@@ -32,7 +30,11 @@ fn validate_path(path: &str) -> Result<PathBuf, NleError> {
 }
 
 /// Load a recording from a file path, returning both the recording and its metadata.
-#[tauri::command]
+///
+/// # Errors
+/// Returns `NleError::FileNotFound` when the path does not exist, and the
+/// error of `Recording::load` when the file cannot be loaded. A panic in the
+/// work becomes `NleError::TaskError`.
 pub async fn load_recording(path: String) -> Result<LoadedRecording, NleError> {
     run_blocking(move || load_recording_from(&path)).await
 }
@@ -114,7 +116,10 @@ fn resolve_output_path(
 /// directory must exist; any other path is refused.
 /// Uses gzip compression if `compress` is `Some(true)`, plain JSON if `Some(false)`,
 /// or falls back to extension detection (`.gz` suffix, in any case) if `None`.
-#[tauri::command]
+///
+/// # Errors
+/// Returns `NleError::SaveError` when the path is refused or the file cannot be
+/// written. A panic in the work becomes `NleError::TaskError`.
 pub async fn save_recording(
     path: String,
     recording: Recording,
@@ -140,7 +145,11 @@ fn save_recording_to(
 
 /// List recordings in a directory, returning metadata for each.
 /// Only considers files ending in `.json` or `.json.gz`, in any case.
-#[tauri::command]
+///
+/// # Errors
+/// Returns `NleError::FileNotFound` when `directory` is not a directory, and
+/// `NleError::LoadError` when it cannot be read. A panic in the work becomes
+/// `NleError::TaskError`.
 pub async fn list_recordings(directory: String) -> Result<Vec<RecordingMetadata>, NleError> {
     run_blocking(move || list_recordings_in(&directory)).await
 }
@@ -308,29 +317,30 @@ fn beta_path_env(var: impl Fn(&'static str) -> Option<OsString>) -> Option<OsStr
     std::env::join_paths(entries).ok()
 }
 
-/// Build the `beta` command with `args` through the shell plugin. Its PATH is
-/// the one that `beta_path_env` builds from `var`. When `beta_path_env` gives
-/// `None`, the command keeps the PATH of the app.
-fn beta_command<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
+/// Build the `beta` command with `args`. Its PATH is the one that
+/// `beta_path_env` builds from `var`. When `beta_path_env` gives `None`, the
+/// command keeps the PATH of the app. The command sheds the inherited `GIT_`
+/// variables, because `childenv::command` builds it.
+fn beta_command(
     args: &[String],
     var: impl Fn(&'static str) -> Option<OsString>,
-) -> tauri_plugin_shell::process::Command {
-    let command = app.shell().command("beta").args(args);
-    match beta_path_env(var) {
-        Some(path) => command.env(PATH_VAR, path),
-        None => command,
+) -> std::process::Command {
+    let mut command = childenv::command("beta");
+    command.args(args);
+    if let Some(path) = beta_path_env(var) {
+        command.env(PATH_VAR, path);
     }
+    command
 }
 
-/// Run the `beta` CLI with `args` through the shell plugin.
+/// Run the `beta` CLI with `args` as a child process.
 /// Returns `output_path` when `beta` succeeds.
 async fn run_beta(
-    app: &tauri::AppHandle,
     args: &[String],
     output_path: &str,
+    var: impl Fn(&'static str) -> Option<OsString>,
 ) -> Result<String, NleError> {
-    let output = beta_command(app, args, std::env::var_os)
+    let output = tokio::process::Command::from(beta_command(args, var))
         .output()
         .await
         .map_err(|e| {
@@ -350,20 +360,25 @@ async fn run_beta(
 }
 
 /// Export a recording to video format by shelling out to the beta CLI.
-#[tauri::command]
-pub async fn export_video(
-    app: tauri::AppHandle,
-    options: ExportOptions,
-) -> Result<String, NleError> {
+///
+/// # Errors
+/// Returns `NleError::FileNotFound` when the input is missing, and
+/// `NleError::ExportError` when the format is not Video, the output path is
+/// refused, `beta` cannot start, or `beta` fails.
+pub async fn export_video(options: ExportOptions) -> Result<String, NleError> {
     let args = video_export_args(&options)?;
-    run_beta(&app, &args, &options.output_path).await
+    run_beta(&args, &options.output_path, std::env::var_os).await
 }
 
 /// Export a recording to web (HTML) format by shelling out to the beta CLI.
-#[tauri::command]
-pub async fn export_web(app: tauri::AppHandle, options: ExportOptions) -> Result<String, NleError> {
+///
+/// # Errors
+/// Returns `NleError::FileNotFound` when the input is missing, and
+/// `NleError::ExportError` when the format is not Web, the output path is
+/// refused, `beta` cannot start, or `beta` fails.
+pub async fn export_web(options: ExportOptions) -> Result<String, NleError> {
     let args = web_export_args(&options)?;
-    run_beta(&app, &args, &options.output_path).await
+    run_beta(&args, &options.output_path, std::env::var_os).await
 }
 
 #[cfg(test)]

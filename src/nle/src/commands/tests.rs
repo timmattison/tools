@@ -1,4 +1,4 @@
-//! Tests for the command bodies that the Tauri commands call.
+//! Tests for the command bodies that the application commands call.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -496,14 +496,6 @@ fn vars(pairs: &[(&'static str, &str)]) -> impl Fn(&'static str) -> Option<OsStr
     move |name| map.get(name).cloned()
 }
 
-/// A mock Tauri app with the shell plugin, which `beta_command` needs.
-fn mock_shell_app() -> tauri::App<tauri::test::MockRuntime> {
-    tauri::test::mock_builder()
-        .plugin(tauri_plugin_shell::init())
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap()
-}
-
 fn split(path: &OsStr) -> Vec<PathBuf> {
     std::env::split_paths(path).collect()
 }
@@ -512,45 +504,85 @@ fn paths(entries: &[&str]) -> Vec<PathBuf> {
     entries.iter().map(PathBuf::from).collect()
 }
 
+/// The Finder PATH and a temporary home whose `.cargo/bin` holds a `beta` that
+/// links to `target`. A symlink, not a written script: a written script gives
+/// ETXTBSY on Linux when another thread forks while the file is open for
+/// writing.
 #[cfg(unix)]
-#[test]
-fn beta_command_finds_beta_in_cargo_bin_from_the_finder_path() {
+fn home_with_beta_linked_to(target: &str) -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join(".cargo").join("bin");
     fs::create_dir_all(&bin).unwrap();
-    // A symlink, not a written script: a written script gives ETXTBSY on
-    // Linux when another thread forks while the file is open for writing.
-    std::os::unix::fs::symlink("/bin/echo", bin.join("beta")).unwrap();
-    let app = mock_shell_app();
+    std::os::unix::fs::symlink(target, bin.join("beta")).unwrap();
+    home
+}
 
-    let command = beta_command(
-        app.handle(),
-        &["found-beta".to_string()],
-        vars(&[
-            (PATH_NAME, FINDER_PATH),
-            (HOME_NAME, home.path().to_str().unwrap()),
-        ]),
-    );
-    let output = std::process::Command::from(command).output().unwrap();
+/// The variables of a run from Finder, with `home` as the home directory.
+#[cfg(unix)]
+fn finder_vars(home: &tempfile::TempDir) -> impl Fn(&'static str) -> Option<OsString> {
+    vars(&[
+        (PATH_NAME, FINDER_PATH),
+        (HOME_NAME, home.path().to_str().unwrap()),
+    ])
+}
+
+/// True when `name` is a variable that `childenv::command` removes.
+fn is_git_variable(name: &OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|name| name.starts_with(childenv::GIT_ENVIRONMENT_PREFIX))
+}
+
+#[cfg(unix)]
+#[test]
+fn beta_command_finds_beta_in_cargo_bin_from_the_finder_path() {
+    let home = home_with_beta_linked_to("/bin/echo");
+
+    let output = beta_command(&["found-beta".to_string()], finder_vars(&home))
+        .output()
+        .unwrap();
 
     assert!(output.status.success());
     assert_eq!(output.stdout, b"found-beta\n");
 }
 
+#[cfg(unix)]
+#[test]
+fn run_beta_returns_the_output_path_when_beta_succeeds() {
+    let home = home_with_beta_linked_to("/usr/bin/true");
+
+    let result = block_on(run_beta(&[], "out.mp4", finder_vars(&home)));
+
+    assert_eq!(result.unwrap(), "out.mp4");
+}
+
+#[cfg(unix)]
+#[test]
+fn run_beta_reports_the_stderr_of_a_failed_beta() {
+    let home = home_with_beta_linked_to("/bin/ls");
+    let missing = home.path().join("no-such-file");
+    let args = vec![missing.to_string_lossy().to_string()];
+
+    let result = block_on(run_beta(&args, "out.mp4", finder_vars(&home)));
+
+    let Err(NleError::ExportError(text)) = result else {
+        panic!("expected an ExportError, got {result:?}");
+    };
+    assert!(text.contains("beta export failed"), "got {text}");
+    assert!(text.contains("no-such-file"), "got {text}");
+}
+
 #[test]
 fn beta_command_sets_only_a_path_from_the_cargo_home_and_home_vars() {
-    let app = mock_shell_app();
     let args = vec!["web".to_string(), "in.cast".to_string()];
 
-    let command = std::process::Command::from(beta_command(
-        app.handle(),
+    let command = beta_command(
         &args,
         vars(&[
             (PATH_NAME, "/a"),
             (CARGO_HOME_NAME, "/cargo-home"),
             (HOME_NAME, "/home-dir"),
         ]),
-    ));
+    );
 
     assert_eq!(command.get_program(), "beta");
     assert_eq!(
@@ -568,23 +600,28 @@ fn beta_command_sets_only_a_path_from_the_cargo_home_and_home_vars() {
         HOMEBREW_INTEL_BIN,
     ]))
     .unwrap();
-    assert_eq!(
-        command.get_envs().collect::<Vec<_>>(),
-        [(OsStr::new(PATH_NAME), Some(expected.as_os_str()))]
-    );
+    // `childenv::command` removes each inherited GIT_ variable, and a removal
+    // shows as a name with no value. Under a git hook there are some.
+    let envs: Vec<_> = command.get_envs().collect();
+    let set: Vec<_> = envs.iter().filter(|(_, value)| value.is_some()).collect();
+    assert_eq!(set, [&(OsStr::new(PATH_NAME), Some(expected.as_os_str()))]);
+    for (name, value) in envs.iter().filter(|(_, value)| value.is_none()) {
+        assert!(
+            is_git_variable(name),
+            "{name:?} is removed ({value:?}) but is not a GIT_ variable"
+        );
+    }
 }
 
 #[test]
 fn beta_command_sets_no_path_when_no_path_can_be_built() {
-    let app = mock_shell_app();
+    let command = beta_command(&[], vars(&[(PATH_NAME, "/a"), (CARGO_HOME_NAME, "/x:y")]));
 
-    let command = std::process::Command::from(beta_command(
-        app.handle(),
-        &[],
-        vars(&[(PATH_NAME, "/a"), (CARGO_HOME_NAME, "/x:y")]),
-    ));
-
-    assert_eq!(command.get_envs().count(), 0);
+    assert!(
+        command.get_envs().all(|(_, value)| value.is_none()),
+        "a variable is set: {:?}",
+        command.get_envs().collect::<Vec<_>>()
+    );
 }
 
 #[test]

@@ -1,5 +1,0 @@
-# esbuild's postinstall script puts the platform binary in place. Vite needs it,
-# so the build is approved. pnpm refuses to install while this decision is
-# missing, thus src/nle/scripts/dev.ts stops at its own pnpm install step.
-allowBuilds:
-  esbuild: true

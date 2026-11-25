@@ -2,13 +2,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use ts_rs::TS;
 
 use crate::error::NleError;
 
 /// A terminal recording, compatible with the beta recorder format.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export_to = "../frontend/src/bindings/")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Recording {
     pub version: u32,
     pub width: u16,
@@ -22,8 +20,7 @@ pub struct Recording {
 }
 
 /// A single event in a recording (output or input).
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export_to = "../frontend/src/bindings/")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     pub time: f64,
     #[serde(rename = "type")]
@@ -32,8 +29,7 @@ pub struct Event {
 }
 
 /// The type of a recording event.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export_to = "../frontend/src/bindings/")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EventType {
     #[serde(rename = "o")]
     Output,
@@ -42,8 +38,7 @@ pub enum EventType {
 }
 
 /// Options for exporting a recording.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export_to = "../frontend/src/bindings/")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportOptions {
     pub input_path: String,
     pub output_path: String,
@@ -56,24 +51,21 @@ pub struct ExportOptions {
 }
 
 /// The format to export a recording to.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export_to = "../frontend/src/bindings/")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ExportFormat {
     Video,
     Web,
 }
 
 /// Response from loading a recording, includes both data and metadata.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export_to = "../frontend/src/bindings/")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadedRecording {
     pub recording: Recording,
     pub metadata: RecordingMetadata,
 }
 
 /// Summary metadata about a loaded recording.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export_to = "../frontend/src/bindings/")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingMetadata {
     pub file_path: String,
     pub title: String,
@@ -87,6 +79,11 @@ pub struct RecordingMetadata {
 
 impl Recording {
     /// Load a recording from a file, auto-detecting gzip compression via magic bytes.
+    ///
+    /// # Errors
+    /// Returns `NleError::LoadError` when the file cannot be opened or read,
+    /// and `NleError::InvalidFormat` when the file is empty or does not parse
+    /// as a recording.
     pub fn load(path: &Path) -> Result<Self, NleError> {
         let mut file = std::fs::File::open(path).map_err(|e| {
             NleError::LoadError(format!(
@@ -130,6 +127,10 @@ impl Recording {
     /// is synced, given the mode of the old file, and renamed over `path`, so
     /// a save that fails leaves the old file as it was. A save to a new path
     /// gives the mode that `File::create` gives.
+    ///
+    /// # Errors
+    /// Returns `NleError::SaveError` when the recording cannot be serialized,
+    /// compressed, or written.
     pub fn save(&self, path: &Path, compress: bool) -> Result<(), NleError> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| NleError::SaveError(format!("Failed to serialize recording: {e}")))?;
