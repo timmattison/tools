@@ -93,8 +93,12 @@ pub fn compare(first: &DynamicImage, second: &DynamicImage, mode: Mode) -> Resul
         if differs {
             differing_pixels = differing_pixels.saturating_add(1);
         }
+        let covered =
+            first.get_pixel_checked(x, y).is_some() || second.get_pixel_checked(x, y).is_some();
         *out = match mode {
             Mode::Highlight if differs => RED,
+            Mode::Mask if differs => RED,
+            Mode::Mask if covered => BLACK,
             _ => one,
         };
     }
