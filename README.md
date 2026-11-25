@@ -310,6 +310,8 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     - `ic --emit-rgba 640x480 photo.jpg` prints the decoded pixels as JSON for a program that draws the picture itself.
       The [`ic-inline`](plugins/ic-inline/README.md) Claude Code plugin uses it to show pictures inline in the transcript:
       `/plugin install ic-inline --marketplace timmattison/tools`
+    - `ic --diff before.png after.png` compares two images pixel by pixel and shows one picture of the differences.
+      `--diff-mode` selects red boxes around each region (the default), a red highlight on the first image, or a mask.
 - inscribe
     - Automatically generates clear and consistent git commit messages using Claude AI. Analyzes staged changes and creates
       conventional commit messages. Supports credential storage in system credential managers (Keychain on macOS, Credential
