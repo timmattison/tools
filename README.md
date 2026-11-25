@@ -2261,8 +2261,8 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     line for the Claude Code sessions. The header adds the swap traffic, the size of the
     compressor, and the swap in use over the same sample. `faulte check` says in seconds if the
     system time is high, and if memory churn or process churn occurs at the same time.
-    `faulte kill` stops the old idle Claude Code sessions after a question. It supports macOS
-    only. See below for the full entry.
+    `faulte kill` stops the old idle Claude Code sessions after a question. `faulte tui` is a live
+    full-screen view with a history. It supports macOS only. See below for the full entry.
   - To install: `cargo install --git https://github.com/timmattison/tools faulte`
 
 - ha (hot actions)
@@ -5309,12 +5309,14 @@ faulte check
 faulte check --watch --interval 10s
 faulte kill
 faulte kill --older-than 3d --idle-for 1h --max 5
+faulte tui
+faulte tui --interval 2s
 ```
 
 ### Options
 
-- `--interval <DURATION>`: The length of the sample, for example `5s`, `10m`, `2h`, or `7d`. A bare number is a number of seconds. The ranking and `faulte kill` count the page faults of each process over this time. `faulte check` reads the kernel counters at the start and at the end of this time. Defaults to `5s`. Zero is refused, because a sample of no time measures nothing.
-- `--limit <N>`: The number of rows that the table shows. Defaults to 25. One line under the table counts the rows that the limit hid, and gives their share of all faults, because the limit hides the small rates and the small rates were the load. The flag belongs to the ranking alone: `faulte kill` shows every candidate of its plan, and refuses `--limit` rather than take it and ignore it.
+- `--interval <DURATION>`: The length of the sample, for example `5s`, `10m`, `2h`, or `7d`. A bare number is a number of seconds. The ranking, `faulte kill`, and each sample of `faulte tui` count the page faults of each process over this time. `faulte check` reads the kernel counters at the start and at the end of this time. Defaults to `5s`. Zero is refused, because a sample of no time measures nothing.
+- `--limit <N>`: The number of rows that the table shows. Defaults to 25. One line under the table counts the rows that the limit hid, and gives their share of all faults, because the limit hides the small rates and the small rates were the load. The flag belongs to the ranking alone: `faulte kill` shows every candidate of its plan, and refuses `--limit` after its name. Before the name, as in `faulte --limit 3 kill`, the flag is a flag of `faulte` itself, and `faulte kill` takes it and ignores it. That spelling keeps the exit code that it had before `faulte tui`.
 - `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
 - `-h`, `--help`: Print the usage.
 
@@ -5397,6 +5399,62 @@ Both parsers fail closed. A header row that is not the one `faulte` asked for, a
 
 The registry of Claude Code is the one fact that stays out of reach. The `~/.claude/sessions` directory of the other account has the mode `0700`. A Claude Code process of another account therefore gives its fault rate, its memory and its age, and `other account — run with sudo` in place of the session, the state and the directory. Under `sudo`, `faulte` reads the registry in the home directory of each owner, and `faulte kill` can stop the sessions of every account. `faulte` never runs `sudo` itself, the same as `crap`.
 
+### `faulte tui`
+
+`faulte tui` opens a full-screen view that keeps a history. `faulte` takes one sample and exits. The view takes a new sample all the time, and each new ranking replaces the old one. The view keeps every ranking, so a person can go back in time.
+
+```text
+faulte tui
+faulte tui --interval 2s
+```
+
+The table has the same columns as `faulte`, and the header has the same lines. It shows every process that made at least one fault. The `--limit` flag does not apply, because a limit hides the small rates, and the small rates were the load. `faulte tui` refuses `--limit`. Above the table, a timeline shows the fault rate over the whole history. Each cell of the timeline shows the highest rate of its slice, so a spike stays visible on a narrow terminal. A second row shows the swap traffic. The two rows are separate, because faults and swap are two separate questions.
+
+In this section, a **frame** is the ranking and the memory counters of one sample. A **gap** is a time that the view tried to measure and did not measure. A failed read makes a gap with its reason. A gap has its own glyph on the timeline, and it is never the lowest bar. The view continues after a failed read.
+
+The view is one sample behind the clock. A sample is complete when the header of the next sample arrives. A banner states the time of the frame on the screen. When the frame is not the live frame, the banner says so in words, with the clock time and the age of the frame. The age and the session state of each row are those of that frame. The sampler continues while a person reads the past, so the history has no hole.
+
+| Key | Action |
+| --- | --- |
+| `←` or `h`, `→` or `l` | Move one frame back, or one frame forward |
+| `[`, `]` | Move one minute back, or one minute forward |
+| `Home` | Move to the oldest frame |
+| `End` | Return to the live view |
+| `Esc` | Close the detail view. With no detail view open, return to the live view |
+| `↑` or `k`, `↓` or `j` | Select the row above, or the row below. In the detail view, show the command of the new process from its first line |
+| `PageUp`, `PageDown` | Move the selection by one screen. In the detail view, scroll the command line |
+| `w` | Change the span of the table: one frame, 1 m, 5 m, 15 m, the whole history |
+| `Enter` | Open the detail view of the selected process |
+| `q`, `Ctrl-C` | Quit |
+
+No key uses Shift or another modifier, because a modified arrow key depends on the terminal and on the multiplexer. The keys answer during a sample, because the sampler runs on its own thread. A slow `top` does not freeze the view.
+
+The `w` key ranks the processes over a span that ends at the selected frame, so one table answers "which processes caused the last 5 minutes". A process that exited in the span keeps its row. The rate of a span is the sum of the faults of the process over the frames of the span, divided by the sum of the windows of those frames. A gap adds to neither sum, so the rate counts measured time only. The header of a span states the measured time and the count of gaps. Its skipped line gives the sum of the processes that exited over the frames of the span, and the zombies and the unsampled processes of the newest frame. Those two counts are snapshots, so a sum counts one zombie once for each frame that saw it. The detail view shows the fault rate of one process over the whole history, and its full command line. A reused PID is a different process, so two processes never share one history.
+
+The view marks the rows of `faulte`, `top`, and `ps` that it started. Those rows stay in the totals. No key sends a signal. `faulte kill` keeps its plan and its question.
+
+#### The memory budget
+
+The history lives in memory and ends with the process. A Mac that is short of memory must not lose more memory to its own diagnostic tool. The budget is 64 MiB, and it counts the frames and the command text. The count of frames also has a limit, so the list of the frames takes at most an eighth of the budget. At one frame each 5 s, the budget holds about 8 hours. The oldest frames leave first. If the selected frame leaves, the selection moves to the oldest frame, and the banner says so. The 8 hours is an estimate from one Mac. The budget test holds the limit.
+
+A frame keeps one compact row for each process that made at least one fault. On 2026-11-08, one sample of this Mac had 1,415 rows, and 495 of them had at least one fault. The command lines took 238,203 bytes. A history of full values at one frame each 5 s needs about 340 MB of text each hour.
+
+#### One `top` child
+
+The view runs one `top -l 0 -s <interval> -c d` child for its whole life. The command `faulte` runs `top -l 2` for each window, and each run pays the full start of `top`. That start made a hole in the record. These measurements are from 2026-11-08, at a load average of 125 to 166:
+
+| Measurement | Result |
+| --- | --- |
+| One `top -l 2 -s 5` | 25.02 s of wall time for one window of 9 s |
+| One `top -l 0 -s 2` through a pipe | First sample after 9.42 s, then one more sample each 4.2 s to 6.9 s |
+| One `top -l 0 -s 2` through a pseudo-terminal | First sample after 22.17 s, then one more sample each 4.6 s to 7.0 s |
+
+A pipe is sufficient. The first sample holds the counter since each process started, so the view discards it. Each later sample is one window, and the windows touch. The window of each frame comes from what the samples state, and not from the interval that the person asked for. If the child ends, the sampler starts one new child after one interval, and a gap holds the lost time. When the view ends, the `top` child stops with it.
+
+#### The terminal
+
+`faulte tui` needs a terminal on its input and on its output. If one of them is not a terminal, `faulte tui` prints the reason and exits 1, and it starts no `top`. A quit, a panic, `SIGTERM`, and `SIGHUP` each restore the terminal. The view redraws at any size. On a platform other than macOS, it prints `faulte supports macOS only.` and exits 1.
+
 ### `faulte kill`
 
 `faulte kill` stops Claude Code sessions, and it never selects another kind of process. `pk` does that job. A session is a candidate when all four of these rules are true:
@@ -5445,12 +5503,12 @@ The transcript of a session stays on disk after the stop, so `crap` takes that s
 - **A scheduled wake-up.** A session can be idle and hold a scheduled wake-up, for example a `/loop`. The registry records no wake-up, so `faulte` cannot see one. This is why the plan shows every candidate before the question: `faulte` gives the facts that it has, and the person decides.
 - **The sessions of another account, without root.** They get a row and a fault rate, and `other account — run with sudo` in place of the session fields. In the plan, they get a block of their own with the `sudo faulte kill` command line that includes them, and `faulte kill` never signals them. A count of unreadable sessions is a better answer than silence about them.
 - **A process that the two sources disagree about.** `top` lists no zombie, and `ps` lists no PID 0. A process can also start or stop between the two reads. `faulte` gives PID 0 a row that names `kernel_task`, and it gives every other such process a count in the header. Nothing falls out of the report.
-- **A live display, and another platform.** The ranking and `faulte kill` take one sample and exit. `faulte check --watch` adds one line for each interval, and it redraws nothing. It supports macOS only, because the fault sampler and the counters of the memory system are those of macOS. On another platform it prints `faulte supports macOS only.` and exits 1.
+- **A live display, and another platform.** The ranking and `faulte kill` take one sample and exit. `faulte check --watch` adds one line for each interval, and it redraws nothing. `faulte tui` is the live view, and it keeps a history. It supports macOS only, because the fault sampler and the counters of the memory system are those of macOS. On another platform it prints `faulte supports macOS only.` and exits 1.
 
 ### Exit codes
 
 - `0`: Success. A question that the person declined is a success as well, because `faulte` did what the answer said. For `faulte check`, the verdict is `OK`, or the reader of a `--watch` left.
-- `1`: The platform is not macOS, or `faulte check` found a problem, or `faulte kill` found candidates and its input is not a terminal.
+- `1`: The platform is not macOS, or `faulte check` found a problem, or `faulte kill` found candidates and its input is not a terminal, or `faulte tui` has no terminal on its input or its output.
 - `2`: A source of this Mac failed, or its output failed a parser, or a stop did not do what the plan said that it would do, or `faulte check` could not write its output. `faulte` prints the reason, and it never prints an empty ranking.
 
 ## wdid (what do i do)
@@ -6121,3 +6179,35 @@ Run these commands from the root of the repository. The build does not install t
 pnpm --dir src/msgs/frontend install
 cargo tauri build --no-bundle   # the binary is target/release/msgs
 ```
+
+## nle (non-linear editor)
+
+A desktop application for the terminal recordings that `beta` writes. This
+version is the scaffold: it opens a `.json` or `.json.gz` recording and shows
+its metadata. The timeline (issue #150) and the preview pane (issue #151) are
+placeholders.
+
+The application is Tauri 2. The Rust side reads and writes every recording
+file, and the frontend reads one through typed commands. The backend also has
+commands that save a recording, list the recordings in a directory, and export
+a recording through the `beta` CLI as a video or a web player. The frontend
+does not call them yet. `ts-rs` generates a TypeScript type from each Rust
+struct that the commands use, and a test fails when the committed types drift
+from the Rust structs.
+
+The export commands run `beta` with the PATH of the app, then
+`$CARGO_HOME/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.
+A macOS app that starts from Finder or the Dock gets only the system PATH.
+`beta` runs `ffmpeg` through the same PATH.
+
+`cargo install` does not build this tool, because the application carries a
+frontend that a bundler must build first. To run it from a checkout:
+
+```bash
+./src/nle/scripts/dev.ts
+```
+
+The script installs the frontend dependencies. It asks `portplz` for a free
+port. Then it starts `cargo tauri dev` with Vite on that port.
+
+To build the desktop application, run `cargo tauri build` from `src/nle`.

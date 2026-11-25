@@ -21,7 +21,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `dirc` | Copies the current directory to the clipboard, or emits a `cd` from a clipboard path. |
 | `dirhash` | SHA256 hash of a directory tree's contents to compare directories for equality. |
 | `diskhog` | Live terminal UI of per-process disk I/O on macOS (IOPS with sudo). |
-| `faulte` | Fault rate — ranks every process of a Mac by the page faults it makes per second, with the swap traffic of the sample and one total line for the Claude Code sessions. `faulte check` says in seconds if the system time is high, and if memory churn or process churn occurs at the same time. `faulte kill` shows the old idle Claude Code sessions and stops them after a question. macOS only. |
+| `faulte` | Fault rate — ranks every process of a Mac by the page faults it makes per second, with the swap traffic of the sample and one total line for the Claude Code sessions. `faulte check` says in seconds if the system time is high, and if memory churn or process churn occurs at the same time. `faulte kill` shows the old idle Claude Code sessions and stops them after a question. `faulte tui` is a live view with a history. macOS only. |
 | `freeport` | Finds a free TCP port on localhost, cross-platform. |
 | `gitdiggin` | Recursively searches git repos for commits containing a string (messages and diffs). |
 | `gitnuke` | Removes a git worktree and deletes its branch; `--force` is required for worktrees with submodules checked out (which `git worktree remove` refuses outright) or uncommitted changes. It asks before it deletes a branch that no recent commit names, `--yes` skips the question, and without a terminal it refuses with exit code 10. |
@@ -47,6 +47,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `localnext` | Serves a statically exported Next.js app from its `out` directory, on a port derived from the project and the git branch. |
 | `msgs` | A macOS desktop app to browse, search, and export iMessage conversations. It reads `chat.db` read-only. |
 | `ng` | Navel-Gaze — watches JS/TS files and re-runs `pnpm lint` (or `--typecheck`) on change. |
+| `nle` | Non-Linear Editor — a desktop editor for `beta` terminal recordings. The scaffold opens a recording and shows its metadata. |
 | `nodenuke` | Removes `node_modules` directories and lock files throughout a repo. |
 | `nodeup` | Updates npm/pnpm/yarn packages across all `package.json` directories. |
 | `nwt` | New Worktree — creates a git worktree with a random Docker-style name, links the child repositories of a container into it, and can leave a heavy tracked directory out of it. |

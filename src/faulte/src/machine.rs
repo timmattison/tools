@@ -1,7 +1,8 @@
 //! The machine that `faulte` reads, behind one trait.
 //!
 //! Every fact of this Mac reaches `faulte` through this module: the sample of
-//! `top`, the process table of `ps`, the Claude Code role of each process, the
+//! `top`, the endless stream of samples from one `top` child (for `faulte tui`),
+//! the process table of `ps`, the Claude Code role of each process, the
 //! registry record of each session, the counters of the virtual memory system,
 //! the account names, and the clock. One trait holds all of them, so a test
 //! gives each fact as a plain value and no test reads the real machine.
@@ -18,8 +19,9 @@ use crate::duration::Span;
 use crate::pid::{Pid, Uid};
 use crate::ranking::{rank, ClaudeRole, Observation, Ranking, Viewer};
 use crate::render::{Accounts, Measurement};
+use crate::stream::FaultStream;
 use crate::table::{ProcessRow, TableParseError};
-use crate::top::{TopParseError, TopSample};
+use crate::top::{FaultCount, TopParseError, TopSample};
 use crate::vm::{SwapUsage, VmCounters, VmDelta};
 
 #[cfg(target_os = "macos")]
@@ -132,6 +134,16 @@ pub trait Machine {
     /// is not success, or writes output that the parser refuses.
     fn sample_faults(&self, interval: Span) -> Result<(TopSample, Duration), MachineError>;
 
+    /// Starts an endless run of the sampler, one sample every `interval`.
+    ///
+    /// The stream gives the samples one at a time as the sampler prints them.
+    /// Dropping the stream stops the sampler.
+    ///
+    /// # Errors
+    ///
+    /// Gives an error when the sampler does not start.
+    fn fault_stream(&self, interval: Span) -> Result<Box<dyn FaultStream>, MachineError>;
+
     /// Reads one row for each process of every account.
     ///
     /// # Errors
@@ -230,8 +242,11 @@ pub struct Observed {
     pub usage: SwapUsage,
     /// The size of the compressor in bytes, after the sample.
     pub compressor_bytes: u64,
-    /// The time between the two reads of the counters. It is longer than the
-    /// window of the ranking, because the sampler starts and stops inside it.
+    /// The time between the two reads of the counters. In a run of one
+    /// sample, it is longer than the window of the ranking, because the
+    /// sampler starts and stops inside it. The terminal view reads the
+    /// counters when it takes a header, after the `ps` of the header before,
+    /// so a slow `ps` can make it longer or shorter than that window.
     pub swap_window: Duration,
     /// The name of each account that owns a row of the ranking.
     pub accounts: Accounts,
@@ -253,6 +268,7 @@ impl Observed {
     pub fn measurement(&self) -> Measurement<'_> {
         Measurement {
             ranking: &self.ranking,
+            processes: self.ranking.rows.len(),
             swap: self.swap,
             usage: self.usage,
             compressor_bytes: self.compressor_bytes,
@@ -283,15 +299,105 @@ pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Observed, Machin
     let (sample, wall) = machine.sample_faults(interval)?;
     let after = machine.vm_counters()?;
     let swap_window = started.elapsed();
+    let sources = read_sources(machine)?;
+    Ok(join_sources(
+        machine,
+        &SampleFacts {
+            interval,
+            window: sample_window(interval, sample.elapsed, wall),
+            faults: &sample.rows,
+            before,
+            after,
+            swap_window,
+        },
+        sources,
+    ))
+}
+
+/// What one sample of faults and the two reads of the counters around it
+/// state. [`read_sources`] reads every other source, and [`join_sources`]
+/// joins them to these.
+#[derive(Debug, Clone, Copy)]
+pub struct SampleFacts<'a> {
+    /// The interval that the person asked for.
+    pub interval: Span,
+    /// The time that the faults of the sample were made over.
+    pub window: Duration,
+    /// The faults of each process in the sample.
+    pub faults: &'a [FaultCount],
+    /// The counters of the virtual memory system before the sample.
+    pub before: VmCounters,
+    /// The counters of the virtual memory system after the sample.
+    pub after: VmCounters,
+    /// The time between the two reads of the counters.
+    pub swap_window: Duration,
+}
+
+/// What every source other than the sample says at one moment.
+///
+/// [`read_sources`] makes this value and [`join_sources`] uses it. The two are
+/// separate because the read must come right after the sample, and a stream
+/// knows only one sample later that the sample is complete.
+#[derive(Debug, Clone)]
+pub struct Sources {
+    /// The swap file of this Mac, and how much of it is in use.
+    usage: SwapUsage,
+    /// The process table.
+    table: Vec<ProcessRow>,
+    /// The Claude Code role of each process that has one.
+    claude: HashMap<Pid, ClaudeRole>,
+    /// The account that runs `faulte`.
+    viewer: Viewer,
+    /// The time of the read. The idle time of a session is measured from it.
+    now: SystemTime,
+    /// The registry record of each Claude Code process that the viewer reads.
+    records: HashMap<Pid, SessionRecord>,
+}
+
+/// Reads every source that is not a sample.
+///
+/// The order of the reads is the design. The swap file comes first, then the
+/// process table, because a process that the sampler saw is still in the table
+/// when it is alive.
+///
+/// # Errors
+///
+/// Gives the error of the first source that failed.
+pub fn read_sources(machine: &dyn Machine) -> Result<Sources, MachineError> {
     let usage = machine.swap_usage()?;
     let table = machine.process_table()?;
     let claude = machine.claude_roles();
     let viewer = machine.viewer();
     let now = machine.now();
     let records = records_of(machine, &table, &claude, viewer);
+    Ok(Sources {
+        usage,
+        table,
+        claude,
+        viewer,
+        now,
+        records,
+    })
+}
+
+/// Joins `sources` to `facts` and ranks the result.
+///
+/// This is the one join of the sources. [`observe`] calls it after its own
+/// sample, and a run that reads a stream of samples calls it for each sample,
+/// so the two never rank in different ways.
+#[must_use]
+pub fn join_sources(machine: &dyn Machine, facts: &SampleFacts<'_>, sources: Sources) -> Observed {
+    let Sources {
+        usage,
+        table,
+        claude,
+        viewer,
+        now,
+        records,
+    } = sources;
     let ranking = rank(&Observation {
-        window: sample_window(interval, sample.elapsed, wall),
-        faults: &sample.rows,
+        window: facts.window,
+        faults: facts.faults,
         table: &table,
         claude: &claude,
         records: &records,
@@ -299,19 +405,19 @@ pub fn observe(machine: &dyn Machine, interval: Span) -> Result<Observed, Machin
         now,
     });
     let accounts = accounts_of(machine, &ranking);
-    Ok(Observed {
+    Observed {
         ranking,
         table,
-        swap: VmDelta::between(before, after),
+        swap: VmDelta::between(facts.before, facts.after),
         usage,
         // The compressor holds what it holds now, so the count after the
         // sample is the one that says what this Mac is doing.
-        compressor_bytes: after.compressor_bytes(machine.page_size()),
-        swap_window,
+        compressor_bytes: facts.after.compressor_bytes(machine.page_size()),
+        swap_window: facts.swap_window,
         accounts,
         now,
-        interval,
-    })
+        interval: facts.interval,
+    }
 }
 
 /// Reads the name of each account that owns a row of `ranking`.

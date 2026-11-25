@@ -11,10 +11,13 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use faulte::duration::Span;
-use faulte::machine::{observe, Machine, MachineError, Signal};
+use faulte::machine::{
+    join_sources, observe, read_sources, Machine, MachineError, SampleFacts, Signal,
+};
 use faulte::pid::{Pid, Uid};
 use faulte::ranking::{ClaudeRole, ClaudeView, Viewer};
 use faulte::state::SessionState;
+use faulte::stream::FaultStream;
 use faulte::table::ProcessRow;
 use faulte::top::{self, TopSample};
 use faulte::vm::{SwapUsage, VmCounters};
@@ -179,6 +182,10 @@ impl FakeMachine {
 impl Machine for FakeMachine {
     fn sample_faults(&self, _interval: Span) -> Result<(TopSample, Duration), MachineError> {
         self.sample.clone()
+    }
+
+    fn fault_stream(&self, _interval: Span) -> Result<Box<dyn FaultStream>, MachineError> {
+        unreachable!("a read of the machine started a stream of faults");
     }
 
     fn process_table(&self) -> Result<Vec<ProcessRow>, MachineError> {
@@ -426,6 +433,51 @@ fn the_run_states_the_swap_traffic_over_the_sample() {
     assert_eq!(
         observed.usage.used_bytes, 11_811_160_064,
         "the swap file states how much of it is in use"
+    );
+}
+
+/// A stream of samples joins each sample with the sources that are not a
+/// sample, and it does so without the single-sample run. The facts bring the
+/// window, the counters and the faults, and the join reads nothing of them
+/// from the machine: the fake gives no counter and no sample for this call.
+#[test]
+fn the_join_ranks_the_facts_that_the_caller_states() {
+    let machine = machine_of_the_capture();
+    let sample = sample();
+    let facts = SampleFacts {
+        interval: interval(),
+        window: Duration::from_secs(7),
+        faults: &sample.rows,
+        before: VmCounters {
+            swapins: 10,
+            swapouts: 20,
+            compressor_pages: 1,
+        },
+        after: VmCounters {
+            swapins: 15,
+            swapouts: 20,
+            compressor_pages: 3,
+        },
+        swap_window: Duration::from_secs(9),
+    };
+
+    let sources = read_sources(&machine).expect("every source answers");
+    let observed = join_sources(&machine, &facts, sources);
+
+    assert_eq!(observed.ranking.window, Duration::from_secs(7));
+    assert_eq!(observed.swap_window, Duration::from_secs(9));
+    assert_eq!(observed.swap.swapins, 5, "15 swap-ins less 10");
+    assert_eq!(observed.swap.swapouts, 0);
+    assert_eq!(observed.compressor_bytes, 3 * PAGE_SIZE);
+    assert_eq!(observed.interval, interval());
+    assert_eq!(
+        observed.ranking.rows.first().map(|r| r.pid.get()),
+        Some(SESSION_PID)
+    );
+    assert_eq!(
+        machine.counters.borrow().len(),
+        2,
+        "the join reads no counter"
     );
 }
 
