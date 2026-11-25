@@ -22,6 +22,7 @@ use termion::input::TermRead;
 use termion::raw::IntoRawMode;
 use unicode_width::UnicodeWidthStr;
 
+mod diff;
 mod emit;
 
 use emit::PixelBox;
