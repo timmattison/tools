@@ -35,6 +35,11 @@
 #                           clippy's --all-targets has already compiled the test
 #                           targets, so this pass is mostly incremental + run.
 #                           It also uses --locked, for the same reason.
+#                           --no-fail-fast runs each test target also after a
+#                           target fails, so one run reports each failed target.
+#                           Without it, cargo stops at the first failed target,
+#                           and each later failure costs one more full run. The
+#                           step still exits non-zero when a test fails.
 #
 # The script reads the working tree of the repository that holds it, whatever
 # the current directory of the caller is.
@@ -92,7 +97,7 @@ without_git_environment cargo machete
 echo "$LOG_PREFIX running cargo clippy --locked --all-targets --workspace -- -D warnings"
 without_git_environment cargo clippy --locked --all-targets --workspace -- -D warnings
 
-echo "$LOG_PREFIX running cargo test --locked --workspace (CLICOLOR_FORCE=1)"
+echo "$LOG_PREFIX running cargo test --locked --no-fail-fast --workspace (CLICOLOR_FORCE=1)"
 # Git exports GIT_ variables into the hook, and every program that the hook
 # starts inherits them. Rust spawns of this workspace shed the same variables
 # through the crate `childenv`, and clippy makes its constructors mandatory.
@@ -123,4 +128,4 @@ echo "$LOG_PREFIX running cargo test --locked --workspace (CLICOLOR_FORCE=1)"
 # in CI and in each terminal that does not set it. The first CI run found 8
 # such tests in `gsw`.
 without_git_environment env CLICOLOR_FORCE=1 COLORTERM=truecolor \
-    cargo test --locked --workspace
+    cargo test --locked --no-fail-fast --workspace
