@@ -7,7 +7,7 @@
 use std::fmt;
 
 /// The ID of a process, as `top` and `ps` print it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct Pid(u32);
 
 impl Pid {
