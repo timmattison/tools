@@ -921,6 +921,34 @@ fn expected_msgs_pnpm_calls() -> [String; 2] {
     ]
 }
 
+/// Install a fake `pnpm` in `dir`, run the real hook once with the planted
+/// `GIT_` variables, remove `dir`, and assert three things: the hook passed,
+/// the fake `pnpm` got exactly `expected_msgs_pnpm_calls()`, and no `pnpm` call
+/// saw a `GIT_` variable. `case` names the staged change in each failure
+/// message.
+fn assert_msgs_checks_ran(dir: &Path, case: &str) {
+    let pnpm = install_fake_program(dir, "pnpm", None);
+
+    let HookRun { passed, output } = run_hook_with_planted_git_variables(dir, &pnpm);
+    let calls = read_recording(&pnpm);
+    cleanup(dir);
+
+    assert!(
+        passed,
+        "the hook must pass with a fake pnpm ({case}): {output}"
+    );
+    assert_eq!(
+        calls.arguments,
+        expected_msgs_pnpm_calls(),
+        "{case} must run the checks of msgs: {output}"
+    );
+    assert!(
+        calls.git_lines.is_empty(),
+        "a pnpm command saw GIT_ variables ({case}): {:?}",
+        calls.git_lines
+    );
+}
+
 /// A move of a file of the msgs frontend or of the msgs scripts out of its
 /// folder, a deletion of it, and a symbolic link in its place must each run the
 /// type check and the tests of msgs, with no `GIT_` variable. Each one takes the
@@ -935,26 +963,7 @@ fn removed_msgs_file_runs_the_msgs_checks() {
             let dir = unique_fixture_dir();
             write_files(&dir, &[committed]);
             commit_then_stage_removal(&dir, committed, removal);
-            let pnpm = install_fake_program(&dir, "pnpm", None);
-
-            let HookRun { passed, output } = run_hook_with_planted_git_variables(&dir, &pnpm);
-            let calls = read_recording(&pnpm);
-            cleanup(&dir);
-
-            assert!(
-                passed,
-                "the hook must pass with a fake pnpm ({removal:?} of {committed}): {output}"
-            );
-            assert_eq!(
-                calls.arguments,
-                expected_msgs_pnpm_calls(),
-                "{removal:?} of {committed} must run the checks of msgs: {output}"
-            );
-            assert!(
-                calls.git_lines.is_empty(),
-                "a pnpm command saw GIT_ variables ({removal:?} of {committed}): {:?}",
-                calls.git_lines
-            );
+            assert_msgs_checks_ran(&dir, &format!("{removal:?} of {committed}"));
         }
     }
 }
@@ -1011,26 +1020,7 @@ fn staged_msgs_file_runs_the_msgs_checks() {
         for how in [InPlace::Add, InPlace::Edit] {
             let dir = unique_fixture_dir();
             stage_in_place(&dir, staged, how);
-            let pnpm = install_fake_program(&dir, "pnpm", None);
-
-            let HookRun { passed, output } = run_hook_with_planted_git_variables(&dir, &pnpm);
-            let calls = read_recording(&pnpm);
-            cleanup(&dir);
-
-            assert!(
-                passed,
-                "the hook must pass with a fake pnpm ({how:?} of {staged}): {output}"
-            );
-            assert_eq!(
-                calls.arguments,
-                expected_msgs_pnpm_calls(),
-                "{how:?} of {staged} must run the checks of msgs: {output}"
-            );
-            assert!(
-                calls.git_lines.is_empty(),
-                "a pnpm command saw GIT_ variables ({how:?} of {staged}): {:?}",
-                calls.git_lines
-            );
+            assert_msgs_checks_ran(&dir, &format!("{how:?} of {staged}"));
         }
     }
 }
