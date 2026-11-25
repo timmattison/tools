@@ -64,7 +64,24 @@ impl Diff {
     /// `the images are the same` when no pixel differs. Otherwise a line such
     /// as `3 regions differ (1204 pixels)`.
     pub fn summary(&self) -> String {
-        String::new()
+        if self.differing_pixels == 0 {
+            return "the images are the same".to_string();
+        }
+        let regions = self.regions.len();
+        let (noun, verb) = if regions == 1 {
+            ("region", "differs")
+        } else {
+            ("regions", "differ")
+        };
+        let pixels = if self.differing_pixels == 1 {
+            "pixel"
+        } else {
+            "pixels"
+        };
+        format!(
+            "{regions} {noun} {verb} ({} {pixels})",
+            self.differing_pixels
+        )
     }
 }
 
