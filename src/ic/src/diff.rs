@@ -600,4 +600,39 @@ mod tests {
         assert!(error.contains("16384x16384"), "{error}");
         assert!(error.contains("134217728"), "{error}");
     }
+
+    #[test]
+    fn boxes_at_the_edge_of_the_canvas_are_clipped() {
+        assert_eq!(
+            regions_of(20, 20, &[(0, 0), (19, 19)]),
+            vec![region(0, 0, 4, 4), region(15, 15, 19, 19)]
+        );
+    }
+
+    #[test]
+    fn a_canvas_of_one_pixel_has_one_region() {
+        let diff = compare(&field(1, 1, &[]), &field(1, 1, &[(0, 0)]), Mode::Boxes).unwrap();
+        assert_eq!(diff.regions, vec![region(0, 0, 0, 0)]);
+        assert_eq!(*diff.picture.get_pixel(0, 0), RED);
+    }
+
+    #[test]
+    fn pixels_that_touch_at_a_corner_are_one_group() {
+        let diff = compare(
+            &field(30, 30, &[]),
+            &field(30, 30, &[(10, 10), (11, 11)]),
+            Mode::Boxes,
+        )
+        .unwrap();
+        assert_eq!(diff.regions, vec![region(6, 6, 15, 15)]);
+        assert_eq!(diff.differing_pixels, 2);
+    }
+
+    #[test]
+    fn an_outline_leaves_a_pixel_that_no_image_covers_blank() {
+        let diff = compare(&field(12, 4, &[]), &field(4, 12, &[]), Mode::Boxes).unwrap();
+        assert_eq!(diff.regions.len(), 1);
+        assert_eq!(*diff.picture.get_pixel(11, 11), BLANK);
+        assert_eq!(*diff.picture.get_pixel(11, 3), RED);
+    }
 }
