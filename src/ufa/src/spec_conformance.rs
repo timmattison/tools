@@ -111,7 +111,63 @@ fn generate(root: &Value, node: &Value, kind: Document, path: &str, depth: usize
             )])
         }
         (Some(scalar), _) => generate_scalar(node, scalar, path),
+        (None, None) if is_empty_schema(node) => node.get("example").cloned().unwrap_or(json!({})),
         (None, None) => panic!("unsupported schema node at {path}"),
+    }
+}
+
+/// The keys that give a schema node a shape. A node with none of them is the
+/// empty schema, which allows any value.
+const SHAPE_KEYWORDS: [&str; 8] = [
+    "type",
+    "properties",
+    "items",
+    "enum",
+    "$ref",
+    "allOf",
+    "oneOf",
+    "anyOf",
+];
+
+/// Whether `node` is the empty schema, which allows any value.
+///
+/// `Access point feature overview` is `{}` in the spec. A model reads it as
+/// any value, so the generator gives the example of the node, or `{}`.
+///
+/// # Arguments
+///
+/// * `node` - The schema node.
+///
+/// # Returns
+///
+/// Whether `node` holds none of [`SHAPE_KEYWORDS`].
+fn is_empty_schema(node: &Value) -> bool {
+    SHAPE_KEYWORDS
+        .iter()
+        .all(|keyword| node.get(keyword).is_none())
+}
+
+/// Whether `example` has the JSON type that a scalar schema declares.
+///
+/// The spec gives some examples in a type other than the declared one: the
+/// voucher `code` is a string with the example `4861409510`. A model follows
+/// the declared type, so such an example is not a document the spec allows.
+///
+/// # Arguments
+///
+/// * `example` - The `example` of the schema node.
+/// * `scalar` - The declared `type` of the node.
+///
+/// # Returns
+///
+/// Whether the example fits the declared type.
+fn fits(example: &Value, scalar: &str) -> bool {
+    match scalar {
+        "string" => example.is_string(),
+        "integer" => example.is_i64() || example.is_u64(),
+        "number" => example.is_number(),
+        "boolean" => example.is_boolean(),
+        _ => false,
     }
 }
 
@@ -166,14 +222,14 @@ fn generate_object(
 ///
 /// # Returns
 ///
-/// The `example` of the schema, else the first `enum` value, else a value
-/// that fits the type and the format.
+/// The `example` of the schema when it fits the declared type, else the
+/// first `enum` value, else a value that fits the type and the format.
 ///
 /// # Panics
 ///
 /// Panics on a type the generator does not know.
 fn generate_scalar(node: &Value, scalar: &str, path: &str) -> Value {
-    if let Some(example) = node.get("example") {
+    if let Some(example) = node.get("example").filter(|example| fits(example, scalar)) {
         return example.clone();
     }
     match scalar {
@@ -252,6 +308,36 @@ const CASES: &[Case] = &[
         reads::<models::DeviceStatistics>,
     ),
     (
+        "Device details",
+        Document::Full,
+        reads::<models::DeviceDetails>,
+    ),
+    (
+        "Hotspot voucher details",
+        Document::Minimal,
+        reads::<models::Voucher>,
+    ),
+    (
+        "Hotspot voucher details",
+        Document::Full,
+        reads::<models::Voucher>,
+    ),
+    (
+        "Hotspot voucher detail page",
+        Document::Minimal,
+        reads::<models::Page<models::Voucher>>,
+    ),
+    (
+        "Hotspot voucher detail page",
+        Document::Full,
+        reads::<models::Page<models::Voucher>>,
+    ),
+    (
+        "IntegrationVoucherCreationResultDto",
+        Document::Full,
+        reads::<models::VoucherCreateResponse>,
+    ),
+    (
         "Voucher deletion results",
         Document::Full,
         reads::<models::VoucherDeletionResults>,
@@ -291,26 +377,64 @@ fn each_documented_answer_reads_into_its_model() {
     );
 }
 
-/// A model that disagrees with its schema is refused in both kinds.
+/// Each of the two disagreements is refused on its own: a model that requires
+/// a field the schema leaves optional, and a model that types a field another
+/// way. A model that agrees with the schema reads both kinds.
 #[test]
 fn a_model_that_disagrees_with_its_schema_is_refused() {
     #[derive(Debug, serde::Deserialize)]
     #[expect(dead_code, reason = "the fields exist to be read by serde")]
-    struct Wrong {
+    struct RequiresTheOptionalNote {
         note: String,
+        count: u64,
+    }
+    #[derive(Debug, serde::Deserialize)]
+    #[expect(dead_code, reason = "the fields exist to be read by serde")]
+    struct ReadsTheCountAsText {
+        note: Option<String>,
         count: String,
+    }
+    #[derive(Debug, serde::Deserialize)]
+    #[expect(dead_code, reason = "the fields exist to be read by serde")]
+    struct Agrees {
+        note: Option<String>,
+        count: u64,
     }
     let schema = json!({
         "type": "object",
         "properties": {
             "note": {"type": "string"},
-            "count": {"type": "integer"}
+            "count": {"type": "integer", "example": "a string example of an integer"}
         },
         "required": ["count"]
     });
     let root = json!({});
     let minimal = generate(&root, &schema, Document::Minimal, "inline", 0);
     let full = generate(&root, &schema, Document::Full, "inline", 0);
-    assert!(reads::<Wrong>(&minimal).is_err(), "minimal: {minimal}");
-    assert!(reads::<Wrong>(&full).is_err(), "full: {full}");
+
+    assert!(
+        reads::<RequiresTheOptionalNote>(&minimal).is_err(),
+        "a missing optional field must be refused: {minimal}"
+    );
+    assert!(
+        reads::<RequiresTheOptionalNote>(&full).is_ok(),
+        "the full document holds the field: {full}"
+    );
+    assert!(
+        reads::<ReadsTheCountAsText>(&full).is_err(),
+        "a field of another type must be refused: {full}"
+    );
+    assert!(
+        reads::<Agrees>(&minimal).is_ok() && reads::<Agrees>(&full).is_ok(),
+        "a model that agrees reads both kinds, and an example of another type is not used: {minimal} {full}"
+    );
+}
+
+/// The empty schema allows any value, and the generator gives its example.
+#[test]
+fn the_empty_schema_gives_its_example() {
+    let root = json!({});
+    let document = generate(&root, &json!({"example": {}}), Document::Full, "inline", 0);
+
+    assert_eq!(document, json!({}));
 }
