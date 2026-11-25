@@ -420,7 +420,7 @@ impl Fixture {
     /// Runs `drun` with `args`, with a stdout whose reader closed before
     /// `drun` started, as when the reader of a pipe exits first. Each write to
     /// stdout fails with a broken pipe. The `stdout` of the result is empty.
-    pub fn run_with_closed_stdout(&self, args: &[&str]) -> Run {
+    fn run_with_closed_stdout(&self, args: &[&str]) -> Run {
         let (reader, writer) = std::io::pipe().expect("a pipe");
         drop(reader);
         let mut command = self.command(args, &[]);
@@ -438,6 +438,25 @@ impl Fixture {
             stderr: String::from_utf8(output.stderr).expect("stderr is UTF-8"),
             elapsed: started.elapsed(),
         }
+    }
+
+    /// Runs `drun` with `args` normally, and then with a closed stdout. Asserts
+    /// that the exit status is the same and that `drun` did not panic. Gives
+    /// the closed run.
+    pub fn assert_closed_stdout_keeps_status(&self, args: &[&str]) -> Run {
+        let normal = self.run(args);
+        let closed = self.run_with_closed_stdout(args);
+        assert_eq!(
+            closed.code, normal.code,
+            "{args:?}: the exit status changed: {}",
+            closed.stderr
+        );
+        assert!(
+            !closed.stderr.contains("panicked"),
+            "{args:?}: {}",
+            closed.stderr
+        );
+        closed
     }
 
     /// Runs `drun` with `args`, the extra environment variables `env`, and
