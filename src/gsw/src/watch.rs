@@ -10095,10 +10095,12 @@ mod push_loop_tests {
     const PAST_ANY_LIFETIME: Duration = Duration::from_secs(600);
 
     /// How long the rescue quit waits before it ends a loop that should have
-    /// ended on its own. Generous enough that a slow machine cannot trip it,
-    /// and short enough to keep the suite quick — it only elapses when the
-    /// test is already failing.
-    const RESCUE_AFTER: Duration = Duration::from_secs(3);
+    /// ended on its own. Each test that uses it ends by itself when it passes,
+    /// thus the bound elapses only when the test is already failing, and a
+    /// long bound costs a passing run nothing. 3 seconds was too short: the
+    /// macOS CI runner held a 200 ms wait past it while it ran the 1026 tests
+    /// of this binary. It is 60 seconds, as `ANSWER_DEADLINE` in `shell.rs` is.
+    const RESCUE_AFTER: Duration = Duration::from_secs(60);
 
     /// The command the probe found, which is what binds the `G` key.
     fn found_command() -> crate::shell::ShellCommand {
