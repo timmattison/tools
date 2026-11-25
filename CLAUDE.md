@@ -219,6 +219,19 @@ caller. It says so at the call site with
 The exemption stays visible in the file it applies to, rather than in a central
 allowlist.
 
+### 24-bit colors read `COLORTERM`
+
+`colored` reads `COLORTERM` each time it formats a 24-bit color. If the value
+is not `truecolor` or `24bit`, it writes the nearest of the 16 basic colors.
+`colored` gives no API to override this read, and `with_forced_ansi` does not
+change it. Thus a test that asserts on a 24-bit color passes only where
+`COLORTERM` says `truecolor`.
+
+`scripts/rust-checks.sh` pins `COLORTERM=truecolor` for the test run, thus the
+hook and CI give the same result in each terminal. To run such a test by hand
+in a terminal that does not set `COLORTERM`, set it on the command:
+`COLORTERM=truecolor cargo test -p gsw`.
+
 ### Crates Currently Using testcolor
 
 - `cdva` - the long-help test of `--strict`
@@ -481,11 +494,20 @@ visible in the file it applies to.
 ### The Runners
 
 The ban covers the Rust code of this workspace. It does not cover code that
-other crates own, for example the build script of a dependency. So
-`.husky/pre-commit` and `test.sh` start each cargo command through
-`without_git_environment` in `scripts/without-git-environment.sh`, which removes
-the whole prefix. The hook starts each `claude` command of its plugin block
-through the same function. The hook is started by `sh`, so that function does not use
+other crates own, for example the build script of a dependency. So each runner
+starts each cargo command through `without_git_environment` in
+`scripts/without-git-environment.sh`, which removes the whole prefix:
+
+- `scripts/rust-checks.sh` runs the four gates. The pre-commit hook and CI both
+  start it, so a cargo command that you add to it gets the sweep.
+- `scripts/plugin-checks.sh` runs the checks of the claude CLI on the plugins
+  under `plugins/`. The pre-commit hook and CI both start it, and it starts
+  each `claude` command through the same function.
+- `.husky/pre-commit` itself starts only the cargo commands of the tool-index
+  guard and of the `ic-inline` block.
+- `test.sh` runs the workspace tests.
+
+The hook is started by `sh`, so `without_git_environment` does not use
 `compgen`, which a shell other than bash does not have.
 
 ### The Trap: A Lint Cannot Say This
@@ -541,9 +563,10 @@ constructor or states an exemption at its site. It does not prove three things:
 
 - `clippy.toml` `disallowed-methods` — a raw `Command::new`,
   `tokio::process::Command::new` or `CommandBuilder::new` fails the build
-- `src/repo-guards/tests/pre_commit_hook.rs` — no cargo command of the hook or
-  of `test.sh`, and no `claude` command of the hook, sees a `GIT_` variable,
-  under a fake program that writes its environment to a file
+- `src/repo-guards/tests/pre_commit_hook.rs` — no cargo command of the hook, of
+  the `scripts/rust-checks.sh` that the hook starts, or of `test.sh`, and no
+  `claude` command of the `scripts/plugin-checks.sh` that the hook starts, sees
+  a `GIT_` variable, under a fake program that writes its environment to a file
 - `repo_guards::git_env_sweep` (`src/repo-guards/src/git_env_sweep.rs`) — no
   file cargo compiles removes a `GIT_`-prefixed variable by name. Its companion
   test asks `cargo metadata` whether the read set holds every target root cargo
@@ -1191,3 +1214,77 @@ shellcheck scripts/update-deps.sh
 5. **Handle arguments properly**: Use `while` loops with `shift` for multi-argument parsing
 6. **Provide help text**: Include `-h`/`--help` options
 7. **Avoid emojis**: Use text indicators like `[PASS]`/`[FAIL]` instead of `✓`/`✗`
+
+## Continuous Integration
+
+Every check that CI runs **must** live in `scripts/rust-checks.sh` or in
+`scripts/plugin-checks.sh`.
+
+### Why
+
+The pre-commit hook and CI must run the same checks. When each caller holds
+its own list, the two lists drift apart, and a check that one list lost
+reports nothing. Thus one script holds each list. `scripts/rust-checks.sh`
+holds the checks of the Rust workspace, and `scripts/plugin-checks.sh` holds the
+checks of the Claude Code plugins under `plugins/`. `.husky/pre-commit` and
+`.github/workflows/ci.yml` each start both scripts. The hook starts a script
+only when a staged path is one that the script reads.
+
+To run the full list by hand, run `./scripts/rust-checks.sh`, then
+`./scripts/plugin-checks.sh`, from the repository root. Do this at the end of a
+TDD run. A `git commit --allow-empty` stages no file, thus the hook runs no
+check in this repository.
+
+### What CI does
+
+`.github/workflows/ci.yml` runs for each pull request, for each push to `main`,
+and when a person starts it by hand (`workflow_dispatch`). It runs the Rust
+checks in one job on `ubuntu-latest` and in one job on `macos-latest`. Some
+crates hold code that compiles only on macOS, and a Linux job does not compile,
+lint, or test that code. It runs the plugin checks in one job on
+`ubuntu-latest`. GitHub does not charge for standard runners in a public
+repository.
+
+Each job of the Rust checks does these steps:
+
+1. On Linux only, install the system packages with `apt-get`: the libraries
+   that some crates link against, and the tools that some tests run. `nle` is
+   a Tauri app, and Tauri on Linux links against WebKitGTK 4.1.
+2. Install Node.js, at the version that `NODE_VERSION` in the workflow names.
+   The tests of `nle` run TypeScript under the real `node`, which needs
+   Node.js 22.18 or later.
+3. Install the toolchain and the components that `rust-toolchain.toml` names.
+4. Install `cargo-machete`.
+5. Restore the Cargo cache. Only a run on `main` saves a cache, and a pull
+   request reads that cache.
+6. Run `scripts/rust-checks.sh`.
+
+The job of the plugin checks does these steps:
+
+1. Install Node.js, at the same `NODE_VERSION`. The package of the claude CLI
+   needs Node.js 22 or later.
+2. Install the claude CLI with `npm`, at the version that
+   `CLAUDE_CODE_VERSION` in the workflow names.
+3. Run `scripts/plugin-checks.sh`.
+
+The plugin checks need no login. `claude plugin test` runs the tests in the
+sandbox of the engine, which has no file system, network or process, thus one
+platform is sufficient.
+
+The workflow sets `CARGO_PROFILE_DEV_DEBUG=0` for each job, because debug
+information is most of the size of the target directory, and the disk of a
+Linux runner is small.
+
+### To add a check
+
+- Add a check of the Rust workspace to `scripts/rust-checks.sh`, and a check of
+  a plugin to `scripts/plugin-checks.sh`. Do not add it to the hook or to the
+  workflow.
+- If the check needs a tool that the runner does not have, add an install step
+  to the workflow.
+- If a crate or a test needs a system library or a tool on Linux, add its
+  package to the `apt-get install` step. The tests of `crap` need `zsh`, for
+  example.
+- Pin each third-party action to a full commit SHA, and write its release tag
+  in a comment. A tag can move, but a commit SHA cannot.
+- Run `actionlint .github/workflows/ci.yml` after each change to the workflow.

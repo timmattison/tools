@@ -184,8 +184,7 @@ mod read {
                 shellquote::shell_quote(&dir.path().join("arguments.txt").to_string_lossy())
             );
             let path = dir.path().join("atuin");
-            fs::write(&path, script).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            gitscratch::testing::executable::write_executable(&path, script).unwrap();
             Self { dir }
         }
 

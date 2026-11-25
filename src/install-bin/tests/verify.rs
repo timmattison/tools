@@ -9,8 +9,6 @@
 //! Parallel-safety: every test gets its own `tempfile::tempdir()` sandbox
 //! (unique per call), so concurrent runs never share a path.
 
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -20,8 +18,7 @@ use install_bin::{verify_exec, ExecVerdict, DEFAULT_VERIFY_TIMEOUT};
 /// `0o755`) and return its path.
 fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
-    fs::write(&path, body).expect("write script");
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+    gitscratch::testing::executable::write_executable(&path, body).expect("write script");
     path
 }
 
