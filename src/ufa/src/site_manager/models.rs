@@ -26,6 +26,10 @@ pub struct Host {
     pub registration_time: Option<String>,
     pub reported_state: Option<ReportedState>,
     pub user_data: Option<UserData>,
+    /// Each other field the API sent, kept verbatim, so `--output json`
+    /// writes the host back with each field it had.
+    #[serde(flatten)]
+    pub other_fields: serde_json::Map<String, serde_json::Value>,
 }
 
 /// The state that a host reports about itself.
@@ -42,13 +46,21 @@ pub struct ReportedState {
     pub hostname: Option<String>,
     pub model: Option<String>,
     pub name: Option<String>,
+    /// Each other field the host reported, kept verbatim.
+    #[serde(flatten)]
+    pub other_fields: serde_json::Map<String, serde_json::Value>,
 }
 
+/// What the account keeps about a host: its name and its note, and the role,
+/// the permissions and the members that the spec example shows.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserData {
     pub name: Option<String>,
     pub note: Option<String>,
+    /// Each other field the API sent, kept verbatim.
+    #[serde(flatten)]
+    pub other_fields: serde_json::Map<String, serde_json::Value>,
 }
 
 /// One page of the answer of `GET /v1/hosts`, in the shape that the official

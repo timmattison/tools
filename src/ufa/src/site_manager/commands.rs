@@ -250,8 +250,10 @@ mod tests {
                 hostname: Some("unifi".to_string()),
                 model: Some("UDM-Pro".to_string()),
                 name: Some(name.to_string()),
+                other_fields: serde_json::Map::new(),
             }),
             user_data: None,
+            other_fields: serde_json::Map::new(),
         }
     }
 
