@@ -5,7 +5,7 @@
 //! differ. The module reads no file and writes no terminal.
 #![deny(clippy::indexing_slicing)]
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use image::{DynamicImage, Rgba, RgbaImage};
 
 /// Red, the color of a pixel that differs and of each outline.
@@ -102,6 +102,13 @@ pub fn compare(first: &DynamicImage, second: &DynamicImage, mode: Mode) -> Resul
     let second = second.to_rgba8();
     let width = first.width().max(second.width());
     let height = first.height().max(second.height());
+    let canvas_pixels = u64::from(width).saturating_mul(u64::from(height));
+    if canvas_pixels > MAX_CANVAS_PIXELS {
+        bail!(
+            "the canvas of the diff is {width}x{height} pixels, and the limit is \
+             {MAX_CANVAS_PIXELS} pixels"
+        );
+    }
     let covered = |x: u32, y: u32| covers(&first, x, y) || covers(&second, x, y);
     let mut picture = RgbaImage::new(width, height);
     let mut differing = Grid::new(width, height);
