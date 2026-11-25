@@ -1930,6 +1930,59 @@ mod tests {
         }
     }
 
+    /// Many settings files have no line break after the last line. The reader
+    /// finds no line break there, and it must still hand out that last line,
+    /// or dotenvy sees the end of the file and drops the last setting with no
+    /// error.
+    #[test]
+    fn a_last_setting_with_no_final_line_break_is_loaded() {
+        let temp = TempConfigDir::new("env-no-final-line-break");
+        create_directory(&temp.dir);
+        write_file(
+            &temp.dir.join(ENVIRONMENT_FILE),
+            "# ufa settings\nUNIFI_URL=https://last.example",
+        );
+
+        let (loaded, url) = load_and_take_back("UNIFI_URL", &temp.dir);
+
+        assert_eq!(
+            loaded.expect("a settings file with no final line break must load"),
+            Some(temp.dir.join(ENVIRONMENT_FILE)),
+            "the load must report the file it read"
+        );
+        assert_eq!(
+            url.as_deref(),
+            Some("https://last.example"),
+            "the last setting must reach the process environment when no line break ends it"
+        );
+    }
+
+    /// dotenvy reads through a `BufReader` of 8 KiB, so a line longer than
+    /// that buffer arrives in more than one read. The line must count once,
+    /// or each line after it gets a line number that is too high.
+    #[test]
+    fn a_bad_line_after_a_value_longer_than_the_read_buffer_is_named_by_its_line_number() {
+        /// The capacity of the `BufReader` that dotenvy reads through.
+        const READ_BUFFER: usize = 8 * 1024;
+        const LEAKED_KEY: &str = "sekrit-api-key";
+        const LONG_SETTING: &str = "UFA_TEST_SETTING_LONGER_THAN_THE_READ_BUFFER";
+        let long_value = "v".repeat(READ_BUFFER.saturating_mul(3));
+        let text = format!("{LONG_SETTING}={long_value}\nUNIFI_API_KEY={LEAKED_KEY} with space\n");
+        let temp = TempConfigDir::new("env-long-value-line-number");
+        create_directory(&temp.dir);
+        write_file(&temp.dir.join(ENVIRONMENT_FILE), &text);
+
+        let (loaded, _) = load_and_take_back(LONG_SETTING, &temp.dir);
+
+        let error = loaded.expect_err("a settings line that cannot be parsed is a fault");
+        let report = format!("{error:#}");
+        assert!(
+            report.contains(" line 2 "),
+            "the failure must name line 2, after a value of {} bytes on line 1, got {report}",
+            long_value.len()
+        );
+    }
+
     /// The file the user put beside the configuration file is the one that is
     /// read, and its settings reach the process environment.
     #[test]
