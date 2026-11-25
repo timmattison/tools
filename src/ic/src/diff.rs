@@ -635,4 +635,203 @@ mod tests {
         assert_eq!(*diff.picture.get_pixel(11, 11), BLANK);
         assert_eq!(*diff.picture.get_pixel(11, 3), RED);
     }
+
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    thread_local! {
+        /// The bytes that this thread allocated and has not freed.
+        static LIVE_BYTES: Cell<usize> = const { Cell::new(0) };
+        /// The largest value that `LIVE_BYTES` had since the last reset.
+        static PEAK_BYTES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// An allocator that counts the live bytes of each thread and the peak.
+    ///
+    /// The counters are thread-local, so the tests that run on other threads
+    /// do not change what one test measures.
+    struct CountingAllocator;
+
+    /// Add `size` bytes to the live count of this thread and raise the peak.
+    fn count_up(size: usize) {
+        let _ = LIVE_BYTES.try_with(|live| {
+            let now = live.get().saturating_add(size);
+            live.set(now);
+            let _ = PEAK_BYTES.try_with(|peak| peak.set(peak.get().max(now)));
+        });
+    }
+
+    /// Take `size` bytes from the live count of this thread.
+    fn count_down(size: usize) {
+        let _ = LIVE_BYTES.try_with(|live| live.set(live.get().saturating_sub(size)));
+    }
+
+    // SAFETY: each method hands the call to `System` with the same arguments, so
+    // the contract of `GlobalAlloc` holds as it holds for `System`. The counters
+    // are thread-local cells and have no effect on the memory.
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: the caller meets the contract of `alloc`, and the layout
+            // goes on unchanged.
+            let pointer = unsafe { System.alloc(layout) };
+            if !pointer.is_null() {
+                count_up(layout.size());
+            }
+            pointer
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            count_down(layout.size());
+            // SAFETY: the caller gives a pointer and a layout from `alloc`, and
+            // both go on unchanged.
+            unsafe { System.dealloc(pointer, layout) };
+        }
+
+        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            // SAFETY: the caller meets the contract of `realloc`, and the
+            // arguments go on unchanged.
+            let moved = unsafe { System.realloc(pointer, layout, new_size) };
+            if !moved.is_null() {
+                count_down(layout.size());
+                count_up(new_size);
+            }
+            moved
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    /// Run `work` and give its result with the bytes that it held at its
+    /// largest, above what this thread held when it began.
+    fn peak_bytes_of<T>(work: impl FnOnce() -> T) -> (T, usize) {
+        let live_at_start = LIVE_BYTES.with(Cell::get);
+        PEAK_BYTES.with(|peak| peak.set(live_at_start));
+        let result = work();
+        let peak = PEAK_BYTES.with(Cell::get);
+        (result, peak.saturating_sub(live_at_start))
+    }
+
+    /// The side of the square pictures of the memory tests, in pixels.
+    const MEMORY_SIDE: u32 = 512;
+    /// The bytes of a picture for each pixel: four channels of one byte.
+    const PICTURE_BYTES_PER_PIXEL: usize = 4;
+    /// The bytes of a `Grid` for each pixel.
+    const GRID_BYTES_PER_PIXEL: usize = 1;
+    /// The work memory that one pixel of width may cost, in bytes. The runs of
+    /// two rows and their groups stay far below this.
+    const WORK_BYTES_PER_COLUMN: usize = 1024;
+
+    /// A square picture of `MEMORY_SIDE` pixels that is `value` where `differs`
+    /// is true for the position, and black elsewhere.
+    fn memory_picture(value: u8, differs: impl Fn(u32, u32) -> bool) -> DynamicImage {
+        DynamicImage::ImageRgba8(RgbaImage::from_fn(MEMORY_SIDE, MEMORY_SIDE, |x, y| {
+            if differs(x, y) {
+                Rgba([value, value, value, 255])
+            } else {
+                Rgba([0, 0, 0, 255])
+            }
+        }))
+    }
+
+    /// The `Grid` of `MEMORY_SIDE` pixels with a flag on where `on` is true.
+    fn memory_grid(on: impl Fn(u32, u32) -> bool) -> Grid {
+        let mut grid = Grid::new(MEMORY_SIDE, MEMORY_SIDE);
+        for y in 0..MEMORY_SIDE {
+            for x in 0..MEMORY_SIDE {
+                if on(x, y) {
+                    grid.set(x, y);
+                }
+            }
+        }
+        grid
+    }
+
+    /// The two ways that the tests make every pixel of a region differ.
+    fn memory_cases() -> [(&'static str, fn(u32, u32) -> bool); 2] {
+        [
+            ("every pixel", |_, _| true),
+            ("checkerboard", |x, y| (x + y) % 2 == 0),
+        ]
+    }
+
+    /// The peak of `compare` is the two pictures that it holds, the `Grid`, and
+    /// a work area that grows with the width. It is not a copy of each picture
+    /// and not a stack that grows with the count of pixels.
+    ///
+    /// The bound is 4 bytes of picture and 1 byte of `Grid` for each pixel,
+    /// plus `WORK_BYTES_PER_COLUMN` for each column. The output picture takes
+    /// the 4 bytes, and the images move into the call.
+    #[test]
+    fn compare_holds_no_copy_of_the_two_images() {
+        let pixels = usize::try_from(MEMORY_SIDE * MEMORY_SIDE).unwrap();
+        let width = usize::try_from(MEMORY_SIDE).unwrap();
+        let bound = (PICTURE_BYTES_PER_PIXEL + GRID_BYTES_PER_PIXEL) * pixels
+            + WORK_BYTES_PER_COLUMN * width;
+        for (name, differs) in memory_cases() {
+            let first = memory_picture(0, |_, _| false);
+            let second = memory_picture(255, differs);
+            let (diff, peak) = peak_bytes_of(|| compare(&first, &second, Mode::Boxes).unwrap());
+            eprintln!("compare, {name}: peak {peak} bytes, bound {bound}");
+            assert_eq!(diff.regions, vec![region(0, 0, 511, 511)], "{name}");
+            assert!(
+                peak <= bound,
+                "{name}: peak {peak} is over the bound {bound}"
+            );
+        }
+    }
+
+    /// The fill of the regions takes memory that grows with the width, not with
+    /// the area.
+    #[test]
+    fn the_regions_take_memory_that_grows_with_the_width() {
+        let bound = WORK_BYTES_PER_COLUMN * usize::try_from(MEMORY_SIDE).unwrap();
+        for (name, on) in memory_cases() {
+            let grid = memory_grid(on);
+            let (regions, peak) = peak_bytes_of(|| find_regions(&grid, 2));
+            eprintln!("find_regions, {name}: peak {peak} bytes, bound {bound}");
+            assert_eq!(regions, vec![region(0, 0, 511, 511)], "{name}");
+            assert!(
+                peak <= bound,
+                "{name}: peak {peak} is over the bound {bound}"
+            );
+        }
+    }
+
+    /// Two bars joined at the bottom are one group, though the fill meets them
+    /// as two groups until the last row.
+    #[test]
+    fn a_u_shape_is_one_region() {
+        let mut spots = Vec::new();
+        for y in 5..=30 {
+            spots.push((10, y));
+            spots.push((50, y));
+        }
+        spots.extend((10..=50).map(|x| (x, 30)));
+        assert_eq!(regions_of(70, 50, &spots), vec![region(6, 1, 54, 34)]);
+    }
+
+    /// Two legs that start from one bar are one group, though the row below the
+    /// bar holds two runs.
+    #[test]
+    fn an_inverted_u_shape_is_one_region() {
+        let mut spots = Vec::new();
+        for y in 5..=30 {
+            spots.push((10, y));
+            spots.push((50, y));
+        }
+        spots.extend((10..=50).map(|x| (x, 5)));
+        assert_eq!(regions_of(70, 50, &spots), vec![region(6, 1, 54, 34)]);
+    }
+
+    /// A group that ends while another continues keeps its own box.
+    #[test]
+    fn a_group_that_ends_while_another_continues_keeps_its_box() {
+        let mut spots = vec![(10, 10)];
+        spots.extend((0..50).map(|y| (50, y)));
+        assert_eq!(
+            regions_of(70, 50, &spots),
+            vec![region(46, 0, 54, 49), region(6, 6, 14, 14)]
+        );
+    }
 }
