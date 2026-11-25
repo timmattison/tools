@@ -289,8 +289,8 @@ fn run_hook_configured(dir: &Path, configure: impl FnOnce(&mut Command)) -> Hook
         path_dirs.push(cargo_home.join(CARGO_HOME_BIN));
         command.env(CARGO_HOME_VARIABLE, cargo_home);
     }
-    let path =
-        std::env::join_paths(path_dirs).expect("failed to join the stub directory onto PATH");
+    let path = std::env::join_paths(path_dirs)
+        .expect("failed to join the stub directory and $CARGO_HOME/bin onto PATH");
     command.env("PATH", path);
     command.env("CARGO_TARGET_DIR", dir.join("target"));
     configure(&mut command);
