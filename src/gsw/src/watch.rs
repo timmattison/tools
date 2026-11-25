@@ -10094,12 +10094,14 @@ mod push_loop_tests {
     /// about.
     const PAST_ANY_LIFETIME: Duration = Duration::from_secs(600);
 
-    /// How long the rescue quit waits before it ends a loop that should have
-    /// ended on its own. Each test that uses it ends by itself when it passes,
-    /// thus the bound elapses only when the test is already failing, and a
-    /// long bound costs a passing run nothing. 3 seconds was too short: the
-    /// macOS CI runner held a 200 ms wait past it while it ran the 1026 tests
-    /// of this binary. It is 60 seconds, as `ANSWER_DEADLINE` in `shell.rs` is.
+    /// How long the rescue quit waits before it ends a loop that must end on
+    /// its own. Each test that uses it ends by itself when it passes, thus
+    /// the bound elapses only when the test already fails, and a long bound
+    /// costs a passing run nothing. The bound is for a late wake only: a
+    /// loaded machine can hold the thread of the loop for seconds. A loop that
+    /// never wakes fails at each bound, thus a test must not let the speed of
+    /// the machine decide whether the loop wakes. It is 60 seconds, as
+    /// `ANSWER_DEADLINE` in `shell.rs` is.
     const RESCUE_AFTER: Duration = Duration::from_secs(60);
 
     /// The command the probe found, which is what binds the `G` key.
@@ -14855,30 +14857,44 @@ mod push_loop_tests {
 
     #[test]
     fn the_pending_lookup_goes_out_by_itself_at_the_end_of_a_rate_limit() {
-        // The block lasts 200 ms of the real clock. The lookup that `r`
-        // left pending goes out when the loop wakes at the end of the block,
-        // with no event behind the wake. The empty burst keeps the loop
-        // waiting for that wake.
+        // The clock of the loop stands at `base` until the loop draws its
+        // second frame, the frame of `r`, and after that at the end of the
+        // block. Thus `r` arrives inside the block on a machine of each
+        // speed. On the real clock, a slow drain let `r` arrive after the
+        // block: the lookup of `r` then went out at once, and nothing woke
+        // the loop again. The lookup that `r` left pending goes out when the
+        // loop wakes by itself at the end of the block, with no event behind
+        // the wake. The empty burst keeps the loop waiting for that wake.
         //
         // A loop that never wakes by itself waits on its channel for ever, so
         // the loop runs on a thread of its own and the test waits for it
         // with a bound. A missing wake then fails this test instead of
         // hanging the suite. The thread of such a failure stays blocked
         // until the test process ends.
+        const BLOCK: Duration = Duration::from_millis(200);
         let (done_tx, done_rx) = mpsc::channel();
         std::thread::spawn(move || {
+            let base = Instant::now();
+            let frames = std::rc::Rc::new(std::cell::Cell::new(0_u32));
+            let counted = std::rc::Rc::clone(&frames);
             let (_screen, seen) = drive_bursts(
                 vec![
                     vec![pull_answer(
                         ALONE,
-                        crate::pull::LookupOutcome::RateLimited(Duration::from_millis(200)),
+                        crate::pull::LookupOutcome::RateLimited(BLOCK),
                     )],
                     vec![Event::ForceRefresh],
                     vec![],
                     vec![Event::Quit],
                 ],
-                pull_setup(World::alone()),
-                Instant::now,
+                Setup {
+                    render: Box::new(move |snapshot: &Snapshot, dims: Dimensions| {
+                        counted.set(counted.get() + 1);
+                        pull_frame(snapshot, dims)
+                    }),
+                    ..pull_setup(World::alone())
+                },
+                move || if frames.get() < 2 { base } else { base + BLOCK },
             );
             let _ = done_tx.send(seen.pull_lookups.len());
         });
