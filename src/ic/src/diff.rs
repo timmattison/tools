@@ -234,8 +234,62 @@ fn find_regions(differing: &Grid, thickness: u32) -> Vec<Region> {
             });
         }
     }
+    let mut regions = merge_touching(regions);
     regions.sort_by_key(|region| (region.top, region.left));
     regions
+}
+
+/// Whether two boxes overlap or touch, also at a corner.
+fn touches(a: Region, b: Region) -> bool {
+    a.left <= b.right.saturating_add(1)
+        && b.left <= a.right.saturating_add(1)
+        && a.top <= b.bottom.saturating_add(1)
+        && b.top <= a.bottom.saturating_add(1)
+}
+
+/// The one box that holds both `a` and `b`.
+fn union(a: Region, b: Region) -> Region {
+    Region {
+        left: a.left.min(b.left),
+        top: a.top.min(b.top),
+        right: a.right.max(b.right),
+        bottom: a.bottom.max(b.bottom),
+    }
+}
+
+/// Merge the boxes that overlap or touch.
+///
+/// # Arguments
+///
+/// * `regions` - The boxes, in any order.
+///
+/// # Returns
+///
+/// The merged boxes, sorted by `left`.
+fn merge_touching(mut regions: Vec<Region>) -> Vec<Region> {
+    regions.sort_by_key(|region| region.left);
+    let mut taken = vec![false; regions.len()];
+    let mut merged = Vec::new();
+    for (start, first) in regions.iter().enumerate() {
+        if taken.get(start).copied().unwrap_or(true) {
+            continue;
+        }
+        let mut current = *first;
+        for (later, candidate) in regions.iter().enumerate().skip(start.saturating_add(1)) {
+            if candidate.left > current.right.saturating_add(1) {
+                break;
+            }
+            let free = taken.get(later).is_some_and(|taken| !taken);
+            if free && touches(current, *candidate) {
+                current = union(current, *candidate);
+                if let Some(flag) = taken.get_mut(later) {
+                    *flag = true;
+                }
+            }
+        }
+        merged.push(current);
+    }
+    merged
 }
 
 /// Draw a red outline inside the edge of `region`.
