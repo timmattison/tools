@@ -132,6 +132,8 @@ if git diff --cached --name-only --diff-filter=ACMRD | grep -qE '^(plugins/|\.cl
     echo "pre-commit: running claude plugin validate on the marketplace"
     without_git_environment claude plugin validate .
     for plugin in plugins/*/; do
+        # A glob that matches no directory stays the text plugins/*/.
+        [ -d "${plugin}" ] || continue
         echo "pre-commit: running claude plugin validate and claude plugin test on ${plugin}"
         without_git_environment claude plugin validate "${plugin}"
         without_git_environment claude plugin test "${plugin}"
