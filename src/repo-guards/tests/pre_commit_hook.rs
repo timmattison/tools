@@ -697,3 +697,151 @@ fn staged_ic_inline_file_with_rust_runs_the_emit_rgba_tests_once() {
         calls.arguments
     );
 }
+
+/// The two ways that a commit takes a committed file away from its path.
+#[derive(Clone, Copy, Debug)]
+enum Removal {
+    /// `git mv` of the file to this path.
+    MoveTo(&'static str),
+    /// `git rm` of the file.
+    Delete,
+}
+
+/// Commit `committed` in a new repository in `dir`, then stage its removal.
+///
+/// `git diff --cached` compares the index to `HEAD`, so a removal shows only
+/// after a commit holds the file. The identity, the signature setting and the
+/// hooks path go on the command line, so the commit reads none of them from the
+/// configuration of this machine, and it writes no configuration.
+fn commit_then_stage_removal(dir: &Path, committed: &str, removal: Removal) {
+    git_init_and_stage(dir, &[committed]);
+    run_git(
+        dir,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-q",
+            "--no-verify",
+            "-m",
+            "fixture",
+        ],
+    );
+    match removal {
+        Removal::MoveTo(destination) => {
+            let parent = dir
+                .join(destination)
+                .parent()
+                .expect("a destination has a parent")
+                .to_path_buf();
+            fs::create_dir_all(&parent)
+                .unwrap_or_else(|e| panic!("create the directory of {destination}: {e}"));
+            run_git(dir, &["mv", committed, destination]);
+        }
+        Removal::Delete => run_git(dir, &["rm", "-q", committed]),
+    }
+}
+
+/// A move of a file of `plugins/ic-inline` to a different path, and a deletion
+/// of it, must run the test target of `ic` that reads the plugin. That target
+/// names the old path, so such a commit breaks it. `git diff` finds renames by
+/// default, and `--name-only` then prints only the new path, so a block that
+/// matches the old path misses the move.
+#[test]
+fn removed_ic_inline_file_runs_the_emit_rgba_tests() {
+    let committed = IC_INLINE_FILES[0];
+    for removal in [
+        Removal::MoveTo("plugins/shared/fixture.png"),
+        Removal::Delete,
+    ] {
+        let dir = unique_fixture_dir();
+        write_files(&dir, &[committed]);
+        commit_then_stage_removal(&dir, committed, removal);
+
+        let (HookRun { passed, output }, calls) = run_hook_with_fake_cargo_and_claude(&dir);
+        cleanup(&dir);
+
+        assert!(
+            passed,
+            "the hook must pass with a fake cargo ({removal:?}): {output}"
+        );
+        assert_eq!(
+            calls.arguments,
+            [IC_INLINE_CARGO_CALL],
+            "{removal:?} of {committed} must run the emit-rgba tests of ic: {output}"
+        );
+        assert!(
+            calls.git_lines.is_empty(),
+            "a cargo command saw GIT_ variables ({removal:?}): {:?}",
+            calls.git_lines
+        );
+    }
+}
+
+/// The cargo call of the tool-index block.
+const INDEX_GUARD_CARGO_CALL: &str = "test -p repo-guards --test tool_index_coverage";
+
+/// A move of a tool index to a different path, and a deletion of it, must run
+/// the tool-index guard. Both take the index away from the root, which is the
+/// fault that the guard catches.
+#[test]
+fn removed_tool_index_runs_the_index_guard() {
+    for removal in [Removal::MoveTo("docs/README.md"), Removal::Delete] {
+        let dir = unique_fixture_dir();
+        fs::write(dir.join("README.md"), "# fixture\n").expect("write README.md");
+        commit_then_stage_removal(&dir, "README.md", removal);
+        let cargo = install_fake_cargo(&dir);
+
+        let HookRun { passed, output } = run_hook_with_planted_git_variables(&dir, &cargo);
+        let calls = read_recording(&cargo);
+        cleanup(&dir);
+
+        assert!(
+            passed,
+            "the hook must pass with a fake cargo ({removal:?}): {output}"
+        );
+        assert_eq!(
+            calls.arguments,
+            [INDEX_GUARD_CARGO_CALL],
+            "{removal:?} of README.md must run the tool-index guard: {output}"
+        );
+    }
+}
+
+/// A file of the fixture plugin that no fixture stages. It keeps the directory
+/// of the plugin after a removal of [`FIXTURE_PLUGIN_FILE`], so the loop of the
+/// plugin block still finds the plugin.
+const FIXTURE_PLUGIN_MANIFEST: &str = "plugins/fixture/.claude-plugin/plugin.json";
+
+/// A move of a file of a plugin out of `plugins/`, and a deletion of it, must
+/// run the checks of the claude CLI. Each one takes the file away from the
+/// plugin, and that can break the plugin as surely as an edit can.
+#[test]
+fn removed_plugin_file_runs_the_plugin_checks() {
+    for removal in [Removal::MoveTo("docs/README.md"), Removal::Delete] {
+        let dir = unique_fixture_dir();
+        write_fixture_plugin(&dir);
+        write_files(&dir, &[FIXTURE_PLUGIN_MANIFEST]);
+        commit_then_stage_removal(&dir, FIXTURE_PLUGIN_FILE, removal);
+        let claude = install_fake_program(&dir, "claude", None);
+
+        let HookRun { passed, output } = run_hook_with_planted_git_variables(&dir, &claude);
+        let calls = read_recording(&claude);
+        cleanup(&dir);
+
+        assert!(
+            passed,
+            "the hook must pass with a fake claude ({removal:?}): {output}"
+        );
+        assert_eq!(
+            calls.arguments, EXPECTED_CLAUDE_CALLS,
+            "{removal:?} of {FIXTURE_PLUGIN_FILE} must run each check of the plugin block: {output}"
+        );
+    }
+}
