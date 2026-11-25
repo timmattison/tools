@@ -580,4 +580,17 @@ mod tests {
         assert_eq!(diff_of(3, 1204).summary(), "3 regions differ (1204 pixels)");
         assert_eq!(diff_of(2, 1).summary(), "2 regions differ (1 pixel)");
     }
+
+    #[test]
+    fn a_canvas_over_the_limit_is_an_error_before_any_allocation() {
+        let wide = DynamicImage::ImageRgba8(RgbaImage::new(16384, 1));
+        let tall = DynamicImage::ImageRgba8(RgbaImage::new(1, 16384));
+        // `unwrap_err` would print the whole picture of a missing error.
+        let Err(error) = compare(&wide, &tall, Mode::Boxes) else {
+            panic!("the canvas of 268 million pixels gave a picture");
+        };
+        let error = error.to_string();
+        assert!(error.contains("16384x16384"), "{error}");
+        assert!(error.contains("134217728"), "{error}");
+    }
 }
