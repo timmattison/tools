@@ -21,6 +21,9 @@ const FIXTURE_PATH: &str = "/home/user/recordings/demo.json";
 /// The number of events in the fixture.
 const EVENT_COUNT: u32 = 42;
 const FIXTURE_TIMESTAMP: f64 = 1_700_000_000.0;
+/// The recording time in the metadata of `properties_show_the_metadata`. It
+/// differs from `FIXTURE_TIMESTAMP`, so the recording cannot stand in for it.
+const METADATA_TIMESTAMP: f64 = 1_600_000_000.0;
 
 /// A recording with the metadata of the React tests: 65.3 seconds, 42 events,
 /// 120x40 cells.
@@ -54,6 +57,16 @@ fn fixture() -> LoadedRecording {
             timestamp: FIXTURE_TIMESTAMP,
         },
     }
+}
+
+/// The HTML of one row of the properties panel: the label span and the value
+/// span, side by side. `hover` is the `title` attribute of the value span.
+fn metadata_row(label: &str, value: &str, hover: Option<&str>) -> String {
+    let title = hover.map_or_else(String::new, |text| format!(" title=\"{text}\""));
+    format!(
+        "<span class=\"metadata-label\">{label}</span>\
+         <span class=\"metadata-value\"{title}>{value}</span>"
+    )
 }
 
 /// Renders `root` to text. The recording goes into the root context.
@@ -318,22 +331,34 @@ fn app_renders_the_style_sheet_first() {
 
 #[test]
 fn properties_show_the_metadata() {
-    let page = render_panels(fixture());
-    for text in [
-        "Demo Recording",
-        "echo hello",
-        "1m 5.3s",
-        "42",
-        "120x40",
-        "demo.json",
-    ] {
-        assert!(page.contains(text), "{text} missing in {page}");
+    let loaded = fixture();
+    let loaded = LoadedRecording {
+        metadata: RecordingMetadata {
+            file_path: FIXTURE_PATH.into(),
+            title: "Metadata Title".into(),
+            command: "ls -la".into(),
+            duration: 125.5,
+            event_count: 7,
+            width: 80,
+            height: 24,
+            timestamp: METADATA_TIMESTAMP,
+        },
+        ..loaded
+    };
+    let page = render_panels(loaded);
+    let recorded = format_recorded(METADATA_TIMESTAMP);
+    let rows = [
+        metadata_row("Title", "Metadata Title", None),
+        metadata_row("Command", "ls -la", None),
+        metadata_row("Duration", "2m 5.5s", None),
+        metadata_row("Events", "7", None),
+        metadata_row("Size", "80x24", None),
+        metadata_row("Recorded", &recorded, None),
+        metadata_row("File", "demo.json", Some(FIXTURE_PATH)),
+    ];
+    for row in rows {
+        assert!(page.contains(&row), "{row} missing in {page}");
     }
-    assert!(page.contains(&format_recorded(FIXTURE_TIMESTAMP)), "{page}");
-    assert!(
-        page.contains(&format!("title=\"{FIXTURE_PATH}\"")),
-        "{page}"
-    );
 }
 
 #[test]
