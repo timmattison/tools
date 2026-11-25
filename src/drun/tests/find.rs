@@ -371,8 +371,9 @@ fn rm_removes_nothing_when_one_name_is_not_found() {
 fn rm_exits_with_the_first_failure_and_still_tries_every_host() {
     let fixture = fleet();
     fixture.exit_status("box-a", 1);
+    fixture.exit_status("box-b", 4);
     let run = fixture.run(&["rm", "job-a", "job-b"]);
-    assert_eq!(run.code, Some(1));
+    assert_eq!(run.code, Some(1), "box-a fails first: {}", run.stderr);
     assert_eq!(fixture.calls_of("box-b", "rm").len(), 1);
 }
 
