@@ -4,8 +4,15 @@
 //! regions of the window: the menu bar, the preview pane, the timeline, and
 //! the properties panel. The open recording lives in the state of `App`.
 
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
+
+use crate::error::NleError;
 
 use crate::format::{file_name, format_duration, format_recorded};
 use crate::types::{LoadedRecording, RecordingMetadata};
@@ -15,6 +22,17 @@ use crate::types::{LoadedRecording, RecordingMetadata};
 const STYLE: &str = include_str!("../assets/main.css");
 /// The text for a recording with no title.
 const UNTITLED: &str = "(untitled)";
+
+/// The name of the file filter for recordings in the file dialog.
+const RECORDINGS_FILTER_NAME: &str = "Recordings";
+/// The extensions that the recordings filter accepts.
+const RECORDINGS_FILTER_EXTENSIONS: &[&str] = &["json", "gz"];
+/// The name of the file filter that accepts every file.
+const ALL_FILES_FILTER_NAME: &str = "All Files";
+/// The extension list that accepts every file.
+const ALL_FILES_FILTER_EXTENSIONS: &[&str] = &["*"];
+/// The start of the message for a recording that does not open.
+const OPEN_FAILED_PREFIX: &str = "Failed to open recording";
 
 /// The title of the application window.
 const WINDOW_TITLE: &str = "NLE - Terminal Recording Editor";
@@ -32,6 +50,74 @@ pub(crate) fn window_config() -> Config {
             .with_resizable(true)
             .with_inner_size(LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT)),
     )
+}
+
+/// A future that the interface runs on its own thread. It needs no `Send`.
+type LocalFuture<T> = Pin<Box<dyn Future<Output = T>>>;
+
+/// The two things that the interface asks of the outside world: the file
+/// dialog and the load of a recording.
+///
+/// The application gets the real dialog and the real command from
+/// `Services::desktop`. A test gives fakes to `Services::new`, so it needs
+/// no window and no file. The value is `Send + Sync` because the launcher
+/// asks for it. The futures that it returns are not `Send`.
+#[derive(Clone)]
+pub(crate) struct Services {
+    pick_recording: Arc<dyn Fn() -> LocalFuture<Option<PathBuf>> + Send + Sync>,
+    load_recording:
+        Arc<dyn Fn(PathBuf) -> LocalFuture<Result<LoadedRecording, NleError>> + Send + Sync>,
+}
+
+impl Services {
+    /// Builds the services from a dialog and a load function.
+    pub(crate) fn new(
+        pick_recording: impl Fn() -> LocalFuture<Option<PathBuf>> + Send + Sync + 'static,
+        load_recording: impl Fn(PathBuf) -> LocalFuture<Result<LoadedRecording, NleError>>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        Self {
+            pick_recording: Arc::new(pick_recording),
+            load_recording: Arc::new(load_recording),
+        }
+    }
+
+    /// Builds the services of the application: the native file dialog and
+    /// the `load_recording` command.
+    ///
+    /// The command takes a `String`, so a path that is not valid UTF-8 loses
+    /// its invalid bytes.
+    pub(crate) fn desktop() -> Self {
+        Self::new(
+            || {
+                Box::pin(async {
+                    rfd::AsyncFileDialog::new()
+                        .add_filter(RECORDINGS_FILTER_NAME, RECORDINGS_FILTER_EXTENSIONS)
+                        .add_filter(ALL_FILES_FILTER_NAME, ALL_FILES_FILTER_EXTENSIONS)
+                        .pick_file()
+                        .await
+                        .map(|file| file.path().to_path_buf())
+                })
+            },
+            |path| {
+                Box::pin(async move {
+                    crate::commands::load_recording(path.to_string_lossy().into_owned()).await
+                })
+            },
+        )
+    }
+
+    /// Shows the file dialog. The answer is `None` when the user cancels.
+    fn pick_recording(&self) -> LocalFuture<Option<PathBuf>> {
+        (self.pick_recording)()
+    }
+
+    /// Loads the recording at `path`.
+    fn load_recording(&self, path: PathBuf) -> LocalFuture<Result<LoadedRecording, NleError>> {
+        (self.load_recording)(path)
+    }
 }
 
 /// The root component of the application.
@@ -60,10 +146,13 @@ pub(crate) fn App() -> Element {
 /// The menu bar with the Open Recording button.
 #[component]
 fn MenuBar(on_loaded: EventHandler<LoadedRecording>, on_error: EventHandler<String>) -> Element {
-    let _ = (on_loaded, on_error);
+    let services = use_context::<Services>();
+    // True from the click until the dialog and the load end.
+    let opening = use_signal(|| false);
+    let _ = (&services, on_loaded, on_error);
     rsx! {
         div { class: "menu-bar",
-            button { "Open Recording" }
+            button { disabled: opening(), "Open Recording" }
         }
     }
 }

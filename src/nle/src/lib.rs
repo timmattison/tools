@@ -14,5 +14,6 @@ pub fn run() {
 
     dioxus::LaunchBuilder::desktop()
         .with_cfg(ui::window_config())
+        .with_context(ui::Services::desktop())
         .launch(ui::App);
 }
