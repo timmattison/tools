@@ -368,10 +368,97 @@ fn the_probe_container_removes_itself() {
             "{probes:?}"
         );
         assert!(
-            probes[0].iter().any(|argument| argument == "busybox:1.37"),
+            probes[0].iter().any(|argument| argument == PROBE_IMAGE),
             "{probes:?}"
         );
     }
+}
+
+/// The image of the probe container.
+const PROBE_IMAGE: &str = "busybox:1.37";
+
+/// The calls of `host` that get or use the image of the probe, in order:
+/// `probe` for the probe container, `image inspect`, and `pull`.
+fn image_steps(fixture: &Fixture, host: &str) -> Vec<Vec<String>> {
+    fixture
+        .calls(host)
+        .into_iter()
+        .filter(|call| {
+            call.iter().any(|argument| argument == "drun.probe=true")
+                || call
+                    .first()
+                    .is_some_and(|first| first == "image" || first == "pull")
+        })
+        .collect()
+}
+
+/// `true` when `call` is a probe that cannot pull its image.
+fn is_probe_without_a_pull(call: &[String]) -> bool {
+    call.iter().any(|argument| argument == "drun.probe=true")
+        && value_of(call, "--pull") == Some("never")
+}
+
+#[test]
+fn a_host_with_the_probe_image_answers_the_probe_without_a_pull() {
+    let fixture = two_hosts();
+    let run = fixture.run(&["pick"]);
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert_eq!(run.stdout, "box-b\n");
+    for host in ["box-a", "box-b"] {
+        let steps = image_steps(&fixture, host);
+        assert_eq!(steps.len(), 1, "{host}: {steps:?}");
+        assert!(is_probe_without_a_pull(&steps[0]), "{host}: {steps:?}");
+    }
+}
+
+#[test]
+fn a_host_without_the_probe_image_pulls_it_and_answers_the_probe_again() {
+    let fixture = two_hosts();
+    fixture.without_probe_image("box-b");
+    let run = fixture.run(&["run", "alpine"]);
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert!(!run.stderr.contains("skipped"), "{}", run.stderr);
+    assert_eq!(fixture.calls_of("box-b", "run").len(), 1, "{}", run.stderr);
+    assert!(fixture.calls_of("box-a", "run").is_empty());
+    let steps = image_steps(&fixture, "box-b");
+    assert_eq!(steps.len(), 4, "{steps:?}");
+    assert!(is_probe_without_a_pull(&steps[0]), "{steps:?}");
+    assert_eq!(
+        (steps[1][0].as_str(), steps[1][1].as_str()),
+        ("image", "inspect"),
+        "{steps:?}"
+    );
+    assert_eq!(
+        steps[1].last().map(String::as_str),
+        Some(PROBE_IMAGE),
+        "{steps:?}"
+    );
+    assert_eq!(steps[2], ["pull", PROBE_IMAGE], "{steps:?}");
+    assert!(is_probe_without_a_pull(&steps[3]), "{steps:?}");
+    assert_eq!(image_steps(&fixture, "box-a").len(), 1);
+}
+
+#[test]
+fn a_host_whose_pull_fails_is_skipped_with_the_pull_command() {
+    let fixture = two_hosts();
+    fixture.without_probe_image("box-b");
+    fixture.pull_down(
+        "box-b",
+        "Error response from daemon: Get \"https://registry-1.docker.io/v2/\": \
+         net/http: request canceled while waiting for connection\n",
+    );
+    let run = fixture.run(&["run", "alpine"]);
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert!(run.stderr.contains("skipped box-b"), "{}", run.stderr);
+    assert!(
+        run.stderr
+            .contains(&format!("docker --context box-b pull {PROBE_IMAGE}")),
+        "{}",
+        run.stderr
+    );
+    assert!(run.stderr.contains("request canceled"), "{}", run.stderr);
+    assert_eq!(fixture.calls_of("box-a", "run").len(), 1, "{}", run.stderr);
+    assert!(fixture.calls_of("box-b", "run").is_empty());
 }
 
 #[test]

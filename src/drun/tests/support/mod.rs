@@ -35,6 +35,13 @@ pub const LOCAL: &str = "@local";
 /// - `hang-<host>`: the host never answers.
 /// - `down-<host>`: the host fails every call, with the text of the file.
 /// - `probe-<host>`: the answer to the probe container.
+/// - `no-image-<host>`: the host does not have the image of the probe. As
+///   docker 29 does, a probe with `--pull never` then fails with exit status
+///   125, and `docker image inspect` fails with exit status 1. Both write
+///   `No such image` to stderr. A probe with any other `--pull` value gets the
+///   image first, as a pull does. A pull that succeeds removes the file.
+/// - `pull-down-<host>`: each pull on the host fails, with the text of the
+///   file. The implicit pull of a probe without `--pull never` fails too.
 /// - `containers-<host>`: the rows of `docker ps`.
 /// - `inspect-<host>`, `wait-<host>`: the answers to those commands.
 /// - `exit-<host>`: the exit status of every other call.
@@ -61,6 +68,15 @@ if [ "$1" = "--context" ]; then
 else
     context=@local
 fi
+# Gets the image of the probe on the host, or fails with the text of
+# pull-down-<host>.
+pull_image() {
+    if [ -f "$dir/pull-down-$context" ]; then
+        cat "$dir/pull-down-$context" >&2
+        return 1
+    fi
+    rm -f "$dir/no-image-$context"
+}
 env | grep '^GIT_' | sort > "$dir/git-env-$context" || true
 separator=$(printf '\037')
 line=
@@ -103,17 +119,63 @@ if [ -f "$dir/down-$context" ]; then
 fi
 case "$1" in
 run)
+    probe=
+    image=
+    pull=missing
+    previous=
     for argument in "$@"; do
-        if [ "$argument" = "drun.probe=true" ]; then
-            if [ -f "$dir/probe-$context" ]; then
-                cat "$dir/probe-$context"
-                exit 0
+        if [ "$previous" = "--pull" ]; then
+            pull=$argument
+        fi
+        if [ "$previous" = "drun.probe=true" ]; then
+            image=$argument
+        fi
+        case "$argument" in
+        --pull=*)
+            pull=${argument#--pull=}
+            ;;
+        drun.probe=true)
+            probe=yes
+            ;;
+        esac
+        previous=$argument
+    done
+    if [ -n "$probe" ]; then
+        if [ -f "$dir/no-image-$context" ]; then
+            if [ "$pull" = never ]; then
+                echo "docker: Error response from daemon: No such image: $image" >&2
+                exit 125
             fi
-            echo "fake docker: no probe answer for $context" >&2
+            pull_image || exit 125
+        fi
+        if [ -f "$dir/probe-$context" ]; then
+            cat "$dir/probe-$context"
+            exit 0
+        fi
+        echo "fake docker: no probe answer for $context" >&2
+        exit 1
+    fi
+    echo "output of the container on $context"
+    ;;
+image)
+    if [ "$2" = inspect ]; then
+        if [ -f "$dir/no-image-$context" ]; then
+            echo "[]"
+            echo "Error response from daemon: No such image: $last" >&2
             exit 1
         fi
-    done
-    echo "output of the container on $context"
+        echo "sha256:0b8c1d5e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c"
+        exit 0
+    fi
+    echo "$1 on $context"
+    ;;
+pull)
+    if pull_image; then
+        echo "$last: Pulling from library/busybox"
+        echo "Status: Downloaded newer image for $last"
+        exit 0
+    fi
+    exit 1
     ;;
 ps)
     if [ -f "$dir/containers-$context" ]; then
@@ -234,6 +296,17 @@ impl Fixture {
             &format!("probe-{host}"),
             &probe_answer(total_kib, available_kib, load, cpus),
         );
+    }
+
+    /// Makes `host` lack the image of the probe. A pull that succeeds gets the
+    /// image.
+    pub fn without_probe_image(&self, host: &str) {
+        self.write(&format!("no-image-{host}"), "");
+    }
+
+    /// Makes each pull on `host` fail, with `message` on stderr.
+    pub fn pull_down(&self, host: &str, message: &str) {
+        self.write(&format!("pull-down-{host}"), message);
     }
 
     /// Makes `host` fail every call, with `message` on stderr.

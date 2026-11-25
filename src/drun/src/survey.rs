@@ -488,4 +488,179 @@ SwapFree:        2097148 kB";
             "{table}"
         );
     }
+
+    /// The limit of the probe in the tests of [`survey_host`].
+    const HOST_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// The limit of the pull that the issue states: 120 s.
+    const STATED_PULL_LIMIT: Duration = Duration::from_secs(120);
+
+    /// One docker command that a test host got: its arguments and its limit.
+    type Call = (Vec<String>, Duration);
+
+    /// The failure of a docker command on a host that does not have the image
+    /// of the probe, with the exit status `code`, as docker 29 gives it.
+    fn no_such_image(code: i32) -> HostFailure {
+        HostFailure::Failed {
+            code: Some(code),
+            detail: format!("Error response from daemon: No such image: {PROBE_IMAGE}"),
+        }
+    }
+
+    /// The step of a call: `probe` for the probe container, else the first
+    /// word of the docker command.
+    fn step(args: &[String]) -> &str {
+        if args.iter().any(|argument| argument == PROBE_LABEL) {
+            "probe"
+        } else {
+            args.first().map_or("", String::as_str)
+        }
+    }
+
+    /// Asks the host `box-a` how busy it is, with a probe limit of
+    /// [`HOST_TIMEOUT`]. `answer` gives the answer to each docker command.
+    /// Gives back the result, and each call in order.
+    fn survey_with<F>(answer: F) -> (Result<Load, HostFailure>, Vec<Call>)
+    where
+        F: Fn(&str) -> Result<String, HostFailure>,
+    {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let context = ContextName::parse("box-a").unwrap();
+        let result = survey_host(&context, HOST_TIMEOUT, |asked, args, limit| {
+            assert_eq!(asked, &context);
+            let args: Vec<String> = args.iter().map(|argument| (*argument).to_owned()).collect();
+            let reply = answer(step(&args));
+            calls.borrow_mut().push((args, limit));
+            reply
+        });
+        (result, calls.into_inner())
+    }
+
+    #[test]
+    fn a_probe_that_answers_gets_no_image_inspect_and_no_pull() {
+        let (result, calls) =
+            survey_with(|_| Ok(probe_output(MEMINFO, "0.52 0.58 0.59 1/389 12345", "4")));
+        assert_eq!(result, Ok(load(16_318_592, 12_237_944, 0.52, 4)));
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        let (args, limit) = &calls[0];
+        assert_eq!(*limit, HOST_TIMEOUT);
+        let pull = args.iter().position(|argument| argument == "--pull");
+        assert_eq!(
+            pull.and_then(|index| args.get(index + 1))
+                .map(String::as_str),
+            Some("never"),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn a_host_without_the_image_pulls_it_with_its_own_limit_and_probes_again() {
+        let pulled = std::cell::Cell::new(false);
+        let (result, calls) = survey_with(|step| match step {
+            "probe" if pulled.get() => Ok(probe_output(MEMINFO, "0.52 0.58 0.59 1/389 12345", "4")),
+            "probe" => Err(no_such_image(125)),
+            "image" => Err(no_such_image(1)),
+            "pull" => {
+                pulled.set(true);
+                Ok(String::new())
+            }
+            other => panic!("unexpected docker command {other}"),
+        });
+        assert_eq!(result, Ok(load(16_318_592, 12_237_944, 0.52, 4)));
+        let steps: Vec<(&str, Duration)> = calls
+            .iter()
+            .map(|(args, limit)| (step(args), *limit))
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                ("probe", HOST_TIMEOUT),
+                ("image", HOST_TIMEOUT),
+                ("pull", STATED_PULL_LIMIT),
+                ("probe", HOST_TIMEOUT),
+            ]
+        );
+        assert_eq!(calls[1].0, ["image", "inspect", PROBE_IMAGE]);
+        assert_eq!(calls[2].0, ["pull", PROBE_IMAGE]);
+    }
+
+    #[test]
+    fn a_pull_that_times_out_names_the_pull_command() {
+        let (result, calls) = survey_with(|step| match step {
+            "probe" => Err(no_such_image(125)),
+            "image" => Err(no_such_image(1)),
+            "pull" => Err(HostFailure::TimedOut(STATED_PULL_LIMIT)),
+            other => panic!("unexpected docker command {other}"),
+        });
+        let message = result.unwrap_err().to_string();
+        assert!(
+            message.contains(&format!("docker --context box-a pull {PROBE_IMAGE}")),
+            "{message}"
+        );
+        assert!(message.contains("no answer in 120 s"), "{message}");
+        let pulls: Vec<&Call> = calls
+            .iter()
+            .filter(|(args, _)| step(args) == "pull")
+            .collect();
+        assert_eq!(pulls.len(), 1, "{calls:?}");
+        assert_eq!(pulls[0].1, STATED_PULL_LIMIT);
+    }
+
+    #[test]
+    fn a_pull_that_fails_names_the_pull_command_and_its_error() {
+        let (result, _) = survey_with(|step| match step {
+            "probe" => Err(no_such_image(125)),
+            "image" => Err(no_such_image(1)),
+            "pull" => Err(HostFailure::Failed {
+                code: Some(1),
+                detail: "Error response from daemon: toomanyrequests: You have reached your \
+                         pull rate limit"
+                    .to_owned(),
+            }),
+            other => panic!("unexpected docker command {other}"),
+        });
+        let message = result.unwrap_err().to_string();
+        assert!(
+            message.contains(&format!("docker --context box-a pull {PROBE_IMAGE}")),
+            "{message}"
+        );
+        assert!(message.contains("toomanyrequests"), "{message}");
+    }
+
+    #[test]
+    fn a_probe_failure_with_the_image_present_or_unknown_pulls_nothing() {
+        let probe_failure = HostFailure::Failed {
+            code: Some(125),
+            detail: "docker: Error response from daemon: failed to create task".to_owned(),
+        };
+        let cannot_connect = HostFailure::Failed {
+            code: Some(1),
+            detail: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. \
+                     Is the docker daemon running?"
+                .to_owned(),
+        };
+        for (name, inspect) in [
+            ("present", Ok("sha256:0b8c1d5e".to_owned())),
+            ("unreachable", Err(cannot_connect)),
+            ("slow", Err(HostFailure::TimedOut(HOST_TIMEOUT))),
+        ] {
+            let (result, calls) = survey_with(|step| match step {
+                "probe" => Err(probe_failure.clone()),
+                "image" => inspect.clone(),
+                _ => Ok(String::new()),
+            });
+            assert_eq!(result, Err(probe_failure.clone()), "{name}");
+            assert!(
+                calls.iter().all(|(args, _)| step(args) != "pull"),
+                "{name}: {calls:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_probe_that_times_out_asks_the_host_nothing_more() {
+        let (result, calls) = survey_with(|_| Err(HostFailure::TimedOut(HOST_TIMEOUT)));
+        assert_eq!(result, Err(HostFailure::TimedOut(HOST_TIMEOUT)));
+        assert_eq!(calls.len(), 1, "{calls:?}");
+    }
 }
