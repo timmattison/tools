@@ -1,7 +1,7 @@
-// The behavior of ic-inline, through the engine: the /ic command, the
-// show_image tool, the rows they draw, and the probe that decides between
-// pixels and half blocks. One block calls the pure half-block arithmetic of
-// hooks/cells.ts directly.
+// The behavior of ic-inline, through the engine: the /ic command and its diff
+// form, the show_image and show_diff tools, the rows they draw, and the probe
+// that decides between pixels and half blocks. One block calls the pure
+// half-block arithmetic of hooks/cells.ts directly.
 //
 // The test kit runs no process, so every test answers `process.run` the way
 // `ic --emit-rgba` answers. FIXTURE_JSON is a copy of the output of that flag

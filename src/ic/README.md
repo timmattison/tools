@@ -147,6 +147,8 @@ ic --diff --diff-mode mask before.png after.png
 
 `--diff` compares two images pixel by pixel and shows one picture of the differences. `ic` decodes both images to RGBA with 8 bits for each channel. A pixel differs when one or more of its four channels differ. The compare has no tolerance.
 
+In Claude Code, the [`ic-inline` plugin](../../plugins/ic-inline/README.md#show-the-differences-between-two-images) shows the same picture in the transcript: `/ic diff before.png after.png` for you, and the tool `show_diff` for Claude.
+
 Above the picture, `ic` prints two lines:
 
 ```text

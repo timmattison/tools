@@ -11,6 +11,7 @@
 //   /ic <file>                  the person shows one, in the output row of the command
 //   /ic diff [--mode M] <a> <b> the person shows the differences of two, the same way
 //   show_image(path)            the model shows one, in the result row of the call
+//   show_diff(first, second, mode?)  the model shows the differences of two, the same way
 //
 // This file is the one that talks to the engine. The engine reads a hooks
 // module before it runs it, and it follows `$` only into the functions that
