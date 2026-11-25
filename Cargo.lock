@@ -6654,6 +6654,7 @@ dependencies = [
  "buildinfo",
  "childenv",
  "flate2",
+ "gitscratch",
  "serde",
  "serde_json",
  "tauri",
