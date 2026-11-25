@@ -307,6 +307,9 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     - A fast terminal image and video display utility, designed as a high-performance alternative to `imgcat`. Supports
       multiple image and video formats, resizing with aspect ratio preservation, and reading from files or stdin. Video support requires ffmpeg.
     - To install: `cargo install --git https://github.com/timmattison/tools ic`
+    - `ic --emit-rgba 640x480 photo.jpg` prints the decoded pixels as JSON for a program that draws the picture itself.
+      The [`ic-inline`](plugins/ic-inline/README.md) Claude Code plugin uses it to show pictures inline in the transcript:
+      `/plugin install ic-inline --marketplace timmattison/tools`
 - inscribe
     - Automatically generates clear and consistent git commit messages using Claude AI. Analyzes staged changes and creates
       conventional commit messages. Supports credential storage in system credential managers (Keychain on macOS, Credential
@@ -2839,6 +2842,62 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     processes, such as 176 Claude Code sessions, then count as one cause. It uses no language
     model. It supports macOS only. See below for the full entry.
   - To install: `cargo install --git https://github.com/timmattison/tools whyslow`
+- portcul (portcullis)
+  - Shows each process that listens on a port in a table in the terminal. Move with the arrow keys or `j`/`k`.
+    Press `d` or Enter to send SIGTERM to the selected process after a confirmation, and press `r` to read the
+    table again. The table refreshes each 2 s, and `--refresh <seconds>` changes the interval (0.1 s or more).
+  - `portcul list [port]` prints one line for each process and address. `portcul kill <port>` sends SIGTERM to
+    each process on the port after a confirmation, and `--yes` skips the confirmation. After the confirmation,
+    `kill` reads the list again, and it sends nothing to a process that no longer listens on the port. `list`
+    and `kill` exit with status 1 when no process listens on the port, and `kill` also exits with status 1 when a
+    kill fails or a process no longer listens.
+  - To install: `cargo install --git https://github.com/timmattison/tools portcul`
+- workit
+  - Builds a Cargo workspace manifest out of a directory tree. It walks the tree, finds every
+    `Cargo.toml` that declares a package and no workspace of its own, and writes those directories
+    into the `[workspace]` members list — rewriting the members of a manifest that is already there
+    and leaving the rest of it alone, and naming on stderr every member the walk did not find
+    before that rewrite drops it. The manifest lands beside the tree that was scanned, so
+    `workit --path ~/code/other` writes `~/code/other/Cargo.toml` and never touches the directory
+    the run was started from; `--output` names a file of its own instead. A member is written
+    relative to the directory that holds the manifest, because that is the directory cargo resolves
+    a member against, so `--output` decides what the members read. A package in that directory
+    itself is written as `.`, which is what cargo calls it. Cargo holds a member only where
+    that manifest sits above the member on the file system, and it refuses an absolute path and a
+    `../` path alike, so `--output` has to name a file at or above the tree that was scanned. A run
+    that meets a package the manifest directory does not hold refuses, names every such package,
+    and writes nothing — it used to write those packages as absolute paths, and no checkout could
+    load the manifest that came out, not even the one that wrote it. The one file left out of the members
+    list is the manifest the run writes, because no workspace holds itself: a package at the
+    search path is a member of a manifest that lands elsewhere. Two packages that share a name are
+    refused rather than written, with the paths that hold each one, because a workspace cannot
+    carry the same package name twice — the report is ordered by package name and by path, so two
+    runs over one tree read the same. A directory named `target` or `node_modules` stays out of
+    the walk, and so does a package inside a git worktree that lies *below* the search path, which
+    is a second checkout of packages the repository already holds — where the search path itself
+    sits is never matched, so a run from inside a worktree still finds every package under it, and
+    a run that found packages and then filtered every one of them out says so and names
+    `--include-worktrees`. A package under a nested repository of its own is not a second checkout
+    and stays in, also when its git directory lies elsewhere, as after
+    `git init --separate-git-dir`, and also when its `.git` file names no git directory, at
+    which git itself stops. A package in a submodule goes with the checkout that holds the submodule: it
+    stays in under the main checkout, and it is left out under a worktree below the search path. An exclusion names a whole directory below the search path, so
+    `targets` and `node_modules_backup` stay in, and the search path itself is never matched
+    against the list — `workit --path ~/code/target/myproj` searches that tree like any other. An
+    entry it cannot use — a directory whose mode keeps it out, a `Cargo.toml` nobody can parse, a
+    package that states no name — is named on stderr and skipped rather than ending the walk, and
+    the number skipped is stated once at the end; the packages it did find are still the answer. A
+    package with no name never reaches the members list, because cargo refuses a whole workspace
+    that lists one — it used to be written in like any other, and the run reported a workspace cargo
+    loads no part of. A run that skipped something and has no package left to list never answered
+    the question it was asked, so that one fails instead of reporting an empty tree.
+  - Usage: `workit`, `workit --path ~/code/tools` (writes `~/code/tools/Cargo.toml`),
+    `workit --path packages --output Cargo.toml` (scans `packages/` and writes the manifest above
+    it, so every member reads `packages/<name>`),
+    `workit --dry-run` (prints the manifest it would write and touches nothing),
+    `workit --exclude vendor`, `workit --include-worktrees`,
+    `workit --no-default-excludes`.
+  - To install: `cargo install --git https://github.com/timmattison/tools workit`
 
 ## dirhash
 
