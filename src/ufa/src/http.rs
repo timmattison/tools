@@ -872,6 +872,25 @@ mod tests {
         assert_eq!(class, FailedAnswer::Unreadable(StatusCode::OK));
     }
 
+    /// An error answer with a body over the limit is still an answer. The
+    /// status arrived, and the read stopped at the limit, so the class is a
+    /// refusal and not a missing answer.
+    #[tokio::test]
+    async fn an_error_answer_with_a_body_over_the_limit_is_refused() {
+        let server = TestServer::replying(&json_response_with_status(
+            "500 Internal Server Error",
+            &over_the_limit(),
+        ))
+        .await;
+
+        let (_, class) = classify(&server).await;
+
+        assert_eq!(
+            class,
+            FailedAnswer::Refused(StatusCode::INTERNAL_SERVER_ERROR)
+        );
+    }
+
     /// A body short enough to read in full is still shown in full, with no
     /// ellipsis suggesting something was withheld.
     #[test]
