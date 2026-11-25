@@ -49,7 +49,19 @@ fn rust_checks_path() -> PathBuf {
     })
 }
 
-/// Absolute, canonical path to the real helper that the check script sources.
+/// Absolute, canonical path to the real plugin check script. The hook starts
+/// it, and each plugin fixture holds a copy of it.
+fn plugin_checks_path() -> PathBuf {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/plugin-checks.sh");
+    fs::canonicalize(&script).unwrap_or_else(|e| {
+        panic!(
+            "cannot canonicalize plugin-checks path {}: {e}",
+            script.display()
+        )
+    })
+}
+
+/// Absolute, canonical path to the real helper that the check scripts source.
 /// Each fixture holds a copy of it next to the copy of the check script.
 fn without_git_environment_path() -> PathBuf {
     let helper =
@@ -116,23 +128,41 @@ fn write_fixture_package(dir: &Path) {
 }
 
 /// Copy the pinned `rust-toolchain.toml` into `dir`, and write the real
-/// `scripts/rust-checks.sh` into `dir/scripts/`. It also copies the real
-/// `scripts/without-git-environment.sh`, because the check script sources it
-/// from its own directory. No process runs the helper, thus a plain copy is
-/// safe. Each fixture builder calls it.
+/// `scripts/rust-checks.sh` into `dir/scripts/`, with its helper. Each fixture
+/// builder calls it.
 fn write_toolchain_and_check_script(dir: &Path) {
     fs::copy(rust_toolchain_path(), dir.join("rust-toolchain.toml"))
         .expect("copy rust-toolchain.toml into fixture");
 
+    write_check_script(dir, &rust_checks_path(), RUST_CHECKS_SCRIPT);
+}
+
+/// The path of the Rust check script, relative to the root of the repository.
+const RUST_CHECKS_SCRIPT: &str = "scripts/rust-checks.sh";
+
+/// Write the check script `source` into `dir` at `relative`, and copy the real
+/// `scripts/without-git-environment.sh` next to it, because each check script
+/// sources the helper from its own directory. No process runs the helper, thus
+/// a plain copy is safe. The script is written with `write_executable` and not
+/// with `fs::copy`, because on Linux a file that this process held open for
+/// writing gives ETXTBSY when the hook runs it while another test thread forks.
+fn write_check_script(dir: &Path, source: &Path, relative: &str) {
     fs::create_dir_all(dir.join("scripts")).expect("create fixture scripts dir");
-    let script = fs::read(rust_checks_path()).expect("read scripts/rust-checks.sh");
-    write_executable(dir.join("scripts/rust-checks.sh"), script)
-        .expect("write rust-checks.sh into fixture");
+    let script = fs::read(source).unwrap_or_else(|e| panic!("read {}: {e}", source.display()));
+    write_executable(dir.join(relative), script)
+        .unwrap_or_else(|e| panic!("write {relative} into fixture: {e}"));
     fs::copy(
         without_git_environment_path(),
         dir.join("scripts/without-git-environment.sh"),
     )
     .expect("copy without-git-environment.sh into fixture");
+}
+
+/// Write the real `scripts/plugin-checks.sh` into `dir/scripts/`, with its
+/// helper. The hook starts `./scripts/plugin-checks.sh` relative to its current
+/// directory, which is the fixture.
+fn write_plugin_checks_script(dir: &Path) {
+    write_check_script(dir, &plugin_checks_path(), PLUGIN_CHECKS_SCRIPT);
 }
 
 /// The text of a `Cargo.lock` that is stale. It lists the `fixture` package and
@@ -713,10 +743,17 @@ const FIXTURE_PLUGIN_FILE: &str = "plugins/fixture/README.md";
 /// The marketplace file at the root of the repository.
 const MARKETPLACE_FILE: &str = ".claude-plugin/marketplace.json";
 
+/// The plugin check script, relative to the root of the repository.
+const PLUGIN_CHECKS_SCRIPT: &str = "scripts/plugin-checks.sh";
+
 /// Write one plugin and the marketplace file into `dir`. The fake `claude`
-/// reads neither, so their text does not matter.
+/// reads neither, so their text does not matter. It also writes the real
+/// `scripts/plugin-checks.sh`. The hook starts `./scripts/plugin-checks.sh`
+/// relative to its current directory, which is the fixture. Without the script,
+/// the hook stops with exit 127 before any check runs.
 fn write_fixture_plugin(dir: &Path) {
     write_files(dir, &[FIXTURE_PLUGIN_FILE, MARKETPLACE_FILE]);
+    write_plugin_checks_script(dir);
 }
 
 /// The `claude` calls of the plugin block for the one fixture plugin, in order.
@@ -726,12 +763,14 @@ const EXPECTED_CLAUDE_CALLS: [&str; 3] = [
     "plugin test plugins/fixture/",
 ];
 
-/// A staged file of a plugin, or the staged marketplace file alone, must run
-/// the checks of the claude CLI, and each `claude` command must run with no
-/// `GIT_` variable, also a name that git has never invented.
+/// A staged file of a plugin, the staged marketplace file, or the staged check
+/// script alone, must run the checks of the claude CLI, and each `claude`
+/// command must run with no `GIT_` variable, also a name that git has never
+/// invented. A staged check script alone runs the checks, because a change to
+/// the list must run the changed list.
 #[test]
 fn plugin_block_runs_claude_without_git_variables() {
-    for staged in [FIXTURE_PLUGIN_FILE, MARKETPLACE_FILE] {
+    for staged in [FIXTURE_PLUGIN_FILE, MARKETPLACE_FILE, PLUGIN_CHECKS_SCRIPT] {
         let dir = unique_fixture_dir();
         write_fixture_plugin(&dir);
         git_init_and_stage(&dir, &[staged]);
@@ -757,8 +796,8 @@ fn plugin_block_runs_claude_without_git_variables() {
     }
 }
 
-/// With no directory below `plugins/`, the loop of the plugin block must run no
-/// claude command. An unmatched glob stays the text `plugins/*/`.
+/// With no directory below `plugins/`, the loop of `scripts/plugin-checks.sh`
+/// must run no claude command. An unmatched glob stays the text `plugins/*/`.
 #[test]
 fn plugin_block_without_a_plugin_directory_validates_only_the_marketplace() {
     let dir = unique_fixture_dir();
@@ -777,8 +816,9 @@ fn plugin_block_without_a_plugin_directory_validates_only_the_marketplace() {
     assert_eq!(calls.arguments, ["plugin validate ."], "{output}");
 }
 
-/// The start of the line that the hook prints when no claude CLI is on `PATH`.
-const NO_CLAUDE_REFUSAL: &str = "pre-commit: the claude CLI is not on PATH";
+/// The start of the line that `scripts/plugin-checks.sh` prints when no claude
+/// CLI is on `PATH`.
+const NO_CLAUDE_REFUSAL: &str = "plugin-checks: the claude CLI is not on PATH";
 
 /// Make a directory that holds a link to each of `programs` and nothing else.
 /// Each link points at the first match on the inherited `PATH`.
@@ -801,8 +841,8 @@ fn directory_of_links(dir: &Path, programs: &[&str]) -> PathBuf {
 /// and name the fix. A gate that skips the checks would report a plugin that it
 /// never read as clean.
 ///
-/// `PATH` holds only the programs that the hook runs before its check for the
-/// CLI, so a claude CLI that is installed on this machine cannot be found.
+/// `PATH` holds only the programs that the hook and the script run before the
+/// check for the CLI, so a claude CLI that is installed on this machine cannot be found.
 /// Proven able to fail by mutation: with `exit 0` in place of the `exit 1` of
 /// the check, the hook passes and this test fails.
 #[test]
@@ -827,10 +867,48 @@ fn plugin_block_without_claude_fails_the_commit() {
     );
 }
 
+/// `scripts/plugin-checks.sh` is the list that CI and a person run by hand.
+/// Started from a directory that is not the root, it must run each check on
+/// the repository that holds it, and each `claude` command must run with no
+/// `GIT_` variable.
+#[test]
+fn plugin_checks_script_runs_from_another_directory() {
+    let dir = unique_fixture_dir();
+    write_fixture_plugin(&dir);
+    let claude = install_fake_program(&dir, "claude", None);
+    let elsewhere = unique_fixture_dir();
+
+    let mut command = childenv::fixture_command("bash");
+    plant_fake_and_git_variables(&mut command, &claude);
+    let completed = command
+        .arg(dir.join(PLUGIN_CHECKS_SCRIPT))
+        .current_dir(&elsewhere)
+        .output()
+        .expect("failed to spawn scripts/plugin-checks.sh");
+    let calls = read_recording(&claude);
+    cleanup(&dir);
+    cleanup(&elsewhere);
+
+    assert!(
+        completed.status.success(),
+        "scripts/plugin-checks.sh must pass with a fake claude: {}",
+        String::from_utf8_lossy(&completed.stderr)
+    );
+    assert_eq!(
+        calls.arguments, EXPECTED_CLAUDE_CALLS,
+        "the script must run each check on the repository that holds it"
+    );
+    assert!(
+        calls.git_lines.is_empty(),
+        "a claude command saw GIT_ variables: {:?}",
+        calls.git_lines
+    );
+}
+
 /// A failed `claude plugin test` must fail the commit. The fake `claude` passes
 /// each validation and fails only the tests, so the hook reaches the last call
 /// of the block. Proven able to fail by mutation: with `|| true` after the
-/// `claude plugin test` line of the hook, the hook passes and this test fails.
+/// `claude plugin test` line of `scripts/plugin-checks.sh`, the hook passes and this test fails.
 #[test]
 fn failed_plugin_test_fails_the_commit() {
     let dir = unique_fixture_dir();
@@ -878,8 +956,11 @@ fn write_files(dir: &Path, files: &[&str]) {
 
 /// Run the real hook in `dir` with a fake `cargo` and a fake `claude`, under
 /// the planted `GIT_` variables. Gives back the run and the calls of the fake
-/// `cargo`.
+/// `cargo`. The ic-inline tests stage a file under `plugins/`, so the hook
+/// starts `scripts/plugin-checks.sh` in those fixtures too. Thus it writes the
+/// script into `dir`.
 fn run_hook_with_fake_cargo_and_claude(dir: &Path) -> (HookRun, RecordedCalls) {
+    write_plugin_checks_script(dir);
     let cargo = install_fake_cargo(dir);
     install_fake_program(dir, "claude", None);
     let run = run_hook_with_planted_git_variables(dir, &cargo);
@@ -1120,8 +1201,8 @@ fn removed_tool_index_runs_the_index_guard() {
 }
 
 /// A file of the fixture plugin that no fixture stages. It keeps the directory
-/// of the plugin after a removal of [`FIXTURE_PLUGIN_FILE`], so the loop of the
-/// plugin block still finds the plugin.
+/// of the plugin after a removal of [`FIXTURE_PLUGIN_FILE`], so the loop of
+/// `scripts/plugin-checks.sh` still finds the plugin.
 const FIXTURE_PLUGIN_MANIFEST: &str = "plugins/fixture/.claude-plugin/plugin.json";
 
 /// A move of a file of a plugin out of `plugins/`, a deletion of it, and a
