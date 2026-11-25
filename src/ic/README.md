@@ -256,8 +256,9 @@ image. Video playback uses that mode, because it puts the cursor where it wants
 it before every frame.
 
 The auto-fit size also pays for the rows that `ic` prints above the image. The
-file name rows, the image, and the row that the shell prompt returns to together
-fit inside the height of the terminal. A long file name is wider than the
+header rows (the file name, or the two lines of `--diff`), the image, and the
+row that the shell prompt returns to together fit inside the height of the
+terminal. A long file name is wider than the
 terminal, and the terminal then wraps it onto more than one row. `ic` measures
 the display width of each header line and counts the rows that the line takes,
 so a wrapped name pays for every row that it occupies.
