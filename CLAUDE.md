@@ -290,6 +290,8 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
 - `sidecar` - the fixture root that the tests put into the fake `gh`
 - `swt` - the path of a `.swt-check` override, and the command lines it prints
   for a person to paste
+- `vpn-tunnel` - the `--op-path` value in the `op-cache invalidate` command that
+  the all-in-use error prints
 - `wdid` - the paths and the history rows that the tests put into stub scripts
 
 ## GitHub REST Through `gh`
@@ -478,7 +480,8 @@ The ban covers the Rust code of this workspace. It does not cover code that
 other crates own, for example the build script of a dependency. So
 `.husky/pre-commit` and `test.sh` start each cargo command through
 `without_git_environment` in `scripts/without-git-environment.sh`, which removes
-the whole prefix. The hook is started by `sh`, so that function does not use
+the whole prefix. The hook starts each `claude` command of its plugin block
+through the same function. The hook is started by `sh`, so that function does not use
 `compgen`, which a shell other than bash does not have.
 
 ### The Trap: A Lint Cannot Say This
@@ -535,8 +538,8 @@ constructor or states an exemption at its site. It does not prove three things:
 - `clippy.toml` `disallowed-methods` — a raw `Command::new`,
   `tokio::process::Command::new` or `CommandBuilder::new` fails the build
 - `src/repo-guards/tests/pre_commit_hook.rs` — no cargo command of the hook or
-  of `test.sh` sees a `GIT_` variable, under a fake `cargo` that writes its
-  environment to a file
+  of `test.sh`, and no `claude` command of the hook, sees a `GIT_` variable,
+  under a fake program that writes its environment to a file
 - `repo_guards::git_env_sweep` (`src/repo-guards/src/git_env_sweep.rs`) — no
   file cargo compiles removes a `GIT_`-prefixed variable by name. Its companion
   test asks `cargo metadata` whether the read set holds every target root cargo
@@ -1000,6 +1003,27 @@ tool's own entry would otherwise document a tool named `To`.
   test asks `cargo metadata` whether the guard's set of binaries is the set
   cargo actually builds, so a binary the guard never learned to discover shows
   up as a set difference instead of a clean report
+
+## Specs and Plans
+
+A spec **must** live in `specs/` and a plan **must** live in `plans/`, both at
+the repository root. A file in any other directory named `specs` or `plans` is
+in the wrong place.
+
+### Why
+
+The superpowers skills write specs and plans to `docs/superpowers/` by default.
+This repository took that default three times: #198 (`portplz`), #200
+(`kitchen-sync`), and #191 (`vpn-tunnel`). Nothing failed, so the files stayed
+there until a review of #191 found them.
+
+### Guards Enforcing This
+
+- `repo_guards::doc_placement` (`src/repo-guards/src/doc_placement.rs`) — every
+  file in a `specs` or `plans` directory below the repository root fails
+  `cargo test`. The walk does not enter a directory that holds a `.git` entry,
+  because that directory is another checkout, for example an agent worktree
+  in `.claude/worktrees/`
 
 ## UTF-8 String Safety
 

@@ -1,6 +1,6 @@
 # Plan: portplz repo-root hashing
 
-> Source PRD: docs/superpowers/specs/2026-04-13-portplz-repo-root-hashing-design.md (Issue #197)
+> Source PRD: specs/2026-04-13-portplz-repo-root-hashing-design.md (Issue #197)
 
 ## Architectural decisions
 

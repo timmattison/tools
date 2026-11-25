@@ -307,6 +307,9 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     - A fast terminal image and video display utility, designed as a high-performance alternative to `imgcat`. Supports
       multiple image and video formats, resizing with aspect ratio preservation, and reading from files or stdin. Video support requires ffmpeg.
     - To install: `cargo install --git https://github.com/timmattison/tools ic`
+    - `ic --emit-rgba 640x480 photo.jpg` prints the decoded pixels as JSON for a program that draws the picture itself.
+      The [`ic-inline`](plugins/ic-inline/README.md) Claude Code plugin uses it to show pictures inline in the transcript:
+      `/plugin install ic-inline --marketplace timmattison/tools`
 - inscribe
     - Automatically generates clear and consistent git commit messages using Claude AI. Analyzes staged changes and creates
       conventional commit messages. Supports credential storage in system credential managers (Keychain on macOS, Credential
@@ -1054,14 +1057,21 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
   - To install: `cargo install --git https://github.com/timmattison/tools beta`
 - vpn-tunnel
   - Generates Docker-based VPN tunnels using gluetun + ProtonVPN + WireGuard. Produces a ready-to-run
-    `docker-compose.yml` plus helper scripts; pulls the WireGuard credential from 1Password via
-    op-cache. Supports per-city pinning or US-wide IP diversity and configurable container prefixes.
+    `docker-compose.yml` plus helper scripts. Reads the `credential*` fields of a 1Password item
+    through op-cache and picks the first WireGuard credential that no running tunnel holds. A
+    regenerated directory keeps the credential that its `.env` names, unless a tunnel of another
+    container name holds it. A directory whose `.env` names no credential, for example one generated
+    before that line existed, keeps the credential whose key its own running tunnel holds.
+    `generate` stops when docker cannot report the running tunnels.
+    Supports per-city pinning or US-wide IP diversity and configurable container prefixes.
   - To install: `cargo install --git https://github.com/timmattison/tools vpn-tunnel`
 - op-cache
   - 1Password credential cache with retry logic, atomic writes, and worktree support. Wraps `op read`
     so repeated calls don't re-hit 1Password (or trigger Touch ID) for every secret. Supports text and
     binary secrets, env-var overrides, cache invalidation, and includes worktree hooks for automatic
-    setup. Required by other tools in this repo (e.g. `vpn-tunnel`).
+    setup. Its `list-fields` subcommand lists the fields of a 1Password item whose label matches a
+    prefix, which is how `vpn-tunnel` finds the several WireGuard credentials that live on one item.
+    Required by other tools in this repo (e.g. `vpn-tunnel`).
   - The 1Password prompt names only the application above the caller. In a zellij pane, it names
     "zellij", whichever of the sessions asked. Thus, before each run of `op`, op-cache names the
     caller itself. A cache hit and an `--env-var` override run no `op`, thus they do neither step.
@@ -1083,13 +1093,14 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
   - op-cache writes an audit trail to `$XDG_STATE_HOME/op-cache/audit.jsonl`. When
     `XDG_STATE_HOME` is unset, empty, or relative, the file is `~/.local/state/op-cache/audit.jsonl`.
     The audit trail has no switch. Each line is one JSON record, of one of two kinds:
-    - `op_start`, before `op` runs: the time, the `request_id`, the attempt, the operation (`read` or
-      `read-binary`), the reference, the working directory, the cache file, the zellij session and
-      pane, `TERM_PROGRAM`, the Claude Code session, and the chain of ancestor processes (at most 32,
-      each command line cut to 1024 bytes). The Claude Code session is the nearest ancestor that has
-      a file `sessions/<pid>.json` in `$CLAUDE_CONFIG_DIR`, else in `~/.claude`. A file whose
-      `startedAt` is earlier than the start of that ancestor is skipped, because that PID now belongs
-      to a different process. The lookup then continues to the next ancestor.
+    - `op_start`, before `op` runs: the time, the `request_id`, the attempt, the operation (`read`,
+      `read-binary`, or `item-get` for `list-fields`), the reference, the working directory, the
+      cache file, the zellij session and pane, `TERM_PROGRAM`, the Claude Code session, and the chain
+      of ancestor processes (at most 32, each command line cut to 1024 bytes). The Claude Code
+      session is the nearest ancestor that has a file `sessions/<pid>.json` in `$CLAUDE_CONFIG_DIR`,
+      else in `~/.claude`. A file whose `startedAt` is earlier than the start of that ancestor is
+      skipped, because that PID now belongs to a different process. The lookup then continues to the
+      next ancestor.
     - `op_end`, after `op` returns, with the same `request_id`: the `outcome` (`ok`, `empty`,
       `failed`, or `spawn_error`), the `exit_code`, and the `duration_ms`. An `empty` outcome means
       `op` exited 0 but gave no value, and op-cache tries again as after a failure. An `empty` or a
@@ -2248,8 +2259,10 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
 - faulte (fault rate)
   - Ranks the processes of a Mac by page faults per second over an interval, and gives a total
     line for the Claude Code sessions. The header adds the swap traffic, the size of the
-    compressor, and the swap in use over the same sample. `faulte kill` stops the old idle Claude
-    Code sessions after a question. It supports macOS only. See below for the full entry.
+    compressor, and the swap in use over the same sample. `faulte check` says in seconds if the
+    system time is high, and if memory churn or process churn occurs at the same time.
+    `faulte kill` stops the old idle Claude Code sessions after a question. It supports macOS
+    only. See below for the full entry.
   - To install: `cargo install --git https://github.com/timmattison/tools faulte`
 
 - ha (hot actions)
@@ -2829,6 +2842,62 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     processes, such as 176 Claude Code sessions, then count as one cause. It uses no language
     model. It supports macOS only. See below for the full entry.
   - To install: `cargo install --git https://github.com/timmattison/tools whyslow`
+- portcul (portcullis)
+  - Shows each process that listens on a port in a table in the terminal. Move with the arrow keys or `j`/`k`.
+    Press `d` or Enter to send SIGTERM to the selected process after a confirmation, and press `r` to read the
+    table again. The table refreshes each 2 s, and `--refresh <seconds>` changes the interval (0.1 s or more).
+  - `portcul list [port]` prints one line for each process and address. `portcul kill <port>` sends SIGTERM to
+    each process on the port after a confirmation, and `--yes` skips the confirmation. After the confirmation,
+    `kill` reads the list again, and it sends nothing to a process that no longer listens on the port. `list`
+    and `kill` exit with status 1 when no process listens on the port, and `kill` also exits with status 1 when a
+    kill fails or a process no longer listens.
+  - To install: `cargo install --git https://github.com/timmattison/tools portcul`
+- workit
+  - Builds a Cargo workspace manifest out of a directory tree. It walks the tree, finds every
+    `Cargo.toml` that declares a package and no workspace of its own, and writes those directories
+    into the `[workspace]` members list — rewriting the members of a manifest that is already there
+    and leaving the rest of it alone, and naming on stderr every member the walk did not find
+    before that rewrite drops it. The manifest lands beside the tree that was scanned, so
+    `workit --path ~/code/other` writes `~/code/other/Cargo.toml` and never touches the directory
+    the run was started from; `--output` names a file of its own instead. A member is written
+    relative to the directory that holds the manifest, because that is the directory cargo resolves
+    a member against, so `--output` decides what the members read. A package in that directory
+    itself is written as `.`, which is what cargo calls it. Cargo holds a member only where
+    that manifest sits above the member on the file system, and it refuses an absolute path and a
+    `../` path alike, so `--output` has to name a file at or above the tree that was scanned. A run
+    that meets a package the manifest directory does not hold refuses, names every such package,
+    and writes nothing — it used to write those packages as absolute paths, and no checkout could
+    load the manifest that came out, not even the one that wrote it. The one file left out of the members
+    list is the manifest the run writes, because no workspace holds itself: a package at the
+    search path is a member of a manifest that lands elsewhere. Two packages that share a name are
+    refused rather than written, with the paths that hold each one, because a workspace cannot
+    carry the same package name twice — the report is ordered by package name and by path, so two
+    runs over one tree read the same. A directory named `target` or `node_modules` stays out of
+    the walk, and so does a package inside a git worktree that lies *below* the search path, which
+    is a second checkout of packages the repository already holds — where the search path itself
+    sits is never matched, so a run from inside a worktree still finds every package under it, and
+    a run that found packages and then filtered every one of them out says so and names
+    `--include-worktrees`. A package under a nested repository of its own is not a second checkout
+    and stays in, also when its git directory lies elsewhere, as after
+    `git init --separate-git-dir`, and also when its `.git` file names no git directory, at
+    which git itself stops. A package in a submodule goes with the checkout that holds the submodule: it
+    stays in under the main checkout, and it is left out under a worktree below the search path. An exclusion names a whole directory below the search path, so
+    `targets` and `node_modules_backup` stay in, and the search path itself is never matched
+    against the list — `workit --path ~/code/target/myproj` searches that tree like any other. An
+    entry it cannot use — a directory whose mode keeps it out, a `Cargo.toml` nobody can parse, a
+    package that states no name — is named on stderr and skipped rather than ending the walk, and
+    the number skipped is stated once at the end; the packages it did find are still the answer. A
+    package with no name never reaches the members list, because cargo refuses a whole workspace
+    that lists one — it used to be written in like any other, and the run reported a workspace cargo
+    loads no part of. A run that skipped something and has no package left to list never answered
+    the question it was asked, so that one fails instead of reporting an empty tree.
+  - Usage: `workit`, `workit --path ~/code/tools` (writes `~/code/tools/Cargo.toml`),
+    `workit --path packages --output Cargo.toml` (scans `packages/` and writes the manifest above
+    it, so every member reads `packages/<name>`),
+    `workit --dry-run` (prints the manifest it would write and touches nothing),
+    `workit --exclude vendor`, `workit --include-worktrees`,
+    `workit --no-default-excludes`.
+  - To install: `cargo install --git https://github.com/timmattison/tools workit`
 
 ## dirhash
 
@@ -5216,18 +5285,35 @@ On 2026-09-17 and 2026-09-18, this Mac spent 78% of its time in the kernel. 34 M
 
 213 Claude Code processes made 90% of all page faults in that sample. No single one of them was the cause: the median session made 23,000 faults in the 20 seconds, and the `node` and `vitest` processes of a running pre-commit hook made 0.4% together. The answer was the sum of 213 small rates, and no row of a table says a sum. That is why `faulte` prints one total line for the Claude Code sessions, above the table. 86 of the 213 sessions were older than 7 days, and that is why `faulte kill` exists.
 
+### Is this the problem now?
+
+`faulte check` gives one verdict in 5 seconds. It reads the CPU counters and the compressor counters of the kernel, and it starts one short process to learn the newest process number. It runs no `top` and no `ps`, thus it works when one `ps` takes 13 seconds.
+
+| Verdict | Meaning | Exit code |
+| --- | --- | --- |
+| `OK` | System time is below 30% of all CPU time. | 0 |
+| `MEMORY CHURN` | System time is at least 30%, and the compressor compresses and decompresses at least 50,000 pages each second. | 1 |
+| `PROCESS CHURN` | System time is at least 30%, the compressor does not reach its limit in both directions, and at least 150 processes start each second. | 1 |
+| `OTHER SYSTEM TIME` | System time is at least 30%, the compressor does not reach its limit in both directions, and fewer than 150 processes start each second. | 1 |
+
+An error gives the exit code 2. `faulte check --watch` prints one line for each interval until you stop it.
+
+On 2026-11-08, at 0% idle, this Mac showed two states. With 32 GB in the compressor, system time was 52% to 66%, and it followed the rate of compressions (correlation 0.88, over 12 samples of 5 seconds). It did not follow the load average (0.32). Each second, 193 to 444 new processes started. With 16 GB in the compressor and at most 51,323 compressions each second, system time was still 42% to 56%, with 257 to 490 new processes each second. The limits come from the bad samples of that day. No sample of a quiet period set them.
+
 ### Basic Usage
 
 ```bash
 faulte
 faulte --interval 20s --limit 40
+faulte check
+faulte check --watch --interval 10s
 faulte kill
 faulte kill --older-than 3d --idle-for 1h --max 5
 ```
 
 ### Options
 
-- `--interval <DURATION>`: The time to sample the page faults of each process, for example `5s`, `10m`, `2h`, or `7d`. A bare number is a number of seconds. Defaults to `5s`. Zero is refused, because a sample of no time measures nothing.
+- `--interval <DURATION>`: The length of the sample, for example `5s`, `10m`, `2h`, or `7d`. A bare number is a number of seconds. The ranking and `faulte kill` count the page faults of each process over this time. `faulte check` reads the kernel counters at the start and at the end of this time. Defaults to `5s`. Zero is refused, because a sample of no time measures nothing.
 - `--limit <N>`: The number of rows that the table shows. Defaults to 25. One line under the table counts the rows that the limit hid, and gives their share of all faults, because the limit hides the small rates and the small rates were the load. The flag belongs to the ranking alone: `faulte kill` shows every candidate of its plan, and refuses `--limit` rather than take it and ignore it.
 - `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
 - `-h`, `--help`: Print the usage.
@@ -5359,13 +5445,13 @@ The transcript of a session stays on disk after the stop, so `crap` takes that s
 - **A scheduled wake-up.** A session can be idle and hold a scheduled wake-up, for example a `/loop`. The registry records no wake-up, so `faulte` cannot see one. This is why the plan shows every candidate before the question: `faulte` gives the facts that it has, and the person decides.
 - **The sessions of another account, without root.** They get a row and a fault rate, and `other account — run with sudo` in place of the session fields. In the plan, they get a block of their own with the `sudo faulte kill` command line that includes them, and `faulte kill` never signals them. A count of unreadable sessions is a better answer than silence about them.
 - **A process that the two sources disagree about.** `top` lists no zombie, and `ps` lists no PID 0. A process can also start or stop between the two reads. `faulte` gives PID 0 a row that names `kernel_task`, and it gives every other such process a count in the header. Nothing falls out of the report.
-- **A live display, and another platform.** `faulte` takes one sample and exits. Nothing refreshes. It supports macOS only, because the fault sampler and the counters of the memory system are those of macOS. On another platform it prints `faulte supports macOS only.` and exits 1.
+- **A live display, and another platform.** The ranking and `faulte kill` take one sample and exit. `faulte check --watch` adds one line for each interval, and it redraws nothing. It supports macOS only, because the fault sampler and the counters of the memory system are those of macOS. On another platform it prints `faulte supports macOS only.` and exits 1.
 
 ### Exit codes
 
-- `0`: Success. A question that the person declined is a success as well, because `faulte` did what the answer said.
-- `1`: The platform is not macOS, or `faulte kill` found candidates and its input is not a terminal.
-- `2`: A source of this Mac failed, or its output failed a parser, or a stop did not do what the plan said that it would do. `faulte` prints the reason, and it never prints an empty ranking.
+- `0`: Success. A question that the person declined is a success as well, because `faulte` did what the answer said. For `faulte check`, the verdict is `OK`, or the reader of a `--watch` left.
+- `1`: The platform is not macOS, or `faulte check` found a problem, or `faulte kill` found candidates and its input is not a terminal.
+- `2`: A source of this Mac failed, or its output failed a parser, or a stop did not do what the plan said that it would do, or `faulte check` could not write its output. `faulte` prints the reason, and it never prints an empty ranking.
 
 ## wdid (what do i do)
 
