@@ -239,6 +239,38 @@ fn find_regions(differing: &Grid, thickness: u32) -> Vec<Region> {
     regions
 }
 
+/// Draw a red outline inside the edge of `region`.
+///
+/// A pixel of the region is red when it is less than `thickness` pixels from
+/// an edge. A pixel that `covered` rejects stays as it is.
+///
+/// # Arguments
+///
+/// * `picture` - The picture to draw on.
+/// * `region` - The box to outline.
+/// * `thickness` - The thickness of the outline, in pixels.
+/// * `covered` - Whether an image covers a pixel.
+fn draw_outline(
+    picture: &mut RgbaImage,
+    region: Region,
+    thickness: u32,
+    covered: impl Fn(u32, u32) -> bool,
+) {
+    for y in region.top..=region.bottom {
+        for x in region.left..=region.right {
+            let on_edge = x.saturating_sub(region.left) < thickness
+                || region.right.saturating_sub(x) < thickness
+                || y.saturating_sub(region.top) < thickness
+                || region.bottom.saturating_sub(y) < thickness;
+            if on_edge && covered(x, y) {
+                if let Some(pixel) = picture.get_pixel_mut_checked(x, y) {
+                    *pixel = RED;
+                }
+            }
+        }
+    }
+}
+
 /// Whether two boxes overlap or touch, also at a corner.
 fn touches(a: Region, b: Region) -> bool {
     a.left <= b.right.saturating_add(1)
@@ -308,6 +340,17 @@ fn merge_sweep(mut regions: Vec<Region>) -> Vec<Region> {
         merged.push(current);
     }
     merged
+}
+
+/// The thickness of an outline, in pixels: `max(2, ceil(L / 400))`, where `L`
+/// is the longer side of the canvas.
+///
+/// # Arguments
+///
+/// * `canvas_width` - The width of the canvas, in pixels.
+/// * `canvas_height` - The height of the canvas, in pixels.
+pub fn line_thickness(canvas_width: u32, canvas_height: u32) -> u32 {
+    canvas_width.max(canvas_height).div_ceil(400).max(2)
 }
 
 #[cfg(test)]
