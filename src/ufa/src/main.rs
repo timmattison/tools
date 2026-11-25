@@ -22,6 +22,8 @@ mod secret;
 mod site_helper;
 mod site_manager;
 #[cfg(test)]
+mod spec_conformance;
+#[cfg(test)]
 mod test_server;
 #[cfg(test)]
 mod test_support;
