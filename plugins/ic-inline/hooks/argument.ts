@@ -121,7 +121,7 @@ function parseDiff(text: string): Asked {
         return { kind: 'refused', reason: `${MODE_OPTION} occurs two times. Give it one time` }
       }
       const value = word === MODE_OPTION ? words.shift() : word.slice(MODE_ASSIGNMENT.length)
-      if (value === undefined) {
+      if (value === undefined || value === '') {
         return { kind: 'refused', reason: `${MODE_OPTION} needs a mode: ${DIFF_MODE_NAMES}` }
       }
       if (!isDiffMode(value)) {
