@@ -27,10 +27,12 @@ ratatui.workspace = true
 runlimit.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+soleinstance.workspace = true
 sysinfo.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+soleinstance = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 unicode-width.workspace = true
 

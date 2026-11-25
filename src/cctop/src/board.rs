@@ -424,6 +424,18 @@ impl Board {
         })
     }
 
+    /// The number of sessions that need the person: the live `needs-you` rows
+    /// with no handled mark. It is the `unmarked` count of the `needs-you`
+    /// entry of [`Board::state_counts`], thus the title line and this count
+    /// come from one function.
+    #[must_use]
+    pub fn attention_count(&self) -> usize {
+        self.state_counts()
+            .iter()
+            .find(|count| count.state == PaneState::NeedsYou)
+            .map_or(0, |count| count.unmarked)
+    }
+
     /// The number of frozen rows on the board, whatever their state.
     #[must_use]
     pub fn frozen_count(&self) -> usize {
@@ -500,6 +512,28 @@ mod tests {
             zellij_session: None,
             zellij_pane: None,
         }
+    }
+
+    /// A state file with a directory name.
+    fn file_in(pid: u32, state: PaneState, directory: &str) -> StateFile {
+        let mut state_file = file(pid, state, 100, 500);
+        state_file.cwd = std::path::PathBuf::from(format!("/path/to/{directory}"));
+        state_file
+    }
+
+    #[test]
+    fn attention_count_counts_only_unmarked_live_needs_you_sessions() {
+        let mut board = Board::new();
+        board.load(file_in(1, PaneState::NeedsYou, "日本語"), None);
+        board.load(file_in(2, PaneState::NeedsYou, "café"), None);
+        board.load(file_in(3, PaneState::NeedsYou, "🎉"), None);
+        board.load(file_in(4, PaneState::NeedsYou, "frozen"), None);
+        board.load(file_in(5, PaneState::Idle, "idle"), None);
+        board.load(file_in(6, PaneState::Working, "working"), None);
+        board.toggle_handled(Pid::new(2));
+        board.set_run_status(Pid::new(4), RunStatus::Stopped, EpochMillis::new(1_000));
+        assert_eq!(board.attention_count(), 2);
+        assert_eq!(Board::new().attention_count(), 0);
     }
 
     #[test]

@@ -23,8 +23,8 @@ shellquote.workspace = true
 serde_json = { workspace = true, features = ["float_roundtrip"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-dirs.workspace = true
 libc.workspace = true
+soleinstance.workspace = true
 objc2.workspace = true
 objc2-app-kit = { workspace = true, features = [
     "std",
@@ -70,6 +70,7 @@ objc2-foundation = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+dirs.workspace = true
 tempfile.workspace = true
 testcolor.workspace = true
 

@@ -1,0 +1,98 @@
+[package]
+name = "cctop-bar"
+version = "0.1.0"
+edition.workspace = true
+description = "A macOS menu-bar mini-map of the Claude Code sessions, with a hotkey that opens cctop in a floating panel"
+license = "MIT"
+
+[lib]
+name = "cctop_bar"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cctop-bar"
+path = "src/main.rs"
+
+[dependencies]
+buildinfo.workspace = true
+cctop.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
+thiserror.workspace = true
+unicode-width.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+dispatch2 = { workspace = true, features = ["std"] }
+global-hotkey.workspace = true
+objc2.workspace = true
+objc2-app-kit = { workspace = true, features = [
+    "std",
+    "NSAppearance",
+    "NSApplication",
+    "NSAttributedString",
+    "NSBitmapImageRep",
+    "NSButton",
+    "NSCell",
+    "NSColor",
+    "NSColorSpace",
+    "NSControl",
+    "NSEvent",
+    "NSFont",
+    "NSFontDescriptor",
+    "NSGraphics",
+    "NSGraphicsContext",
+    "NSImage",
+    "NSImageRep",
+    "NSMenu",
+    "NSMenuItem",
+    "NSPanel",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSScreen",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSStringDrawing",
+    "NSText",
+    "NSView",
+    "NSWindow",
+    "NSWorkspace",
+    "libc",
+    "objc2-core-foundation",
+] }
+objc2-core-foundation = { workspace = true, features = [
+    "std",
+    "CFArray",
+    "CFCGTypes",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+] }
+objc2-core-graphics = { workspace = true, features = [
+    "std",
+    "CGGeometry",
+    "CGWindow",
+] }
+objc2-foundation = { workspace = true, features = [
+    "std",
+    "NSArray",
+    "NSAttributedString",
+    "NSDictionary",
+    "NSEnumerator",
+    "NSDistributedNotificationCenter",
+    "NSGeometry",
+    "NSNotification",
+    "NSRunLoop",
+    "NSString",
+    "NSTimer",
+    "objc2-core-foundation",
+] }
+soleinstance.workspace = true
+
+[dev-dependencies]
+childenv.workspace = true
+testcolor.workspace = true
+
+[lints]
+workspace = true

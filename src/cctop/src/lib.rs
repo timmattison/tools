@@ -12,13 +12,17 @@
 //! - `focus` runs the two focus steps: `zellij` focuses the pane, and
 //!   `wezterm` writes the focus request to the terminal device of the pane.
 //!   `ancestry` and `lsof` find that device.
+//! - `minimap` turns a board into the tiles of the mini-map.
 //! - `notification` sends a macOS notification.
 //! - `runner` runs each external command, thus a test can answer a command
 //!   without it running.
 //! - `controller` is the logic of the main loop.
+//! - `jobs` runs the two jobs that can block, a focus and a notification,
+//!   each on its own thread. The notification waits for the lock of
+//!   `cctop-bar`.
 //!
 //! The binary only wires these modules to the terminal: one channel of
-//! events, one loop that draws, and one thread for each job that can block.
+//! events and one loop that draws. The jobs live in `jobs`.
 
 // Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
@@ -29,8 +33,10 @@ pub mod app;
 pub mod board;
 pub mod controller;
 pub mod focus;
+pub mod jobs;
 pub mod liveness;
 pub mod lsof;
+pub mod minimap;
 pub mod notification;
 pub mod paths;
 pub mod registry;
