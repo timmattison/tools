@@ -9,6 +9,9 @@
 //! [`CachedOnePassword`], over a real cache file in a directory of the test's
 //! own: a read that the cache file answers, and every forget. A test therefore
 //! runs the real `OpCache::invalidate` on a real file.
+//!
+//! A read that succeeds at the vault writes the key into the cache file, as
+//! op-cache does after it asks 1Password. A failed read writes nothing.
 
 use crate::config::{op_cache_in, CachedOnePassword, KeyStore};
 use anyhow::{Context, Result};
@@ -19,6 +22,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The time that each seeded cache entry says it was read from 1Password.
 const SEEDED_AT: &str = "2026-01-01T00:00:00Z";
+
+/// The time that a cache entry says it was read from 1Password, when a read
+/// of the vault wrote it.
+const VAULT_READ_AT: &str = "2026-01-02T00:00:00Z";
 
 /// A throwaway config directory that never touches the developer's real
 /// `~/.config/ufa`.
@@ -76,6 +83,9 @@ impl Drop for TempConfigDir {
 ///
 /// A key rotation in 1Password is exactly that: the cache file holds the key
 /// from before the rotation, and the vault holds the key from after it.
+///
+/// A read that goes to the vault writes the key into the cache file, as
+/// op-cache does after it asks 1Password.
 pub(crate) struct TestVault {
     /// The directory that holds the cache file. It is here for its drop,
     /// which removes the directory when the vault goes.
@@ -123,18 +133,12 @@ impl TestVault {
             fs::create_dir_all(&directory.dir).unwrap_or_else(|error| {
                 panic!("{} must be creatable: {error}", directory.dir.display())
             });
-            let entries: serde_json::Map<String, serde_json::Value> = cached
-                .iter()
-                .map(|(reference, key)| {
-                    (
-                        (*reference).to_string(),
-                        serde_json::json!({ "value": key, "fetchedAt": SEEDED_AT }),
-                    )
-                })
-                .collect();
             let path = op_cache_in(&directory.dir).cache_path().to_path_buf();
-            fs::write(&path, serde_json::Value::Object(entries).to_string())
-                .unwrap_or_else(|error| panic!("{} must be writable: {error}", path.display()));
+            let mut entries = serde_json::Map::new();
+            for (reference, key) in cached {
+                put_entry(&mut entries, reference, key, SEEDED_AT);
+            }
+            write_entries(&path, entries);
         }
 
         let vault = Self {
@@ -214,13 +218,49 @@ impl KeyStore for TestVault {
         }
 
         self.vault_reads.set(self.vault_reads.get() + 1);
-        self.current
+        let key = self
+            .current
             .clone()
-            .with_context(|| format!("the vault of this test cannot be read at {reference}"))
+            .with_context(|| format!("the vault of this test cannot be read at {reference}"))?;
+
+        // op-cache keeps the key that 1Password gave. A failed read above
+        // returned before this point, so it writes nothing.
+        let path = self.cache.cache_path();
+        let mut entries = fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        put_entry(&mut entries, reference, &key, VAULT_READ_AT);
+        write_entries(path, entries);
+
+        Ok(key)
     }
 
     fn forget(&self, reference: &str) -> Result<()> {
         self.forgets.set(self.forgets.get() + 1);
         self.keys.forget(reference)
     }
+}
+
+/// Put one cache entry in the shape that op-cache writes.
+fn put_entry(
+    entries: &mut serde_json::Map<String, serde_json::Value>,
+    reference: &str,
+    key: &str,
+    fetched_at: &str,
+) {
+    entries.insert(
+        reference.to_string(),
+        serde_json::json!({ "value": key, "fetchedAt": fetched_at }),
+    );
+}
+
+/// Write the entries to the cache file.
+///
+/// # Panics
+///
+/// Panics if the file cannot be written.
+fn write_entries(path: &std::path::Path, entries: serde_json::Map<String, serde_json::Value>) {
+    fs::write(path, serde_json::Value::Object(entries).to_string())
+        .unwrap_or_else(|error| panic!("{} must be writable: {error}", path.display()));
 }

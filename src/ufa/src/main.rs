@@ -1641,12 +1641,16 @@ mod key_rotation_tests {
         assert_one_request_with(&accepting, NEW_KEY, "the accepting controller");
         assert_eq!(vault.forgets(), 1, "the cached copy must be forgotten once");
         assert!(
-            !vault.caches(REFERENCE),
-            "the cache file must no longer hold the reference"
+            vault.caches(REFERENCE),
+            "the cache file must hold the copy that 1Password gave"
+        );
+        assert!(
+            vault.cache_file().contains(NEW_KEY),
+            "the cache file must hold the new key"
         );
         assert!(
             !vault.cache_file().contains(OLD_KEY),
-            "the cache file must no longer hold the refused key"
+            "the cache file must not hold the key from before the rotation"
         );
         assert_one_note_about_the_new_key(&outcome.notes);
     }
@@ -1700,16 +1704,24 @@ mod key_rotation_tests {
         assert_one_request_with(&refusing, OLD_KEY, "the refusing Site Manager API");
         assert_one_request_with(&accepting, NEW_KEY, "the accepting Site Manager API");
         assert!(
-            !vault.caches(SITE_MANAGER_REFERENCE),
-            "the cache file must no longer hold the Site Manager reference"
+            vault.caches(SITE_MANAGER_REFERENCE),
+            "the cache file must hold the copy that 1Password gave"
+        );
+        assert!(
+            vault.cache_file().contains(NEW_KEY),
+            "the cache file must hold the new key"
+        );
+        assert!(
+            !vault.cache_file().contains(OLD_KEY),
+            "the cache file must not hold the key from before the rotation"
         );
         assert_one_note_about_the_new_key(&outcome.notes);
     }
 
     /// 1Password still holds the key that the API refused. The key is wrong,
     /// not stale, and a second run gets the same answer, so the user gets the
-    /// first error. The cache file no longer holds a copy, so the next run
-    /// reads 1Password.
+    /// first error. The cache file holds the copy that 1Password just gave, which
+    /// is the same key.
     #[tokio::test]
     async fn the_same_key_from_1password_gives_the_first_error_back() {
         let vault = TestVault::new("same-key", &[(REFERENCE, OLD_KEY)], Some(OLD_KEY));
@@ -1737,6 +1749,14 @@ mod key_rotation_tests {
         );
         assert_eq!(outcome.runs, 1, "the same key must not be sent again");
         assert_eq!(vault.forgets(), 1, "the cached copy must be forgotten");
+        assert!(
+            vault.caches(REFERENCE),
+            "the cache file must hold the copy that 1Password just gave"
+        );
+        assert!(
+            vault.cache_file().contains(OLD_KEY),
+            "the copy that 1Password gave is the same key"
+        );
         assert_eq!(
             vault.vault_reads(),
             1,

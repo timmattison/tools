@@ -2135,12 +2135,16 @@ mod tests {
             "the cached copy must be forgotten before the read"
         );
         assert!(
-            !vault.caches(OP_REFERENCE),
-            "the cache file must no longer hold the reference"
+            vault.caches(OP_REFERENCE),
+            "the cache file must hold the copy that 1Password gave"
+        );
+        assert!(
+            vault.cache_file().contains(KEY_AFTER_THE_ROTATION),
+            "the cache file must hold the key after the rotation"
         );
         assert!(
             !vault.cache_file().contains(KEY_BEFORE_THE_ROTATION),
-            "the cache file must no longer hold the key from before the rotation"
+            "the cache file must not hold the key from before the rotation"
         );
     }
 
