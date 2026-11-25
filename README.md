@@ -2256,8 +2256,10 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
 - faulte (fault rate)
   - Ranks the processes of a Mac by page faults per second over an interval, and gives a total
     line for the Claude Code sessions. The header adds the swap traffic, the size of the
-    compressor, and the swap in use over the same sample. `faulte kill` stops the old idle Claude
-    Code sessions after a question. It supports macOS only. See below for the full entry.
+    compressor, and the swap in use over the same sample. `faulte check` says in seconds if the
+    system time is high, and if memory churn or process churn occurs at the same time.
+    `faulte kill` stops the old idle Claude Code sessions after a question. It supports macOS
+    only. See below for the full entry.
   - To install: `cargo install --git https://github.com/timmattison/tools faulte`
 - ufa (UniFi API)
   - Drives a UniFi Network application through its Integration API, and the cloud consoles of an
@@ -5244,18 +5246,35 @@ On 2026-09-17 and 2026-09-18, this Mac spent 78% of its time in the kernel. 34 M
 
 213 Claude Code processes made 90% of all page faults in that sample. No single one of them was the cause: the median session made 23,000 faults in the 20 seconds, and the `node` and `vitest` processes of a running pre-commit hook made 0.4% together. The answer was the sum of 213 small rates, and no row of a table says a sum. That is why `faulte` prints one total line for the Claude Code sessions, above the table. 86 of the 213 sessions were older than 7 days, and that is why `faulte kill` exists.
 
+### Is this the problem now?
+
+`faulte check` gives one verdict in 5 seconds. It reads the CPU counters and the compressor counters of the kernel, and it starts one short process to learn the newest process number. It runs no `top` and no `ps`, thus it works when one `ps` takes 13 seconds.
+
+| Verdict | Meaning | Exit code |
+| --- | --- | --- |
+| `OK` | System time is below 30% of all CPU time. | 0 |
+| `MEMORY CHURN` | System time is at least 30%, and the compressor compresses and decompresses at least 50,000 pages each second. | 1 |
+| `PROCESS CHURN` | System time is at least 30%, the compressor does not reach its limit in both directions, and at least 150 processes start each second. | 1 |
+| `OTHER SYSTEM TIME` | System time is at least 30%, the compressor does not reach its limit in both directions, and fewer than 150 processes start each second. | 1 |
+
+An error gives the exit code 2. `faulte check --watch` prints one line for each interval until you stop it.
+
+On 2026-11-08, at 0% idle, this Mac showed two states. With 32 GB in the compressor, system time was 52% to 66%, and it followed the rate of compressions (correlation 0.88, over 12 samples of 5 seconds). It did not follow the load average (0.32). Each second, 193 to 444 new processes started. With 16 GB in the compressor and at most 51,323 compressions each second, system time was still 42% to 56%, with 257 to 490 new processes each second. The limits come from the bad samples of that day. No sample of a quiet period set them.
+
 ### Basic Usage
 
 ```bash
 faulte
 faulte --interval 20s --limit 40
+faulte check
+faulte check --watch --interval 10s
 faulte kill
 faulte kill --older-than 3d --idle-for 1h --max 5
 ```
 
 ### Options
 
-- `--interval <DURATION>`: The time to sample the page faults of each process, for example `5s`, `10m`, `2h`, or `7d`. A bare number is a number of seconds. Defaults to `5s`. Zero is refused, because a sample of no time measures nothing.
+- `--interval <DURATION>`: The length of the sample, for example `5s`, `10m`, `2h`, or `7d`. A bare number is a number of seconds. The ranking and `faulte kill` count the page faults of each process over this time. `faulte check` reads the kernel counters at the start and at the end of this time. Defaults to `5s`. Zero is refused, because a sample of no time measures nothing.
 - `--limit <N>`: The number of rows that the table shows. Defaults to 25. One line under the table counts the rows that the limit hid, and gives their share of all faults, because the limit hides the small rates and the small rates were the load. The flag belongs to the ranking alone: `faulte kill` shows every candidate of its plan, and refuses `--limit` rather than take it and ignore it.
 - `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
 - `-h`, `--help`: Print the usage.
@@ -5387,13 +5406,13 @@ The transcript of a session stays on disk after the stop, so `crap` takes that s
 - **A scheduled wake-up.** A session can be idle and hold a scheduled wake-up, for example a `/loop`. The registry records no wake-up, so `faulte` cannot see one. This is why the plan shows every candidate before the question: `faulte` gives the facts that it has, and the person decides.
 - **The sessions of another account, without root.** They get a row and a fault rate, and `other account — run with sudo` in place of the session fields. In the plan, they get a block of their own with the `sudo faulte kill` command line that includes them, and `faulte kill` never signals them. A count of unreadable sessions is a better answer than silence about them.
 - **A process that the two sources disagree about.** `top` lists no zombie, and `ps` lists no PID 0. A process can also start or stop between the two reads. `faulte` gives PID 0 a row that names `kernel_task`, and it gives every other such process a count in the header. Nothing falls out of the report.
-- **A live display, and another platform.** `faulte` takes one sample and exits. Nothing refreshes. It supports macOS only, because the fault sampler and the counters of the memory system are those of macOS. On another platform it prints `faulte supports macOS only.` and exits 1.
+- **A live display, and another platform.** The ranking and `faulte kill` take one sample and exit. `faulte check --watch` adds one line for each interval, and it redraws nothing. It supports macOS only, because the fault sampler and the counters of the memory system are those of macOS. On another platform it prints `faulte supports macOS only.` and exits 1.
 
 ### Exit codes
 
-- `0`: Success. A question that the person declined is a success as well, because `faulte` did what the answer said.
-- `1`: The platform is not macOS, or `faulte kill` found candidates and its input is not a terminal.
-- `2`: A source of this Mac failed, or its output failed a parser, or a stop did not do what the plan said that it would do. `faulte` prints the reason, and it never prints an empty ranking.
+- `0`: Success. A question that the person declined is a success as well, because `faulte` did what the answer said. For `faulte check`, the verdict is `OK`, or the reader of a `--watch` left.
+- `1`: The platform is not macOS, or `faulte check` found a problem, or `faulte kill` found candidates and its input is not a terminal.
+- `2`: A source of this Mac failed, or its output failed a parser, or a stop did not do what the plan said that it would do, or `faulte check` could not write its output. `faulte` prints the reason, and it never prints an empty ranking.
 
 ## wdid (what do i do)
 
