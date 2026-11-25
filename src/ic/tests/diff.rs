@@ -70,7 +70,8 @@ fn fixtures(scratch: &Scratch) -> (PathBuf, PathBuf) {
 /// # Panics
 /// Panics when the pixel lies outside the picture.
 fn pixel(picture: &Emitted, x: u64, y: u64) -> [u8; 4] {
-    let start = usize::try_from((y * picture.width + x) * 4).expect("a test offset fits");
+    let start =
+        usize::try_from(y * picture.width + x).expect("a test offset fits") * BYTES_PER_PIXEL;
     let bytes = picture
         .rgba
         .get(start..start + BYTES_PER_PIXEL)
