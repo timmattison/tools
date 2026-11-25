@@ -248,6 +248,16 @@ struct Args {
     /// flag wins over it.
     #[clap(long, value_enum)]
     protocol: Option<ProtocolArg>,
+
+    /// Compare two still images pixel by pixel, and show one picture of the
+    /// differences. Give exactly two image files, FIRST and SECOND. Neither
+    /// image is scaled, and the two share the upper-left corner
+    #[clap(long, conflicts_with_all = ["stdin", "monitor", "will_display", "loop_video", "fps", "do_not_drop_frames", "memory_cleanup_frequency", "max_fps", "adaptive_fps"])]
+    diff: bool,
+
+    /// How the picture of --diff shows the differences (default: boxes)
+    #[clap(long, value_enum, value_name = "MODE", requires = "diff")]
+    diff_mode: Option<diff::Mode>,
 }
 
 fn main() -> Result<()> {
@@ -255,7 +265,9 @@ fn main() -> Result<()> {
 
     validate_arguments(&args)?;
 
-    if let Some(pixel_box) = args.emit_rgba {
+    if args.diff {
+        show_diff(&args)?;
+    } else if let Some(pixel_box) = args.emit_rgba {
         emit_picture(&args, pixel_box)?;
     } else if args.will_display {
         report_display_readiness(&args)?;
@@ -284,6 +296,7 @@ fn main() -> Result<()> {
 }
 
 fn validate_arguments(args: &Args) -> Result<()> {
+    validate_diff(args)?;
     validate_input_modes(args)?;
     validate_emit(args)?;
     validate_dimensions(args)?;
@@ -315,18 +328,41 @@ fn validate_input_modes(args: &Args) -> Result<()> {
     Ok(())
 }
 
-/// Refuse a run of `--emit-rgba` over more than one file.
+/// Refuse a run of `--diff` over any count of files but two.
+///
+/// Clap refuses the flag beside the other input modes and beside the options
+/// of a video. This check holds the one rule that clap cannot state: the count
+/// of files. It runs first, so `ic --diff` with no file gets this message and
+/// not the message about a missing input.
+///
+/// # Errors
+/// An error that says the flag takes exactly two files, when the count is
+/// another number.
+fn validate_diff(args: &Args) -> Result<()> {
+    if args.diff && args.files.len() != 2 {
+        anyhow::bail!(
+            "--diff compares two images, thus it takes exactly two files, and it got {}",
+            args.files.len()
+        );
+    }
+
+    Ok(())
+}
+
+/// Refuse a run of `--emit-rgba` over more than one picture.
 ///
 /// The flag prints one JSON document, and a reader of it parses one picture.
 /// Clap refuses the flag beside every option of a display, and this check
-/// holds the one rule that clap cannot state: the count of files.
+/// holds the one rule that clap cannot state: the count of files. With
+/// `--diff` the two files make one picture, so that run may name two files.
 ///
 /// # Errors
-/// An error that says the flag takes one picture, when it has more than one.
+/// An error that says the flag takes one picture, when it has more than one
+/// file and no `--diff`.
 fn validate_emit(args: &Args) -> Result<()> {
-    if args.emit_rgba.is_some() && args.files.len() > 1 {
+    if args.emit_rgba.is_some() && !args.diff && args.files.len() > 1 {
         anyhow::bail!(
-            "--emit-rgba prints one picture, thus it takes one picture: give one file or --stdin"
+            "--emit-rgba prints one picture, thus it takes one picture: give one file, --stdin, or --diff with two files"
         );
     }
 
@@ -2183,6 +2219,82 @@ fn decode_picture(source: &[u8], name: &Path) -> Result<DynamicImage> {
     }
 
     Ok(reader.with_guessed_format()?.decode()?)
+}
+
+/// Compare two still images, and show one picture of the differences.
+///
+/// The run checks both paths before it decodes either one, so a bad second
+/// path does not wait for a slow decode of the first. A video or a text file
+/// is no still image, and the error names it. The picture comes from
+/// [`diff::compare`] in the mode of `--diff-mode`, or `boxes` when none is
+/// given.
+///
+/// With `--emit-rgba`, the run prints the picture as JSON and prints no
+/// header. Otherwise it prints a header of two lines, the two paths and the
+/// summary of the differences, and then it shows the picture as it shows a
+/// still image.
+///
+/// # Arguments
+/// * `args` - The command line arguments. `validate_diff` has checked that
+///   `files` holds two paths.
+///
+/// # Returns
+/// Nothing when the picture is out.
+///
+/// # Errors
+/// An error when a file is missing, a video, a text file, or not an image,
+/// when the two images make a canvas over the limit, or when the output
+/// fails. Each decode error names its path.
+fn show_diff(args: &Args) -> Result<()> {
+    let [first_path, second_path] = args.files.as_slice() else {
+        anyhow::bail!(
+            "--diff compares two images, thus it takes exactly two files, and it got {}",
+            args.files.len()
+        );
+    };
+    for path in [first_path, second_path] {
+        ensure_file_exists(path)?;
+        if is_video_file(path) {
+            anyhow::bail!(
+                "--diff compares two still images, and {} is a video",
+                path.display()
+            );
+        }
+        if is_text_file(path) {
+            anyhow::bail!(
+                "--diff compares two still images, and {} is a text file",
+                path.display()
+            );
+        }
+    }
+
+    let first = load_still_image(first_path)?;
+    let second = load_still_image(second_path)?;
+    let diff = diff::compare(&first, &second, args.diff_mode.unwrap_or_default())?;
+    let summary = diff.summary();
+    let picture = DynamicImage::ImageRgba8(diff.picture);
+
+    if let Some(pixel_box) = args.emit_rgba {
+        return emit::write_rgba_json(&picture, pixel_box, &mut io::stdout().lock());
+    }
+
+    let header = [
+        format!("{} vs {}", first_path.display(), second_path.display()),
+        summary,
+    ];
+    display_image_with_header(args, &header, |_capabilities| Ok((picture, None)))
+}
+
+/// Read and decode one image file of `--diff`.
+///
+/// # Arguments
+/// * `path` - The path of the image file.
+///
+/// # Errors
+/// An error that names the path, when the file does not open or holds no
+/// image.
+fn load_still_image(path: &Path) -> Result<DynamicImage> {
+    with_image_file(path, |source| decode_picture(&source, path))
 }
 
 /// Make a picture out of the bytes of an image file, and keep the bytes when
