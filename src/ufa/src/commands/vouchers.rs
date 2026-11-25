@@ -1413,6 +1413,65 @@ mod deletion_tests {
         );
     }
 
+    /// A success answer whose body is not the shape of
+    /// `VoucherDeletionResults`.
+    const UNREADABLE_ANSWER: &str = r#"{"deleted":true}"#;
+
+    /// The finding this answers: a controller that answered a deletion at
+    /// once with a success status and a body that ufa cannot read stopped the
+    /// run. The note said `Could not delete voucher`, the closing count left
+    /// out a voucher that the controller deleted, and the rest were not sent,
+    /// although no timeout was at risk. Only a missing answer stops the run.
+    #[tokio::test]
+    async fn an_unreadable_success_answer_does_not_stop_the_deletion() {
+        let run = run_confirmed_delete([
+            json_response(ONE_DELETED),
+            json_response(UNREADABLE_ANSWER),
+            json_response(ONE_DELETED),
+        ])
+        .await;
+
+        let expected: Vec<String> = LISTED_IDS.iter().map(|id| run.deletion_of(id)).collect();
+        assert_eq!(
+            run.deletions, expected,
+            "an answer that arrived at once must not stop the run"
+        );
+
+        let error = error_text(&run);
+        assert!(
+            !error.contains(NOT_ATTEMPTED),
+            "no voucher was left unsent, got {error}"
+        );
+        assert!(
+            error.contains("could not read the answer to the deletion of 1 of 3 voucher(s)"),
+            "the error must say that one answer was unreadable, got {error}"
+        );
+
+        let notes = run.notes();
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains(SECOND_CODE) && note.contains("200")),
+            "a note must name the voucher and the status, got {notes:?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .filter(|note| note.contains(SECOND_CODE))
+                .all(|note| !note.starts_with("Could not delete voucher")),
+            "the controller did not refuse the deletion, got {notes:?}"
+        );
+        assert!(
+            notes.iter().all(|note| !note.contains(NOT_ATTEMPTED)),
+            "no note may name a count as not attempted, got {notes:?}"
+        );
+        assert_eq!(
+            notes.last().copied(),
+            Some("Deleted 2 of 3 voucher(s)"),
+            "the closing note must stay last, got {notes:?}"
+        );
+    }
+
     /// A controller that gives no answer to the first deletion gets no
     /// other deletion, and every other listed voucher is not attempted.
     #[tokio::test]
