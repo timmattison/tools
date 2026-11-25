@@ -3,10 +3,12 @@
 
 use super::*;
 use crate::format::format_recorded;
-use crate::types::{Recording, RecordingMetadata};
+use crate::types::{Event, EventType, Recording, RecordingMetadata};
 use std::collections::BTreeMap;
 
 const FIXTURE_PATH: &str = "/home/user/recordings/demo.json";
+/// The number of events in the fixture.
+const EVENT_COUNT: u32 = 42;
 const FIXTURE_TIMESTAMP: f64 = 1_700_000_000.0;
 
 /// A recording with the metadata of the React tests: 65.3 seconds, 42 events,
@@ -22,14 +24,20 @@ fn fixture() -> LoadedRecording {
             command: "echo hello".into(),
             title: "Demo Recording".into(),
             env: BTreeMap::new(),
-            events: Vec::new(),
+            events: (0..EVENT_COUNT)
+                .map(|index| Event {
+                    time: f64::from(index) / 10.0,
+                    event_type: EventType::Output,
+                    data: "x".into(),
+                })
+                .collect(),
         },
         metadata: RecordingMetadata {
             file_path: FIXTURE_PATH.into(),
             title: "Demo Recording".into(),
             command: "echo hello".into(),
             duration: 65.3,
-            event_count: 42,
+            event_count: EVENT_COUNT as usize,
             width: 120,
             height: 40,
             timestamp: FIXTURE_TIMESTAMP,
