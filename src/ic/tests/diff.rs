@@ -23,7 +23,7 @@ use image::{Rgba, RgbaImage};
 
 mod common;
 
-use common::emit::{emitted, pattern, run, Emitted, Scratch, BYTES_PER_PIXEL};
+use common::emit::{emitted, pattern, run, Emitted, Run, Scratch, BYTES_PER_PIXEL};
 use common::{unreachable_path_dir, TERM_XTERM_256COLOR};
 
 /// The name that this target puts in the unreachable `PATH` of its children.
@@ -164,5 +164,174 @@ fn diff_emit_prints_no_header() {
         !outcome.stdout.contains(" vs "),
         "an emit run must print no header: {:?}",
         outcome.stdout
+    );
+}
+
+/// The exit status of a run that `ic` itself refused.
+const RUN_ERROR: Option<i32> = Some(1);
+
+/// The exit status of a run that clap refused before `ic` read anything.
+const USAGE_ERROR: Option<i32> = Some(2);
+
+/// Assert that `outcome` is a refusal of `ic` that names `cause` and prints
+/// nothing to standard output.
+fn assert_refused(outcome: &Run, cause: &str) {
+    assert_eq!(outcome.code, RUN_ERROR, "stderr: {}", outcome.stderr);
+    assert_eq!(outcome.stdout, "", "a refusal must print nothing");
+    assert!(
+        outcome.stderr.contains(cause),
+        "the refusal must say {cause:?}: {}",
+        outcome.stderr
+    );
+}
+
+/// The flag compares two images. One file, three files, and no file are each
+/// refused, and the message says two files.
+#[test]
+fn diff_takes_exactly_two_files() {
+    let scratch = Scratch::new(TARGET_NAME, "count");
+    let (first, second) = fixtures(&scratch);
+
+    assert_refused(
+        &run(ic(TERM_XTERM_256COLOR).arg(FLAG).arg(&first)),
+        "two files",
+    );
+    assert_refused(
+        &run(ic(TERM_XTERM_256COLOR)
+            .arg(FLAG)
+            .arg(&first)
+            .arg(&second)
+            .arg(&first)),
+        "two files",
+    );
+    assert_refused(&run(ic(TERM_XTERM_256COLOR).arg(FLAG)), "two files");
+}
+
+/// A video is no still image, and the refusal names the reason.
+#[test]
+fn diff_refuses_a_video() {
+    let scratch = Scratch::new(TARGET_NAME, "video");
+    let (first, _second) = fixtures(&scratch);
+    let clip = scratch.file("clip.mp4", b"not really a video");
+
+    assert_refused(
+        &run(ic(TERM_XTERM_256COLOR).arg(FLAG).arg(&first).arg(&clip)),
+        "video",
+    );
+    assert_refused(
+        &run(ic(TERM_XTERM_256COLOR).arg(FLAG).arg(&clip).arg(&first)),
+        "video",
+    );
+}
+
+/// A text file is no still image, and the refusal names the reason.
+#[test]
+fn diff_refuses_a_text_file() {
+    let scratch = Scratch::new(TARGET_NAME, "text");
+    let (first, _second) = fixtures(&scratch);
+    let notes = scratch.file("notes.txt", b"hello, this is text");
+
+    assert_refused(
+        &run(ic(TERM_XTERM_256COLOR).arg(FLAG).arg(&first).arg(&notes)),
+        "text file",
+    );
+}
+
+/// The flag beside another input mode or an option of a video is a mistake of
+/// usage, and the refusal of clap names the flag.
+#[test]
+fn diff_refuses_the_other_modes() {
+    let scratch = Scratch::new(TARGET_NAME, "modes");
+    let (first, second) = fixtures(&scratch);
+    let directory = scratch.dir.display().to_string();
+
+    for option in [
+        &["--stdin"][..],
+        &["--monitor", directory.as_str()],
+        &["--will-display"],
+        &["--loop-video"],
+        &["--fps", "10"],
+        &["--do-not-drop-frames"],
+        &["--memory-cleanup-frequency", "10"],
+        &["--max-fps", "10"],
+        &["--adaptive-fps"],
+    ] {
+        let outcome = run(ic(TERM_XTERM_256COLOR)
+            .arg(FLAG)
+            .args(option)
+            .arg(&first)
+            .arg(&second));
+
+        assert_eq!(
+            outcome.code, USAGE_ERROR,
+            "{option:?} with the flag must be refused as usage: {}",
+            outcome.stderr
+        );
+        assert!(
+            outcome.stderr.contains(option[0]),
+            "the refusal must name {}: {}",
+            option[0],
+            outcome.stderr
+        );
+    }
+}
+
+/// `--diff-mode` means nothing without `--diff`, and clap says so.
+#[test]
+fn diff_mode_needs_the_flag() {
+    let scratch = Scratch::new(TARGET_NAME, "mode-alone");
+    let (first, _second) = fixtures(&scratch);
+
+    let outcome = run(ic(TERM_XTERM_256COLOR)
+        .args(["--diff-mode", "mask"])
+        .arg(&first));
+
+    assert_eq!(outcome.code, USAGE_ERROR, "stderr: {}", outcome.stderr);
+    assert!(
+        outcome.stderr.contains(FLAG),
+        "the refusal must name {FLAG}: {}",
+        outcome.stderr
+    );
+}
+
+/// A display run prints the two paths and the summary above the picture. The
+/// run forces a protocol and a size, so it reads no terminal.
+#[test]
+fn diff_display_prints_the_header() {
+    let scratch = Scratch::new(TARGET_NAME, "header");
+    let (first, second) = fixtures(&scratch);
+
+    let display = |second: &std::path::Path| {
+        run(ic(TERM_XTERM_256COLOR)
+            .arg(FLAG)
+            .args(["--protocol", "iterm2", "--width", "10", "--height", "5"])
+            .arg(&first)
+            .arg(second))
+    };
+
+    let differing = display(&second);
+    assert_eq!(differing.code, Some(0), "stderr: {}", differing.stderr);
+    let expected = format!(
+        "{} vs {}\n1 region differs (1 pixel)\n",
+        first.display(),
+        second.display()
+    );
+    assert!(
+        differing.stdout.starts_with(&expected),
+        "stdout must start with {expected:?}: {:?}",
+        differing.stdout
+    );
+
+    let same = display(&first);
+    assert_eq!(same.code, Some(0), "stderr: {}", same.stderr);
+    let expected = format!(
+        "{} vs {}\nthe images are the same\n",
+        first.display(),
+        first.display()
+    );
+    assert!(
+        same.stdout.starts_with(&expected),
+        "stdout must start with {expected:?}: {:?}",
+        same.stdout
     );
 }
