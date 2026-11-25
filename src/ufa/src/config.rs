@@ -1719,6 +1719,38 @@ mod tests {
         );
     }
 
+    /// dotenvy puts the whole text of a line it cannot parse into its error,
+    /// and that text holds the value. `main` prints the error, so a key with a
+    /// space in it, or a key with no closing quote, must not reach the report.
+    #[test]
+    fn a_settings_line_that_cannot_be_parsed_does_not_show_its_value() {
+        const LEAKED_KEY: &str = "sekrit-api-key";
+        let lines = [
+            format!("UNIFI_API_KEY={LEAKED_KEY} with space\n"),
+            format!("UNIFI_API_KEY=\"{LEAKED_KEY}\n"),
+        ];
+
+        for line in lines {
+            let temp = TempConfigDir::new("env-unparsable");
+            create_directory(&temp.dir);
+            write_file(&temp.dir.join(ENVIRONMENT_FILE), &line);
+
+            let (loaded, _) = load_and_take_back("UNIFI_API_KEY", &temp.dir);
+
+            let error = loaded.expect_err("a settings line that cannot be parsed is a fault");
+            for report in [format!("{error:#}"), format!("{error:?}")] {
+                assert!(
+                    report.contains(ENVIRONMENT_FILE),
+                    "the failure must name the file it could not parse, got {report}"
+                );
+                assert!(
+                    !report.contains(LEAKED_KEY),
+                    "the failure must not show the value of the line {line:?}, got {report}"
+                );
+            }
+        }
+    }
+
     /// The file the user put beside the configuration file is the one that is
     /// read, and its settings reach the process environment.
     #[test]
