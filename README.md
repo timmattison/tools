@@ -307,6 +307,9 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     - A fast terminal image and video display utility, designed as a high-performance alternative to `imgcat`. Supports
       multiple image and video formats, resizing with aspect ratio preservation, and reading from files or stdin. Video support requires ffmpeg.
     - To install: `cargo install --git https://github.com/timmattison/tools ic`
+    - `ic --emit-rgba 640x480 photo.jpg` prints the decoded pixels as JSON for a program that draws the picture itself.
+      The [`ic-inline`](plugins/ic-inline/README.md) Claude Code plugin uses it to show pictures inline in the transcript:
+      `/plugin install ic-inline --marketplace timmattison/tools`
 - inscribe
     - Automatically generates clear and consistent git commit messages using Claude AI. Analyzes staged changes and creates
       conventional commit messages. Supports credential storage in system credential managers (Keychain on macOS, Credential
@@ -2258,8 +2261,8 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     line for the Claude Code sessions. The header adds the swap traffic, the size of the
     compressor, and the swap in use over the same sample. `faulte check` says in seconds if the
     system time is high, and if memory churn or process churn occurs at the same time.
-    `faulte kill` stops the old idle Claude Code sessions after a question. It supports macOS
-    only. See below for the full entry.
+    `faulte kill` stops the old idle Claude Code sessions after a question. `faulte tui` is a live
+    full-screen view with a history. It supports macOS only. See below for the full entry.
   - To install: `cargo install --git https://github.com/timmattison/tools faulte`
 - ufa (UniFi API)
   - Drives a UniFi Network application through its Integration API, and the cloud consoles of an
@@ -2859,6 +2862,62 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     processes, such as 176 Claude Code sessions, then count as one cause. It uses no language
     model. It supports macOS only. See below for the full entry.
   - To install: `cargo install --git https://github.com/timmattison/tools whyslow`
+- portcul (portcullis)
+  - Shows each process that listens on a port in a table in the terminal. Move with the arrow keys or `j`/`k`.
+    Press `d` or Enter to send SIGTERM to the selected process after a confirmation, and press `r` to read the
+    table again. The table refreshes each 2 s, and `--refresh <seconds>` changes the interval (0.1 s or more).
+  - `portcul list [port]` prints one line for each process and address. `portcul kill <port>` sends SIGTERM to
+    each process on the port after a confirmation, and `--yes` skips the confirmation. After the confirmation,
+    `kill` reads the list again, and it sends nothing to a process that no longer listens on the port. `list`
+    and `kill` exit with status 1 when no process listens on the port, and `kill` also exits with status 1 when a
+    kill fails or a process no longer listens.
+  - To install: `cargo install --git https://github.com/timmattison/tools portcul`
+- workit
+  - Builds a Cargo workspace manifest out of a directory tree. It walks the tree, finds every
+    `Cargo.toml` that declares a package and no workspace of its own, and writes those directories
+    into the `[workspace]` members list — rewriting the members of a manifest that is already there
+    and leaving the rest of it alone, and naming on stderr every member the walk did not find
+    before that rewrite drops it. The manifest lands beside the tree that was scanned, so
+    `workit --path ~/code/other` writes `~/code/other/Cargo.toml` and never touches the directory
+    the run was started from; `--output` names a file of its own instead. A member is written
+    relative to the directory that holds the manifest, because that is the directory cargo resolves
+    a member against, so `--output` decides what the members read. A package in that directory
+    itself is written as `.`, which is what cargo calls it. Cargo holds a member only where
+    that manifest sits above the member on the file system, and it refuses an absolute path and a
+    `../` path alike, so `--output` has to name a file at or above the tree that was scanned. A run
+    that meets a package the manifest directory does not hold refuses, names every such package,
+    and writes nothing — it used to write those packages as absolute paths, and no checkout could
+    load the manifest that came out, not even the one that wrote it. The one file left out of the members
+    list is the manifest the run writes, because no workspace holds itself: a package at the
+    search path is a member of a manifest that lands elsewhere. Two packages that share a name are
+    refused rather than written, with the paths that hold each one, because a workspace cannot
+    carry the same package name twice — the report is ordered by package name and by path, so two
+    runs over one tree read the same. A directory named `target` or `node_modules` stays out of
+    the walk, and so does a package inside a git worktree that lies *below* the search path, which
+    is a second checkout of packages the repository already holds — where the search path itself
+    sits is never matched, so a run from inside a worktree still finds every package under it, and
+    a run that found packages and then filtered every one of them out says so and names
+    `--include-worktrees`. A package under a nested repository of its own is not a second checkout
+    and stays in, also when its git directory lies elsewhere, as after
+    `git init --separate-git-dir`, and also when its `.git` file names no git directory, at
+    which git itself stops. A package in a submodule goes with the checkout that holds the submodule: it
+    stays in under the main checkout, and it is left out under a worktree below the search path. An exclusion names a whole directory below the search path, so
+    `targets` and `node_modules_backup` stay in, and the search path itself is never matched
+    against the list — `workit --path ~/code/target/myproj` searches that tree like any other. An
+    entry it cannot use — a directory whose mode keeps it out, a `Cargo.toml` nobody can parse, a
+    package that states no name — is named on stderr and skipped rather than ending the walk, and
+    the number skipped is stated once at the end; the packages it did find are still the answer. A
+    package with no name never reaches the members list, because cargo refuses a whole workspace
+    that lists one — it used to be written in like any other, and the run reported a workspace cargo
+    loads no part of. A run that skipped something and has no package left to list never answered
+    the question it was asked, so that one fails instead of reporting an empty tree.
+  - Usage: `workit`, `workit --path ~/code/tools` (writes `~/code/tools/Cargo.toml`),
+    `workit --path packages --output Cargo.toml` (scans `packages/` and writes the manifest above
+    it, so every member reads `packages/<name>`),
+    `workit --dry-run` (prints the manifest it would write and touches nothing),
+    `workit --exclude vendor`, `workit --include-worktrees`,
+    `workit --no-default-excludes`.
+  - To install: `cargo install --git https://github.com/timmattison/tools workit`
 
 ## dirhash
 
@@ -5270,12 +5329,14 @@ faulte check
 faulte check --watch --interval 10s
 faulte kill
 faulte kill --older-than 3d --idle-for 1h --max 5
+faulte tui
+faulte tui --interval 2s
 ```
 
 ### Options
 
-- `--interval <DURATION>`: The length of the sample, for example `5s`, `10m`, `2h`, or `7d`. A bare number is a number of seconds. The ranking and `faulte kill` count the page faults of each process over this time. `faulte check` reads the kernel counters at the start and at the end of this time. Defaults to `5s`. Zero is refused, because a sample of no time measures nothing.
-- `--limit <N>`: The number of rows that the table shows. Defaults to 25. One line under the table counts the rows that the limit hid, and gives their share of all faults, because the limit hides the small rates and the small rates were the load. The flag belongs to the ranking alone: `faulte kill` shows every candidate of its plan, and refuses `--limit` rather than take it and ignore it.
+- `--interval <DURATION>`: The length of the sample, for example `5s`, `10m`, `2h`, or `7d`. A bare number is a number of seconds. The ranking, `faulte kill`, and each sample of `faulte tui` count the page faults of each process over this time. `faulte check` reads the kernel counters at the start and at the end of this time. Defaults to `5s`. Zero is refused, because a sample of no time measures nothing.
+- `--limit <N>`: The number of rows that the table shows. Defaults to 25. One line under the table counts the rows that the limit hid, and gives their share of all faults, because the limit hides the small rates and the small rates were the load. The flag belongs to the ranking alone: `faulte kill` shows every candidate of its plan, and refuses `--limit` after its name. Before the name, as in `faulte --limit 3 kill`, the flag is a flag of `faulte` itself, and `faulte kill` takes it and ignores it. That spelling keeps the exit code that it had before `faulte tui`.
 - `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
 - `-h`, `--help`: Print the usage.
 
@@ -5358,6 +5419,62 @@ Both parsers fail closed. A header row that is not the one `faulte` asked for, a
 
 The registry of Claude Code is the one fact that stays out of reach. The `~/.claude/sessions` directory of the other account has the mode `0700`. A Claude Code process of another account therefore gives its fault rate, its memory and its age, and `other account — run with sudo` in place of the session, the state and the directory. Under `sudo`, `faulte` reads the registry in the home directory of each owner, and `faulte kill` can stop the sessions of every account. `faulte` never runs `sudo` itself, the same as `crap`.
 
+### `faulte tui`
+
+`faulte tui` opens a full-screen view that keeps a history. `faulte` takes one sample and exits. The view takes a new sample all the time, and each new ranking replaces the old one. The view keeps every ranking, so a person can go back in time.
+
+```text
+faulte tui
+faulte tui --interval 2s
+```
+
+The table has the same columns as `faulte`, and the header has the same lines. It shows every process that made at least one fault. The `--limit` flag does not apply, because a limit hides the small rates, and the small rates were the load. `faulte tui` refuses `--limit`. Above the table, a timeline shows the fault rate over the whole history. Each cell of the timeline shows the highest rate of its slice, so a spike stays visible on a narrow terminal. A second row shows the swap traffic. The two rows are separate, because faults and swap are two separate questions.
+
+In this section, a **frame** is the ranking and the memory counters of one sample. A **gap** is a time that the view tried to measure and did not measure. A failed read makes a gap with its reason. A gap has its own glyph on the timeline, and it is never the lowest bar. The view continues after a failed read.
+
+The view is one sample behind the clock. A sample is complete when the header of the next sample arrives. A banner states the time of the frame on the screen. When the frame is not the live frame, the banner says so in words, with the clock time and the age of the frame. The age and the session state of each row are those of that frame. The sampler continues while a person reads the past, so the history has no hole.
+
+| Key | Action |
+| --- | --- |
+| `←` or `h`, `→` or `l` | Move one frame back, or one frame forward |
+| `[`, `]` | Move one minute back, or one minute forward |
+| `Home` | Move to the oldest frame |
+| `End` | Return to the live view |
+| `Esc` | Close the detail view. With no detail view open, return to the live view |
+| `↑` or `k`, `↓` or `j` | Select the row above, or the row below. In the detail view, show the command of the new process from its first line |
+| `PageUp`, `PageDown` | Move the selection by one screen. In the detail view, scroll the command line |
+| `w` | Change the span of the table: one frame, 1 m, 5 m, 15 m, the whole history |
+| `Enter` | Open the detail view of the selected process |
+| `q`, `Ctrl-C` | Quit |
+
+No key uses Shift or another modifier, because a modified arrow key depends on the terminal and on the multiplexer. The keys answer during a sample, because the sampler runs on its own thread. A slow `top` does not freeze the view.
+
+The `w` key ranks the processes over a span that ends at the selected frame, so one table answers "which processes caused the last 5 minutes". A process that exited in the span keeps its row. The rate of a span is the sum of the faults of the process over the frames of the span, divided by the sum of the windows of those frames. A gap adds to neither sum, so the rate counts measured time only. The header of a span states the measured time and the count of gaps. Its skipped line gives the sum of the processes that exited over the frames of the span, and the zombies and the unsampled processes of the newest frame. Those two counts are snapshots, so a sum counts one zombie once for each frame that saw it. The detail view shows the fault rate of one process over the whole history, and its full command line. A reused PID is a different process, so two processes never share one history.
+
+The view marks the rows of `faulte`, `top`, and `ps` that it started. Those rows stay in the totals. No key sends a signal. `faulte kill` keeps its plan and its question.
+
+#### The memory budget
+
+The history lives in memory and ends with the process. A Mac that is short of memory must not lose more memory to its own diagnostic tool. The budget is 64 MiB, and it counts the frames and the command text. The count of frames also has a limit, so the list of the frames takes at most an eighth of the budget. At one frame each 5 s, the budget holds about 8 hours. The oldest frames leave first. If the selected frame leaves, the selection moves to the oldest frame, and the banner says so. The 8 hours is an estimate from one Mac. The budget test holds the limit.
+
+A frame keeps one compact row for each process that made at least one fault. On 2026-11-08, one sample of this Mac had 1,415 rows, and 495 of them had at least one fault. The command lines took 238,203 bytes. A history of full values at one frame each 5 s needs about 340 MB of text each hour.
+
+#### One `top` child
+
+The view runs one `top -l 0 -s <interval> -c d` child for its whole life. The command `faulte` runs `top -l 2` for each window, and each run pays the full start of `top`. That start made a hole in the record. These measurements are from 2026-11-08, at a load average of 125 to 166:
+
+| Measurement | Result |
+| --- | --- |
+| One `top -l 2 -s 5` | 25.02 s of wall time for one window of 9 s |
+| One `top -l 0 -s 2` through a pipe | First sample after 9.42 s, then one more sample each 4.2 s to 6.9 s |
+| One `top -l 0 -s 2` through a pseudo-terminal | First sample after 22.17 s, then one more sample each 4.6 s to 7.0 s |
+
+A pipe is sufficient. The first sample holds the counter since each process started, so the view discards it. Each later sample is one window, and the windows touch. The window of each frame comes from what the samples state, and not from the interval that the person asked for. If the child ends, the sampler starts one new child after one interval, and a gap holds the lost time. When the view ends, the `top` child stops with it.
+
+#### The terminal
+
+`faulte tui` needs a terminal on its input and on its output. If one of them is not a terminal, `faulte tui` prints the reason and exits 1, and it starts no `top`. A quit, a panic, `SIGTERM`, and `SIGHUP` each restore the terminal. The view redraws at any size. On a platform other than macOS, it prints `faulte supports macOS only.` and exits 1.
+
 ### `faulte kill`
 
 `faulte kill` stops Claude Code sessions, and it never selects another kind of process. `pk` does that job. A session is a candidate when all four of these rules are true:
@@ -5406,12 +5523,12 @@ The transcript of a session stays on disk after the stop, so `crap` takes that s
 - **A scheduled wake-up.** A session can be idle and hold a scheduled wake-up, for example a `/loop`. The registry records no wake-up, so `faulte` cannot see one. This is why the plan shows every candidate before the question: `faulte` gives the facts that it has, and the person decides.
 - **The sessions of another account, without root.** They get a row and a fault rate, and `other account — run with sudo` in place of the session fields. In the plan, they get a block of their own with the `sudo faulte kill` command line that includes them, and `faulte kill` never signals them. A count of unreadable sessions is a better answer than silence about them.
 - **A process that the two sources disagree about.** `top` lists no zombie, and `ps` lists no PID 0. A process can also start or stop between the two reads. `faulte` gives PID 0 a row that names `kernel_task`, and it gives every other such process a count in the header. Nothing falls out of the report.
-- **A live display, and another platform.** The ranking and `faulte kill` take one sample and exit. `faulte check --watch` adds one line for each interval, and it redraws nothing. It supports macOS only, because the fault sampler and the counters of the memory system are those of macOS. On another platform it prints `faulte supports macOS only.` and exits 1.
+- **A live display, and another platform.** The ranking and `faulte kill` take one sample and exit. `faulte check --watch` adds one line for each interval, and it redraws nothing. `faulte tui` is the live view, and it keeps a history. It supports macOS only, because the fault sampler and the counters of the memory system are those of macOS. On another platform it prints `faulte supports macOS only.` and exits 1.
 
 ### Exit codes
 
 - `0`: Success. A question that the person declined is a success as well, because `faulte` did what the answer said. For `faulte check`, the verdict is `OK`, or the reader of a `--watch` left.
-- `1`: The platform is not macOS, or `faulte check` found a problem, or `faulte kill` found candidates and its input is not a terminal.
+- `1`: The platform is not macOS, or `faulte check` found a problem, or `faulte kill` found candidates and its input is not a terminal, or `faulte tui` has no terminal on its input or its output.
 - `2`: A source of this Mac failed, or its output failed a parser, or a stop did not do what the plan said that it would do, or `faulte check` could not write its output. `faulte` prints the reason, and it never prints an empty ranking.
 
 ## wdid (what do i do)
@@ -6046,3 +6163,71 @@ After Enter, `chf` replaces itself with the shell that runs `crap`. The exit sta
 ```bash
 cargo install --git https://github.com/timmattison/tools chf
 ```
+
+## msgs (iMessage browser)
+
+Browse, search, and export your iMessage conversations. `msgs` is a desktop app for macOS, made with Tauri v2. It reads `~/Library/Messages/chat.db` read-only, and it never writes to it.
+
+- **Conversations.** The left panel lists the conversations, newest first. The arrow keys move the selection, and Enter opens the conversation.
+- **Messages.** The right panel shows the messages of the conversation as chat bubbles. Older messages load when you scroll up. An attachment shows as a line with its name and size.
+- **Search.** The search box finds the text of all messages. At each start, `msgs` makes a full-text index of the message text in memory, in the background, and the search box shows the progress. A search that you type during the build waits for it, and runs when the index is ready. Click a result to open its conversation at that message and highlight it.
+- **Export.** Click **Export Selection**, click the first and the last message of a range, then click **Export JSON**. `msgs` writes `messages.json` and an `attachments/` folder to the location that you choose. Each attachment file gets the name `<attachment id>-<file name>`, and `messages.json` gives that path in `exported_file`.
+
+The search index lives in memory only. `msgs` writes no copy of the message text to disk. Thus each start makes the index again, and search waits for that build. An older `msgs` kept the index in `~/Library/Application Support/msgs/text-cache.db`, outside the protection that macOS gives to `~/Library/Messages`. At each start, `msgs` deletes that file.
+
+`msgs --version` prints the version and does not start the app.
+
+### Requirements
+
+- macOS, with Messages set up.
+- Full Disk Access for the app, or for the terminal that starts it: System Settings > Privacy & Security > Full Disk Access. If the access is missing, `msgs` shows these steps.
+- Node.js, pnpm, and the Tauri CLI (`cargo install tauri-cli`).
+
+### Run it in development
+
+```bash
+src/msgs/scripts/dev.ts
+```
+
+The script installs the frontend dependencies, gets a free port from `portplz`, and starts the app on that port. Tauri starts Vite on the same port through `beforeDevCommand`, and the script does not change `tauri.conf.json`. A plain `cargo tauri dev` from the root of the repository starts Vite on port 1420. It does not install the frontend dependencies, thus run `pnpm --dir src/msgs/frontend install` before it.
+
+### Build it
+
+Run these commands from the root of the repository. The build does not install the frontend dependencies, thus the first command installs them:
+
+```bash
+pnpm --dir src/msgs/frontend install
+cargo tauri build --no-bundle   # the binary is target/release/msgs
+```
+
+## nle (non-linear editor)
+
+A desktop application for the terminal recordings that `beta` writes. This
+version is the scaffold: it opens a `.json` or `.json.gz` recording and shows
+its metadata. The timeline (issue #150) and the preview pane (issue #151) are
+placeholders.
+
+The application is Tauri 2. The Rust side reads and writes every recording
+file, and the frontend reads one through typed commands. The backend also has
+commands that save a recording, list the recordings in a directory, and export
+a recording through the `beta` CLI as a video or a web player. The frontend
+does not call them yet. `ts-rs` generates a TypeScript type from each Rust
+struct that the commands use, and a test fails when the committed types drift
+from the Rust structs.
+
+The export commands run `beta` with the PATH of the app, then
+`$CARGO_HOME/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.
+A macOS app that starts from Finder or the Dock gets only the system PATH.
+`beta` runs `ffmpeg` through the same PATH.
+
+`cargo install` does not build this tool, because the application carries a
+frontend that a bundler must build first. To run it from a checkout:
+
+```bash
+./src/nle/scripts/dev.ts
+```
+
+The script installs the frontend dependencies. It asks `portplz` for a free
+port. Then it starts `cargo tauri dev` with Vite on that port.
+
+To build the desktop application, run `cargo tauri build` from `src/nle`.

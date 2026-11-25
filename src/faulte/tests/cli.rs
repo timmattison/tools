@@ -55,7 +55,8 @@ fn one_line(text: &[u8]) -> String {
         .join(" ")
 }
 
-/// `--limit` belongs to the ranking, and `faulte kill` refuses it.
+/// `--limit` belongs to the ranking, and `faulte kill` refuses it after its
+/// name. Before the name, the flag is a flag of `faulte`, and the run succeeds.
 ///
 /// The issue gives `--limit` to the ranking and `--max` to `faulte kill`. A
 /// flag that a command takes and then ignores is worse than a flag that it
@@ -91,6 +92,70 @@ fn kill_refuses_the_limit_of_the_ranking() {
         .success(),
         "the ranking flag stands before the name of the command"
     );
+}
+
+/// The exit code of a run that needs a terminal and has none.
+#[cfg(target_os = "macos")]
+const NOT_A_TERMINAL_EXIT: i32 = 1;
+
+/// `faulte tui` draws a full-screen view, so a run with pipes refuses.
+///
+/// The test runs the binary with a null input and a captured output.
+#[cfg(target_os = "macos")]
+#[test]
+fn tui_with_no_terminal_exits_one() {
+    let output = run(&["tui"]);
+    let stderr = one_line(&output.stderr);
+
+    assert_eq!(
+        output.status.code(),
+        Some(NOT_A_TERMINAL_EXIT),
+        "faulte tui with pipes exits 1, it wrote {stderr:?}"
+    );
+    assert!(
+        stderr.contains(
+            "faulte tui draws a full-screen view, so it needs a terminal on its input and on its output. faulte tui did not start."
+        ),
+        "the message states why: {stderr:?}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "faulte tui writes nothing to the output: {:?}",
+        glyphs(&output.stdout)
+    );
+}
+
+/// `--limit` belongs to the ranking, and `faulte tui` refuses it in both
+/// spellings. A view that took the flag and ignored it would mislead the
+/// person who wrote it.
+#[test]
+fn tui_refuses_the_limit_of_the_ranking_in_both_spellings() {
+    for args in [["tui", "--limit", "3"], ["--limit", "3", "tui"]] {
+        let output = run(&args);
+        let stderr = one_line(&output.stderr);
+
+        assert_eq!(
+            output.status.code(),
+            Some(USAGE_ERROR),
+            "faulte {args:?} is a usage error, it wrote {stderr:?}"
+        );
+        assert!(
+            stderr.contains("--limit"),
+            "the message names the flag that faulte tui does not take, for {args:?}: {stderr:?}"
+        );
+        assert!(
+            !stderr.contains("unrecognized subcommand"),
+            "the message is about the flag and not about the command, for {args:?}: {stderr:?}"
+        );
+    }
+}
+
+/// `--help` lists the `tui` command.
+#[test]
+fn help_lists_the_tui_command() {
+    let top = one_line(&run(&["--help"]).stdout);
+
+    assert!(top.contains("tui"), "faulte --help lists tui: {top}");
 }
 
 /// `--version` gives the name, the package version, the git hash, and the

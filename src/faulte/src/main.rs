@@ -4,9 +4,11 @@
 use std::process::ExitCode;
 
 use buildinfo::version_string;
-use clap::{Parser, Subcommand};
+use clap::error::ErrorKind;
+use clap::parser::ValueSource;
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 #[cfg(target_os = "macos")]
-use faulte::check::{self, Sampler};
+use faulte::check;
 use faulte::duration::Span;
 #[cfg(target_os = "macos")]
 use faulte::machine::{macos::Mac, observe, MachineError};
@@ -17,11 +19,19 @@ use faulte::plan::{self, Candidate, PlanInput, Rules};
 #[cfg(target_os = "macos")]
 use faulte::render;
 #[cfg(target_os = "macos")]
+use faulte::sampler::Sampler;
+#[cfg(target_os = "macos")]
 use faulte::stop::{self, Decision, Timing};
 #[cfg(target_os = "macos")]
-use std::io::{self, BufRead, ErrorKind, IsTerminal, Write};
+use faulte::tui::{self as view, TerminalEvents};
 #[cfg(target_os = "macos")]
-use std::time::Duration;
+use std::io::{self, BufRead, IsTerminal, Write};
+#[cfg(target_os = "macos")]
+use std::sync::atomic::AtomicBool;
+#[cfg(target_os = "macos")]
+use std::sync::Arc;
+#[cfg(target_os = "macos")]
+use std::time::{Duration, SystemTime};
 
 /// The one-line description that `--help` shows.
 const ABOUT: &str =
@@ -69,6 +79,19 @@ const EXIT_ERROR: u8 = 2;
 /// not do the work that the command line asked for, so it is not a success.
 #[cfg(target_os = "macos")]
 const EXIT_NOT_A_TERMINAL: u8 = 1;
+
+/// What `faulte tui` says when the input or the output is not a terminal.
+#[cfg(target_os = "macos")]
+const TUI_NEEDS_A_TERMINAL: &str = "faulte tui draws a full-screen view, so it needs a terminal on its input and on its output. faulte tui did not start.";
+
+/// The signals that make `faulte tui` leave the same way that `q` does.
+///
+/// The handler of each one only sets a flag. The loop reads the flag, and the
+/// guard of the terminal restores the screen on the way out. A handler that
+/// restored the screen itself would call functions that are not safe in a
+/// signal handler.
+#[cfg(target_os = "macos")]
+const LEAVING_SIGNALS: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGHUP, libc::SIGINT];
 
 /// The exit code when `faulte check` finds a problem.
 #[cfg(target_os = "macos")]
@@ -148,9 +171,10 @@ const POLL: Duration = Duration::from_secs(1);
 #[command(name = "faulte", version = version_string!(), about = ABOUT)]
 struct Cli {
     /// The length of the sample, for example 5s, 10m, or 2h. A bare number is a
-    /// number of seconds. The ranking and `faulte kill` count the page faults
-    /// of each process over this time. `faulte check` reads the kernel counters
-    /// at the start and at the end of this time.
+    /// number of seconds. The ranking, `faulte kill`, and each sample of
+    /// `faulte tui` count the page faults of each process over this time.
+    /// `faulte check` reads the kernel counters at the start and at the end of
+    /// this time.
     #[arg(long, global = true, value_name = DURATION_VALUE, default_value = DEFAULT_INTERVAL)]
     interval: Span,
 
@@ -186,6 +210,10 @@ enum Command {
         max: Option<usize>,
     },
 
+    /// Show a full-screen view of the page faults of this Mac, with the
+    /// history of the samples. Press q to leave.
+    Tui,
+
     /// Say if the system time of this Mac is high now, and if memory churn or
     /// process churn occurs at the same time. The exit code is 0 for no problem,
     /// 1 for a problem, and 2 for an error. It runs no `top` and no `ps`, thus it
@@ -198,7 +226,31 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    run(Cli::parse())
+    run(parse_cli())
+}
+
+/// What the usage error says when `faulte tui` gets `--limit`.
+const TUI_REFUSES_LIMIT: &str = "--limit belongs to the ranking, and faulte tui has no ranking to limit. Run faulte tui with no --limit.";
+
+/// Reads the command line and exits with a usage error when it is wrong.
+///
+/// `--limit` stands before the name of a command, so clap accepts it for
+/// `faulte tui`. The flag belongs to the ranking alone. A flag that a command
+/// takes and then ignores is worse than a flag that it refuses, so this
+/// function refuses `--limit` that the person typed with `tui`. The value
+/// source tells a typed flag from the default. `faulte --limit N kill` keeps
+/// its exit code of 0, because `faulte tui` changes no exit code of
+/// `faulte kill`.
+fn parse_cli() -> Cli {
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    let typed_limit = matches.value_source("limit") == Some(ValueSource::CommandLine);
+    if matches!(cli.command, Some(Command::Tui)) && typed_limit {
+        Cli::command()
+            .error(ErrorKind::ArgumentConflict, TUI_REFUSES_LIMIT)
+            .exit();
+    }
+    cli
 }
 
 /// Runs the command that the person gave.
@@ -211,6 +263,7 @@ fn run(cli: Cli) -> ExitCode {
     } = cli;
     match command {
         None => rank(interval, limit),
+        Some(Command::Tui) => tui(interval),
         Some(Command::Kill {
             older_than,
             idle_for,
@@ -249,7 +302,7 @@ fn deliver(output: &mut impl Write, lines: &[String]) -> Delivery {
     for line in lines {
         match writeln!(output, "{line}") {
             Ok(()) => {}
-            Err(error) if error.kind() == ErrorKind::BrokenPipe => return Delivery::ReaderLeft,
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return Delivery::ReaderLeft,
             Err(error) => {
                 eprintln!("{TOOL}: {NO_OUTPUT}: {error}");
                 return Delivery::Failed;
@@ -267,7 +320,7 @@ fn deliver(output: &mut impl Write, lines: &[String]) -> Delivery {
 #[cfg(target_os = "macos")]
 fn check_now(interval: Span, watch: bool) -> ExitCode {
     let interval = Duration::from(interval);
-    let mut sampler = match Sampler::start(Mac::new()) {
+    let mut sampler = match check::Sampler::start(Mac::new()) {
         Ok(sampler) => sampler,
         Err(error) => return failed(&error),
     };
@@ -299,7 +352,7 @@ fn check_now(interval: Span, watch: bool) -> ExitCode {
 /// with the exit code 2 when a read of the kernel or a write of the output
 /// fails.
 #[cfg(target_os = "macos")]
-fn check_watch(sampler: &mut Sampler<Mac>, interval: Duration) -> ExitCode {
+fn check_watch(sampler: &mut check::Sampler<Mac>, interval: Duration) -> ExitCode {
     let mut output = io::stdout().lock();
     loop {
         let result = match sampler.sample(interval) {
@@ -311,6 +364,54 @@ fn check_watch(sampler: &mut Sampler<Mac>, interval: Duration) -> ExitCode {
             Delivery::Written => {}
             Delivery::ReaderLeft => return ExitCode::SUCCESS,
             Delivery::Failed => return ExitCode::from(EXIT_ERROR),
+        }
+    }
+}
+
+/// Shows the full-screen view until the person quits or a signal arrives.
+///
+/// The check for a terminal comes first, so a run with pipes starts no `top`.
+/// The locals drop in the reverse order of their making: the session restores
+/// the terminal first, then the sampler stops `top`.
+#[cfg(target_os = "macos")]
+fn tui(interval: Span) -> ExitCode {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        eprintln!("{TUI_NEEDS_A_TERMINAL}");
+        return ExitCode::from(EXIT_NOT_A_TERMINAL);
+    }
+    let signalled = Arc::new(AtomicBool::new(false));
+    for signal in LEAVING_SIGNALS {
+        if let Err(error) = signal_hook::flag::register(signal, Arc::clone(&signalled)) {
+            eprintln!("{TOOL}: {error}");
+            return ExitCode::from(EXIT_ERROR);
+        }
+    }
+    let sampler = Sampler::spawn(Mac::new(), interval, Pid::new(std::process::id()));
+    // The session erases the screen, restores the terminal on every exit, and
+    // installs a panic hook that restores it too.
+    let mut session = match altscreen::RatatuiSession::enter(altscreen::Options::default()) {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("{TOOL}: cannot enter the alternate screen: {error}");
+            return ExitCode::from(EXIT_ERROR);
+        }
+    };
+    let result = view::run(
+        session.terminal(),
+        &mut TerminalEvents,
+        sampler.updates(),
+        &signalled,
+        &SystemTime::now,
+        &chrono::Local,
+    );
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            // The session has not dropped yet, so the screen is still the
+            // alternate screen. Restore it before the message.
+            drop(session);
+            eprintln!("{TOOL}: {error}");
+            ExitCode::from(EXIT_ERROR)
         }
     }
 }

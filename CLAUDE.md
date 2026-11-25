@@ -278,6 +278,8 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
   prints for a person to paste
 - `crap` - the paths that the tests of the shell function put into the fake
   scripts
+- `faulte` - the text and the PID file path that the stream tests put into
+  the stub scripts
 - `gitscratch` - the log path, the path of the real git, and the subcommand
   names that the `git` shim of `testing::git_shim` puts into its script
 - `glance` - the remote binary in the command that `ssh` sends to the second
@@ -480,7 +482,8 @@ The ban covers the Rust code of this workspace. It does not cover code that
 other crates own, for example the build script of a dependency. So
 `.husky/pre-commit` and `test.sh` start each cargo command through
 `without_git_environment` in `scripts/without-git-environment.sh`, which removes
-the whole prefix. The hook is started by `sh`, so that function does not use
+the whole prefix. The hook starts each `claude` command of its plugin block
+through the same function. The hook is started by `sh`, so that function does not use
 `compgen`, which a shell other than bash does not have.
 
 ### The Trap: A Lint Cannot Say This
@@ -537,8 +540,8 @@ constructor or states an exemption at its site. It does not prove three things:
 - `clippy.toml` `disallowed-methods` — a raw `Command::new`,
   `tokio::process::Command::new` or `CommandBuilder::new` fails the build
 - `src/repo-guards/tests/pre_commit_hook.rs` — no cargo command of the hook or
-  of `test.sh` sees a `GIT_` variable, under a fake `cargo` that writes its
-  environment to a file
+  of `test.sh`, and no `claude` command of the hook, sees a `GIT_` variable,
+  under a fake program that writes its environment to a file
 - `repo_guards::git_env_sweep` (`src/repo-guards/src/git_env_sweep.rs`) — no
   file cargo compiles removes a `GIT_`-prefixed variable by name. Its companion
   test asks `cargo metadata` whether the read set holds every target root cargo
@@ -692,6 +695,7 @@ nothing is reported, so a stale entry fails too. The list holds three entries:
 - `cctop` - the full-screen view, through the ratatui session
 - `chf` - the picker, through the ratatui session
 - `diskhog` - the full-screen view, through the ratatui session
+- `faulte` - the view of `faulte tui`, through the ratatui session
 - `gitrdun` - the progress view, through the ratatui session
 - `gsw` - the watch view
 - `ha` - the full-screen view, through the ratatui session
