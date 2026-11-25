@@ -1,0 +1,35 @@
+[package]
+name = "msgs"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+tauri.workspace = true
+tauri-plugin-dialog.workspace = true
+rusqlite.workspace = true
+specta.workspace = true
+buildinfo.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+log.workspace = true
+env_logger.workspace = true
+dirs.workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dev-dependencies]
+# The row trace lets a test write to chat.db between two reads.
+rusqlite = { workspace = true, features = ["trace"] }
+tempfile.workspace = true
+childenv.workspace = true
+# A zone with summer time, for the tests of the offset of each date.
+chrono-tz.workspace = true
+specta-typescript.workspace = true
+
+[lints]
+workspace = true
