@@ -133,7 +133,7 @@ fn leaf_to_string(value: &serde_json::Value) -> String {
     }
 }
 
-#[allow(
+#[expect(
     clippy::print_stdout,
     reason = "this prints the document the user asked for, which is what standard output carries"
 )]
@@ -192,7 +192,7 @@ where
 }
 
 // Specific implementation for vectors with Tabled items
-#[allow(
+#[expect(
     clippy::print_stdout,
     reason = "this prints the document the user asked for, which is what standard output carries"
 )]
@@ -324,7 +324,7 @@ impl Report {
     /// Standard error carries the notes in both formats rather than in one, so
     /// there is a single rule about where a note goes, and it is the stream
     /// this crate already reports on -- the site it picked for the user, say.
-    #[allow(
+    #[expect(
         clippy::print_stdout,
         reason = "the document is what the user asked for; the notes beside it go to standard error"
     )]

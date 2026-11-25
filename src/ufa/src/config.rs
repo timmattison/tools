@@ -427,7 +427,7 @@ impl Config {
     /// Private on purpose: callers go through [`Config::edit`], which reads
     /// what is already on disk first, so no command can blank out a field it
     /// never asked about.
-    #[allow(
+    #[expect(
         clippy::print_stdout,
         reason = "only the setup wizard saves, through Config::edit, and the wizard is a conversation at a terminal with no --output format"
     )]
@@ -460,7 +460,7 @@ impl Config {
     }
 
     /// Interactive configuration setup
-    #[allow(
+    #[expect(
         clippy::print_stdout,
         reason = "the setup wizard is a conversation at a terminal, and it has no --output format"
     )]
@@ -589,7 +589,7 @@ impl Config {
     /// Only the cloud credential is touched: the controller URL, its
     /// 1Password reference and the TLS choice are loaded from the saved
     /// configuration and written back unchanged.
-    #[allow(
+    #[expect(
         clippy::print_stdout,
         reason = "the setup wizard is a conversation at a terminal, and it has no --output format"
     )]
@@ -733,7 +733,7 @@ const API_KEY_QUESTION: &str = "\nPaste your API key here: ";
 ///
 /// Returns an error when the answers do not come from a terminal, and if the
 /// answer cannot be read.
-#[allow(
+#[expect(
     clippy::print_stdout,
     reason = "the setup wizard is a conversation at a terminal, and it has no --output format"
 )]
@@ -1140,7 +1140,7 @@ pub fn read_again_from_1password(keys: &impl KeyStore, reference: &str) -> Resul
 }
 
 /// Run network discovery (mDNS + common IPs) and let the user pick.
-#[allow(
+#[expect(
     clippy::print_stdout,
     reason = "the setup wizard is a conversation at a terminal, and it has no --output format"
 )]
@@ -1174,7 +1174,7 @@ async fn network_discover_and_select() -> Result<String> {
     }
 }
 
-#[allow(
+#[expect(
     clippy::print_stdout,
     reason = "the setup wizard is a conversation at a terminal, and it has no --output format"
 )]
@@ -1217,7 +1217,7 @@ async fn get_manual_controller_url() -> Result<String> {
 }
 
 /// Prompt for an API key when no 1Password entry exists.
-#[allow(
+#[expect(
     clippy::print_stdout,
     reason = "the setup wizard is a conversation at a terminal, and it has no --output format"
 )]
