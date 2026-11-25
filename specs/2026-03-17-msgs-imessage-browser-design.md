@@ -35,7 +35,7 @@ src/msgs/
 │   ├── commands.rs     # Tauri command handlers (thin, call AppState)
 │   ├── state.rs        # AppState: db and cache slots, cache build thread, CacheStatus
 │   ├── db.rs           # SQLite query layer
-│   ├── cache.rs        # Text cache: FTS5 index of message text
+│   ├── cache.rs        # Search index: in-memory FTS5 index of message text
 │   ├── parser.rs       # attributedBody parser
 │   ├── export.rs       # Export engine
 │   ├── error.rs        # Error types
@@ -64,7 +64,7 @@ src/msgs/
         ├── conversations.ts    # Conversation list
         ├── messages.ts         # Message view
         ├── search.ts           # Global search
-        ├── cache-status.ts     # Search index state in the search box
+        ├── cache-status.ts     # Search index state in the search box, and the state that a waiting search reads
         ├── export.ts           # Export selection mode and save dialog
         ├── utils.ts            # DOM and error helpers
         ├── bindings.ts         # Generated types (do not edit)
@@ -82,10 +82,10 @@ All business logic lives in Rust:
 - **DB Layer**: Read-only SQLite connection to `~/Library/Messages/chat.db` via `rusqlite` with `SQLITE_OPEN_READ_ONLY`. Requires Full Disk Access granted to the app.
 - **attributedBody Parser**: Extracts plain text from NSKeyedArchiver/streamtyped blobs. 99.9% of messages (235k of 237k) store text in `attributedBody`, not the `text` column. See [attributedBody Parsing](#attributedbody-parsing) section for details. The parser is a distinct module with fallback handling for unrecognized blob formats.
 - **Date Conversion**: Apple Core Data timestamps are nanoseconds since 2001-01-01. Convert via `date / 1_000_000_000 + 978_307_200` to Unix epoch. Serialized as ISO 8601 with timezone offset (e.g., `2025-01-15T10:30:22-05:00`).
-- **Text Cache**: After launch, the backend extracts text from all `attributedBody` blobs and caches in a local SQLite database (`text-cache.db` in the `msgs` folder of the local data directory, `~/Library/Application Support/msgs/text-cache.db` on macOS) with an FTS5 virtual table. The build runs in the background, thus the window and the conversation views work while it runs, and search answers that the index is still building. This enables fast full-text search without modifying `chat.db`. The cache is rebuilt at the start of the app when the source fingerprint of `chat.db` changes (the count of joined message rows, the highest message ROWID, and the latest edit date). A failed build is tried again at the next call of `check_db_access`. A manual refresh is not built (see `WISHLIST.md`).
+- **Search Index**: At each start, the backend extracts text from all `attributedBody` blobs and builds an in-memory SQLite FTS5 index. The index has no file, and `temp_store` is `MEMORY`, thus the app writes no copy of the message text to disk. Each start builds the index again. The build runs in the background, thus the window and the conversation views work while it runs. A search that the user types during the build waits for it, and the result list shows the progress. A message that arrives after the start is not in the index until the next start. A failed build is tried again at the next call of `check_db_access`. A manual refresh is not built (see `WISHLIST.md`). Each call of `check_db_access` deletes the `text-cache.db` of an older msgs with its `-journal`, `-wal`, and `-shm` files, and the empty `msgs` folder. This enables fast full-text search without modifying `chat.db`.
 - **Query Builder**: Constructs SQL against Apple's schema (`message`, `chat`, `handle`, `attachment`, and their join tables).
 - **Export Engine**: Serializes message ranges to JSON and copies attachment files to an export folder.
-- **Search Engine**: FTS5 queries against the text cache, optionally filtered to a specific chat_id. While the index builds or after a failed build, the command returns a `CacheError` and the search box shows it. There is no in-memory fallback.
+- **Search Engine**: FTS5 queries against the in-memory index, optionally filtered to a specific chat_id. The frontend does not send a search while the index builds. If a search call arrives during the build or after a failed build, the command returns a `CacheError` and the search box shows it. There is no fallback.
 
 ### Frontend (Vanilla TypeScript + Vite)
 
@@ -97,7 +97,7 @@ Rust structs generate the TypeScript types through `specta-typescript` into `fro
 
 ### IPC
 
-All frontend-to-backend communication via typed Tauri commands. Every command returns `Result<T, MsgsError>`. The backend pushes `cache-status` events (`state`, `indexed`, `total`) during the text cache build. Export progress events are not built (see `WISHLIST.md`). Each command runs off the main thread.
+All frontend-to-backend communication via typed Tauri commands. Every command returns `Result<T, MsgsError>`. The backend pushes `cache-status` events (`state`, `indexed`, `total`) during the build of the search index. Export progress events are not built (see `WISHLIST.md`). Each command runs off the main thread.
 
 ### Version Information
 
@@ -333,7 +333,7 @@ Each stage produces a working application.
 - Keyboard navigation (Up/Down for conversations, Enter to open)
 
 ### Stage 3: Search
-- Text cache builder — extract all `attributedBody` text into local FTS5 database on launch
+- Search index builder — extract all `attributedBody` text into an in-memory FTS5 index at each launch
 - `search_messages` command — FTS5 search with optional chat_id filter
 - `get_cache_status` command and `cache-status` events — progress of the background build
 - Global search: a list of matching messages, each with its conversation name
@@ -362,7 +362,7 @@ A command that fails rejects the invoke with the message of the error, and the f
 - **ParseError**: Not used. The parser returns `None` for a blob that it cannot read and logs a warning. The message then has no text, and the bubble shows no text. A placeholder is on the wishlist (`WISHLIST.md`).
 - **ExportError**: The export bar shows `Export failed: <message>`. The confirm button is enabled again, thus the user can start the export again. There is no separate retry button.
 - **AttachmentNotFound**: Not used. The export skips an attachment whose path is missing, outside the root, or not copyable, logs a warning, and writes `exported_file: null` in `messages.json`. The export summary counts only the copied files. A list of the skipped files is on the wishlist (`WISHLIST.md`).
-- **CacheError**: Search has no fallback. The search box shows `Search unavailable: <error>` when the build fails, and the result list shows `Search failed: <message>` when a search call fails. There is no rebuild prompt (see `WISHLIST.md`).
+- **CacheError**: Search has no fallback. A search that is typed during the build waits for it. The search box shows `Search unavailable: <error>` when the build fails, and the result list shows `Search failed: <message>` when a search call fails. There is no rebuild prompt (see `WISHLIST.md`).
 
 ## Testing Strategy
 
@@ -378,4 +378,4 @@ A command that fails rejects the invoke with the message of the error, and the f
 - Attachment file paths validated to be within `~/Library/Messages/Attachments/` after `..` and symlinks resolve (both the path and the root are canonicalized before the comparison) and before the export copies them (path traversal prevention)
 - CSP configured to prevent loading external resources
 - Tauri v2 capabilities restricted to `core:default` and `dialog:default` (the save dialog of the export). The app has no file-system plugin and no asset protocol
-- The text cache file (`~/Library/Application Support/msgs/text-cache.db` on macOS) holds a copy of the text of each message. The copy lies outside the TCC protection of `~/Library/Messages`, and each process of the same user can read it. Deleting the file removes the copy, and msgs makes it again at the next start
+- The search index lives in memory only. The app writes no copy of the message text to disk, and each start deletes the `text-cache.db` of an older msgs (it held a copy outside the TCC protection of `~/Library/Messages`).

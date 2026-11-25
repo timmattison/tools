@@ -6006,10 +6006,10 @@ Browse, search, and export your iMessage conversations. `msgs` is a desktop app 
 
 - **Conversations.** The left panel lists the conversations, newest first. The arrow keys move the selection, and Enter opens the conversation.
 - **Messages.** The right panel shows the messages of the conversation as chat bubbles. Older messages load when you scroll up. An attachment shows as a line with its name and size.
-- **Search.** The search box finds the text of all messages. After each start, `msgs` makes a full-text index of the message text in the background, and the search box shows the progress. Click a result to open its conversation at that message and highlight it.
+- **Search.** The search box finds the text of all messages. At each start, `msgs` makes a full-text index of the message text in memory, in the background, and the search box shows the progress. A search that you type during the build waits for it, and runs when the index is ready. Click a result to open its conversation at that message and highlight it.
 - **Export.** Click **Export Selection**, click the first and the last message of a range, then click **Export JSON**. `msgs` writes `messages.json` and an `attachments/` folder to the location that you choose. Each attachment file gets the name `<attachment id>-<file name>`, and `messages.json` gives that path in `exported_file`.
 
-The search index is a copy of the text of each message, in `~/Library/Application Support/msgs/text-cache.db`. To remove the copy, stop `msgs` and delete that file. `msgs` makes it again at the next start.
+The search index lives in memory only. `msgs` writes no copy of the message text to disk. Thus each start makes the index again, and search waits for that build. An older `msgs` kept the index in `~/Library/Application Support/msgs/text-cache.db`, outside the protection that macOS gives to `~/Library/Messages`. At each start, `msgs` deletes that file.
 
 `msgs --version` prints the version and does not start the app.
 

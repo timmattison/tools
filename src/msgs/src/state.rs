@@ -1,7 +1,7 @@
 //! The state of the app and the logic of the commands, without Tauri types,
 //! so tests can drive it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::Serialize;
@@ -14,42 +14,58 @@ use crate::types::{Conversation, DbStatus, ExportResult, Message, SearchResult};
 
 /// Where chat.db lives, relative to the home directory.
 const CHAT_DB_PATH: &str = "Library/Messages/chat.db";
-const CACHE_DB_NAME: &str = "text-cache.db";
-const CACHE_DIR_NAME: &str = "msgs";
 
-/// The two files that the app reads and writes.
+/// The folder, inside the local data directory, where an older msgs kept its
+/// search index.
+const OLD_CACHE_DIR_NAME: &str = "msgs";
+
+/// The file where an older msgs kept the text of each message.
+const OLD_CACHE_DB_NAME: &str = "text-cache.db";
+
+/// The suffixes of the old cache file and of its SQLite side files. The side
+/// files hold message text too.
+const OLD_CACHE_SUFFIXES: [&str; 4] = ["", "-journal", "-wal", "-shm"];
+
+/// The places that the app reads and cleans up.
 #[derive(Debug, Clone)]
 pub struct DataPaths {
     pub chat_db: PathBuf,
-    pub cache_db: PathBuf,
+    /// The folder where an older msgs kept `text-cache.db`. `None` when the
+    /// local data directory is unknown.
+    pub old_cache_dir: Option<PathBuf>,
 }
 
 impl DataPaths {
-    /// The paths of a real install. Creates the folder of the cache.
+    /// The paths of a real install. Creates no folder.
     ///
     /// # Errors
     ///
     /// Returns `MsgsError::DatabaseError` when the home directory is unknown.
-    /// Returns `MsgsError::CacheError` when the local data directory is
-    /// unknown or the cache folder cannot be created.
     pub fn default_paths() -> Result<Self, MsgsError> {
         let home = dirs::home_dir().ok_or(MsgsError::DatabaseError(
             "Cannot determine home directory".to_string(),
         ))?;
-        let cache_dir = dirs::data_local_dir()
-            .ok_or_else(|| MsgsError::CacheError("Cannot determine local data dir".to_string()))?
-            .join(CACHE_DIR_NAME);
-        std::fs::create_dir_all(&cache_dir).map_err(|e| {
-            MsgsError::CacheError(format!(
-                "Cannot create cache dir {}: {e}",
-                cache_dir.display()
-            ))
-        })?;
         Ok(Self {
             chat_db: home.join(CHAT_DB_PATH),
-            cache_db: cache_dir.join(CACHE_DB_NAME),
+            old_cache_dir: dirs::data_local_dir().map(|dir| dir.join(OLD_CACHE_DIR_NAME)),
         })
     }
+}
+
+/// Delete the text cache of an older msgs: the file, its SQLite side files,
+/// and the folder when it is empty. The file holds the text of each message
+/// outside the TCC protection of `~/Library/Messages`.
+fn remove_old_text_cache(dir: &Path) {
+    for suffix in OLD_CACHE_SUFFIXES {
+        let file = dir.join(format!("{OLD_CACHE_DB_NAME}{suffix}"));
+        match std::fs::remove_file(&file) {
+            Ok(()) => log::info!("Deleted the old text cache {}", file.display()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => log::warn!("Cannot delete the old text cache {}: {e}", file.display()),
+        }
+    }
+    // The folder is missing, or it holds other files. Both are fine.
+    let _ = std::fs::remove_dir(dir);
 }
 
 /// The state of the search index, as the frontend sees it.
@@ -103,25 +119,21 @@ fn not_initialized() -> MsgsError {
     MsgsError::DatabaseError("Database not initialized".to_string())
 }
 
-/// Build the search index. Uses its own read-only connection to chat.db,
-/// thus it holds no lock while it reads. Locks the slot only to store a
-/// report or the result.
-fn run_build(paths: &DataPaths, slot: &Mutex<CacheSlot>, on_status: &dyn Fn(CacheStatus)) {
+/// Build the search index in memory from the chat.db at `chat_db`. Uses its
+/// own read-only connection to chat.db, thus it holds no lock while it reads.
+/// Locks the slot only to store a report or the result.
+fn run_build(chat_db: &Path, slot: &Mutex<CacheSlot>, on_status: &dyn Fn(CacheStatus)) {
     let set = |new: CacheSlot| {
         if let Ok(mut guard) = slot.lock() {
             *guard = new;
         }
     };
     let built = (|| -> Result<TextCache, MsgsError> {
-        let db = MessageDb::open_at(&paths.chat_db)?;
-        let cache = TextCache::open_at(&paths.cache_db)?;
-        if cache.needs_rebuild(db.connection())? {
-            cache.rebuild(db.connection(), PROGRESS_INTERVAL, &mut |indexed, total| {
-                set(CacheSlot::Building { indexed, total });
-                on_status(CacheStatus::Building { indexed, total });
-            })?;
-        }
-        Ok(cache)
+        let db = MessageDb::open_at(chat_db)?;
+        TextCache::build(db.connection(), PROGRESS_INTERVAL, &mut |indexed, total| {
+            set(CacheSlot::Building { indexed, total });
+            on_status(CacheStatus::Building { indexed, total });
+        })
     })();
     match built {
         Ok(cache) => {
@@ -142,12 +154,12 @@ const BUILD_PANICKED: &str = "The build of the search index stopped unexpectedly
 /// Run `run_build`, and turn a panic of it into a failed build. A build that
 /// panics after it stored a result keeps that result.
 fn run_build_catching_panics(
-    paths: &DataPaths,
+    chat_db: &Path,
     slot: &Mutex<CacheSlot>,
     on_status: &dyn Fn(CacheStatus),
 ) {
     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_build(paths, slot, on_status);
+        run_build(chat_db, slot, on_status);
     }));
     if built.is_ok() {
         return;
@@ -178,7 +190,7 @@ impl AppState {
     }
 
     /// Open chat.db and start the build of the search index on a new thread.
-    /// Returns when chat.db is open. Calls `on_status` from the build thread
+    /// Each call first deletes the text cache of an older msgs. Returns when chat.db is open. Calls `on_status` from the build thread
     /// with each change of the index state. A second call starts no second
     /// build, unless the last build failed.
     ///
@@ -192,6 +204,13 @@ impl AppState {
         &self,
         on_status: impl Fn(CacheStatus) + Send + 'static,
     ) -> Result<DbStatus, MsgsError> {
+        if let Ok(DataPaths {
+            old_cache_dir: Some(dir),
+            ..
+        }) = &self.paths
+        {
+            remove_old_text_cache(dir);
+        }
         let mut db_slot = lock(&self.db)?;
         if let Some(db) = db_slot.as_ref() {
             let status = db.check_access()?;
@@ -241,9 +260,9 @@ impl AppState {
                 total: 0,
             };
         }
-        let paths = paths.clone();
+        let chat_db = paths.chat_db.clone();
         let slot = Arc::clone(&self.cache);
-        std::thread::spawn(move || run_build_catching_panics(&paths, &slot, &on_status));
+        std::thread::spawn(move || run_build_catching_panics(&chat_db, &slot, &on_status));
         Ok(())
     }
 
@@ -383,6 +402,14 @@ mod tests {
     use super::*;
     use crate::test_fixture::{apple_ns, ChatDbFixture, MessageSpec};
 
+    /// The paths of a start that has no old cache folder.
+    fn paths_of(fixture: &ChatDbFixture) -> DataPaths {
+        DataPaths {
+            chat_db: fixture.path().to_path_buf(),
+            old_cache_dir: None,
+        }
+    }
+
     /// How long a test waits for a call that must not wait for the build.
     const CALL_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -407,10 +434,7 @@ mod tests {
                 chats: vec![chat],
                 ..MessageSpec::default()
             });
-            let paths = DataPaths {
-                chat_db: fixture.path().to_path_buf(),
-                cache_db: fixture.dir().join("text-cache.db"),
-            };
+            let paths = paths_of(&fixture);
             let state = Arc::new(AppState::new(Ok(paths)));
             let (release, gate) = mpsc::channel::<()>();
             let (entered_tx, entered) = mpsc::channel::<()>();
@@ -528,10 +552,7 @@ mod tests {
     #[test]
     fn a_finished_build_reports_ready_and_search_works() {
         let fixture = fixture_with_messages(3);
-        let paths = DataPaths {
-            chat_db: fixture.path().to_path_buf(),
-            cache_db: fixture.dir().join("text-cache.db"),
-        };
+        let paths = paths_of(&fixture);
         let (state, seen) = statuses_of_a_finished_build(paths);
         assert_eq!(seen.last(), Some(&CacheStatus::Ready));
         assert_eq!(state.cache_status().expect("status"), CacheStatus::Ready);
@@ -542,10 +563,7 @@ mod tests {
     #[test]
     fn progress_reports_never_go_back_and_end_at_the_total() {
         let fixture = fixture_with_messages(3);
-        let paths = DataPaths {
-            chat_db: fixture.path().to_path_buf(),
-            cache_db: fixture.dir().join("text-cache.db"),
-        };
+        let paths = paths_of(&fixture);
         let (_state, seen) = statuses_of_a_finished_build(paths);
         let indexed: Vec<i64> = seen
             .iter()
@@ -566,10 +584,7 @@ mod tests {
 
     /// A state whose index holds the 3 messages of `fixture`.
     fn ready_state(fixture: &ChatDbFixture) -> AppState {
-        let paths = DataPaths {
-            chat_db: fixture.path().to_path_buf(),
-            cache_db: fixture.dir().join("text-cache.db"),
-        };
+        let paths = paths_of(fixture);
         let (state, seen) = statuses_of_a_finished_build(paths);
         assert_eq!(seen.last(), Some(&CacheStatus::Ready));
         state
@@ -606,10 +621,7 @@ mod tests {
     #[test]
     fn a_build_that_panics_reports_failed_and_the_next_open_starts_a_build() {
         let fixture = fixture_with_messages(1);
-        let paths = DataPaths {
-            chat_db: fixture.path().to_path_buf(),
-            cache_db: fixture.dir().join("text-cache.db"),
-        };
+        let paths = paths_of(&fixture);
         let state = AppState::new(Ok(paths));
         let (tx, rx) = mpsc::channel();
         state
@@ -647,27 +659,20 @@ mod tests {
     }
 
     #[test]
-    fn a_cache_that_cannot_open_fails_while_the_database_works() {
-        let fixture = fixture_with_messages(1);
-        let blocker = fixture.dir().join("blocker");
-        std::fs::write(&blocker, "a file").expect("write blocker");
-        let paths = DataPaths {
-            chat_db: fixture.path().to_path_buf(),
-            cache_db: blocker.join("x").join("text-cache.db"),
-        };
-        let (state, seen) = statuses_of_a_finished_build(paths);
-        assert!(
-            matches!(seen.last(), Some(CacheStatus::Failed { .. })),
-            "{seen:?}"
-        );
+    fn a_build_that_cannot_open_chat_db_reports_failed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let slot = Mutex::new(CacheSlot::Building {
+            indexed: 0,
+            total: 0,
+        });
+        let seen = Mutex::new(Vec::new());
+        run_build(&dir.path().join("missing.db"), &slot, &|status| {
+            seen.lock().expect("seen").push(status);
+        });
+        assert!(matches!(*slot.lock().expect("slot"), CacheSlot::Failed(_)));
         assert!(matches!(
-            state.cache_status().expect("status"),
-            CacheStatus::Failed { .. }
-        ));
-        assert_eq!(state.list_conversations(0, 50).expect("list").len(), 1);
-        assert!(matches!(
-            state.search("lunch", None, 0, 50),
-            Err(MsgsError::CacheError(_))
+            seen.lock().expect("seen").last(),
+            Some(CacheStatus::Failed { .. })
         ));
     }
 
@@ -682,7 +687,7 @@ mod tests {
         std::fs::create_dir_all(&old_cache_dir).expect("old cache dir");
         DataPaths {
             chat_db: fixture.path().to_path_buf(),
-            cache_db: old_cache_dir.join(OLD_CACHE_FILE),
+            old_cache_dir: Some(old_cache_dir),
         }
     }
 

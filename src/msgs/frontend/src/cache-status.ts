@@ -7,14 +7,31 @@ const SEARCH_INPUT_ID = "global-search";
 const READY_PLACEHOLDER = "Search messages...";
 const PERCENT_SCALE = 100;
 
+let latest: CacheStatus = { state: "not_started" };
+const listeners: ((status: CacheStatus) => void)[] = [];
+
+/** The line that tells how far the build of the search index has come. */
+export function indexingProgress(status: Extract<CacheStatus, { state: "building" }>): string {
+  const percent =
+    status.total > 0 ? Math.floor((status.indexed * PERCENT_SCALE) / status.total) : 0;
+  return `Indexing messages for search: ${percent}%`;
+}
+
+/** The latest state of the search index that this window has seen. */
+export function currentCacheStatus(): CacheStatus {
+  return latest;
+}
+
+/** Call `listener` with each new state of the search index. */
+export function onCacheStatus(listener: (status: CacheStatus) => void): void {
+  listeners.push(listener);
+}
+
 /** The placeholder text that shows the state of the search index. */
 function placeholderFor(status: CacheStatus): string {
   switch (status.state) {
-    case "building": {
-      const percent =
-        status.total > 0 ? Math.floor((status.indexed * PERCENT_SCALE) / status.total) : 0;
-      return `Indexing messages for search: ${percent}%`;
-    }
+    case "building":
+      return indexingProgress(status);
     case "failed":
       return `Search unavailable: ${status.error}`;
     case "ready":
@@ -24,8 +41,10 @@ function placeholderFor(status: CacheStatus): string {
 }
 
 function apply(status: CacheStatus): void {
+  latest = status;
   const input = document.getElementById(SEARCH_INPUT_ID);
   if (input instanceof HTMLInputElement) input.placeholder = placeholderFor(status);
+  for (const listener of listeners) listener(status);
 }
 
 /**

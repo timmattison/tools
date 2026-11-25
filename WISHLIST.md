@@ -38,9 +38,10 @@ The design of `msgs` described these features, and the first version does not ha
 - **Progress events for a large export.** The export runs with no progress report, and the
   export bar shows no count. An `export-progress` event from the backend, as `cache-status`
   does for the search index, lets the bar show the files copied so far.
-- **A manual rebuild of the search index.** The index rebuilds when the fingerprint of
-  chat.db changes, and there is no way to force it. A command and a button make a rebuild
-  possible after a failed build, with the same `cache-status` events.
+- **A manual rebuild of the search index.** The index builds once at each start, thus a
+  message that arrives later is not in the index until the next start. There is no way to
+  force a rebuild during a session. A command and a button make a rebuild possible, with
+  the same `cache-status` events.
 - **Search in one chat.** The `search_messages` command takes a chat id, and the UI always
   sends none. A scope control in the chat header and the `Cmd+Shift+F` shortcut make a
   search inside the open conversation possible.
