@@ -1117,8 +1117,14 @@ mod tests {
         // Each expected source is what Go encoding/csv reads, as the docker CLI
         // reads a --mount value in opts/mount.go, after strings.TrimSpace.
         let cases: [(&str, Option<&str>); 21] = [
-            (" type=bind,src=/leading-space,dst=/y", Some("/leading-space")),
-            ("type=bind,dst=/y,src=/trailing-space ", Some("/trailing-space")),
+            (
+                " type=bind,src=/leading-space,dst=/y",
+                Some("/leading-space"),
+            ),
+            (
+                "type=bind,dst=/y,src=/trailing-space ",
+                Some("/trailing-space"),
+            ),
             (
                 "type=bind,dst=/y,\"src=/space-after-quote\" ",
                 Some("/space-after-quote"),
