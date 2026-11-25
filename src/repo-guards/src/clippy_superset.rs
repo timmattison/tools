@@ -43,20 +43,22 @@
 //! bans or plain settings, so the requirement is read off the root file rather
 //! than written down here:
 //!
-//! - An **array** value contributes one requirement per element. A table
-//!   element is identified by its `path` string, which is how every
-//!   `disallowed-*` list names the item it bans; a bare string element is
-//!   identified by itself, which is how `disallowed-names` and its relatives
-//!   are written. The crate file satisfies the requirement when its own array
-//!   under the same key carries an element with that identity. Its array may be
-//!   longer: extra bans are the whole point of having a crate-local file.
+//! - An **array** value contributes one requirement per element. The crate
+//!   file satisfies the requirement when its own array under the same key
+//!   carries an element equal to it: the same `path`, the same `reason`, and
+//!   the same `replacement`, in any order of keys. A crate file that keeps the
+//!   path and changes the reason prints advice that the root file no longer
+//!   gives, so it fails too. A report names the element by its `path` string,
+//!   which is how every `disallowed-*` list names the item it bans, or by the
+//!   text of a bare string element, which is how `disallowed-names` and its
+//!   relatives are written. Its array may be longer: extra bans are the whole
+//!   point of having a crate-local file.
 //! - Any **other** value is a setting rather than a list, and a setting cannot
 //!   be extended — only replaced. The crate file satisfies it by declaring the
 //!   same key with an equal value. A crate that genuinely wants a different
 //!   threshold has to say so out loud by failing this guard, which is the
 //!   visible, reviewable form of a decision that is otherwise invisible.
 
-use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -93,14 +95,18 @@ const PATH_KEY: &str = "path";
 /// in a clippy configuration would be a threshold rather than a ban.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Requirement {
-    /// One element of an array-valued key, identified by the `path` of a table
-    /// element or by the text of a string element.
+    /// One element of an array-valued key. The crate file must carry an
+    /// element equal to it, so the reason and the replacement count as well as
+    /// the path.
     Entry {
         /// The array-valued key the element belongs to, such as
         /// `disallowed-methods`.
         key: String,
-        /// The element's identity.
+        /// The element's identity: the `path` of a table element, or the text
+        /// of a string element. A report names the element by it.
         identity: String,
+        /// The whole element, as the root file writes it.
+        entry: Value,
     },
     /// A key whose value is not an array, which a crate file can only match
     /// rather than extend.
@@ -115,7 +121,7 @@ pub enum Requirement {
 impl fmt::Display for Requirement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Entry { key, identity } => write!(f, "{key} entry `{identity}`"),
+            Self::Entry { key, identity, .. } => write!(f, "{key} entry `{identity}`"),
             Self::Setting { key, value } => write!(f, "{key} = {value}"),
         }
     }
@@ -285,6 +291,10 @@ impl fmt::Display for Report {
         writeln!(
             f,
             "Clippy reads the nearest configuration file and no other, so a crate file replaces the root file rather than extending it."
+        )?;
+        writeln!(
+            f,
+            "A crate file restates a ban only with the whole entry of the root file, its reason included."
         )?;
 
         for offender in &self.offenders {
@@ -498,6 +508,7 @@ fn requirements(root_config: &Path) -> Result<Vec<Requirement>, ClippySupersetEr
             required.push(Requirement::Entry {
                 key: key.clone(),
                 identity,
+                entry: entry.clone(),
             });
         }
     }
@@ -518,16 +529,10 @@ fn identity_of(entry: &Value) -> Option<String> {
 /// True when `table` carries the declaration `requirement` demands.
 fn satisfies(table: &toml::Table, requirement: &Requirement) -> bool {
     match requirement {
-        Requirement::Entry { key, identity } => table
+        Requirement::Entry { key, entry, .. } => table
             .get(key)
             .and_then(Value::as_array)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter_map(identity_of)
-                    .collect::<BTreeSet<String>>()
-            })
-            .is_some_and(|declared| declared.contains(identity)),
+            .is_some_and(|entries| entries.contains(entry)),
         Requirement::Setting { key, value } => table.get(key) == Some(value),
     }
 }

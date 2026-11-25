@@ -12,7 +12,8 @@
 #
 # `repo_guards::clippy_superset` fails `cargo test` when this file stops being a
 # superset of the root one, so an entry added there and forgotten here is caught
-# rather than silently dropped.
+# rather than silently dropped. The guard compares each whole entry, so a reason
+# changed there and not here is caught too.
 #
 # ---------------------------------------------------------------------------
 # ufa's own bans
