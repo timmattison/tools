@@ -1,10 +1,11 @@
-# Continuous integration for the Rust workspace.
+# Continuous integration for the Rust workspace and the Claude Code plugins.
 #
-# Each job runs scripts/rust-checks.sh. The pre-commit hook runs the same
-# script, thus CI and the hook run the same list of checks. Add a new check to
-# that script, not to this file.
+# The Rust jobs run scripts/rust-checks.sh, and the plugin job runs
+# scripts/plugin-checks.sh. The pre-commit hook runs the same scripts, thus CI
+# and the hook run the same lists of checks. Add a new check to a script, not
+# to this file.
 #
-# The jobs run on Linux and on macOS. Some crates hold code that compiles only
+# The Rust jobs run on Linux and on macOS. Some crates hold code that compiles only
 # on macOS (`#[cfg(target_os = "macos")]`). A Linux job does not compile, lint,
 # or test that code. GitHub does not charge for standard runners in a public
 # repository.
@@ -81,3 +82,37 @@ jobs:
 
       - name: Run the Rust checks
         run: ./scripts/rust-checks.sh
+
+  plugin-checks:
+    name: Plugin checks
+    # The plugin tests run in the sandbox of the engine, which has no file
+    # system, network or process. Thus the platform does not change them, and
+    # one Linux job is sufficient.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # The version of the claude CLI that runs the checks: the version of the
+      # `stable` tag of @anthropic-ai/claude-code on 2026-11-25.
+      CLAUDE_CODE_VERSION: "2.1.326"
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Node.js
+        # The package of the claude CLI needs Node.js 22 or later.
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+
+      - name: Install the claude CLI
+        # npm comes with Node.js. It runs the postinstall script of the
+        # package, which puts the native binary for the runner in place. The
+        # checks need no login.
+        run: |
+          npm install --global --no-fund --no-audit "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+          claude --version
+
+      - name: Run the plugin checks
+        run: ./scripts/plugin-checks.sh

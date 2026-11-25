@@ -1212,28 +1212,35 @@ shellcheck scripts/update-deps.sh
 
 ## Continuous Integration
 
-Every check that CI runs **must** live in `scripts/rust-checks.sh`.
+Every check that CI runs **must** live in `scripts/rust-checks.sh` or in
+`scripts/plugin-checks.sh`.
 
 ### Why
 
 The pre-commit hook and CI must run the same checks. When each caller holds
 its own list, the two lists drift apart, and a check that one list lost
-reports nothing. Thus one script holds the list. `.husky/pre-commit` and
-`.github/workflows/ci.yml` each start that script.
+reports nothing. Thus one script holds each list. `scripts/rust-checks.sh`
+holds the checks of the Rust workspace, and `scripts/plugin-checks.sh` holds the
+checks of the Claude Code plugins under `plugins/`. `.husky/pre-commit` and
+`.github/workflows/ci.yml` each start both scripts. The hook starts a script
+only when a staged path is one that the script reads.
 
-To run the full list by hand, run `./scripts/rust-checks.sh` from any
-directory. Do this at the end of a TDD run. A `git commit --allow-empty` stages
+To run the full list by hand, run `./scripts/rust-checks.sh`, then
+`./scripts/plugin-checks.sh`, from the repository root. Do this at the end of a
+TDD run. A `git commit --allow-empty` stages
 no file, thus the hook runs no check in this repository.
 
 ### What CI does
 
 `.github/workflows/ci.yml` runs for each pull request, for each push to `main`,
-and when a person starts it by hand (`workflow_dispatch`). It runs one job on
-`ubuntu-latest` and one job on `macos-latest`. Some crates hold code that
-compiles only on macOS, and a Linux job does not compile, lint, or test that
-code. GitHub does not charge for standard runners in a public repository.
+and when a person starts it by hand (`workflow_dispatch`). It runs the Rust
+checks in one job on `ubuntu-latest` and in one job on `macos-latest`. Some
+crates hold code that compiles only on macOS, and a Linux job does not compile,
+lint, or test that code. It runs the plugin checks in one job on
+`ubuntu-latest`. GitHub does not charge for standard runners in a public
+repository.
 
-Each job does these steps:
+Each job of the Rust checks does these steps:
 
 1. On Linux only, install the system packages with `apt-get`: the libraries
    that some crates link against, and the tools that some tests run.
@@ -1243,13 +1250,25 @@ Each job does these steps:
    request reads that cache.
 5. Run `scripts/rust-checks.sh`.
 
-Both jobs set `CARGO_PROFILE_DEV_DEBUG=0`, because debug information is most
+The job of the plugin checks does these steps:
+
+1. Install Node.js. The package of the claude CLI needs Node.js 22 or later.
+2. Install the claude CLI with `npm`, at the version that
+   `CLAUDE_CODE_VERSION` in the workflow names.
+3. Run `scripts/plugin-checks.sh`.
+
+The plugin checks need no login. `claude plugin test` runs the tests in the
+sandbox of the engine, which has no file system, network or process, thus one
+platform is sufficient.
+
+The workflow sets `CARGO_PROFILE_DEV_DEBUG=0` for each job, because debug information is most
 of the size of the target directory, and the disk of a Linux runner is small.
 
 ### To add a check
 
-- Add the check to `scripts/rust-checks.sh`. Do not add it to the hook or to
-  the workflow.
+- Add a check of the Rust workspace to `scripts/rust-checks.sh`, and a check of
+  a plugin to `scripts/plugin-checks.sh`. Do not add it to the hook or to the
+  workflow.
 - If the check needs a tool that the runner does not have, add an install step
   to the workflow.
 - If a crate or a test needs a system library or a tool on Linux, add its
