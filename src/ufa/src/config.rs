@@ -43,9 +43,10 @@ const ENVIRONMENT_FILE: &str = ".env";
 
 /// Load the settings file that sits beside the configuration file.
 ///
-/// The load happens before the arguments are parsed, because clap reads
-/// `UNIFI_URL`, `UNIFI_API_KEY` and `UNIFI_INSECURE` during the parse, and a
-/// value in the environment beats the configuration file.
+/// The load happens before the arguments are parsed, because clap reads the
+/// `UNIFI_*` variables during the parse, and a value in the environment beats
+/// the configuration file. `UNIFI_SITE_MANAGER_API_KEY` is one of them, so the
+/// settings file can give the cloud key too.
 ///
 /// Exactly one path is read: `directory/.env`, and no other. `dotenvy::dotenv`
 /// and `dotenvy::from_filename` both walk up from the working directory to the
