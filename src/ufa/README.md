@@ -220,10 +220,10 @@ Caused by:
 ### What a listing shows
 
 Without `--all`, a list command answers with one page of a collection: 25
-items (100 for `vouchers list`), unless `--limit` says otherwise. `--all` reads every page and shows the whole
-collection, with no note. `--all` does not take `--limit` or `--offset`, and it
-does take `--filter`. A page that holds less than the whole collection says
-so, under the table:
+items (100 for `vouchers list`), unless `--limit` says otherwise. `--all`
+reads every page and shows the whole collection, with no note. `--all` does
+not take `--limit` or `--offset`, and it does take `--filter`. A page that
+holds less than the whole collection says so, under the table:
 
 ```
 This page shows 1-25 of 100. Use --limit and --offset to see the rest, or --all to see every item.
