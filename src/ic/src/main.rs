@@ -340,13 +340,26 @@ fn validate_input_modes(args: &Args) -> Result<()> {
 /// another number.
 fn validate_diff(args: &Args) -> Result<()> {
     if args.diff && args.files.len() != 2 {
-        anyhow::bail!(
-            "--diff compares two images, thus it takes exactly two files, and it got {}",
-            args.files.len()
-        );
+        return Err(diff_file_count_error(args.files.len()));
     }
 
     Ok(())
+}
+
+/// The error of a run of `--diff` over `count` files, when `count` is not two.
+///
+/// [`validate_diff`] gives it, and [`show_diff`] gives the same text when its
+/// slice pattern finds another count, so the two refusals cannot drift apart.
+///
+/// # Arguments
+/// * `count` - The number of files on the command line.
+///
+/// # Returns
+/// An error that says the flag takes exactly two files, and names `count`.
+fn diff_file_count_error(count: usize) -> anyhow::Error {
+    anyhow::anyhow!(
+        "--diff compares two images, thus it takes exactly two files, and it got {count}"
+    )
 }
 
 /// Refuse a run of `--emit-rgba` over more than one picture.
@@ -354,7 +367,7 @@ fn validate_diff(args: &Args) -> Result<()> {
 /// The flag prints one JSON document, and a reader of it parses one picture.
 /// Clap refuses the flag beside every option of a display, and this check
 /// holds the one rule that clap cannot state: the count of files. With
-/// `--diff` the two files make one picture, so that run may name two files.
+/// `--diff` the two files make one picture, so that run can name two files.
 ///
 /// # Errors
 /// An error that says the flag takes one picture, when it has more than one
@@ -2247,10 +2260,7 @@ fn decode_picture(source: &[u8], name: &Path) -> Result<DynamicImage> {
 /// fails. Each decode error names its path.
 fn show_diff(args: &Args) -> Result<()> {
     let [first_path, second_path] = args.files.as_slice() else {
-        anyhow::bail!(
-            "--diff compares two images, thus it takes exactly two files, and it got {}",
-            args.files.len()
-        );
+        return Err(diff_file_count_error(args.files.len()));
     };
     for path in [first_path, second_path] {
         ensure_file_exists(path)?;
