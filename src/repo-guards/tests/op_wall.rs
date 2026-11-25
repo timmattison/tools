@@ -155,6 +155,22 @@ pub fn controllers() {
 }
 ";
 
+/// The program as Windows names it. The backslash already splits the path, and
+/// `op.exe` is the file that a Windows install of the 1Password CLI holds.
+const WINDOWS_EXECUTABLE: &str = "\
+pub fn controllers() {
+    let _ = childenv::command(\"C:\\\\bin\\\\op.exe\").arg(\"whoami\").output();
+}
+";
+
+/// The program in capital letters. The default file system of macOS and the
+/// file system of Windows ignore case, so `OP` finds the same binary as `op`.
+const OTHER_CASE: &str = "\
+pub fn controllers() {
+    let _ = childenv::command(\"OP\").arg(\"whoami\").output();
+}
+";
+
 /// Everything that names `op` and runs nothing.
 ///
 /// `which` locates the binary. `op-cache` is the sanctioned route and is a
@@ -235,6 +251,8 @@ fn every_spelling_of_a_spawn_is_an_offender() {
         ("a renamed Command type", TYPE_RENAMED),
         ("a rename after the call", RENAMED_AFTER_THE_CALL),
         ("a pseudo-terminal builder", PSEUDO_TERMINAL),
+        ("a Windows executable", WINDOWS_EXECUTABLE),
+        ("a program name in capitals", OTHER_CASE),
     ] {
         let dir = tree(&[("lib.rs", source), ("plain.rs", PLAIN)]);
         let report = op_wall::audit_sources(dir.path()).expect("the audit reaches a verdict");
