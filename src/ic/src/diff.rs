@@ -85,26 +85,36 @@ pub fn compare(first: &DynamicImage, second: &DynamicImage, mode: Mode) -> Resul
     let second = second.to_rgba8();
     let width = first.width().max(second.width());
     let height = first.height().max(second.height());
+    let covered = |x: u32, y: u32| covers(&first, x, y) || covers(&second, x, y);
     let mut picture = RgbaImage::new(width, height);
+    let mut differing = Grid::new(width, height);
     let mut differing_pixels = 0_u64;
     for (x, y, out) in picture.enumerate_pixels_mut() {
         let one = pixel_at(&first, x, y);
-        let differs = one != pixel_at(&second, x, y);
+        let two = pixel_at(&second, x, y);
+        let differs = one != two;
         if differs {
             differing_pixels = differing_pixels.saturating_add(1);
+            differing.set(x, y);
         }
-        let covered =
-            first.get_pixel_checked(x, y).is_some() || second.get_pixel_checked(x, y).is_some();
         *out = match mode {
+            Mode::Boxes => two,
             Mode::Highlight if differs => RED,
             Mode::Mask if differs => RED,
-            Mode::Mask if covered => BLACK,
+            Mode::Mask if covered(x, y) => BLACK,
             _ => one,
         };
     }
+    let thickness = line_thickness(width, height);
+    let regions = find_regions(&differing, thickness);
+    if mode == Mode::Boxes {
+        for region in &regions {
+            draw_outline(&mut picture, *region, thickness, covered);
+        }
+    }
     Ok(Diff {
         picture,
-        regions: Vec::new(),
+        regions,
         differing_pixels,
     })
 }
@@ -113,6 +123,151 @@ pub fn compare(first: &DynamicImage, second: &DynamicImage, mode: Mode) -> Resul
 /// cover that position.
 fn pixel_at(image: &RgbaImage, x: u32, y: u32) -> Rgba<u8> {
     image.get_pixel_checked(x, y).copied().unwrap_or(BLANK)
+}
+
+/// Whether `image` covers the position (`x`, `y`).
+fn covers(image: &RgbaImage, x: u32, y: u32) -> bool {
+    x < image.width() && y < image.height()
+}
+
+/// A flag for each pixel of the canvas.
+struct Grid {
+    /// The width of the canvas, in pixels.
+    width: u32,
+    /// The height of the canvas, in pixels.
+    height: u32,
+    /// The flags, row by row from the top left.
+    cells: Vec<bool>,
+}
+
+impl Grid {
+    /// A grid of `width` by `height` flags that are all off.
+    fn new(width: u32, height: u32) -> Self {
+        let count = u64::from(width).saturating_mul(u64::from(height));
+        Self {
+            width,
+            height,
+            cells: vec![false; usize::try_from(count).unwrap_or(0)],
+        }
+    }
+
+    /// The position of (`x`, `y`) in `cells`, or `None` outside the grid.
+    fn index(&self, x: u32, y: u32) -> Option<usize> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let row = usize::try_from(y).ok()?;
+        let column = usize::try_from(x).ok()?;
+        row.checked_mul(usize::try_from(self.width).ok()?)?
+            .checked_add(column)
+    }
+
+    /// Whether the flag at (`x`, `y`) is on. A position outside the grid is off.
+    fn get(&self, x: u32, y: u32) -> bool {
+        self.index(x, y)
+            .and_then(|index| self.cells.get(index))
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Turn the flag at (`x`, `y`) on. A position outside the grid does nothing.
+    fn set(&mut self, x: u32, y: u32) {
+        if let Some(cell) = self.index(x, y).and_then(|index| self.cells.get_mut(index)) {
+            *cell = true;
+        }
+    }
+}
+
+/// The padded boxes of the pixels that differ, sorted by (top, left).
+///
+/// Two pixels that differ are in one group when they touch, also at a corner.
+/// The box of a group has `thickness + 2` pixels of padding on each side, and
+/// the canvas clips it.
+///
+/// # Arguments
+///
+/// * `differing` - The flag of each pixel that differs.
+/// * `thickness` - The thickness of an outline, in pixels.
+fn find_regions(differing: &Grid, thickness: u32) -> Vec<Region> {
+    let padding = thickness.saturating_add(2);
+    let last_column = differing.width.saturating_sub(1);
+    let last_row = differing.height.saturating_sub(1);
+    let mut seen = Grid::new(differing.width, differing.height);
+    let mut regions = Vec::new();
+    for y in 0..differing.height {
+        for x in 0..differing.width {
+            if !differing.get(x, y) || seen.get(x, y) {
+                continue;
+            }
+            let mut bounds = Region {
+                left: x,
+                top: y,
+                right: x,
+                bottom: y,
+            };
+            let mut stack = vec![(x, y)];
+            seen.set(x, y);
+            while let Some((cx, cy)) = stack.pop() {
+                bounds.left = bounds.left.min(cx);
+                bounds.top = bounds.top.min(cy);
+                bounds.right = bounds.right.max(cx);
+                bounds.bottom = bounds.bottom.max(cy);
+                for dy in -1..=1_i32 {
+                    for dx in -1..=1_i32 {
+                        let (Some(nx), Some(ny)) =
+                            (cx.checked_add_signed(dx), cy.checked_add_signed(dy))
+                        else {
+                            continue;
+                        };
+                        if differing.get(nx, ny) && !seen.get(nx, ny) {
+                            seen.set(nx, ny);
+                            stack.push((nx, ny));
+                        }
+                    }
+                }
+            }
+            regions.push(Region {
+                left: bounds.left.saturating_sub(padding),
+                top: bounds.top.saturating_sub(padding),
+                right: bounds.right.saturating_add(padding).min(last_column),
+                bottom: bounds.bottom.saturating_add(padding).min(last_row),
+            });
+        }
+    }
+    regions.sort_by_key(|region| (region.top, region.left));
+    regions
+}
+
+/// Draw a red outline inside the edge of `region`.
+///
+/// A pixel of the region is red when it is less than `thickness` pixels from
+/// an edge. A pixel that `covered` rejects stays as it is.
+///
+/// # Arguments
+///
+/// * `picture` - The picture to draw on.
+/// * `region` - The box to outline.
+/// * `thickness` - The thickness of the outline, in pixels.
+/// * `covered` - Whether an image covers a pixel.
+fn draw_outline(
+    picture: &mut RgbaImage,
+    region: Region,
+    thickness: u32,
+    covered: impl Fn(u32, u32) -> bool,
+) {
+    for y in region.top..=region.bottom {
+        for x in region.left..=region.right {
+            let on_edge = x.saturating_sub(region.left) < thickness
+                || region.right.saturating_sub(x) < thickness
+                || y.saturating_sub(region.top) < thickness
+                || region.bottom.saturating_sub(y) < thickness;
+            if on_edge && covered(x, y) {
+                if let Some(pixel) = picture.get_pixel_mut_checked(x, y) {
+                    *pixel = RED;
+                }
+            }
+        }
+    }
 }
 
 /// The thickness of an outline, in pixels: `max(2, ceil(L / 400))`, where `L`
