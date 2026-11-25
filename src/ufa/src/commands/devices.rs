@@ -1043,7 +1043,7 @@ mod action_tests {
         "cpuUtilizationPct": 12.5,
         "memoryUtilizationPct": 40.25,
         "uplink": { "txRateBps": 1200000, "rxRateBps": 3400 },
-        "interfaces": { "radios": [ { "frequencyGHz": 5.0, "txRetriesPct": 1.5 } ] }
+        "interfaces": { "radios": [ { "frequencyGHz": "5", "txRetriesPct": 1.5 } ] }
     }"#;
 
     /// The device collection of a site that holds the two devices above.

@@ -359,8 +359,10 @@ pub struct DeviceInterfaceStatistics {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct RadioStatistics {
+    /// The band, as the controller spells it: `2.4`, `5`, `6` or `60`. The
+    /// API sends a string, the same as [`WirelessRadio::frequency_ghz`].
     #[serde(rename = "frequencyGHz")]
-    pub frequency_ghz: f64,
+    pub frequency_ghz: String,
     #[serde(rename = "txRetriesPct")]
     pub tx_retries_pct: Option<f64>,
 }
