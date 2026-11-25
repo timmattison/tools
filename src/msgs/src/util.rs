@@ -47,6 +47,17 @@ mod tests {
         (dir, root)
     }
 
+    /// Messages keeps each attachment path as `~/Library/Messages/...`.
+    /// The test reads the home directory and changes no environment.
+    #[test]
+    fn expand_tilde_puts_the_home_directory_in_place_of_a_leading_tilde() {
+        let home = dirs::home_dir().expect("home directory");
+        assert_eq!(
+            expand_tilde("~/Library/Messages/Attachments/ab/a.jpg"),
+            home.join("Library/Messages/Attachments/ab/a.jpg")
+        );
+    }
+
     #[test]
     fn resolve_attachment_accepts_a_file_inside_the_root() {
         let (dir, root) = temp_root();
