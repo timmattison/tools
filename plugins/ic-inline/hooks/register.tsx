@@ -18,7 +18,8 @@
 // this file declares at its top, so every hook and every call on `$` is here.
 // The modules beside it are pure: picture (the arguments and the output of
 // ic, and the kept decodes), cells (sizes and half blocks), draw (the tree of
-// one picture), argument (paths) and options (userConfig).
+// one picture), argument (the text after /ic: one path or the diff form, and
+// the paths) and options (userConfig).
 
 import type { EngineInterface, Register, RenderElement, RenderViewport } from 'claude-code'
 
