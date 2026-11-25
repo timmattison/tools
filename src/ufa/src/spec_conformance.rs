@@ -314,6 +314,11 @@ const CASES: &[Case] = &[
     ),
     (
         "Device details",
+        Document::Minimal,
+        reads::<models::DeviceDetails>,
+    ),
+    (
+        "Device details",
         Document::Full,
         reads::<models::DeviceDetails>,
     ),
