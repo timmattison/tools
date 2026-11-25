@@ -1231,11 +1231,13 @@ code. GitHub does not charge for standard runners in a public repository.
 
 Each job does these steps:
 
-1. Install the toolchain and the components that `rust-toolchain.toml` names.
-2. Install `cargo-machete`.
-3. Restore the Cargo cache. Only a run on `main` saves a cache, and a pull
+1. On Linux only, install the system packages with `apt-get`: the libraries
+   that some crates link against, and the tools that some tests run.
+2. Install the toolchain and the components that `rust-toolchain.toml` names.
+3. Install `cargo-machete`.
+4. Restore the Cargo cache. Only a run on `main` saves a cache, and a pull
    request reads that cache.
-4. Run `scripts/rust-checks.sh`.
+5. Run `scripts/rust-checks.sh`.
 
 Both jobs set `CARGO_PROFILE_DEV_DEBUG=0`, because debug information is most
 of the size of the target directory, and the disk of a Linux runner is small.
