@@ -241,6 +241,21 @@ impl Api {
             ),
         }
     }
+
+    /// The advice about the key for a status that refuses it.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - The status this API answered with.
+    ///
+    /// # Returns
+    ///
+    /// The message of [`Api::authentication_failure`] for a 401 or a 403,
+    /// whatever the body. `None` for any other status.
+    fn key_refusal(self, status: StatusCode) -> Option<String> {
+        (status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN)
+            .then(|| self.authentication_failure(status))
+    }
 }
 
 /// Build the HTTP client that talks to `api`.
@@ -466,13 +481,21 @@ async fn read_body(api: Api, mut response: reqwest::Response, limit: u64) -> Res
 /// The error to raise. It carries `status`. A success status gives an
 /// [`UnreadableAnswer`]. Any other status gives a [`StatusError`], the same
 /// as a refusal with a short body, so [`answered_status`] reads a 401 back
-/// whatever the size of its body.
+/// whatever the size of its body. A 401 or a 403 starts its message with the
+/// advice about the key that a short body gets, and then names the size.
 fn body_too_large(api: Api, status: StatusCode, size: u64, limit: u64) -> anyhow::Error {
-    let message = format!(
+    let size_text = format!(
         "{} answered HTTP {status} with a body of at least {size} bytes, over the {limit} bytes \
-         ufa reads. Ask for a smaller part of the collection, or check the server that answered.",
+         ufa reads.",
         api.label()
     );
+    let message = match api.key_refusal(status) {
+        Some(advice) => format!("{advice} {size_text}"),
+        None => format!(
+            "{size_text} Ask for a smaller part of the collection, or check the server that \
+             answered."
+        ),
+    };
 
     if status.is_success() {
         anyhow::Error::new(UnreadableAnswer {
@@ -531,8 +554,8 @@ where
 /// The error to raise. It carries `status`, which [`answered_status`] reads
 /// back.
 fn response_error(api: Api, status: StatusCode, body: &str) -> anyhow::Error {
-    let message = if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-        api.authentication_failure(status)
+    let message = if let Some(advice) = api.key_refusal(status) {
+        advice
     } else if let Ok(error) = serde_json::from_str::<ApiErrorBody>(body) {
         format!("{} error: {} (HTTP {status})", api.label(), error.message)
     } else {
