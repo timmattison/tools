@@ -691,8 +691,10 @@ fn mount_bind_source(spec: &str) -> Option<String> {
 /// Go `encoding/csv` with its default settings reads a record in the same
 /// way, and the docker CLI reads a `--mount` value with it (`opts/mount.go`).
 /// A field that starts with a quote ends at the next lone quote, and `""` in
-/// it is one quote. A line break ends the record, and the rest of the text is
-/// not read. The function gives `None` where Go gives an error: no record, a
+/// it is one quote. Outside such a field, a line break ends the record, and
+/// the rest of the text is not read. The function skips the empty lines
+/// before the record, reads `\r\n` as one line break, and drops a `\r` at the
+/// end of the text. It gives `None` where Go gives an error: no record, a
 /// quote inside a field that does not start with a quote, a quoted field with
 /// no closing quote, or a closing quote that a character other than a comma or
 /// a line break follows.
