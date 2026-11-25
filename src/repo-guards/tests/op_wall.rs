@@ -136,6 +136,17 @@ pub fn controllers() {
 }
 ";
 
+/// The rename after the call that it renames. A `use` item applies to its
+/// whole module wherever it stands, so a walk that learns each rename when it
+/// reaches it reads the call before it knows the new name.
+const RENAMED_AFTER_THE_CALL: &str = "\
+pub fn controllers() {
+    let _ = spawn(\"op\").arg(\"whoami\").output();
+}
+
+use childenv::command as spawn;
+";
+
 /// The builder of a process on a pseudo-terminal. `clippy.toml` bans its
 /// constructor beside `Command::new`, because it starts a child process too.
 const PSEUDO_TERMINAL: &str = "\
@@ -222,6 +233,7 @@ fn every_spelling_of_a_spawn_is_an_offender() {
         ("a childenv call in a macro", CHILDENV_INSIDE_A_MACRO),
         ("a renamed childenv entrance", CHILDENV_RENAMED),
         ("a renamed Command type", TYPE_RENAMED),
+        ("a rename after the call", RENAMED_AFTER_THE_CALL),
         ("a pseudo-terminal builder", PSEUDO_TERMINAL),
     ] {
         let dir = tree(&[("lib.rs", source), ("plain.rs", PLAIN)]);
