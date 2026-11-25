@@ -2238,7 +2238,8 @@ fn decode_picture(source: &[u8], name: &Path) -> Result<DynamicImage> {
 ///
 /// The run checks both paths before it decodes either one, so a bad second
 /// path does not wait for a slow decode of the first. A video or a text file
-/// is no still image, and the error names it. The picture comes from
+/// is no still image, and the error names it. A file is text when neither its
+/// extension nor its first bytes name an image format. The picture comes from
 /// [`diff::compare`] in the mode of `--diff-mode`, or `boxes` when none is
 /// given.
 ///
@@ -2270,7 +2271,7 @@ fn show_diff(args: &Args) -> Result<()> {
                 path.display()
             );
         }
-        if is_text_file(path) {
+        if is_text_file(path) && names_no_image_format(path) {
             anyhow::bail!(
                 "--diff compares two still images, and {} is a text file",
                 path.display()
@@ -2305,6 +2306,26 @@ fn show_diff(args: &Args) -> Result<()> {
 /// image.
 fn load_still_image(path: &Path) -> Result<DynamicImage> {
     with_image_file(path, |source| decode_picture(&source, path))
+}
+
+/// Whether the file at `path` opens, and neither its extension nor its first
+/// bytes name an image format.
+///
+/// [`is_text_file`] reads only the extension. A screenshot with no extension,
+/// or a format that the decoder reads and `ic` does not list, is still a
+/// picture, and [`decode_picture`] reads it. This check reads only the first
+/// bytes, so `--diff` still checks both paths before it decodes either one.
+///
+/// # Arguments
+/// * `path` - The path of the file.
+///
+/// # Returns
+/// `false` also when the file does not open, because that file is not text.
+/// The decode then reports the failure with its cause.
+fn names_no_image_format(path: &Path) -> bool {
+    image::ImageReader::open(path)
+        .and_then(|reader| reader.with_guessed_format())
+        .is_ok_and(|reader| reader.format().is_none())
 }
 
 /// Make a picture out of the bytes of an image file, and keep the bytes when
