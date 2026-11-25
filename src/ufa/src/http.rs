@@ -196,11 +196,7 @@ pub fn failed_answer(error: &anyhow::Error) -> FailedAnswer {
         .chain()
         .find_map(|cause| cause.downcast_ref::<UnreadableAnswer>())
         .map_or(FailedAnswer::Missing, |answer| {
-            if answer.status.is_success() {
-                FailedAnswer::Unreadable(answer.status)
-            } else {
-                FailedAnswer::Refused(answer.status)
-            }
+            FailedAnswer::Unreadable(answer.status)
         })
 }
 
@@ -468,18 +464,26 @@ async fn read_body(api: Api, mut response: reqwest::Response, limit: u64) -> Res
 ///
 /// # Returns
 ///
-/// The error to raise. It carries `status`, which [`failed_answer`] reads
-/// back.
+/// The error to raise. It carries `status`. A success status gives an
+/// [`UnreadableAnswer`]. Any other status gives a [`StatusError`], the same
+/// as a refusal with a short body, so [`answered_status`] reads a 401 back
+/// whatever the size of its body.
 fn body_too_large(api: Api, status: StatusCode, size: u64, limit: u64) -> anyhow::Error {
-    anyhow::Error::new(UnreadableAnswer {
-        status,
-        message: format!(
-            "{} answered HTTP {status} with a body of at least {size} bytes, over the {limit} bytes \
-             ufa reads. Ask for a smaller part of the collection, or check the server that answered.",
-            api.label()
-        ),
-        source: None,
-    })
+    let message = format!(
+        "{} answered HTTP {status} with a body of at least {size} bytes, over the {limit} bytes \
+         ufa reads. Ask for a smaller part of the collection, or check the server that answered.",
+        api.label()
+    );
+
+    if status.is_success() {
+        anyhow::Error::new(UnreadableAnswer {
+            status,
+            message,
+            source: None,
+        })
+    } else {
+        anyhow::Error::new(StatusError { status, message })
+    }
 }
 
 /// Deserialize a successful response body as `T`.
