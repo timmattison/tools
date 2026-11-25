@@ -1112,8 +1112,22 @@ mod tests {
     #[test]
     fn a_mount_value_is_one_csv_record_as_docker_reads_it() {
         // Each expected source is what Go encoding/csv reads, as the docker CLI
-        // reads a --mount value in opts/mount.go.
-        let cases: [(&str, Option<&str>); 16] = [
+        // reads a --mount value in opts/mount.go, after strings.TrimSpace.
+        let cases: [(&str, Option<&str>); 21] = [
+            (" type=bind,src=/leading-space,dst=/y", Some("/leading-space")),
+            ("type=bind,dst=/y,src=/trailing-space ", Some("/trailing-space")),
+            (
+                "type=bind,dst=/y,\"src=/space-after-quote\" ",
+                Some("/space-after-quote"),
+            ),
+            (
+                "\n    type=bind,src=/indented,dst=/y\n  ",
+                Some("/indented"),
+            ),
+            (
+                "\u{a0}\u{2003}type=bind,dst=/y,src=/unicode-space\t\u{85}",
+                Some("/unicode-space"),
+            ),
             ("type=bind,\"source=/tmp/a,b\",target=/x", Some("/tmp/a,b")),
             (
                 "\"type=bind\",src=/quoted-type,dst=/q",
