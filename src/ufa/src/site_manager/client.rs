@@ -428,6 +428,126 @@ mod tests {
         assert_eq!(hosts.len(), 2, "every host the server sent must come back");
     }
 
+    /// The 200 example of `GET /v1/hosts` in the official Site Manager spec.
+    const SPEC_HOSTS_PAGE: &str = include_str!("openapi-examples/hosts-page.json");
+
+    /// The `console` example of `GET /v1/hosts/{id}` in the official spec.
+    const SPEC_HOST_CONSOLE: &str = include_str!("openapi-examples/host-console.json");
+
+    /// The `network-server` example of `GET /v1/hosts/{id}` in the spec.
+    const SPEC_HOST_NETWORK_SERVER: &str =
+        include_str!("openapi-examples/host-network-server.json");
+
+    /// The id of the host in the spec example of the listing.
+    const SPEC_CONSOLE_ID: &str =
+        "70A7419783ED0000000006797F060000000006C719490000000062ABD4EA:1261206302";
+
+    /// The spec listing example, with its `nextToken` set to `token`, or
+    /// removed when `token` is `None`.
+    fn spec_page(token: Option<&str>) -> serde_json::Value {
+        let mut page: serde_json::Value =
+            serde_json::from_str(SPEC_HOSTS_PAGE).expect("the spec example is JSON");
+        let object = page.as_object_mut().expect("the example is an object");
+        match token {
+            Some(token) => {
+                object.insert("nextToken".to_string(), token.into());
+            }
+            None => {
+                object.remove("nextToken");
+            }
+        }
+        page
+    }
+
+    /// The host ids that `hosts` hold, in order.
+    fn ids(hosts: &[Host]) -> Vec<&str> {
+        hosts.iter().map(|host| host.id.as_str()).collect()
+    }
+
+    /// The listing example of the spec is one page, and it reads as one.
+    #[tokio::test]
+    async fn the_last_page_of_the_spec_example_is_read_as_the_listing() {
+        let body = spec_page(None).to_string();
+        let server = TestServer::replying(&json_response(&body)).await;
+        let client = client_talking_to(server.origin());
+
+        let hosts = client
+            .get_hosts()
+            .await
+            .expect("the answer of the spec must be readable");
+
+        assert_eq!(server.requests().len(), 1, "a last page needs one request");
+        assert_eq!(ids(&hosts), [SPEC_CONSOLE_ID]);
+        let shown = serde_json::to_value(&hosts[0]).expect("a host is JSON");
+        assert_eq!(
+            shown["registrationTime"], "",
+            "the time stays as the API sent it"
+        );
+    }
+
+    /// The walk sends each `nextToken` back as one percent-encoded value, and
+    /// reads the pages in order.
+    #[tokio::test]
+    async fn the_walk_follows_the_next_token_of_each_page() {
+        let first = spec_page(Some("page 2&x=y:z")).to_string();
+        let mut last = spec_page(None);
+        last["data"][0]["id"] = "second-host".into();
+        let routes: Vec<(String, String)> = vec![(
+            "nextToken=page+2%26x%3Dy%3Az".to_string(),
+            json_response(&last.to_string()),
+        )];
+        let server = TestServer::routing(&routes, &json_response(&first)).await;
+        let client = client_talking_to(server.origin());
+
+        let hosts = client
+            .get_hosts()
+            .await
+            .expect("two pages of the spec shape must be readable");
+
+        assert_eq!(server.requests().len(), 2, "two pages need two requests");
+        assert_eq!(ids(&hosts), [SPEC_CONSOLE_ID, "second-host"]);
+    }
+
+    /// A server that gives the token it was sent again would send the walk
+    /// round forever. The walk refuses the answer instead.
+    #[tokio::test]
+    async fn a_page_token_that_comes_back_is_refused() {
+        let server = TestServer::replying(&json_response(SPEC_HOSTS_PAGE)).await;
+        let client = client_talking_to(server.origin());
+
+        let outcome =
+            tokio::time::timeout(std::time::Duration::from_secs(60), client.get_hosts())
+                .await
+                .expect("the walk must stop on its own");
+
+        let error = outcome.expect_err("a repeated token is not a listing");
+        let report = format!("{error:#}");
+        assert!(report.contains("a second time"), "got: {report}");
+    }
+
+    /// `GET /v1/hosts/{id}` gives the host inside `data`, for each example
+    /// of the spec.
+    #[tokio::test]
+    async fn a_host_in_the_data_key_of_the_spec_is_read() {
+        for (body, id) in [
+            (SPEC_HOST_CONSOLE, SPEC_CONSOLE_ID),
+            (
+                SPEC_HOST_NETWORK_SERVER,
+                "1d9cf3ee-0c0f-466e-933c-9af829f09b50",
+            ),
+        ] {
+            let server = TestServer::replying(&json_response(body)).await;
+            let client = client_talking_to(server.origin());
+
+            let host = client
+                .get_host(id)
+                .await
+                .expect("the answer of the spec must be readable");
+
+            assert_eq!(host.id, id);
+        }
+    }
+
     /// `.` and `..` name no host at all, and a URL builder that appends path
     /// segments silently drops them -- which would turn `ufa cloud host ..`
     /// into a request for the whole host listing.
