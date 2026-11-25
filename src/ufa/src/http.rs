@@ -721,6 +721,27 @@ mod tests {
         );
     }
 
+    /// A failure answer in the API error shape quotes its message, and a huge
+    /// message is cut short like any other body.
+    #[test]
+    fn a_huge_error_message_is_quoted_only_in_part() {
+        let body = serde_json::json!({ "message": "x".repeat(HUGE_BODY_CHARS) }).to_string();
+
+        let rendered =
+            response_error(Api::Controller, StatusCode::INTERNAL_SERVER_ERROR, &body).to_string();
+
+        assert!(
+            rendered.chars().count() < REASONABLE_ERROR_CHARS,
+            "the error reproduced {} characters of a {HUGE_BODY_CHARS}-character message",
+            rendered.chars().count()
+        );
+        assert!(
+            rendered.contains("API error: xxxx"),
+            "the error must quote the start of the message, got: {}",
+            rendered.chars().take(200).collect::<String>()
+        );
+    }
+
     /// The same, for the body of a response that succeeded but did not carry
     /// the JSON the caller expected.
     #[test]
