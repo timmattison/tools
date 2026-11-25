@@ -2327,8 +2327,8 @@ fn load_still_image(path: &Path) -> Result<DynamicImage> {
 /// The decode then reports the failure with its cause.
 fn starts_no_image(path: &Path) -> bool {
     let mut block = Vec::new();
-    let read = fs::File::open(path)
-        .and_then(|file| file.take(FIRST_BLOCK_BYTES).read_to_end(&mut block));
+    let read =
+        fs::File::open(path).and_then(|file| file.take(FIRST_BLOCK_BYTES).read_to_end(&mut block));
     if read.is_err() {
         return false;
     }
