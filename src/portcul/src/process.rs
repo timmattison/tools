@@ -315,10 +315,21 @@ fn kill_error(error: &std::io::Error) -> anyhow::Error {
 
 /// Formats the header shown before listing processes to kill.
 ///
+/// `targets` are the processes that listen on `port`.
+///
 /// Example: "Found 2 processes on port 8080:"
-pub fn format_kill_header(count: usize, port: u16) -> String {
+pub fn format_kill_header(targets: &[&ListeningProcess], port: u16) -> String {
+    let count: usize = targets.iter().map(|l| l.addresses.len()).sum();
     let noun = if count == 1 { "process" } else { "processes" };
     format!("Found {count} {noun} on port {port}:")
+}
+
+/// Formats the question that `portcul kill` asks before it sends SIGTERM.
+///
+/// `targets` are the processes that the header of [`format_kill_header`]
+/// counts.
+pub fn format_kill_prompt(_targets: &[&ListeningProcess]) -> &'static str {
+    "Kill these processes? [y/n] "
 }
 
 /// Formats the result message after sending SIGTERM.
@@ -638,16 +649,64 @@ mod tests {
         assert_eq!(pid.as_u32(), 1234);
     }
 
+    /// Builds a listener on `port` for the tests of the kill header and the
+    /// kill prompt.
+    fn port_listener(pid: u32, name: &str, port: u16, addresses: &[&str]) -> ListeningProcess {
+        ListeningProcess {
+            pid: Pid::try_from(pid).unwrap(),
+            name: name.to_string(),
+            port,
+            addresses: addresses.iter().map(ToString::to_string).collect(),
+        }
+    }
+
     #[test]
     fn test_format_kill_header_single() {
-        let header = format_kill_header(1, 8080);
+        let nginx = port_listener(1234, "nginx", 8080, &["0.0.0.0"]);
+        let header = format_kill_header(&[&nginx], 8080);
         assert_eq!(header, "Found 1 process on port 8080:");
     }
 
     #[test]
     fn test_format_kill_header_multiple() {
-        let header = format_kill_header(3, 443);
+        let a = port_listener(100, "nginx", 443, &["0.0.0.0"]);
+        let b = port_listener(200, "nginx", 443, &["127.0.0.1"]);
+        let c = port_listener(300, "caddy", 443, &["::"]);
+        let header = format_kill_header(&[&a, &b, &c], 443);
         assert_eq!(header, "Found 3 processes on port 443:");
+    }
+
+    #[test]
+    fn test_format_kill_header_one_dual_stack_process_counts_one_process() {
+        // One process that listens on 0.0.0.0 and on :: prints two address
+        // lines, but it is one process, and it gets one SIGTERM.
+        let node = port_listener(4321, "node", 8080, &["0.0.0.0", "::"]);
+        let header = format_kill_header(&[&node], 8080);
+        assert_eq!(header, "Found 1 process (2 addresses) on port 8080:");
+    }
+
+    #[test]
+    fn test_format_kill_header_counts_addresses_when_they_differ_from_processes() {
+        let a = port_listener(100, "nginx", 80, &["0.0.0.0", "::"]);
+        let b = port_listener(200, "nginx", 80, &["127.0.0.1"]);
+        let header = format_kill_header(&[&a, &b], 80);
+        assert_eq!(header, "Found 2 processes (3 addresses) on port 80:");
+    }
+
+    #[test]
+    fn test_format_kill_prompt_one_dual_stack_process_asks_about_this_process() {
+        let node = port_listener(4321, "node", 8080, &["0.0.0.0", "::"]);
+        assert_eq!(format_kill_prompt(&[&node]), "Kill this process? [y/n] ");
+    }
+
+    #[test]
+    fn test_format_kill_prompt_two_processes_asks_about_these_processes() {
+        let a = port_listener(100, "nginx", 80, &["0.0.0.0"]);
+        let b = port_listener(200, "nginx", 80, &["127.0.0.1"]);
+        assert_eq!(
+            format_kill_prompt(&[&a, &b]),
+            "Kill these processes? [y/n] "
+        );
     }
 
     #[test]

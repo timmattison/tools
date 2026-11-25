@@ -16,7 +16,7 @@ mod process;
 mod ui;
 
 use process::{
-    collect_listeners, filter_by_port, format_kill_header, format_process_line,
+    collect_listeners, filter_by_port, format_kill_header, format_kill_prompt, format_process_line,
     kill_after_confirmation, kill_process, kill_targets,
 };
 use ui::{AppState, KillConfirm};
@@ -130,8 +130,7 @@ fn cmd_kill(port: u16, yes: bool) -> Result<()> {
     } else {
         // Interactive: show processes and ask for confirmation.
         // Print one line per address so output is easy to grep/pipe.
-        let address_count: usize = targets.iter().map(|l| l.addresses.len()).sum();
-        println!("{}", format_kill_header(address_count, port));
+        println!("{}", format_kill_header(&targets, port));
         for listener in &targets {
             for address in &listener.addresses {
                 println!("{}", format_process_line(listener, address));
@@ -139,7 +138,7 @@ fn cmd_kill(port: u16, yes: bool) -> Result<()> {
         }
         println!();
 
-        eprint!("Kill these processes? [y/n] ");
+        eprint!("{}", format_kill_prompt(&targets));
         io::stderr().flush()?;
 
         let mut input = String::new();
