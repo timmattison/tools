@@ -190,9 +190,10 @@ impl AppState {
     }
 
     /// Open chat.db and start the build of the search index on a new thread.
-    /// Each call first deletes the text cache of an older msgs. Returns when chat.db is open. Calls `on_status` from the build thread
-    /// with each change of the index state. A second call starts no second
-    /// build, unless the last build failed.
+    /// Each call first deletes the text cache of an older msgs. Returns when
+    /// chat.db is open. Calls `on_status` from the build thread with each
+    /// change of the index state. A second call starts no second build,
+    /// unless the last build failed.
     ///
     /// # Errors
     ///
