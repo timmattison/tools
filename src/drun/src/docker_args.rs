@@ -1038,12 +1038,16 @@ mod tests {
             "--mount",
             "type=volume,src=named,dst=/z",
             "--mount=source=/not-a-bind,target=/w",
+            "--mount",
+            "Type=BIND,SRC=/Upper,target=/u",
+            "--mount=type=Bind,Source=/Mixed,Target=/m",
             "alpine",
         ])
         .unwrap();
         assert_eq!(
             parsed.bind_sources,
-            ["./src", "/home/me/out", "/srv", "../up"]
+            ["./src", "/home/me/out", "/srv", "../up", "/Upper", "/Mixed"],
+            "docker lowercases each key of --mount and the value of type"
         );
     }
 
