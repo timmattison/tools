@@ -81,12 +81,31 @@ impl Diff {
 /// Returns an error when the canvas holds more than [`MAX_CANVAS_PIXELS`]
 /// pixels.
 pub fn compare(first: &DynamicImage, second: &DynamicImage, mode: Mode) -> Result<Diff> {
-    let _ = (first, second, mode);
+    let _ = mode;
+    let first = first.to_rgba8();
+    let second = second.to_rgba8();
+    let width = first.width().max(second.width());
+    let height = first.height().max(second.height());
+    let mut picture = RgbaImage::new(width, height);
+    let mut differing_pixels = 0_u64;
+    for (x, y, out) in picture.enumerate_pixels_mut() {
+        let one = pixel_at(&first, x, y);
+        if one != pixel_at(&second, x, y) {
+            differing_pixels = differing_pixels.saturating_add(1);
+        }
+        *out = one;
+    }
     Ok(Diff {
-        picture: RgbaImage::new(0, 0),
+        picture,
         regions: Vec::new(),
-        differing_pixels: 0,
+        differing_pixels,
     })
+}
+
+/// The pixel of `image` at (`x`, `y`), or [`BLANK`] when the image does not
+/// cover that position.
+fn pixel_at(image: &RgbaImage, x: u32, y: u32) -> Rgba<u8> {
+    image.get_pixel_checked(x, y).copied().unwrap_or(BLANK)
 }
 
 /// The thickness of an outline, in pixels: `max(2, ceil(L / 400))`, where `L`
