@@ -374,9 +374,7 @@ mod tests {
     /// path is Unix-shaped), keyed off a parallel-safe tempdir by the caller.
     #[cfg(unix)]
     fn write_executable_stub(path: &std::path::Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(path, body).expect("write stub");
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod stub");
+        gitscratch::testing::executable::write_executable(path, body).expect("write stub");
     }
 
     #[cfg(unix)]

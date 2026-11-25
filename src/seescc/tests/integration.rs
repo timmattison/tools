@@ -5,7 +5,6 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -15,8 +14,7 @@ const FIXTURE: &str = include_str!("fixtures/sccache-0.15.0.json");
 /// Write an executable `sccache` stub into `dir` with the given shell body.
 fn write_stub(dir: &Path, body: &str) {
     let path = dir.join("sccache");
-    fs::write(&path, body).expect("write stub");
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod stub");
+    gitscratch::testing::executable::write_executable(&path, body).expect("write stub");
 }
 
 /// Run seescc with `path_value` as its PATH and `iso` as both `HOME` and

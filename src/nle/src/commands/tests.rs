@@ -494,15 +494,21 @@ fn paths(entries: &[&str]) -> Vec<PathBuf> {
     entries.iter().map(PathBuf::from).collect()
 }
 
+/// The `beta` that the test puts in `~/.cargo/bin`. It prints its arguments,
+/// as `echo` does.
+#[cfg(unix)]
+const BETA_STUB: &str = "#!/bin/sh\nprintf '%s\\n' \"$*\"\n";
+
 #[cfg(unix)]
 #[test]
 fn beta_command_finds_beta_in_cargo_bin_from_the_finder_path() {
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join(".cargo").join("bin");
     fs::create_dir_all(&bin).unwrap();
-    // A symlink, not a written script: a written script gives ETXTBSY on
-    // Linux when another thread forks while the file is open for writing.
-    std::os::unix::fs::symlink("/bin/echo", bin.join("beta")).unwrap();
+    // A script, not a link to /bin/echo: the Rust coreutils of Ubuntu 26.04
+    // refuse to run under a name other than their own. The writer of
+    // `gitscratch` stops the ETXTBSY race of a written script on Linux.
+    gitscratch::testing::executable::write_executable(bin.join("beta"), BETA_STUB).unwrap();
     let app = mock_shell_app();
 
     let command = beta_command(
@@ -515,7 +521,11 @@ fn beta_command_finds_beta_in_cargo_bin_from_the_finder_path() {
     );
     let output = std::process::Command::from(command).output().unwrap();
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "the stub beta failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(output.stdout, b"found-beta\n");
 }
 

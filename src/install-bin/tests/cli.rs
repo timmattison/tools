@@ -4,8 +4,6 @@
 //! Parallel-safety: every test gets its own `tempfile::tempdir()` sandbox, so
 //! concurrent runs never share a path.
 
-use std::os::unix::fs::PermissionsExt;
-
 /// Path to the freshly built `install-bin` binary, provided by Cargo to
 /// integration tests.
 const BIN: &str = env!("CARGO_BIN_EXE_install-bin");
@@ -75,8 +73,8 @@ fn no_verify_skips_the_exec_check() {
     // --no-verify this same binary would fail the install, so a clean exit here
     // proves the check never ran.)
     let src = dir.path().join("suicidal");
-    std::fs::write(&src, "#!/bin/sh\nkill -KILL $$\n").expect("write source");
-    std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o755)).expect("chmod source");
+    gitscratch::testing::executable::write_executable(&src, "#!/bin/sh\nkill -KILL $$\n")
+        .expect("write source");
 
     let out = childenv::fixture_command(BIN)
         .arg(&src)

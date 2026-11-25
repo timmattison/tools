@@ -1,5 +1,7 @@
 # Fun tools written by Tim Mattison
 
+[![CI](https://github.com/timmattison/tools/actions/workflows/ci.yml/badge.svg)](https://github.com/timmattison/tools/actions/workflows/ci.yml)
+
 I started this repo forever ago (2014!) to hold some tools I needed at the time. I converted the tools from ~~Golang~~
 to Rust for fun, and that conversion is now complete: no Go is left in this repository.
 

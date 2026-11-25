@@ -33,6 +33,10 @@ yaml-rust2 = { workspace = true }
 # The tests start node through childenv::fixture_command, because clippy.toml
 # bans std::process::Command::new.
 childenv = { workspace = true }
+# The tests of dev-script.rs and of src/commands/tests.rs write their shims
+# through testing::executable::write_executable. Linux refuses to run a shim
+# that a fork on another test thread holds open for writing (ETXTBSY).
+gitscratch = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

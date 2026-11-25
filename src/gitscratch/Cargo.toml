@@ -47,7 +47,8 @@ testcolor.workspace = true
 
 [features]
 # Shared git fixture builders for the test suites of crates built on gitscratch,
-# the pseudo-terminal, and the `git` shim that the tests of `grind` and `grime` share.
+# the pseudo-terminal, the `git` shim that the tests of `grind` and `grime`
+# share, and the writer of the executable stubs that a test runs.
 testing = ["dep:libc", "dep:shellquote"]
 # The progress display of `Console`. It is off by default, because it needs the
 # size of the terminal, and `grist` must not carry that dependency.
