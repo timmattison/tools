@@ -847,6 +847,12 @@ fn in_tmux() -> bool {
     std::env::var("TMUX").is_ok()
 }
 
+/// The way past a wrong refusal of Mosh or tmux, which each such refusal
+/// names. Each rule of the gate reads a guess, and a forced protocol passes
+/// every rule.
+const FORCED_PROTOCOL_REPAIR: &str =
+    "If this check is wrong and this terminal draws images, force a protocol with --protocol or IC_PROTOCOL.";
+
 /// Refuse the run when this session cannot draw an image.
 ///
 /// The gate reads four things: what the environment of a mosh session states
@@ -982,15 +988,17 @@ fn validate_terminal_for_graphics(
             Upstream Mosh strips the escape sequences that carry an image (Sixel, Kitty, iTerm2).\n\
             A Mosh that draws them answers that query, so {} display cannot work here.\n\
             \n\
-            To display images, reconnect with ssh user@host instead of mosh user@host.",
-            feature
+            To display images, reconnect with ssh user@host instead of mosh user@host.\n\
+            {}",
+            feature,
+            FORCED_PROTOCOL_REPAIR
         );
     }
 
     // Check for tmux, since a tmux that draws no image strips the sequences.
     // A tmux that draws one answers the query above.
     if in_tmux {
-        anyhow::bail!("tmux detected, and this session answered no query about images. {} display does not work here. Please run it directly in your terminal.", feature);
+        anyhow::bail!("tmux detected, and this session answered no query about images. {} display does not work here. Please run it directly in your terminal.\n{}", feature, FORCED_PROTOCOL_REPAIR);
     }
 
     if !terminal_caps.draws_images() {
