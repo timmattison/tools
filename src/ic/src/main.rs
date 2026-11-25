@@ -1059,13 +1059,16 @@ fn validate_terminal_for_graphics(
 ///
 /// A protocol that the user forced with `--protocol` or `IC_PROTOCOL` passes
 /// the gate here as it passes the gate on the image path, so the two answers
-/// stay one answer.
+/// stay one answer. The gate passes a forced terminal on its type alone, so
+/// such a run reads the environment and asks the terminal nothing.
 ///
 /// # Arguments
 /// * `args` - The command line arguments, which hold `--protocol`.
 fn report_display_readiness(args: &Args) -> Result<()> {
-    let terminal_caps =
-        with_the_forced_protocol(Capabilities::detect_by_asking_the_protocol(), args);
+    let terminal_caps = match forced_protocol_for(args) {
+        Some(protocol) => Capabilities::detect().with_forced_protocol(protocol),
+        None => Capabilities::detect_by_asking_the_protocol(),
+    };
     let transport = detect_remote_transport();
 
     validate_terminal_for_graphics(&terminal_caps, &transport, in_tmux(), "Image")
@@ -2518,10 +2521,10 @@ fn forced_protocol_for(args: &Args) -> Option<ForcedProtocol> {
 
 /// Put the protocol that the user forced, if there is one, on `capabilities`.
 ///
-/// Each read of the terminal in `ic` comes through here, through
-/// [`drawing_capabilities`] or [`report_display_readiness`]. So the gate, the
-/// writer, and the rule that decides if the bytes of a file travel as they
-/// stand all read one choice.
+/// Each path that draws a picture comes through here, through
+/// [`drawing_capabilities`], and [`report_display_readiness`] reads the same
+/// [`forced_protocol_for`]. So the gate, the writer, and the rule that decides
+/// if the bytes of a file travel as they stand all read one choice.
 ///
 /// # Arguments
 /// * `capabilities` - What `termgfx` read about the terminal.
