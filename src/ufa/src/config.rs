@@ -8,7 +8,7 @@ use dirs::config_dir;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 /// Prefix identifying a 1Password secret reference.
@@ -52,7 +52,8 @@ const ENVIRONMENT_FILE: &str = ".env";
 /// and `dotenvy::from_filename` both walk up from the working directory to the
 /// root, which puts a settings file in every directory above the user on the
 /// path — enough for one of them to name the controller the user's own API key
-/// goes to, with certificate verification off. `dotenvy::from_path` searches
+/// goes to, with certificate verification off. The function reads that one path
+/// with `fs::read` and hands the bytes to `dotenvy::from_read`, which searches
 /// nothing.
 ///
 /// The behaviour this changes: a settings file in a checkout, or in any other
@@ -63,8 +64,11 @@ const ENVIRONMENT_FILE: &str = ".env";
 /// A file that is not there is the normal case and stays silent. Any other
 /// fault is reported, because a settings file the user wrote and `ufa` cannot
 /// read is a fault the user must see. A line that cannot be parsed is
-/// reported by its position only: dotenvy puts the text of the line into its
-/// error, and that text holds the value, which is often a key.
+/// reported by the line where its setting starts, and no text of it is shown:
+/// dotenvy puts the text of the line into its error, and that text holds the
+/// value, which is often a key. The position that dotenvy gives has a different
+/// unit for each kind of error, so a [`LineCountingReader`] counts the lines
+/// that dotenvy reads instead.
 ///
 /// # Arguments
 ///
@@ -76,17 +80,129 @@ const ENVIRONMENT_FILE: &str = ".env";
 pub fn load_environment_file(directory: &Path) -> Result<Option<PathBuf>> {
     let path = directory.join(ENVIRONMENT_FILE);
 
-    match dotenvy::from_path(&path) {
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("Failed to read settings file: {}", path.display()));
+        }
+    };
+    let mut reader = LineCountingReader::new(&bytes);
+
+    match dotenvy::from_read(&mut reader) {
         Ok(()) => Ok(Some(path)),
-        Err(error) if error.not_found() => Ok(None),
-        Err(dotenvy::Error::LineParse(_, position)) => Err(anyhow::anyhow!(
-            "Failed to parse settings file {}: a line has an error at position {position}. \
-             The line is not shown, because it can hold a key. \
-             Put quotes around a value that holds a space.",
-            path.display()
-        )),
+        Err(dotenvy::Error::LineParse(text, _)) => {
+            let line = reader.lines_begun().saturating_sub(newlines_inside(&text));
+            Err(anyhow::anyhow!(
+                "Failed to parse settings file {}: the setting that starts on line {line} \
+                 cannot be parsed. The line is not shown, because it can hold a key. \
+                 Put quotes around a value that holds a space.",
+                path.display()
+            ))
+        }
         Err(error) => Err(anyhow::Error::new(error))
             .with_context(|| format!("Failed to read settings file: {}", path.display())),
+    }
+}
+
+/// Count the line breaks that sit inside the text of one setting.
+///
+/// A final line break ends the last line of the setting, so it is not inside.
+///
+/// # Arguments
+///
+/// * `text` - The text that dotenvy puts into a parse error.
+///
+/// # Returns
+///
+/// How many lines the setting spans after its first line.
+fn newlines_inside(text: &str) -> usize {
+    let breaks = text.matches('\n').count();
+    if text.ends_with('\n') {
+        breaks.saturating_sub(1)
+    } else {
+        breaks
+    }
+}
+
+/// A reader that counts the physical lines it has handed out.
+///
+/// dotenvy wraps its reader in a `BufReader` and reads one line at a time. The
+/// buffer refills only when it is empty, and this reader hands out at most one
+/// line for each read. Thus dotenvy never holds a line it has not reached, and
+/// when it reports its first error, the count is the last line of the setting
+/// that failed.
+struct LineCountingReader<'a> {
+    /// The bytes that are not handed out yet.
+    rest: &'a [u8],
+    /// Whether the next byte is the first byte of a line.
+    at_line_start: bool,
+    /// How many lines have begun.
+    lines_begun: usize,
+}
+
+impl<'a> LineCountingReader<'a> {
+    /// Make a reader over `bytes` that has begun no line.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The whole content of the settings file.
+    ///
+    /// # Returns
+    ///
+    /// The new reader.
+    fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            rest: bytes,
+            at_line_start: true,
+            lines_begun: 0,
+        }
+    }
+
+    /// How many lines have begun.
+    ///
+    /// # Returns
+    ///
+    /// The count of lines whose first byte was handed out.
+    fn lines_begun(&self) -> usize {
+        self.lines_begun
+    }
+}
+
+impl io::Read for LineCountingReader<'_> {
+    /// Hand out at most the rest of the current line, and never more than
+    /// `buf` holds.
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - Where the bytes go.
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes written, which is 0 for an empty `buf` or at the end.
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() || self.rest.is_empty() {
+            return Ok(0);
+        }
+        let line_end = self
+            .rest
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map_or(self.rest.len(), |index| index.saturating_add(1));
+        let count = line_end.min(buf.len());
+        let (head, tail) = self
+            .rest
+            .split_at_checked(count)
+            .unwrap_or((self.rest, &[]));
+        let target = buf.get_mut(..head.len()).unwrap_or_default();
+        target.copy_from_slice(head);
+        if self.at_line_start {
+            self.lines_begun = self.lines_begun.saturating_add(1);
+        }
+        self.at_line_start = head.last() == Some(&b'\n');
+        self.rest = tail;
+        Ok(head.len())
     }
 }
 
