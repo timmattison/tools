@@ -529,6 +529,7 @@ describe('/ic diff refuses', () => {
       reason: '--mode takes boxes, highlight or mask, and it got red',
     },
     { cause: '--mode with no mode', args: 'diff a.png b.png --mode', reason: '--mode needs a mode: boxes, highlight or mask' },
+    { cause: '--mode= with no mode', args: 'diff --mode= a.png b.png', reason: '--mode needs a mode: boxes, highlight or mask' },
     { cause: '--mode two times', args: 'diff --mode mask --mode boxes a.png b.png', reason: '--mode occurs two times' },
     { cause: 'an option that it does not know', args: 'diff --fast a.png b.png', reason: 'does not know the option --fast' },
     { cause: 'a double quote that is not closed', args: 'diff "a.png b.png', reason: 'a double quote is not closed' },
