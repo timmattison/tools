@@ -204,8 +204,8 @@ fn who_is_using(_path: &Path) -> Result<Vec<ProcessInfo>> {
 ///
 /// `target_path` is a file or a directory. `proc_root` is the directory that
 /// holds one entry for each process. It is `/proc` in production and a fake
-/// directory in a test. The function returns an error when it cannot read
-/// `proc_root` itself or cannot walk `target_path`.
+/// directory in a test. The function returns an error when it cannot open
+/// `proc_root` or cannot walk `target_path`.
 #[cfg(target_os = "linux")]
 fn get_file_users_linux(target_path: &Path, proc_root: &Path) -> Result<Vec<ProcessInfo>> {
     use procfs::process::{all_processes_with_root, FDTarget, MMapPath};
@@ -226,8 +226,9 @@ fn get_file_users_linux(target_path: &Path, proc_root: &Path) -> Result<Vec<Proc
 
     for process in all_processes_with_root(proc_root)? {
         // procfs cannot open an entry when its process stopped after the
-        // listing, or when the entry is not a process directory. Skip such an
-        // entry and go on.
+        // listing, or when the entry is not a process directory. A read error
+        // of the listing also comes here, and the listing then stops, thus the
+        // result can be incomplete. Skip such an entry and go on.
         let Ok(process) = process else {
             continue;
         };
