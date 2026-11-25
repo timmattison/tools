@@ -12,7 +12,9 @@ export default defineConfig({
     port: DEFAULT_DEV_PORT,
     strictPort: true,
   },
-  envPrefix: ["VITE_", "TAURI_"],
+  // TAURI_ENV_ and not TAURI_: the Tauri CLI reads the updater signing key
+  // from TAURI_SIGNING_PRIVATE_KEY, and the frontend must never get it.
+  envPrefix: ["VITE_", "TAURI_ENV_"],
   test: {
     environment: "jsdom",
     setupFiles: ["./src/test-setup.ts"],
