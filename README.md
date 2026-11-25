@@ -5257,7 +5257,7 @@ faulte tui --interval 2s
 ### Options
 
 - `--interval <DURATION>`: The length of the sample, for example `5s`, `10m`, `2h`, or `7d`. A bare number is a number of seconds. The ranking, `faulte kill`, and each sample of `faulte tui` count the page faults of each process over this time. `faulte check` reads the kernel counters at the start and at the end of this time. Defaults to `5s`. Zero is refused, because a sample of no time measures nothing.
-- `--limit <N>`: The number of rows that the table shows. Defaults to 25. One line under the table counts the rows that the limit hid, and gives their share of all faults, because the limit hides the small rates and the small rates were the load. The flag belongs to the ranking alone: `faulte kill` shows every candidate of its plan, and refuses `--limit` rather than take it and ignore it.
+- `--limit <N>`: The number of rows that the table shows. Defaults to 25. One line under the table counts the rows that the limit hid, and gives their share of all faults, because the limit hides the small rates and the small rates were the load. The flag belongs to the ranking alone: `faulte kill` shows every candidate of its plan, and refuses `--limit` after its name. Before the name, as in `faulte --limit 3 kill`, the flag is a flag of `faulte` itself, and `faulte kill` takes it and ignores it. That spelling keeps the exit code that it had before `faulte tui`.
 - `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
 - `-h`, `--help`: Print the usage.
 

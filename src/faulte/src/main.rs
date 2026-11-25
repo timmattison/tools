@@ -238,7 +238,9 @@ const TUI_REFUSES_LIMIT: &str = "--limit belongs to the ranking, and faulte tui 
 /// `faulte tui`. The flag belongs to the ranking alone. A flag that a command
 /// takes and then ignores is worse than a flag that it refuses, so this
 /// function refuses `--limit` that the person typed with `tui`. The value
-/// source tells a typed flag from the default.
+/// source tells a typed flag from the default. `faulte --limit N kill` keeps
+/// its exit code of 0, because `faulte tui` changes no exit code of
+/// `faulte kill`.
 fn parse_cli() -> Cli {
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());

@@ -55,7 +55,8 @@ fn one_line(text: &[u8]) -> String {
         .join(" ")
 }
 
-/// `--limit` belongs to the ranking, and `faulte kill` refuses it.
+/// `--limit` belongs to the ranking, and `faulte kill` refuses it after its
+/// name. Before the name, the flag is a flag of `faulte`, and the run succeeds.
 ///
 /// The issue gives `--limit` to the ranking and `--max` to `faulte kill`. A
 /// flag that a command takes and then ignores is worse than a flag that it
