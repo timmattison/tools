@@ -889,3 +889,61 @@ fn removed_plugin_file_runs_the_plugin_checks() {
         );
     }
 }
+
+/// The files of msgs that the msgs fixtures commit: one of the frontend, and
+/// one of the scripts. The msgs block reads both folders.
+const MSGS_FILES: [&str; 2] = ["src/msgs/frontend/src/a.ts", "src/msgs/scripts/a.ts"];
+
+/// The `pnpm` calls of the msgs block, in order. Each one names the frontend
+/// of msgs in this repository, through the folder of the hook.
+fn expected_msgs_pnpm_calls() -> [String; 2] {
+    let frontend = format!(
+        "{}/../src/msgs/frontend",
+        hook_path()
+            .parent()
+            .expect("the hook has a parent")
+            .display()
+    );
+    [
+        format!("--dir {frontend} install --frozen-lockfile --prefer-offline"),
+        format!("--dir {frontend} run check"),
+    ]
+}
+
+/// A move of a file of the msgs frontend or of the msgs scripts out of its
+/// folder, a deletion of it, and a symbolic link in its place must each run the
+/// type check and the tests of msgs, with no `GIT_` variable. Each one takes the
+/// file away from the code that imports it, and that breaks the type check as
+/// an edit can. `git diff` finds renames by default, and `--name-only` then
+/// prints only the new path, so a block that matches the old path misses the
+/// move.
+#[test]
+fn removed_msgs_file_runs_the_msgs_checks() {
+    for committed in MSGS_FILES {
+        for removal in each_removal("src/msgs/other/a.ts") {
+            let dir = unique_fixture_dir();
+            write_files(&dir, &[committed]);
+            commit_then_stage_removal(&dir, committed, removal);
+            let pnpm = install_fake_program(&dir, "pnpm", None);
+
+            let HookRun { passed, output } = run_hook_with_planted_git_variables(&dir, &pnpm);
+            let calls = read_recording(&pnpm);
+            cleanup(&dir);
+
+            assert!(
+                passed,
+                "the hook must pass with a fake pnpm ({removal:?} of {committed}): {output}"
+            );
+            assert_eq!(
+                calls.arguments,
+                expected_msgs_pnpm_calls(),
+                "{removal:?} of {committed} must run the checks of msgs: {output}"
+            );
+            assert!(
+                calls.git_lines.is_empty(),
+                "a pnpm command saw GIT_ variables ({removal:?} of {committed}): {:?}",
+                calls.git_lines
+            );
+        }
+    }
+}
