@@ -1,5 +1,7 @@
 //! Tests for the command bodies that the Tauri commands call.
 
+use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::Path;
 
@@ -461,6 +463,29 @@ const FINDER_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 const HOMEBREW_ARM_BIN: &str = "/opt/homebrew/bin";
 const HOMEBREW_INTEL_BIN: &str = "/usr/local/bin";
 
+// The names of the variables, written here again and not taken from the code
+// under test, so that a wrong name in that code fails these tests.
+const PATH_NAME: &str = "PATH";
+const CARGO_HOME_NAME: &str = "CARGO_HOME";
+const HOME_NAME: &str = "HOME";
+
+/// A lookup over fixed pairs, in place of `std::env::var_os`.
+fn vars(pairs: &[(&'static str, &str)]) -> impl Fn(&'static str) -> Option<OsString> {
+    let map: HashMap<&'static str, OsString> = pairs
+        .iter()
+        .map(|(name, value)| (*name, OsString::from(value)))
+        .collect();
+    move |name| map.get(name).cloned()
+}
+
+/// A mock Tauri app with the shell plugin, which `beta_command` needs.
+fn mock_shell_app() -> tauri::App<tauri::test::MockRuntime> {
+    tauri::test::mock_builder()
+        .plugin(tauri_plugin_shell::init())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap()
+}
+
 fn split(path: &OsStr) -> Vec<PathBuf> {
     std::env::split_paths(path).collect()
 }
@@ -471,38 +496,86 @@ fn paths(entries: &[&str]) -> Vec<PathBuf> {
 
 #[cfg(unix)]
 #[test]
-fn beta_path_finds_beta_in_cargo_bin_from_the_finder_path() {
+fn beta_command_finds_beta_in_cargo_bin_from_the_finder_path() {
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join(".cargo").join("bin");
     fs::create_dir_all(&bin).unwrap();
     // A symlink, not a written script: a written script gives ETXTBSY on
     // Linux when another thread forks while the file is open for writing.
     std::os::unix::fs::symlink("/bin/echo", bin.join("beta")).unwrap();
+    let app = mock_shell_app();
 
-    let path = beta_path_env(
-        Some(OsStr::new(FINDER_PATH)),
-        None,
-        Some(home.path().as_os_str()),
-    )
-    .unwrap();
-    let output = std::process::Command::new("beta")
-        .arg("found-beta")
-        .env_clear()
-        .env("PATH", path)
-        .output()
-        .unwrap();
+    let command = beta_command(
+        app.handle(),
+        &["found-beta".to_string()],
+        vars(&[
+            (PATH_NAME, FINDER_PATH),
+            (HOME_NAME, home.path().to_str().unwrap()),
+        ]),
+    );
+    let output = std::process::Command::from(command).output().unwrap();
 
     assert!(output.status.success());
     assert_eq!(output.stdout, b"found-beta\n");
 }
 
 #[test]
+fn beta_command_sets_only_a_path_from_the_cargo_home_and_home_vars() {
+    let app = mock_shell_app();
+    let args = vec!["web".to_string(), "in.cast".to_string()];
+
+    let command = std::process::Command::from(beta_command(
+        app.handle(),
+        &args,
+        vars(&[
+            (PATH_NAME, "/a"),
+            (CARGO_HOME_NAME, "/cargo-home"),
+            (HOME_NAME, "/home-dir"),
+        ]),
+    ));
+
+    assert_eq!(command.get_program(), "beta");
+    assert_eq!(
+        command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect::<Vec<_>>(),
+        args
+    );
+    let expected = std::env::join_paths(paths(&[
+        "/a",
+        "/cargo-home/bin",
+        "/home-dir/.cargo/bin",
+        HOMEBREW_ARM_BIN,
+        HOMEBREW_INTEL_BIN,
+    ]))
+    .unwrap();
+    assert_eq!(
+        command.get_envs().collect::<Vec<_>>(),
+        [(OsStr::new(PATH_NAME), Some(expected.as_os_str()))]
+    );
+}
+
+#[test]
+fn beta_command_sets_no_path_when_no_path_can_be_built() {
+    let app = mock_shell_app();
+
+    let command = std::process::Command::from(beta_command(
+        app.handle(),
+        &[],
+        vars(&[(PATH_NAME, "/a"), (CARGO_HOME_NAME, "/x:y")]),
+    ));
+
+    assert_eq!(command.get_envs().count(), 0);
+}
+
+#[test]
 fn beta_path_lists_app_then_cargo_then_homebrew_dirs() {
-    let path = beta_path_env(
-        Some(OsStr::new("/a:/b")),
-        Some(OsStr::new("/cargo-home")),
-        Some(OsStr::new("/home-dir")),
-    )
+    let path = beta_path_env(vars(&[
+        (PATH_NAME, "/a:/b"),
+        (CARGO_HOME_NAME, "/cargo-home"),
+        (HOME_NAME, "/home-dir"),
+    ]))
     .unwrap();
 
     assert_eq!(
@@ -521,12 +594,7 @@ fn beta_path_lists_app_then_cargo_then_homebrew_dirs() {
 #[test]
 fn beta_path_adds_no_directory_that_is_already_an_entry() {
     let app_path = format!("/z:{HOMEBREW_INTEL_BIN}:/home-dir/.cargo/bin");
-    let path = beta_path_env(
-        Some(OsStr::new(&app_path)),
-        None,
-        Some(OsStr::new("/home-dir")),
-    )
-    .unwrap();
+    let path = beta_path_env(vars(&[(PATH_NAME, &app_path), (HOME_NAME, "/home-dir")])).unwrap();
 
     assert_eq!(
         split(&path),
@@ -541,14 +609,14 @@ fn beta_path_adds_no_directory_that_is_already_an_entry() {
 
 #[test]
 fn beta_path_with_no_inputs_holds_only_the_homebrew_dirs() {
-    let path = beta_path_env(None, None, None).unwrap();
+    let path = beta_path_env(vars(&[])).unwrap();
 
     assert_eq!(split(&path), paths(HOMEBREW_BIN_DIRS));
 }
 
 #[test]
 fn beta_path_is_none_when_a_directory_holds_the_separator() {
-    let path = beta_path_env(Some(OsStr::new("/a")), Some(OsStr::new("/x:y")), None);
+    let path = beta_path_env(vars(&[(PATH_NAME, "/a"), (CARGO_HOME_NAME, "/x:y")]));
 
     assert_eq!(path, None);
 }

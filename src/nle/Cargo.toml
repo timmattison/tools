@@ -26,6 +26,9 @@ ts-rs = { version = "10", features = ["serde-compat"] }
 tempfile = { workspace = true }
 
 [dev-dependencies]
+# The `test` feature gives `tauri::test::mock_builder`, a mock app that the
+# tests of `beta_command` build the shell plugin command on.
+tauri = { version = "2", features = ["test"] }
 yaml-rust2 = { workspace = true }
 
 [lints]

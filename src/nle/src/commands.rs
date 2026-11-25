@@ -1,4 +1,4 @@
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use tauri_plugin_shell::ShellExt;
@@ -281,22 +281,23 @@ fn web_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
 /// on its PATH.
 const HOMEBREW_BIN_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin"];
 
-/// Build the PATH for the `beta` child: each entry of `app_path` in its order,
-/// then `<cargo_home>/bin`, `<home>/.cargo/bin`, and `HOMEBREW_BIN_DIRS`.
+/// The environment variable that lists the directories where a program is
+/// found.
+const PATH_VAR: &str = "PATH";
+
+/// Build the PATH for the `beta` child from the variables that `var` gives
+/// (`std::env::var_os` in the app): each entry of `PATH` in its order, then
+/// `$CARGO_HOME/bin`, `$HOME/.cargo/bin`, and `HOMEBREW_BIN_DIRS`.
 /// It adds no directory that is already an entry. It returns `None` when
 /// `std::env::join_paths` fails, and the child then keeps the PATH of the app.
-fn beta_path_env(
-    app_path: Option<&OsStr>,
-    cargo_home: Option<&OsStr>,
-    home: Option<&OsStr>,
-) -> Option<OsString> {
-    let mut entries: Vec<PathBuf> = app_path
-        .map(|p| std::env::split_paths(p).collect())
+fn beta_path_env(var: impl Fn(&'static str) -> Option<OsString>) -> Option<OsString> {
+    let mut entries: Vec<PathBuf> = var(PATH_VAR)
+        .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
-    let extras = cargo_home
+    let extras = var("CARGO_HOME")
         .map(|dir| PathBuf::from(dir).join("bin"))
         .into_iter()
-        .chain(home.map(|dir| PathBuf::from(dir).join(".cargo").join("bin")))
+        .chain(var("HOME").map(|dir| PathBuf::from(dir).join(".cargo").join("bin")))
         .chain(HOMEBREW_BIN_DIRS.iter().map(PathBuf::from));
     for extra in extras {
         if !entries.contains(&extra) {
@@ -306,6 +307,15 @@ fn beta_path_env(
     std::env::join_paths(entries).ok()
 }
 
+/// Build the `beta` command with `args` through the shell plugin.
+fn beta_command<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    args: &[String],
+    _var: impl Fn(&'static str) -> Option<OsString>,
+) -> tauri_plugin_shell::process::Command {
+    app.shell().command("beta").args(args)
+}
+
 /// Run the `beta` CLI with `args` through the shell plugin.
 /// Returns `output_path` when `beta` succeeds.
 async fn run_beta(
@@ -313,13 +323,9 @@ async fn run_beta(
     args: &[String],
     output_path: &str,
 ) -> Result<String, NleError> {
-    let mut command = app.shell().command("beta").args(args);
-    if let Some(path) = beta_path_env(
-        std::env::var_os("PATH").as_deref(),
-        std::env::var_os("CARGO_HOME").as_deref(),
-        std::env::var_os("HOME").as_deref(),
-    ) {
-        command = command.env("PATH", path);
+    let mut command = beta_command(app, args, std::env::var_os);
+    if let Some(path) = beta_path_env(std::env::var_os) {
+        command = command.env(PATH_VAR, path);
     }
     let output = command.output().await.map_err(|e| {
         NleError::ExportError(format!(
