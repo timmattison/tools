@@ -1747,7 +1747,10 @@ window, and not the window of whoever typed `cargo test`.
 the terminal, and gives back a `std::process::Output`.
 `Pty::run_with_output_on_terminal` puts standard error on the terminal too, so a
 test sees the display that a person sees. So a test of `grind` or
-`grime` sees the color that a person at a terminal sees. Output processing is
+`grime` sees the color that a person at a terminal sees. A child whose command
+states no `TERM` gets `TERM=xterm-256color` (`Pty::TERM`), because a display
+draws nothing for no `TERM`, and a GitHub runner sets none. A `TERM` that the
+command sets or removes wins. Output processing is
 off, so the bytes come back as the child wrote them. The master end is read on
 a thread of its own, so output of any size comes back whole. The helper lives
 here because both tools need it, and two copies of the same `unsafe` code part
