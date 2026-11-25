@@ -1810,6 +1810,49 @@ mod tests {
         assert!(reading.header_lines()[0].contains("of the whole history (3 frames, 0 gaps)"));
     }
 
+    /// A span of 1 m or more takes the zombies and the unsampled processes
+    /// from its newest frame, the same as the one-frame view of that frame.
+    /// The two counts are snapshots of the table of `ps`, so a sum over the
+    /// frames counts one zombie once for each frame that saw it.
+    #[test]
+    fn a_span_states_the_zombies_and_the_unsampled_of_its_newest_frame() {
+        let mut updates = Vec::new();
+        for (secs, zombies, unsampled) in [(10, 9, 4), (12, 0, 0), (14, 72, 5)] {
+            let mut sampled = sample(secs, vec![row(1, 4)]);
+            sampled.observed.ranking.skipped.zombies = zombies;
+            sampled.observed.ranking.skipped.unsampled = unsampled;
+            updates.push(Update::Frame(Box::new(sampled)));
+        }
+        let mut history = History::new();
+        let ids: Vec<EntryId> = updates
+            .into_iter()
+            .map(|update| history.add(update))
+            .collect();
+        let one_frame = history.frame(ids[2]).expect("the frame is there");
+        let expected = "skipped: 72 zombies, 5 were not in the top sample";
+
+        assert_eq!(
+            one_frame.header_lines().last().map(String::as_str),
+            Some(expected)
+        );
+        for width in [
+            SpanWidth::OneMinute,
+            SpanWidth::FiveMinutes,
+            SpanWidth::FifteenMinutes,
+            SpanWidth::Whole,
+        ] {
+            let reading = history.span(ids[2], width).expect("the span has frames");
+
+            assert_eq!(
+                reading.header_lines().last().map(String::as_str),
+                Some(expected),
+                "the span {}",
+                width.label()
+            );
+            assert_eq!(reading.ranking().skipped, one_frame.ranking().skipped);
+        }
+    }
+
     /// A narrow span walks back only over the entries that are young enough,
     /// and a span can end at a gap.
     #[test]
