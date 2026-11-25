@@ -41,8 +41,9 @@
 //!    std::process::Command as Process` makes `Process::new` one.
 //!
 //! The arguments name the `op` binary when they hold, at any depth, a string
-//! literal whose last path segment is `op`. Thus `"/opt/homebrew/bin/op"` runs
-//! the same binary, and `"op-cache"` runs a different one. A literal after the
+//! literal whose last path segment is `op` or `op.exe`, in any letter case.
+//! Thus `"/opt/homebrew/bin/op"` and `"OP"` run the same binary, and
+//! `"op-cache"` runs a different one. A literal after the
 //! closing parenthesis is an argument of a later method, so
 //! `childenv::command("git").arg("op")` runs git.
 //!
