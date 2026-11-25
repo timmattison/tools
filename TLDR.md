@@ -22,7 +22,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `dirhash` | SHA256 hash of a directory tree's contents to compare directories for equality. |
 | `diskhog` | Live terminal UI of per-process disk I/O on macOS (IOPS with sudo). |
 | `drun` | Docker run on the least busy host — runs a container on the Docker context with the most free memory and CPU, then finds it again with `ps`, `status`, `logs`, `wait`, `exec`, `cp`, and `rm`. `drun buildx create` puts a builder there too, and other commands go to the local docker. |
-| `faulte` | Fault rate — ranks every process of a Mac by the page faults it makes per second, with the swap traffic of the sample and one total line for the Claude Code sessions. `faulte kill` shows the old idle Claude Code sessions and stops them after a question. macOS only. |
+| `faulte` | Fault rate — ranks every process of a Mac by the page faults it makes per second, with the swap traffic of the sample and one total line for the Claude Code sessions. `faulte check` says in seconds if the system time is high, and if memory churn or process churn occurs at the same time. `faulte kill` shows the old idle Claude Code sessions and stops them after a question. macOS only. |
 | `freeport` | Finds a free TCP port on localhost, cross-platform. |
 | `gitdiggin` | Recursively searches git repos for commits containing a string (messages and diffs). |
 | `gitnuke` | Removes a git worktree and deletes its branch; `--force` is required for worktrees with submodules checked out (which `git worktree remove` refuses outright) or uncommitted changes. It asks before it deletes a branch that no recent commit names, `--yes` skips the question, and without a terminal it refuses with exit code 10. |
