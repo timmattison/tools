@@ -183,4 +183,12 @@ mod tests {
         assert_eq!(*diff.picture.get_pixel(0, 0), RED);
         assert_eq!(*diff.picture.get_pixel(2, 2), BLANK);
     }
+
+    #[test]
+    fn mask_paints_the_same_pixels_black_and_the_changed_ones_red() {
+        let diff = compare(&picture(3, 2), &changed(2, 3, &[(0, 0)]), Mode::Mask).unwrap();
+        assert_eq!(*diff.picture.get_pixel(1, 1), BLACK);
+        assert_eq!(*diff.picture.get_pixel(0, 0), RED);
+        assert_eq!(*diff.picture.get_pixel(2, 2), BLANK);
+    }
 }
