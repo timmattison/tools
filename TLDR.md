@@ -22,7 +22,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `dirhash` | SHA256 hash of a directory tree's contents to compare directories for equality. |
 | `diskhog` | Live terminal UI of per-process disk I/O on macOS (IOPS with sudo). |
 | `drun` | Docker run on the least busy host — runs a container on the Docker context with the most free memory and CPU, then finds it again with `ps`, `status`, `logs`, `wait`, `exec`, `cp`, and `rm`. `drun buildx create` puts a builder there too, and other commands go to the local docker. |
-| `faulte` | Fault rate — ranks every process of a Mac by the page faults it makes per second, with the swap traffic of the sample and one total line for the Claude Code sessions. `faulte check` says in seconds if the system time is high, and if memory churn or process churn occurs at the same time. `faulte kill` shows the old idle Claude Code sessions and stops them after a question. macOS only. |
+| `faulte` | Fault rate — ranks every process of a Mac by the page faults it makes per second, with the swap traffic of the sample and one total line for the Claude Code sessions. `faulte check` says in seconds if the system time is high, and if memory churn or process churn occurs at the same time. `faulte kill` shows the old idle Claude Code sessions and stops them after a question. `faulte tui` is a live view with a history. macOS only. |
 | `freeport` | Finds a free TCP port on localhost, cross-platform. |
 | `gitdiggin` | Recursively searches git repos for commits containing a string (messages and diffs). |
 | `gitnuke` | Removes a git worktree and deletes its branch; `--force` is required for worktrees with submodules checked out (which `git worktree remove` refuses outright) or uncommitted changes. It asks before it deletes a branch that no recent commit names, `--yes` skips the question, and without a terminal it refuses with exit code 10. |
@@ -47,6 +47,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `krt` | Knights of the Round Trip — records the network path to a destination, hop by hop, into an append-only JSONL file, and draws the live table of that path under a terminal. `krt replay` folds one run of a recorded file into one table of the path. `krt hunt` looks for the longest path it can find: it draws random addresses, traces a pool of them at once, and prints the shortest, longest, fastest, and slowest path it found, and `--mine` probes a few addresses near each destination that sets a record, to find whether a neighbor gives a longer path. |
 | `localnext` | Serves a statically exported Next.js app from its `out` directory, on a port derived from the project and the git branch. |
 | `ng` | Navel-Gaze — watches JS/TS files and re-runs `pnpm lint` (or `--typecheck`) on change. |
+| `nle` | Non-Linear Editor — a desktop editor for `beta` terminal recordings. The scaffold opens a recording and shows its metadata. |
 | `nodenuke` | Removes `node_modules` directories and lock files throughout a repo. |
 | `nodeup` | Updates npm/pnpm/yarn packages across all `package.json` directories. |
 | `nwt` | New Worktree — creates a git worktree with a random Docker-style name, links the child repositories of a container into it, and can leave a heavy tracked directory out of it. |

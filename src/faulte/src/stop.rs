@@ -425,6 +425,7 @@ mod tests {
     use crate::pid::{Pid, Uid};
     use crate::ranking::{ClaudeRole, ClaudeView, RankedRow, Viewer};
     use crate::state::SessionState;
+    use crate::stream::FaultStream;
     use crate::top::TopSample;
     use crate::vm::{SwapUsage, VmCounters};
 
@@ -804,6 +805,10 @@ mod tests {
 
         fn sample_faults(&self, _interval: Span) -> Result<(TopSample, Duration), MachineError> {
             unreachable!("the stop sequence samples no faults");
+        }
+
+        fn fault_stream(&self, _interval: Span) -> Result<Box<dyn FaultStream>, MachineError> {
+            unreachable!("the stop sequence starts no stream of faults");
         }
 
         fn claude_roles(&self) -> HashMap<Pid, ClaudeRole> {
