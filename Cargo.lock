@@ -2590,15 +2590,21 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 name = "faulte"
 version = "0.1.0"
 dependencies = [
+ "altscreen",
  "buildinfo",
  "childenv",
  "chrono",
  "clap",
  "comfy-table",
+ "crossterm",
  "libc",
  "occ",
+ "ratatui",
+ "shellquote",
+ "signal-hook 0.3.18",
  "termsize",
  "testcolor",
+ "textfit",
  "thiserror 2.0.21",
 ]
 
