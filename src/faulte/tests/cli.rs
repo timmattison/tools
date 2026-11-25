@@ -318,6 +318,44 @@ fn help_gives_each_flag_and_its_default() {
     }
 }
 
+/// `--interval` is one global flag, thus its help is true for each command.
+/// The check samples no page faults, and its help says what the check does.
+#[test]
+fn check_help_says_what_the_interval_does_for_the_check() {
+    let help = run(&["check", "--help"]);
+    assert!(help.status.success(), "faulte check --help exits 0");
+
+    let help = one_line(&help.stdout);
+    assert!(
+        help.contains("reads the kernel counters"),
+        "faulte check --help: {help}"
+    );
+}
+
+/// The help names each exit code of the check. It does not say that the check
+/// finds the cause of the high system time, because no measurement of the
+/// check proves a cause.
+#[test]
+fn check_help_names_each_exit_code_and_claims_no_cause() {
+    let check = run(&["check", "--help"]);
+    assert!(check.status.success(), "faulte check --help exits 0");
+    let top = run(&["--help"]);
+    assert!(top.status.success(), "faulte --help exits 0");
+
+    let check = one_line(&check.stdout);
+    let top = one_line(&top.stdout);
+    assert!(
+        check.contains("0 for no problem, 1 for a problem, and 2 for an error"),
+        "faulte check --help names each exit code: {check}"
+    );
+    for (name, help) in [("faulte check --help", &check), ("faulte --help", &top)] {
+        assert!(
+            !help.contains("why the system time"),
+            "{name} claims a cause: {help}"
+        );
+    }
+}
+
 /// The tests of the real signals of this Mac.
 ///
 /// These are the one place where `faulte` signals a process for real, and each
@@ -599,4 +637,177 @@ mod signals {
             "the message names the call that failed: {error}"
         );
     }
+}
+
+/// `faulte check` reads this Mac, states one verdict on its first line, and
+/// gives the exit code of that verdict.
+///
+/// The verdict depends on the Mac at the time of the test, thus the test holds
+/// the rule that links the text to the exit code, and not one verdict.
+#[cfg(target_os = "macos")]
+#[test]
+fn check_states_a_verdict_and_the_exit_code_of_that_verdict() {
+    let output = run(&["check", "--interval", "1s"]);
+    let text = glyphs(&output.stdout);
+    let first = text.lines().next().unwrap_or_default();
+
+    assert!(first.starts_with("faulte check: "), "the verdict: {text}");
+    let expected = i32::from(first != "faulte check: OK");
+    assert_eq!(
+        output.status.code(),
+        Some(expected),
+        "the exit code: {text}"
+    );
+    assert!(text.contains("compressions/s"), "the rates: {text}");
+    assert!(text.contains("% system"), "the CPU split: {text}");
+    assert!(
+        text.contains("new processes/s"),
+        "the new processes: {text}"
+    );
+}
+
+/// One line of a watch reaches a reader that stops after that line, and the
+/// run then ends with no panic.
+#[cfg(target_os = "macos")]
+#[test]
+fn check_watch_prints_lines_and_ends_when_the_reader_goes_away() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    let mut child = childenv::fixture_command(BIN)
+        .args(["check", "--watch", "--interval", "1s"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the faulte binary starts");
+    let stdout = child.stdout.take().expect("the pipe of the output");
+    let mut first = String::new();
+    BufReader::new(stdout)
+        .read_line(&mut first)
+        .expect("one line of the watch");
+    // The read end of the pipe closes at the end of the statement above. The
+    // next line of the watch then finds no reader.
+    let status = child.wait().expect("the watch ends");
+
+    assert!(first.contains("% "), "a line of the watch: {first:?}");
+    assert!(first.contains("/s"), "the rates of the watch: {first:?}");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a watch with no reader ends cleanly"
+    );
+}
+
+/// A reader that leaves before the report starts does not change how the run
+/// ends. The run keeps the exit code of its verdict and does not panic.
+///
+/// The verdict depends on the Mac at the time of the test, thus the test holds
+/// the two exit codes that a verdict can give.
+#[cfg(target_os = "macos")]
+#[test]
+fn check_with_no_reader_keeps_the_exit_code_of_its_verdict() {
+    use std::process::Stdio;
+
+    let mut child = childenv::fixture_command(BIN)
+        .args(["check", "--interval", "1s"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the faulte binary starts");
+    // The read end of the pipe closes here, one second before the report.
+    drop(child.stdout.take());
+    let output = child.wait_with_output().expect("the check ends");
+
+    let stderr = glyphs(&output.stderr);
+    assert!(
+        matches!(output.status.code(), Some(0 | 1)),
+        "the exit code of a verdict, not {:?}: {stderr}",
+        output.status.code(),
+    );
+    assert!(!stderr.contains("panicked"), "no panic: {stderr}");
+}
+
+/// The longest time that a run with no room for its output may take.
+///
+/// A `--watch` run whose write does not fail never ends, thus the helper stops
+/// it at this bound.
+#[cfg(target_os = "macos")]
+const NO_ROOM_BOUND: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Runs `faulte` with `args` and a file size limit of 0 on its output file.
+///
+/// The first write to the file fails with `EFBIG`. The shell ignores
+/// `SIGXFSZ`, thus the write gives an error and the signal does not stop the
+/// run. `exec` makes the child process the `faulte` binary itself. `name`
+/// keeps two parallel tests apart. Gives the exit code and the glyphs of the
+/// error output.
+#[cfg(target_os = "macos")]
+fn run_with_no_room_for_output(name: &str, args: &[&str]) -> (Option<i32>, String) {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_nanos();
+    let file = std::env::temp_dir().join(format!(
+        "faulte-no-room-{name}-{}-{nanos}.txt",
+        std::process::id()
+    ));
+    let mut child = childenv::fixture_command("/bin/sh")
+        .args([
+            "-c",
+            r#"trap "" XFSZ; ulimit -f 0; output=$1; shift; exec "$@" > "$output""#,
+            "sh",
+        ])
+        .arg(&file)
+        .arg(BIN)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the shell starts");
+    let start = Instant::now();
+    loop {
+        if child.try_wait().expect("the child can be polled").is_some() {
+            break;
+        }
+        if start.elapsed() >= NO_ROOM_BOUND {
+            child.kill().expect("the child can be killed");
+            child.wait().expect("the child ends after the kill");
+            let _ = std::fs::remove_file(&file);
+            panic!("the run did not end within {NO_ROOM_BOUND:?}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().expect("the output is read");
+    std::fs::remove_file(&file).expect("the shell made the file");
+    (output.status.code(), glyphs(&output.stderr))
+}
+
+/// A report that cannot be written gives the exit code 2 and a message.
+#[cfg(target_os = "macos")]
+#[test]
+fn check_with_no_room_for_its_report_is_an_error() {
+    let (code, stderr) = run_with_no_room_for_output("report", &["check", "--interval", "1s"]);
+
+    assert_eq!(code, Some(2), "stderr: {stderr}");
+    assert!(
+        stderr.contains("the check did not write its output"),
+        "the message: {stderr}"
+    );
+}
+
+/// A watch line that cannot be written gives the exit code 2 and a message.
+#[cfg(target_os = "macos")]
+#[test]
+fn check_watch_with_no_room_for_its_line_is_an_error() {
+    let (code, stderr) =
+        run_with_no_room_for_output("watch", &["check", "--watch", "--interval", "1s"]);
+
+    assert_eq!(code, Some(2), "stderr: {stderr}");
+    assert!(
+        stderr.contains("the check did not write its output"),
+        "the message: {stderr}"
+    );
 }
