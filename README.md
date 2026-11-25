@@ -310,6 +310,8 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
     - `ic --emit-rgba 640x480 photo.jpg` prints the decoded pixels as JSON for a program that draws the picture itself.
       The [`ic-inline`](plugins/ic-inline/README.md) Claude Code plugin uses it to show pictures inline in the transcript:
       `/plugin install ic-inline --marketplace timmattison/tools`
+    - `ic --diff before.png after.png` compares two images pixel by pixel and shows one picture of the differences.
+      `--diff-mode` selects red boxes around each region (the default), a red highlight on the first image, or a mask.
 - inscribe
     - Automatically generates clear and consistent git commit messages using Claude AI. Analyzes staged changes and creates
       conventional commit messages. Supports credential storage in system credential managers (Keychain on macOS, Credential
@@ -6175,6 +6177,42 @@ After Enter, `chf` replaces itself with the shell that runs `crap`. The exit sta
 
 ```bash
 cargo install --git https://github.com/timmattison/tools chf
+```
+
+## msgs (iMessage browser)
+
+Browse, search, and export your iMessage conversations. `msgs` is a desktop app for macOS, made with Tauri v2. It reads `~/Library/Messages/chat.db` read-only, and it never writes to it.
+
+- **Conversations.** The left panel lists the conversations, newest first. The arrow keys move the selection, and Enter opens the conversation.
+- **Messages.** The right panel shows the messages of the conversation as chat bubbles. Older messages load when you scroll up. An attachment shows as a line with its name and size.
+- **Search.** The search box finds the text of all messages. At each start, `msgs` makes a full-text index of the message text in memory, in the background, and the search box shows the progress. A search that you type during the build waits for it, and runs when the index is ready. Click a result to open its conversation at that message and highlight it.
+- **Export.** Click **Export Selection**, click the first and the last message of a range, then click **Export JSON**. `msgs` writes `messages.json` and an `attachments/` folder to the location that you choose. Each attachment file gets the name `<attachment id>-<file name>`, and `messages.json` gives that path in `exported_file`.
+
+The search index lives in memory only. `msgs` writes no copy of the message text to disk. Thus each start makes the index again, and search waits for that build. An older `msgs` kept the index in `~/Library/Application Support/msgs/text-cache.db`, outside the protection that macOS gives to `~/Library/Messages`. At each start, `msgs` deletes that file.
+
+`msgs --version` prints the version and does not start the app.
+
+### Requirements
+
+- macOS, with Messages set up.
+- Full Disk Access for the app, or for the terminal that starts it: System Settings > Privacy & Security > Full Disk Access. If the access is missing, `msgs` shows these steps.
+- Node.js, pnpm, and the Tauri CLI (`cargo install tauri-cli`).
+
+### Run it in development
+
+```bash
+src/msgs/scripts/dev.ts
+```
+
+The script installs the frontend dependencies, gets a free port from `portplz`, and starts the app on that port. Tauri starts Vite on the same port through `beforeDevCommand`, and the script does not change `tauri.conf.json`. A plain `cargo tauri dev` from the root of the repository starts Vite on port 1420. It does not install the frontend dependencies, thus run `pnpm --dir src/msgs/frontend install` before it.
+
+### Build it
+
+Run these commands from the root of the repository. The build does not install the frontend dependencies, thus the first command installs them:
+
+```bash
+pnpm --dir src/msgs/frontend install
+cargo tauri build --no-bundle   # the binary is target/release/msgs
 ```
 
 ## nle (non-linear editor)
