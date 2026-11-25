@@ -181,6 +181,11 @@ impl io::Read for LineCountingReader<'_> {
     /// # Returns
     ///
     /// The number of bytes written, which is 0 for an empty `buf` or at the end.
+    ///
+    /// # Errors
+    ///
+    /// An error when the count of bytes does not fit the rest of the file or
+    /// `buf`. The count is at most the length of each, thus no read gives it.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if buf.is_empty() || self.rest.is_empty() {
             return Ok(0);
@@ -191,11 +196,14 @@ impl io::Read for LineCountingReader<'_> {
             .position(|&byte| byte == b'\n')
             .map_or(self.rest.len(), |index| index.saturating_add(1));
         let count = line_end.min(buf.len());
-        let (head, tail) = self
-            .rest
-            .split_at_checked(count)
-            .unwrap_or((self.rest, &[]));
-        let target = buf.get_mut(..head.len()).unwrap_or_default();
+        let Some((head, tail)) = self.rest.split_at_checked(count) else {
+            return Err(io::Error::other(
+                "the line ends past the end of the settings file",
+            ));
+        };
+        let Some(target) = buf.get_mut(..count) else {
+            return Err(io::Error::other("the line is longer than the read buffer"));
+        };
         target.copy_from_slice(head);
         if self.at_line_start {
             self.lines_begun = self.lines_begun.saturating_add(1);
