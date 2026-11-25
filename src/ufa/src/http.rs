@@ -891,6 +891,27 @@ mod tests {
         );
     }
 
+    /// A refusal of the key with a body over the limit still gives its
+    /// status to `answered_status`. A command reads that status to decide to
+    /// read the key from 1Password again, and the size of the body does not
+    /// change what a 401 says about the key.
+    #[tokio::test]
+    async fn an_unauthorized_answer_with_a_body_over_the_limit_keeps_its_status() {
+        let server = TestServer::replying(&json_response_with_status(
+            "401 Unauthorized",
+            &over_the_limit(),
+        ))
+        .await;
+
+        let (error, _) = classify(&server).await;
+
+        assert_eq!(
+            answered_status(&error),
+            Some(StatusCode::UNAUTHORIZED),
+            "got: {error:#}"
+        );
+    }
+
     /// A body short enough to read in full is still shown in full, with no
     /// ellipsis suggesting something was withheld.
     #[test]
