@@ -259,6 +259,9 @@ fn union(a: Region, b: Region) -> Region {
 
 /// Merge the boxes that overlap or touch.
 ///
+/// A merged box can grow into a third box that touched neither part, so the
+/// function repeats the sweep until a sweep merges nothing.
+///
 /// # Arguments
 ///
 /// * `regions` - The boxes, in any order.
@@ -267,6 +270,21 @@ fn union(a: Region, b: Region) -> Region {
 ///
 /// The merged boxes, sorted by `left`.
 fn merge_touching(mut regions: Vec<Region>) -> Vec<Region> {
+    loop {
+        let before = regions.len();
+        regions = merge_sweep(regions);
+        if regions.len() == before {
+            return regions;
+        }
+    }
+}
+
+/// One sweep of [`merge_touching`].
+///
+/// The sweep sorts the boxes by `left`. It compares each box only with the
+/// later boxes whose `left` is at most one pixel past its `right`, so a
+/// picture with many far boxes stays fast.
+fn merge_sweep(mut regions: Vec<Region>) -> Vec<Region> {
     regions.sort_by_key(|region| region.left);
     let mut taken = vec![false; regions.len()];
     let mut merged = Vec::new();
@@ -290,49 +308,6 @@ fn merge_touching(mut regions: Vec<Region>) -> Vec<Region> {
         merged.push(current);
     }
     merged
-}
-
-/// Draw a red outline inside the edge of `region`.
-///
-/// A pixel of the region is red when it is less than `thickness` pixels from
-/// an edge. A pixel that `covered` rejects stays as it is.
-///
-/// # Arguments
-///
-/// * `picture` - The picture to draw on.
-/// * `region` - The box to outline.
-/// * `thickness` - The thickness of the outline, in pixels.
-/// * `covered` - Whether an image covers a pixel.
-fn draw_outline(
-    picture: &mut RgbaImage,
-    region: Region,
-    thickness: u32,
-    covered: impl Fn(u32, u32) -> bool,
-) {
-    for y in region.top..=region.bottom {
-        for x in region.left..=region.right {
-            let on_edge = x.saturating_sub(region.left) < thickness
-                || region.right.saturating_sub(x) < thickness
-                || y.saturating_sub(region.top) < thickness
-                || region.bottom.saturating_sub(y) < thickness;
-            if on_edge && covered(x, y) {
-                if let Some(pixel) = picture.get_pixel_mut_checked(x, y) {
-                    *pixel = RED;
-                }
-            }
-        }
-    }
-}
-
-/// The thickness of an outline, in pixels: `max(2, ceil(L / 400))`, where `L`
-/// is the longer side of the canvas.
-///
-/// # Arguments
-///
-/// * `canvas_width` - The width of the canvas, in pixels.
-/// * `canvas_height` - The height of the canvas, in pixels.
-pub fn line_thickness(canvas_width: u32, canvas_height: u32) -> u32 {
-    canvas_width.max(canvas_height).div_ceil(400).max(2)
 }
 
 #[cfg(test)]
