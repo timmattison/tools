@@ -2281,7 +2281,7 @@ fn show_diff(args: &Args) -> Result<()> {
 
     let first = load_still_image(first_path)?;
     let second = load_still_image(second_path)?;
-    let diff = diff::compare(&first, &second, args.diff_mode.unwrap_or_default())?;
+    let diff = diff::compare(first, second, args.diff_mode.unwrap_or_default())?;
     let summary = diff.summary();
     let picture = DynamicImage::ImageRgba8(diff.picture);
 

@@ -89,17 +89,18 @@ impl Diff {
 ///
 /// # Arguments
 ///
-/// * `first` - The first image.
-/// * `second` - The second image.
+/// * `first` - The first image. The function takes it by value, so that it
+///   does not copy it: an RGBA8 image moves into the comparison.
+/// * `second` - The second image, taken by value for the same reason.
 /// * `mode` - What the picture shows.
 ///
 /// # Errors
 ///
 /// Returns an error when the canvas holds more than [`MAX_CANVAS_PIXELS`]
 /// pixels.
-pub fn compare(first: &DynamicImage, second: &DynamicImage, mode: Mode) -> Result<Diff> {
-    let first = first.to_rgba8();
-    let second = second.to_rgba8();
+pub fn compare(first: DynamicImage, second: DynamicImage, mode: Mode) -> Result<Diff> {
+    let first = first.into_rgba8();
+    let second = second.into_rgba8();
     let width = first.width().max(second.width());
     let height = first.height().max(second.height());
     let canvas_pixels = u64::from(width).saturating_mul(u64::from(height));
@@ -202,11 +203,210 @@ impl Grid {
     }
 }
 
+/// A maximal horizontal run of pixels that differ, in one row.
+#[derive(Debug, Clone, Copy)]
+struct Run {
+    /// The first column of the run.
+    left: u32,
+    /// The last column of the run. The edge is inclusive.
+    right: u32,
+    /// The index of the [`Group`] that holds the run.
+    label: usize,
+}
+
+/// A node of a union-find over the runs that touch.
+#[derive(Debug, Clone, Copy)]
+struct Group {
+    /// The node that this node joined. A root is its own parent.
+    parent: usize,
+    /// The box of the pixels of the group, with no padding. Valid on a root.
+    bounds: Region,
+}
+
+/// What the compaction of a row has done with one group.
+#[derive(Debug, Clone, Copy)]
+enum Slot {
+    /// No run of the row has reached this group.
+    Unseen,
+    /// The group lives on, at this index of the new arena.
+    Active(usize),
+    /// The group has ended, and its box is in the finished list.
+    Finished,
+}
+
+/// The root of the group `start`. The walk halves the path as it climbs.
+fn find_root(groups: &mut [Group], start: usize) -> usize {
+    let mut node = start;
+    loop {
+        let Some(parent) = groups.get(node).map(|group| group.parent) else {
+            return node;
+        };
+        if parent == node {
+            return node;
+        }
+        let grandparent = groups.get(parent).map_or(parent, |group| group.parent);
+        if let Some(group) = groups.get_mut(node) {
+            group.parent = grandparent;
+        }
+        node = grandparent;
+    }
+}
+
+/// Grow the box `target` so that it holds the box `other` too.
+fn widen(target: &mut Region, other: Region) {
+    *target = union(*target, other);
+}
+
+/// Put the runs of the row `y` into `runs`, left to right.
+fn collect_runs(differing: &Grid, y: u32, runs: &mut Vec<Run>) {
+    runs.clear();
+    let mut start: Option<u32> = None;
+    for x in 0..differing.width {
+        match (differing.get(x, y), start) {
+            (true, None) => start = Some(x),
+            (false, Some(left)) => {
+                runs.push(Run {
+                    left,
+                    right: x.saturating_sub(1),
+                    label: 0,
+                });
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(left) = start {
+        runs.push(Run {
+            left,
+            right: differing.width.saturating_sub(1),
+            label: 0,
+        });
+    }
+}
+
+/// Give each run of `current` a group: the group of each run of `previous`
+/// that touches it, also at a corner, or a new group. Groups that two runs of
+/// `previous` held apart are joined.
+fn label_runs(groups: &mut Vec<Group>, previous: &[Run], current: &mut [Run], y: u32) {
+    let mut first = 0_usize;
+    for run in current.iter_mut() {
+        while previous
+            .get(first)
+            .is_some_and(|p| p.right.saturating_add(1) < run.left)
+        {
+            first = first.saturating_add(1);
+        }
+        let mut label: Option<usize> = None;
+        let mut index = first;
+        while let Some(p) = previous.get(index) {
+            if p.left > run.right.saturating_add(1) {
+                break;
+            }
+            index = index.saturating_add(1);
+            let root = find_root(groups, p.label);
+            match label {
+                None => label = Some(root),
+                Some(kept) if kept != root => {
+                    let other = groups.get(root).map(|group| group.bounds);
+                    if let Some(group) = groups.get_mut(root) {
+                        group.parent = kept;
+                    }
+                    if let (Some(other), Some(group)) = (other, groups.get_mut(kept)) {
+                        widen(&mut group.bounds, other);
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+        let label = label.unwrap_or_else(|| {
+            let at = groups.len();
+            groups.push(Group {
+                parent: at,
+                bounds: Region {
+                    left: run.left,
+                    top: y,
+                    right: run.right,
+                    bottom: y,
+                },
+            });
+            at
+        });
+        run.label = label;
+        if let Some(group) = groups.get_mut(label) {
+            widen(
+                &mut group.bounds,
+                Region {
+                    left: run.left,
+                    top: y,
+                    right: run.right,
+                    bottom: y,
+                },
+            );
+        }
+    }
+}
+
+/// Keep only the groups that `current` holds, give each run of `current` the
+/// index of its group in the new arena, and push the box of each group that
+/// only `previous` held onto `finished`.
+fn finish_and_compact(
+    groups: &mut Vec<Group>,
+    previous: &[Run],
+    current: &mut [Run],
+    finished: &mut Vec<Region>,
+) {
+    let mut slots = vec![Slot::Unseen; groups.len()];
+    let mut arena: Vec<Group> = Vec::with_capacity(current.len());
+    for run in current.iter_mut() {
+        let root = find_root(groups, run.label);
+        match slots.get(root).copied().unwrap_or(Slot::Finished) {
+            Slot::Active(at) => run.label = at,
+            _ => {
+                let at = arena.len();
+                if let Some(group) = groups.get(root) {
+                    arena.push(Group {
+                        parent: at,
+                        bounds: group.bounds,
+                    });
+                }
+                if let Some(slot) = slots.get_mut(root) {
+                    *slot = Slot::Active(at);
+                }
+                run.label = at;
+            }
+        }
+    }
+    finish_groups(groups, previous, &mut slots, finished);
+    *groups = arena;
+}
+
+/// Push the box of each group of `runs` that is still `Unseen`, once.
+fn finish_groups(
+    groups: &mut [Group],
+    runs: &[Run],
+    slots: &mut [Slot],
+    finished: &mut Vec<Region>,
+) {
+    for run in runs {
+        let root = find_root(groups, run.label);
+        if let (Some(slot @ Slot::Unseen), Some(group)) = (slots.get_mut(root), groups.get(root)) {
+            finished.push(group.bounds);
+            *slot = Slot::Finished;
+        }
+    }
+}
+
 /// The padded boxes of the pixels that differ, sorted by (top, left).
 ///
 /// Two pixels that differ are in one group when they touch, also at a corner.
 /// The box of a group has `thickness + 2` pixels of padding on each side, and
 /// the canvas clips it.
+///
+/// The function makes one pass over the rows. It cuts each row into runs of
+/// pixels that differ, and it joins each run to the runs of the row above that
+/// touch it, also at a corner. A group that no run of the row continues is
+/// finished, and only its box stays. The work memory thus grows with the width
+/// of the canvas, plus one box for each finished group, and not with the area.
 ///
 /// # Arguments
 ///
@@ -216,48 +416,27 @@ fn find_regions(differing: &Grid, thickness: u32) -> Vec<Region> {
     let padding = thickness.saturating_add(2);
     let last_column = differing.width.saturating_sub(1);
     let last_row = differing.height.saturating_sub(1);
-    let mut seen = Grid::new(differing.width, differing.height);
-    let mut regions = Vec::new();
+    let mut groups: Vec<Group> = Vec::new();
+    let mut previous: Vec<Run> = Vec::new();
+    let mut current: Vec<Run> = Vec::new();
+    let mut finished: Vec<Region> = Vec::new();
     for y in 0..differing.height {
-        for x in 0..differing.width {
-            if !differing.get(x, y) || seen.get(x, y) {
-                continue;
-            }
-            let mut bounds = Region {
-                left: x,
-                top: y,
-                right: x,
-                bottom: y,
-            };
-            let mut stack = vec![(x, y)];
-            seen.set(x, y);
-            while let Some((cx, cy)) = stack.pop() {
-                bounds.left = bounds.left.min(cx);
-                bounds.top = bounds.top.min(cy);
-                bounds.right = bounds.right.max(cx);
-                bounds.bottom = bounds.bottom.max(cy);
-                for dy in -1..=1_i32 {
-                    for dx in -1..=1_i32 {
-                        let (Some(nx), Some(ny)) =
-                            (cx.checked_add_signed(dx), cy.checked_add_signed(dy))
-                        else {
-                            continue;
-                        };
-                        if differing.get(nx, ny) && !seen.get(nx, ny) {
-                            seen.set(nx, ny);
-                            stack.push((nx, ny));
-                        }
-                    }
-                }
-            }
-            regions.push(Region {
-                left: bounds.left.saturating_sub(padding),
-                top: bounds.top.saturating_sub(padding),
-                right: bounds.right.saturating_add(padding).min(last_column),
-                bottom: bounds.bottom.saturating_add(padding).min(last_row),
-            });
-        }
+        collect_runs(differing, y, &mut current);
+        label_runs(&mut groups, &previous, &mut current, y);
+        finish_and_compact(&mut groups, &previous, &mut current, &mut finished);
+        std::mem::swap(&mut previous, &mut current);
     }
+    let mut slots = vec![Slot::Unseen; groups.len()];
+    finish_groups(&mut groups, &previous, &mut slots, &mut finished);
+    let regions = finished
+        .into_iter()
+        .map(|bounds| Region {
+            left: bounds.left.saturating_sub(padding),
+            top: bounds.top.saturating_sub(padding),
+            right: bounds.right.saturating_add(padding).min(last_column),
+            bottom: bounds.bottom.saturating_add(padding).min(last_row),
+        })
+        .collect();
     let mut regions = merge_touching(regions);
     regions.sort_by_key(|region| (region.top, region.left));
     regions
@@ -398,7 +577,7 @@ mod tests {
 
     #[test]
     fn pictures_of_two_sizes_share_the_upper_left_corner() {
-        let diff = compare(&picture(3, 2), &picture(2, 3), Mode::Highlight).unwrap();
+        let diff = compare(picture(3, 2), picture(2, 3), Mode::Highlight).unwrap();
         assert_eq!(diff.picture.dimensions(), (3, 3));
         assert_eq!(*diff.picture.get_pixel(1, 1), color(1, 1));
         assert_eq!(diff.differing_pixels, 4);
@@ -408,8 +587,8 @@ mod tests {
     fn a_fully_transparent_strip_is_not_a_difference() {
         let first = RgbaImage::from_fn(3, 2, |x, y| if x == 2 { BLANK } else { color(x, y) });
         let diff = compare(
-            &DynamicImage::ImageRgba8(first),
-            &picture(2, 2),
+            DynamicImage::ImageRgba8(first),
+            picture(2, 2),
             Mode::Highlight,
         )
         .unwrap();
@@ -432,7 +611,7 @@ mod tests {
 
     #[test]
     fn highlight_paints_a_changed_pixel_red() {
-        let diff = compare(&picture(3, 2), &changed(2, 3, &[(0, 0)]), Mode::Highlight).unwrap();
+        let diff = compare(picture(3, 2), changed(2, 3, &[(0, 0)]), Mode::Highlight).unwrap();
         assert_eq!(*diff.picture.get_pixel(1, 1), color(1, 1));
         assert_eq!(*diff.picture.get_pixel(0, 0), RED);
         assert_eq!(*diff.picture.get_pixel(2, 2), BLANK);
@@ -440,7 +619,7 @@ mod tests {
 
     #[test]
     fn mask_paints_the_same_pixels_black_and_the_changed_ones_red() {
-        let diff = compare(&picture(3, 2), &changed(2, 3, &[(0, 0)]), Mode::Mask).unwrap();
+        let diff = compare(picture(3, 2), changed(2, 3, &[(0, 0)]), Mode::Mask).unwrap();
         assert_eq!(*diff.picture.get_pixel(1, 1), BLACK);
         assert_eq!(*diff.picture.get_pixel(0, 0), RED);
         assert_eq!(*diff.picture.get_pixel(2, 2), BLANK);
@@ -489,7 +668,7 @@ mod tests {
     #[test]
     fn boxes_of_two_equal_pictures_show_the_second_picture() {
         let second = field(20, 20, &[]);
-        let diff = compare(&field(20, 20, &[]), &second, Mode::Boxes).unwrap();
+        let diff = compare(field(20, 20, &[]), second.clone(), Mode::Boxes).unwrap();
         assert!(diff.regions.is_empty());
         assert_eq!(diff.differing_pixels, 0);
         assert_eq!(diff.picture, second.to_rgba8());
@@ -498,7 +677,7 @@ mod tests {
     #[test]
     fn boxes_outline_one_changed_pixel_inside_its_padded_box() {
         let second = field(30, 30, &[(10, 10)]);
-        let diff = compare(&field(30, 30, &[]), &second, Mode::Boxes).unwrap();
+        let diff = compare(field(30, 30, &[]), second.clone(), Mode::Boxes).unwrap();
         assert_eq!(diff.regions, vec![region(6, 6, 14, 14)]);
         assert_eq!(diff.differing_pixels, 1);
         for (x, y) in [(6, 10), (7, 10), (13, 10), (14, 10), (10, 6), (10, 14)] {
@@ -517,8 +696,8 @@ mod tests {
     /// The regions of two pictures that differ at the listed positions.
     fn regions_of(width: u32, height: u32, spots: &[(u32, u32)]) -> Vec<Region> {
         compare(
-            &field(width, height, &[]),
-            &field(width, height, spots),
+            field(width, height, &[]),
+            field(width, height, spots),
             Mode::Boxes,
         )
         .unwrap()
@@ -593,7 +772,7 @@ mod tests {
         let wide = DynamicImage::ImageRgba8(RgbaImage::new(16384, 1));
         let tall = DynamicImage::ImageRgba8(RgbaImage::new(1, 16384));
         // `unwrap_err` would print the whole picture of a missing error.
-        let Err(error) = compare(&wide, &tall, Mode::Boxes) else {
+        let Err(error) = compare(wide, tall, Mode::Boxes) else {
             panic!("the canvas of 268 million pixels gave a picture");
         };
         let error = error.to_string();
@@ -611,7 +790,7 @@ mod tests {
 
     #[test]
     fn a_canvas_of_one_pixel_has_one_region() {
-        let diff = compare(&field(1, 1, &[]), &field(1, 1, &[(0, 0)]), Mode::Boxes).unwrap();
+        let diff = compare(field(1, 1, &[]), field(1, 1, &[(0, 0)]), Mode::Boxes).unwrap();
         assert_eq!(diff.regions, vec![region(0, 0, 0, 0)]);
         assert_eq!(*diff.picture.get_pixel(0, 0), RED);
     }
@@ -619,8 +798,8 @@ mod tests {
     #[test]
     fn pixels_that_touch_at_a_corner_are_one_group() {
         let diff = compare(
-            &field(30, 30, &[]),
-            &field(30, 30, &[(10, 10), (11, 11)]),
+            field(30, 30, &[]),
+            field(30, 30, &[(10, 10), (11, 11)]),
             Mode::Boxes,
         )
         .unwrap();
@@ -630,7 +809,7 @@ mod tests {
 
     #[test]
     fn an_outline_leaves_a_pixel_that_no_image_covers_blank() {
-        let diff = compare(&field(12, 4, &[]), &field(4, 12, &[]), Mode::Boxes).unwrap();
+        let diff = compare(field(12, 4, &[]), field(4, 12, &[]), Mode::Boxes).unwrap();
         assert_eq!(diff.regions.len(), 1);
         assert_eq!(*diff.picture.get_pixel(11, 11), BLANK);
         assert_eq!(*diff.picture.get_pixel(11, 3), RED);
@@ -747,8 +926,11 @@ mod tests {
         grid
     }
 
+    /// A rule that says whether the pixel at (x, y) differs.
+    type DifferenceRule = fn(u32, u32) -> bool;
+
     /// The two ways that the tests make every pixel of a region differ.
-    fn memory_cases() -> [(&'static str, fn(u32, u32) -> bool); 2] {
+    fn memory_cases() -> [(&'static str, DifferenceRule); 2] {
         [
             ("every pixel", |_, _| true),
             ("checkerboard", |x, y| (x + y) % 2 == 0),
@@ -771,7 +953,7 @@ mod tests {
         for (name, differs) in memory_cases() {
             let first = memory_picture(0, |_, _| false);
             let second = memory_picture(255, differs);
-            let (diff, peak) = peak_bytes_of(|| compare(&first, &second, Mode::Boxes).unwrap());
+            let (diff, peak) = peak_bytes_of(|| compare(first, second, Mode::Boxes).unwrap());
             eprintln!("compare, {name}: peak {peak} bytes, bound {bound}");
             assert_eq!(diff.regions, vec![region(0, 0, 511, 511)], "{name}");
             assert!(
