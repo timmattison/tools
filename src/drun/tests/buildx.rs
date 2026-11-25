@@ -13,21 +13,7 @@
 
 mod support;
 
-use support::{Fixture, GIB_16, LOCAL};
-
-/// `words` as the arguments of one call that the fake recorded.
-fn call(words: &[&str]) -> Vec<String> {
-    words.iter().map(|word| (*word).to_owned()).collect()
-}
-
-/// Two hosts. `box-a` uses 90% of its memory, and `box-b` uses 20%.
-fn two_hosts() -> Fixture {
-    let fixture = Fixture::new();
-    fixture.hosts(&["box-a", "box-b"]);
-    fixture.host("box-a", GIB_16, GIB_16 / 10, 0.2, 4);
-    fixture.host("box-b", GIB_16, GIB_16 * 8 / 10, 0.2, 4);
-    fixture
-}
+use support::{call, two_hosts, Fixture, LOCAL};
 
 /// Makes sure that `drun` asked no host anything, not even for the probe.
 fn assert_no_host_asked(fixture: &Fixture, args: &[&str]) {

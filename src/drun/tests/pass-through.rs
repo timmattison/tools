@@ -10,15 +10,10 @@
 
 mod support;
 
-use support::{Fixture, LOCAL};
-
-/// `words` as the arguments of one call that the fake recorded.
-fn call(words: &[&str]) -> Vec<String> {
-    words.iter().map(|word| (*word).to_owned()).collect()
-}
+use support::{call, Fixture, LOCAL};
 
 /// A fixture with two hosts, which no test in this file must ask.
-fn two_hosts() -> Fixture {
+fn two_hosts_without_answers() -> Fixture {
     let fixture = Fixture::new();
     fixture.hosts(&["box-a", "box-b"]);
     fixture
@@ -45,7 +40,7 @@ fn a_command_that_drun_does_not_know_goes_to_the_docker_of_this_computer() {
 
 #[test]
 fn the_buildx_commands_of_a_build_script_go_to_the_docker_of_this_computer() {
-    let fixture = two_hosts();
+    let fixture = two_hosts_without_answers();
     let commands: [&[&str]; 6] = [
         &["buildx", "inspect", "misc-multiarch"],
         &["buildx", "use", "misc-multiarch"],
@@ -80,7 +75,7 @@ fn the_buildx_commands_of_a_build_script_go_to_the_docker_of_this_computer() {
 
 #[test]
 fn a_docker_flag_before_the_command_goes_to_docker_with_the_command() {
-    let fixture = two_hosts();
+    let fixture = two_hosts_without_answers();
     let run = fixture.run(&[
         "--context",
         "box-a",

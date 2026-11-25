@@ -10,7 +10,7 @@
 
 mod support;
 
-use support::{row, Fixture, GIB_16, LOCAL};
+use support::{call, row, two_hosts, Fixture, LOCAL};
 
 /// The format that `drun status` gives `docker inspect`.
 const STATE_FORMAT: &str = "{{.State.Status}} {{.State.ExitCode}}";
@@ -38,11 +38,6 @@ fn fleet() -> Fixture {
         )],
     );
     fixture
-}
-
-/// Turns string slices into owned arguments, for comparison with calls.
-fn words(words: &[&str]) -> Vec<String> {
-    words.iter().map(|word| (*word).to_owned()).collect()
 }
 
 #[test]
@@ -122,7 +117,7 @@ fn status_prints_the_host_the_state_and_the_exit_status() {
     assert_eq!(run.stdout, "box-b exited 0\n");
     assert_eq!(
         fixture.calls_of("box-b", "inspect"),
-        [words(&[
+        [call(&[
             "inspect",
             "--type",
             "container",
@@ -158,7 +153,7 @@ fn rm_finds_a_name_with_a_leading_slash_and_passes_it_on_as_written() {
     let fixture = fleet();
     let run = fixture.run(&["rm", "/job-a"]);
     assert_eq!(run.code, Some(0), "{}", run.stderr);
-    assert_eq!(fixture.calls_of("box-a", "rm"), [words(&["rm", "/job-a"])]);
+    assert_eq!(fixture.calls_of("box-a", "rm"), [call(&["rm", "/job-a"])]);
 }
 
 #[test]
@@ -299,7 +294,7 @@ fn logs_go_to_the_host_that_has_the_container() {
     assert_eq!(run.stdout, "logs on box-b\n");
     assert_eq!(
         fixture.calls_of("box-b", "logs"),
-        [words(&["logs", "-f", "--tail", "10", "job-b"])]
+        [call(&["logs", "-f", "--tail", "10", "job-b"])]
     );
     assert!(fixture.calls_of("box-a", "logs").is_empty());
 }
@@ -313,7 +308,7 @@ fn wait_exits_with_the_exit_status_of_the_container() {
     assert_eq!(run.stdout, "3\n");
     assert_eq!(
         fixture.calls_of("box-b", "wait"),
-        [words(&["wait", "job-b"])]
+        [call(&["wait", "job-b"])]
     );
     fixture.wait_answer("box-b", "0\n");
     assert_eq!(fixture.run(&["wait", "job-b"]).code, Some(0));
@@ -326,7 +321,7 @@ fn exec_runs_on_the_host_that_has_the_container() {
     assert_eq!(run.code, Some(0), "{}", run.stderr);
     assert_eq!(
         fixture.calls_of("box-a", "exec"),
-        [words(&[
+        [call(&[
             "exec", "-it", "-e", "A=b", "job-a", "sh", "-c", "echo -d"
         ])]
     );
@@ -339,7 +334,7 @@ fn cp_copies_from_the_host_that_has_the_container() {
     assert_eq!(run.code, Some(0), "{}", run.stderr);
     assert_eq!(
         fixture.calls_of("box-b", "cp"),
-        [words(&["cp", "job-b:/out/result.json", "./result.json"])]
+        [call(&["cp", "job-b:/out/result.json", "./result.json"])]
     );
 }
 
@@ -350,11 +345,11 @@ fn rm_removes_each_container_on_its_own_host() {
     assert_eq!(run.code, Some(0), "{}", run.stderr);
     assert_eq!(
         fixture.calls_of("box-a", "rm"),
-        [words(&["rm", "-f", "job-a"])]
+        [call(&["rm", "-f", "job-a"])]
     );
     assert_eq!(
         fixture.calls_of("box-b", "rm"),
-        [words(&["rm", "-f", "job-b"])]
+        [call(&["rm", "-f", "job-b"])]
     );
 }
 
@@ -404,10 +399,7 @@ fn commands_that_take_one_name_refuse_other_arguments() {
 
 #[test]
 fn a_detached_container_can_be_followed_to_its_result() {
-    let fixture = Fixture::new();
-    fixture.hosts(&["box-a", "box-b"]);
-    fixture.host("box-a", GIB_16, GIB_16 / 10, 0.2, 4);
-    fixture.host("box-b", GIB_16, GIB_16 * 8 / 10, 0.2, 4);
+    let fixture = two_hosts();
     let run = fixture.run(&["run", "-d", "alpine", "sleep", "5"]);
     assert_eq!(run.code, Some(0), "{}", run.stderr);
     let (host, name) = run

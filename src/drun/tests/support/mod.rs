@@ -253,6 +253,20 @@ pub fn row(id: &str, name: &str, image: &str, status: &str, managed: bool) -> St
     )
 }
 
+/// `words` as the arguments of one call that the fake recorded.
+pub fn call(words: &[&str]) -> Vec<String> {
+    words.iter().map(|word| (*word).to_owned()).collect()
+}
+
+/// Two hosts. `box-a` uses 90% of its memory, and `box-b` uses 20%.
+pub fn two_hosts() -> Fixture {
+    let fixture = Fixture::new();
+    fixture.hosts(&["box-a", "box-b"]);
+    fixture.host("box-a", GIB_16, GIB_16 / 10, 0.2, 4);
+    fixture.host("box-b", GIB_16, GIB_16 * 8 / 10, 0.2, 4);
+    fixture
+}
+
 impl Fixture {
     /// Makes the directory, the fake `docker`, and an empty config home.
     pub fn new() -> Self {

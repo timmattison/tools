@@ -11,19 +11,10 @@ mod support;
 
 use std::time::Duration;
 
-use support::{row, Fixture, GIB_16};
+use support::{row, two_hosts, Fixture, GIB_16};
 
 /// The label that `drun run` puts on every container.
 const MANAGED: &str = "drun.managed=true";
-
-/// Two hosts. `box-a` uses 90% of its memory, and `box-b` uses 20%.
-fn two_hosts() -> Fixture {
-    let fixture = Fixture::new();
-    fixture.hosts(&["box-a", "box-b"]);
-    fixture.host("box-a", GIB_16, GIB_16 / 10, 0.2, 4);
-    fixture.host("box-b", GIB_16, GIB_16 * 8 / 10, 0.2, 4);
-    fixture
-}
 
 /// The value that follows `flag` in `call`.
 fn value_of<'a>(call: &'a [String], flag: &str) -> Option<&'a str> {
