@@ -12,6 +12,8 @@
 //! lowest value. When two hosts have the same value, the host with more free
 //! memory wins, and after that the host that is first in the configuration.
 
+use std::time::Duration;
+
 use crate::config::Config;
 use crate::host::{self, Answer, ContextName, HostFailure};
 use crate::table;
@@ -46,6 +48,29 @@ pub struct Survey {
 
 /// Asks every host in `config` how busy it is, all at the same time.
 pub fn survey(config: &Config) -> Survey {
+    let answers = host::ask_all(config.contexts(), |context| {
+        survey_host(context, config.host_timeout(), host::ask)
+    });
+    Survey { answers }
+}
+
+/// Asks the host `context` how busy it is.
+///
+/// `ask` runs one docker command on a host, as [`host::ask`] does, and the
+/// tests give their own. `host_timeout` is the limit of the probe.
+///
+/// # Errors
+///
+/// Returns the [`HostFailure`] of the probe, or [`HostFailure::Unreadable`]
+/// when `drun` cannot read the answer of the probe.
+fn survey_host<A>(
+    context: &ContextName,
+    host_timeout: Duration,
+    ask: A,
+) -> Result<Load, HostFailure>
+where
+    A: Fn(&ContextName, &[&str], Duration) -> Result<String, HostFailure>,
+{
     let script = probe_script();
     let args = [
         "run",
@@ -61,11 +86,8 @@ pub fn survey(config: &Config) -> Survey {
         "-c",
         &script,
     ];
-    let answers = host::ask_all(config.contexts(), |context| {
-        let text = host::ask(context, &args, config.host_timeout())?;
-        Load::parse(&text).map_err(HostFailure::Unreadable)
-    });
-    Survey { answers }
+    let text = ask(context, &args, host_timeout)?;
+    Load::parse(&text).map_err(HostFailure::Unreadable)
 }
 
 /// The shell script that the probe container runs.
@@ -259,8 +281,6 @@ impl Survey {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
 
     /// The real `/proc/meminfo` of a computer with 16 GB of memory, cut short.
