@@ -456,3 +456,99 @@ fn list_recordings_command_lists_one_saved_file() {
             .unwrap();
     assert_eq!(listed.len(), 1);
 }
+
+const FINDER_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+const HOMEBREW_ARM_BIN: &str = "/opt/homebrew/bin";
+const HOMEBREW_INTEL_BIN: &str = "/usr/local/bin";
+
+fn split(path: &OsStr) -> Vec<PathBuf> {
+    std::env::split_paths(path).collect()
+}
+
+fn paths(entries: &[&str]) -> Vec<PathBuf> {
+    entries.iter().map(PathBuf::from).collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn beta_path_finds_beta_in_cargo_bin_from_the_finder_path() {
+    let home = tempfile::tempdir().unwrap();
+    let bin = home.path().join(".cargo").join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    // A symlink, not a written script: a written script gives ETXTBSY on
+    // Linux when another thread forks while the file is open for writing.
+    std::os::unix::fs::symlink("/bin/echo", bin.join("beta")).unwrap();
+
+    let path = beta_path_env(
+        Some(OsStr::new(FINDER_PATH)),
+        None,
+        Some(home.path().as_os_str()),
+    )
+    .unwrap();
+    let output = std::process::Command::new("beta")
+        .arg("found-beta")
+        .env_clear()
+        .env("PATH", path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"found-beta\n");
+}
+
+#[test]
+fn beta_path_lists_app_then_cargo_then_homebrew_dirs() {
+    let path = beta_path_env(
+        Some(OsStr::new("/a:/b")),
+        Some(OsStr::new("/cargo-home")),
+        Some(OsStr::new("/home-dir")),
+    )
+    .unwrap();
+
+    assert_eq!(
+        split(&path),
+        paths(&[
+            "/a",
+            "/b",
+            "/cargo-home/bin",
+            "/home-dir/.cargo/bin",
+            HOMEBREW_ARM_BIN,
+            HOMEBREW_INTEL_BIN,
+        ])
+    );
+}
+
+#[test]
+fn beta_path_adds_no_directory_that_is_already_an_entry() {
+    let app_path = format!("/z:{HOMEBREW_INTEL_BIN}:/home-dir/.cargo/bin");
+    let path = beta_path_env(
+        Some(OsStr::new(&app_path)),
+        None,
+        Some(OsStr::new("/home-dir")),
+    )
+    .unwrap();
+
+    assert_eq!(
+        split(&path),
+        paths(&[
+            "/z",
+            HOMEBREW_INTEL_BIN,
+            "/home-dir/.cargo/bin",
+            HOMEBREW_ARM_BIN,
+        ])
+    );
+}
+
+#[test]
+fn beta_path_with_no_inputs_holds_only_the_homebrew_dirs() {
+    let path = beta_path_env(None, None, None).unwrap();
+
+    assert_eq!(split(&path), paths(HOMEBREW_BIN_DIRS));
+}
+
+#[test]
+fn beta_path_is_none_when_a_directory_holds_the_separator() {
+    let path = beta_path_env(Some(OsStr::new("/a")), Some(OsStr::new("/x:y")), None);
+
+    assert_eq!(path, None);
+}

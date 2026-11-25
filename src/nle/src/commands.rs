@@ -1,3 +1,4 @@
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 use tauri_plugin_shell::ShellExt;
@@ -275,6 +276,24 @@ fn web_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
     Ok(args)
 }
 
+/// Directories where Homebrew puts binaries such as `ffmpeg`, which `beta`
+/// runs. A macOS app that starts from Finder or the Dock does not have them
+/// on its PATH.
+const HOMEBREW_BIN_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin"];
+
+/// Build the PATH for the `beta` child: each entry of `app_path` in its order,
+/// then `<cargo_home>/bin`, `<home>/.cargo/bin`, and `HOMEBREW_BIN_DIRS`.
+/// It adds no directory that is already an entry. It returns `None` when
+/// `std::env::join_paths` fails, and the child then keeps the PATH of the app.
+fn beta_path_env(
+    app_path: Option<&OsStr>,
+    cargo_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+) -> Option<OsString> {
+    let _ = (cargo_home, home);
+    app_path.map(OsStr::to_os_string)
+}
+
 /// Run the `beta` CLI with `args` through the shell plugin.
 /// Returns `output_path` when `beta` succeeds.
 async fn run_beta(
@@ -282,17 +301,19 @@ async fn run_beta(
     args: &[String],
     output_path: &str,
 ) -> Result<String, NleError> {
-    let output = app
-        .shell()
-        .command("beta")
-        .args(args)
-        .output()
-        .await
-        .map_err(|e| {
-            NleError::ExportError(format!(
-                "Failed to run beta CLI (is it installed and on PATH?): {e}"
-            ))
-        })?;
+    let mut command = app.shell().command("beta").args(args);
+    if let Some(path) = beta_path_env(
+        std::env::var_os("PATH").as_deref(),
+        std::env::var_os("CARGO_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    ) {
+        command = command.env("PATH", path);
+    }
+    let output = command.output().await.map_err(|e| {
+        NleError::ExportError(format!(
+            "Failed to run beta CLI (is it installed and on PATH?): {e}"
+        ))
+    })?;
 
     if output.status.success() {
         Ok(output_path.to_string())
