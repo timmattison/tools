@@ -230,6 +230,10 @@ fn diff_refuses_a_video() {
     );
 }
 
+/// The words of the refusal of a text file. A decode error names the path, and
+/// the path ends in `.txt`, thus the words start at `is`.
+const TEXT_CAUSE: &str = "is a text file";
+
 /// A text file is no still image, and the refusal names the reason.
 #[test]
 fn diff_refuses_a_text_file() {
@@ -239,8 +243,50 @@ fn diff_refuses_a_text_file() {
 
     assert_refused(
         &run(ic(TERM_XTERM_256COLOR).arg(FLAG).arg(&first).arg(&notes)),
-        "text file",
+        TEXT_CAUSE,
     );
+}
+
+/// A text file whose first bytes match the signature of an image format is
+/// still a text file. `BM` starts a BMP file, and `P1` starts a PNM file, but
+/// no image header follows either one here.
+#[test]
+fn diff_refuses_a_text_file_that_starts_like_an_image() {
+    let scratch = Scratch::new(TARGET_NAME, "text-signature");
+    let (first, _second) = fixtures(&scratch);
+
+    for (name, text) in [
+        ("notes.txt", b"BMW service notes".as_slice()),
+        ("todo.txt", b"P1 priorities".as_slice()),
+    ] {
+        let notes = scratch.file(name, text);
+        assert_refused(
+            &run(ic(TERM_XTERM_256COLOR).arg(FLAG).arg(&first).arg(&notes)),
+            TEXT_CAUSE,
+        );
+    }
+}
+
+/// A plain PBM file is text from its first byte to its last, and it is still
+/// an image. With no extension, the run reads it as it reads the same bytes
+/// under the name `plain.pbm`.
+#[test]
+fn diff_reads_a_plain_pbm_whose_name_has_no_extension() {
+    let scratch = Scratch::new(TARGET_NAME, "plain-pbm");
+    let (first, _second) = fixtures(&scratch);
+    let pbm = b"P1\n# a 2 by 2 checker\n2 2\n0 1\n1 0\n";
+    let named = scratch.file("plain.pbm", pbm);
+    let bare = scratch.file("plain", pbm);
+
+    let emit = |path: &std::path::Path| {
+        run(ic(TERM_XTERM_256COLOR)
+            .arg(FLAG)
+            .args(["--emit-rgba", BOX])
+            .arg(path)
+            .arg(&first))
+    };
+
+    assert_eq!(emitted(&emit(&bare)), emitted(&emit(&named)));
 }
 
 /// A file whose name gives no format that `ic` lists is still an image when its
