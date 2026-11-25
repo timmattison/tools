@@ -412,18 +412,19 @@ fn repository_root() -> PathBuf {
 /// left to the ignore files because this walk turns the ignore files off; see
 /// [`HOW`].
 ///
-/// `dist` is the bundle a frontend build writes. `src/nle` holds a Tauri
-/// frontend, so `pnpm build` writes one minified row of JavaScript to
-/// `src/nle/frontend/dist`, and the JavaScript row of the table reads that row
-/// as ending inside a template string.
+/// `dist` is the bundle a frontend build writes. A bundler writes one minified
+/// row of JavaScript there, and the JavaScript row of the table reads that row
+/// as ending inside a template string. Until issue #761 moved `nle` to Dioxus,
+/// `pnpm build` wrote such a bundle to `src/nle/frontend/dist`.
 const BUILD_DIRECTORIES: &[&str] = &["target", "node_modules", "dist"];
 
 /// Whether a path the walk found lies inside build output.
 ///
 /// [`roots`] drops a build directory that sits at the top of the repository,
-/// and a build directory below a root reaches the walk. `src/nle/frontend/dist`
-/// is such a directory, one level below the `src` root, so the name alone
-/// cannot be the rule. Every component of the path answers instead.
+/// and a build directory below a root reaches the walk. A frontend bundle such
+/// as `src/<tool>/frontend/dist` is such a directory, below the `src` root, so
+/// the name alone cannot be the rule. Every component of the path answers
+/// instead.
 ///
 /// The path read here is the one relative to the root that found it, not the
 /// absolute one. A checkout that lives under a directory named `target` is
@@ -510,11 +511,10 @@ fn defective_fixtures() -> PathBuf {
 /// A build directory below a root, planted for the length of one run.
 ///
 /// The guard below walks the repository itself, so the condition it must answer
-/// has to stand in the repository while the run lasts. `src/nle` holds a Tauri
-/// frontend, and `pnpm build` writes its bundle to `src/nle/frontend/dist`. A
-/// checkout that nobody built holds no such directory, so a guard that waits
-/// for one reports clean on most machines and fails on the machine that built
-/// the app. This plants one every run instead.
+/// has to stand in the repository while the run lasts. A frontend bundle below
+/// a root is the case, and a checkout that nobody built holds no such
+/// directory, so a guard that waits for one reports clean on most machines and
+/// fails on the machine that built the app. This plants one every run instead.
 ///
 /// The name carries the process and the clock, because two runs of this suite
 /// share one tree. A fixed name lets one run delete the file the other run is
@@ -537,7 +537,7 @@ impl PlantedBuildOutput {
         let assets = directory.join("dist").join("assets");
         std::fs::create_dir_all(&assets).expect("the planted build directory is created");
         // The shape a bundler writes: one long row that opens a template string
-        // and never closes it, which is what the real bundle of `nle` does.
+        // and never closes it, which is what the Vite bundle of `nle` did.
         std::fs::write(assets.join("index.js"), "const a=`unclosed\n")
             .expect("the planted bundle is written");
         Self { directory }
