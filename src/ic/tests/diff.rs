@@ -110,3 +110,32 @@ fn diff_boxes_is_the_default_picture() {
     assert_eq!(pixel(&picture, 24, 20), RED);
     assert_eq!(pixel(&picture, 10, 10), source_pixel(&first, 10, 10));
 }
+
+/// `highlight` shows the first image, with each differing pixel red and no
+/// outline.
+#[test]
+fn diff_highlight_marks_the_pixel_on_the_first_image() {
+    let (picture, first) = emit_diff(&["--diff-mode", "highlight"]);
+
+    assert_eq!(pixel(&picture, 20, 20), RED);
+    assert_eq!(pixel(&picture, 10, 10), source_pixel(&first, 10, 10));
+    assert_eq!(pixel(&picture, 16, 20), source_pixel(&first, 16, 20));
+}
+
+/// `mask` shows opaque black, with each differing pixel red.
+#[test]
+fn diff_mask_marks_the_pixel_on_black() {
+    let (picture, _first) = emit_diff(&["--diff-mode", "mask"]);
+
+    assert_eq!(pixel(&picture, 20, 20), RED);
+    assert_eq!(pixel(&picture, 10, 10), [0, 0, 0, 255]);
+}
+
+/// `boxes` is the mode that a run with no `--diff-mode` takes.
+#[test]
+fn diff_mode_boxes_is_the_default() {
+    let (named, _) = emit_diff(&["--diff-mode", "boxes"]);
+    let (unnamed, _) = emit_diff(&[]);
+
+    assert_eq!(named, unnamed);
+}
