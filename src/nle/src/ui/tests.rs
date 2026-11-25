@@ -284,11 +284,10 @@ impl Window {
     /// Whether the start tag of the Open Recording button holds `disabled`.
     fn open_is_disabled(&self) -> bool {
         let page = self.html();
-        let label = page
-            .find(&format!(">{OPEN_LABEL}</button>"))
+        let (before, _) = page
+            .split_once(&format!(">{OPEN_LABEL}</button>"))
             .unwrap_or_else(|| panic!("no Open Recording button in {page}"));
-        let start = page[..label].rfind("<button").expect("a button start tag");
-        let tag = &page[start..label];
+        let (_, tag) = before.rsplit_once("<button").expect("a button start tag");
         tag.split([' ', '>', '=']).any(|word| word == "disabled")
     }
 }
