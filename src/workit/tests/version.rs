@@ -7,7 +7,6 @@
 //! time.
 
 use regex::Regex;
-use std::process::Command;
 
 /// The shape clap prints for `version = version_string!()`: the binary name,
 /// the crate version, then the seven-character git hash and the state of the
@@ -18,7 +17,7 @@ const VERSION_PATTERN: &str =
 
 #[test]
 fn version_reports_the_git_hash_and_the_dirty_status() {
-    let output = Command::new(env!("CARGO_BIN_EXE_workit"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_workit"))
         .arg("--version")
         .output()
         .expect("the workit binary runs");

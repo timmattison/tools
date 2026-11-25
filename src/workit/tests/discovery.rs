@@ -25,12 +25,12 @@
 //! the binary printed. Every run states `--output`, and it always names a file
 //! inside the fixture, so nothing is written and nothing outside the temporary
 //! directory is read: two copies of this file can run at the same time, and
-//! neither one can reach a real repository. No test here runs git, so none of
-//! them inherits a git environment either.
+//! neither one can reach a real repository. Each run starts through
+//! `childenv::fixture_command`, so none of them inherits a git environment
+//! either.
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use tempfile::TempDir;
 
 /// A temporary directory and the canonical path of the search root inside it.
@@ -82,7 +82,7 @@ fn workspace_at(root: &Path, relative: &str, members: &str) {
 /// caller names a file inside the fixture, so no run can touch a manifest of
 /// the repository it was started from.
 fn members_written_to(root: &Path, manifest: &Path) -> Vec<String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_workit"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_workit"))
         .current_dir(root)
         .arg("--path")
         .arg(root)

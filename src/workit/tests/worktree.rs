@@ -29,16 +29,15 @@
 //! from a hook without a scrub re-initialises the developer's own repository.
 //! That has happened to this repository before.
 //!
-//! So every git child spawned here goes through
-//! [`gitscratch::shed_inherited_git_environment`], whose rule is the `GIT_`
-//! prefix read off the live environment rather than a list of names that goes
-//! stale, and every one of them is pointed at a `HOME` and an
-//! `XDG_CONFIG_HOME` of its own inside a temporary directory, so no global
-//! config is read and none is written. No test runs `git config`: identity and
-//! signing are stated per invocation with `-c`. After each repository and each
-//! worktree is built, [`Fixture::assert_toplevel`] asks git itself which
-//! working tree it just acted on and refuses to continue unless the answer is
-//! the fixture.
+//! So every child spawned here starts through [`childenv::fixture_command`],
+//! whose rule is the `GIT_` prefix read off the live environment rather than a
+//! list of names that goes stale, and every one of them is pointed at a `HOME`
+//! and an `XDG_CONFIG_HOME` of its own inside a temporary directory, so no
+//! global config is read and none is written. No test runs `git config`:
+//! identity and signing are stated per invocation with `-c`. After each
+//! repository and each worktree is built, [`Fixture::assert_toplevel`] asks git
+//! itself which working tree it just acted on and refuses to continue unless
+//! the answer is the fixture.
 //!
 //! Every fixture lives in its own [`TempDir`] and every branch it creates
 //! carries this process's id and a nanosecond stamp, so two copies of this file
@@ -46,10 +45,9 @@
 //! and every run passes `--dry-run`, so no run can write a manifest anywhere.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gitscratch::shed_inherited_git_environment;
 use tempfile::TempDir;
 
 /// The name every fixture commit is authored and committed under. Stated per
@@ -108,10 +106,7 @@ impl Fixture {
     /// Panics if git cannot be spawned or exits non-zero, carrying the command
     /// and both of its streams.
     fn git(&self, cwd: &Path, args: &[&str]) -> String {
-        let mut command = Command::new("git");
-        shed_inherited_git_environment(&mut command);
-
-        let output = command
+        let output = childenv::fixture_command("git")
             .args(args)
             .current_dir(cwd)
             .env("HOME", &self.home)
@@ -289,10 +284,7 @@ impl Fixture {
     /// git today, and a test suite that only stays hermetic while the code
     /// under test happens not to call git is hermetic by luck.
     fn workit(&self, search_root: &Path, extra: &[&str]) -> Output {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_workit"));
-        shed_inherited_git_environment(&mut command);
-
-        command
+        childenv::fixture_command(env!("CARGO_BIN_EXE_workit"))
             .current_dir(search_root)
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join("config"))

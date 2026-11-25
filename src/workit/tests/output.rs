@@ -32,7 +32,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use tempfile::TempDir;
 use toml_edit::DocumentMut;
 
@@ -72,7 +72,7 @@ fn package_at(root: &Path, relative: &str, name: &str) -> PathBuf {
 /// successfully. The working directory is stated on every run, because the
 /// directory a run is started from is one of the two inputs under test.
 fn workit(cwd: &Path, args: &[&str]) -> Output {
-    let output = Command::new(env!("CARGO_BIN_EXE_workit"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_workit"))
         .current_dir(cwd)
         .args(args)
         .output()
@@ -94,7 +94,7 @@ fn workit(cwd: &Path, args: &[&str]) -> Output {
 /// opposite status: a run that wrote a manifest cargo cannot load is the defect,
 /// and it reads as success from the exit status alone.
 fn workit_fails(cwd: &Path, args: &[&str]) -> Output {
-    let output = Command::new(env!("CARGO_BIN_EXE_workit"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_workit"))
         .current_dir(cwd)
         .args(args)
         .output()

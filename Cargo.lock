@@ -10442,8 +10442,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "buildinfo",
+ "childenv",
  "clap",
- "gitscratch",
  "regex",
  "tempfile",
  "toml_edit 0.22.27",

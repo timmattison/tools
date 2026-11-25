@@ -26,7 +26,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use tempfile::TempDir;
 
 /// A `Cargo.toml` no parser accepts.
@@ -78,7 +78,7 @@ fn package_at(root: &Path, relative: &str, name: &str) {
 /// file inside the fixture, so no run can touch a manifest of the repository it
 /// was started from.
 fn workit(root: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_workit"))
+    childenv::fixture_command(env!("CARGO_BIN_EXE_workit"))
         .current_dir(root)
         .arg("--path")
         .arg(root)

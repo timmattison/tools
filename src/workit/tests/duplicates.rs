@@ -22,12 +22,13 @@
 //! binary over that tree with `--dry-run`, and points `--output` inside the
 //! fixture. Nothing is written and nothing outside the temporary directory is
 //! read, so two copies of this file can run at the same time and neither one
-//! can reach a real repository. No test here runs git, so none of them inherits
-//! a git environment either.
+//! can reach a real repository. Each run starts through
+//! `childenv::fixture_command`, so none of them inherits a git environment
+//! either.
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use tempfile::TempDir;
 
 /// The words the fixture builds a duplicated package name out of, in the order
@@ -130,7 +131,7 @@ fn build_duplicates(root: &Path) -> Vec<(String, Vec<String>)> {
 /// file inside the fixture, so no run can touch a manifest of the repository it
 /// was started from.
 fn workit(root: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_workit"))
+    childenv::fixture_command(env!("CARGO_BIN_EXE_workit"))
         .current_dir(root)
         .arg("--path")
         .arg(root)

@@ -15,7 +15,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use tempfile::TempDir;
 
 /// Writes a package manifest at `relative` under `root`, so the walk has
@@ -50,7 +49,7 @@ fn fixture(name: &str) -> (TempDir, std::path::PathBuf) {
 /// the output path names a file inside the fixture so no run can touch a
 /// manifest of the repository it was started from.
 fn members_of(root: &Path, extra_args: &[&str]) -> Vec<String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_workit"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_workit"))
         .arg("--path")
         .arg(root)
         .arg("--output")

@@ -19,15 +19,13 @@
 //! Every test here builds its own tree in its own temporary directory and
 //! points the run at a manifest inside it, so nothing outside the fixture is
 //! written. These tests write for real rather than with `--dry-run`, because
-//! what reaches the file is the thing under test. No test here runs git, so
-//! none of them inherits a git environment; the one that runs `cargo` sheds
-//! that environment all the same, and gives it a target directory inside the
-//! fixture so it cannot disturb the workspace it was started from.
+//! what reaches the file is the thing under test. Each child process starts
+//! through `childenv::fixture_command`, so none of them inherits a git
+//! environment. The one that runs `cargo` also gets a target directory inside
+//! the fixture, so it cannot disturb the workspace it was started from.
 
-use gitscratch::shed_inherited_git_environment;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use tempfile::TempDir;
 
 /// A manifest of the shape people write by hand: a comment at the top, a
@@ -87,7 +85,7 @@ fn package_at(root: &Path, relative: &str, name: &str) {
 /// Runs the binary over `root`, writing for real, and fails the test with what
 /// the run printed when it did not succeed.
 fn workit(root: &Path) {
-    let output = Command::new(env!("CARGO_BIN_EXE_workit"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_workit"))
         .current_dir(root)
         .arg("--path")
         .arg(root)
@@ -106,7 +104,7 @@ fn workit(root: &Path) {
 /// Runs the binary over `root` as `workit` does and returns its output, after
 /// it asserts that the run refused the manifest.
 fn workit_fails(root: &Path) -> std::process::Output {
-    let output = Command::new(env!("CARGO_BIN_EXE_workit"))
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_workit"))
         .current_dir(root)
         .arg("--path")
         .arg(root)
@@ -265,11 +263,7 @@ fn a_manifest_written_where_none_existed_is_one_cargo_accepts() {
     workit(&root);
 
     let manifest = root.join("Cargo.toml");
-    let mut cargo = Command::new(env!("CARGO"));
-    // Nothing here reads a repository, but a `GIT_*` inherited from a
-    // pre-commit hook aims every tool that does. The rule is the prefix.
-    shed_inherited_git_environment(&mut cargo);
-    let metadata = cargo
+    let metadata = childenv::fixture_command(env!("CARGO"))
         // The build products of this run belong inside the fixture, which is
         // deleted with it. Sharing the workspace's own `./target` would let a
         // test disturb the build it was started by.
