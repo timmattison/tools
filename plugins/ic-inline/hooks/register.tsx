@@ -7,9 +7,10 @@
 // elements: an Image where the terminal draws pixels, colored half blocks
 // everywhere else (zellij, tmux, iTerm2, mosh).
 //
-// Two ways to show a picture:
-//   /ic <file>         the person shows one, in the output row of the command
-//   show_image(path)   the model shows one, in the result row of the call
+// The ways to show a picture:
+//   /ic <file>                  the person shows one, in the output row of the command
+//   /ic diff [--mode M] <a> <b> the person shows the differences of two, the same way
+//   show_image(path)            the model shows one, in the result row of the call
 //
 // This file is the one that talks to the engine. The engine reads a hooks
 // module before it runs it, and it follows `$` only into the functions that
@@ -20,10 +21,20 @@
 
 import type { EngineInterface, Register, RenderElement, RenderViewport } from 'claude-code'
 
-import { fromHome, parsePath, startsAtHome } from './argument'
+import { type Asked, fromHome, parseCommand, parsePath, startsAtHome } from './argument'
 import { type Drawing, pictureTree, type PictureElements } from './draw'
 import { type Options, readOptions, type Renderer } from './options'
-import { Decodes, IC_TIMEOUT_MS, icArguments, type Loaded, loadedFrom, notRun } from './picture'
+import {
+  DIFF_MODES,
+  Decodes,
+  IC_TIMEOUT_MS,
+  icArguments,
+  type Loaded,
+  loadedFrom,
+  notRun,
+  type Picture,
+  type Subject,
+} from './picture'
 
 const SHOWN = { plugin: 'ic-inline', key: 'shown' } as const
 const PIXELS = { plugin: 'ic-inline', key: 'pixels' } as const
@@ -32,7 +43,13 @@ const COMMAND = 'ic'
 const TOOL_NAME = 'show_image'
 const TOOL = 'mcp__ic-inline__show_image'
 
-const USAGE = 'Usage: /ic <image file>. It shows the picture inline, decoded by ic.'
+/** The diff form of /ic, as its usage names it. */
+const DIFF_FORM = `/ic diff [--mode ${DIFF_MODES.join('|')}] <first> <second>`
+
+const USAGE = `Usage: /ic <image file>, or ${DIFF_FORM}. It shows the picture inline, decoded by ic.`
+
+/** The usage that a refusal of the diff form ends with. */
+const DIFF_USAGE = `Usage: ${DIFF_FORM}. It shows the differences of two images inline, decoded by ic --diff.`
 
 const TOOL_DESCRIPTION = [
   'Show an image file to the user inline in the terminal transcript, decoded by ic.',
@@ -80,8 +97,8 @@ export const register: Register = (on, rawOptions) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: COMMAND,
-      description: 'Show an image inline in the transcript, decoded by ic',
-      argumentHint: '<image file>',
+      description: 'Show an image, or the differences of two, inline in the transcript, decoded by ic',
+      argumentHint: `<image file> | diff [--mode ${DIFF_MODES.join('|')}] <first> <second>`,
     })
     await $.tool.register({
       name: TOOL_NAME,
@@ -101,22 +118,21 @@ export const register: Register = (on, rawOptions) => {
   })
 
   on('command.run', { command: COMMAND }, async ($, e) => {
-    const path = await pathOf($, e.args)
-    if (path === undefined) return { text: USAGE }
+    const asked = await askedOf($, e.args)
+    if (asked.kind === 'empty') return { text: USAGE }
+    if (asked.kind === 'refused') return { text: `${asked.reason}. ${DIFF_USAGE}` }
 
-    const loaded = await load($, options.icPath, path, true)
-    if (!loaded.isLoaded) return { text: `Could not show ${path}: ${loaded.reason}` }
-
-    const { sourceWidth, sourceHeight } = loaded.picture
-    return { text: `Showed ${path} (${sourceWidth}×${sourceHeight}) inline.` }
+    const loaded = await load($, options.icPath, asked, true)
+    if (!loaded.isLoaded) return { text: `Could not ${failedOf(asked)}: ${loaded.reason}` }
+    return { text: `Showed ${shownOf(asked, loaded.picture)} inline.` }
   })
 
   on('ui.render', { component: 'CommandOutput', props: { command: COMMAND } }, async ($, e, next) => {
     if (e.surface !== 'terminal' || e.props.isErrored) return next(e)
-    const path = await pathOf($, e.props.args)
-    if (path === undefined) return next(e)
+    const asked = await askedOf($, e.props.args)
+    if (asked.kind === 'empty' || asked.kind === 'refused') return next(e)
 
-    return (await drawRow($, $.ui.resolve(e), e.viewport, path, options)) ?? next(e)
+    return (await drawRow($, $.ui.resolve(e), e.viewport, asked, options)) ?? next(e)
   })
 
   on('tool.call', { tool: TOOL }, async ($, e) => {
@@ -124,7 +140,7 @@ export const register: Register = (on, rawOptions) => {
     const path = typeof given === 'string' ? await pathOf($, given) : undefined
     if (path === undefined) return { deny: `${TOOL_NAME} needs a path: the image file to show.` }
 
-    const loaded = await load($, options.icPath, path, true)
+    const loaded = await load($, options.icPath, { kind: 'image', path }, true)
     if (!loaded.isLoaded) return { deny: `Could not show ${path}: ${loaded.reason}` }
 
     await $.state.set({ ...SHOWN, id: e.tool_use_id }, { path })
@@ -143,7 +159,8 @@ export const register: Register = (on, rawOptions) => {
     const { value: shown } = await $.state.get({ ...SHOWN, id: e.requestId })
     if (shown === undefined) return next(e)
 
-    return (await drawRow($, $.ui.resolve(e), e.viewport, shown.path, options)) ?? next(e)
+    const subject: Subject = { kind: 'image', path: shown.path }
+    return (await drawRow($, $.ui.resolve(e), e.viewport, subject, options)) ?? next(e)
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -174,32 +191,60 @@ export const register: Register = (on, rawOptions) => {
  */
 async function pathOf($: EngineInterface, text: string): Promise<string | undefined> {
   const path = parsePath(text)
-  if (path === undefined || !startsAtHome(path)) return path
-  return fromHome(path, await $.env.get('HOME'))
+  return path === undefined ? undefined : homePath($, path)
+}
+
+/** `path` with a leading `~` made into HOME, which is read only when the path needs it. */
+async function homePath($: EngineInterface, path: string): Promise<string> {
+  return startsAtHome(path) ? fromHome(path, await $.env.get('HOME')) : path
+}
+
+/** What the text after /ic asks for, with each path that ic reads made from HOME as `pathOf` makes it. */
+async function askedOf($: EngineInterface, text: string): Promise<Asked> {
+  const asked = parseCommand(text)
+  if (asked.kind === 'image') return { kind: 'image', path: await homePath($, asked.path) }
+  if (asked.kind === 'diff') {
+    return { ...asked, first: await homePath($, asked.first), second: await homePath($, asked.second) }
+  }
+  return asked
 }
 
 /**
- * The picture at `path`, decoded by the ic at `icPath`. `isFresh` runs ic
- * again, as a request of the person or the model does: the file can have
+ * The picture of `subject`, decoded by the ic at `icPath`. `isFresh` runs ic
+ * again, as a request of the person or the model does: a file can have
  * changed. A draw of a row takes the kept decode. Never rejects.
  */
-function load($: EngineInterface, icPath: string, path: string, isFresh: boolean): Promise<Loaded> {
-  const held = isFresh ? undefined : decodes.held(icPath, path)
+function load($: EngineInterface, icPath: string, subject: Subject, isFresh: boolean): Promise<Loaded> {
+  const argv = icArguments(icPath, subject)
+  const held = isFresh ? undefined : decodes.held(argv)
   if (held !== undefined) return held
 
-  const loading = runIc($, icPath, path)
-  decodes.keep(icPath, path, loading)
+  const loading = runIc($, icPath, argv)
+  decodes.keep(argv, loading)
   return loading
 }
 
-/** Run ic over `path` and read what it printed. Never rejects. */
-async function runIc($: EngineInterface, icPath: string, path: string): Promise<Loaded> {
+/** Run `argv`, which starts with the ic at `icPath`, and read what it printed. Never rejects. */
+async function runIc($: EngineInterface, icPath: string, argv: string[]): Promise<Loaded> {
   try {
-    const run = await $.process.run(icArguments(icPath, path), { timeoutMs: IC_TIMEOUT_MS })
+    const run = await $.process.run(argv, { timeoutMs: IC_TIMEOUT_MS })
     return loadedFrom(run, icPath)
   } catch (error) {
     return notRun(icPath, error)
   }
+}
+
+/** What a request for `subject` could not do, for the message of a failure. */
+function failedOf(subject: Subject): string {
+  return subject.kind === 'image' ? `show ${subject.path}` : `compare ${subject.first} and ${subject.second}`
+}
+
+/** What a request for `subject` showed, with the size of the picture in the file. */
+function shownOf(subject: Subject, picture: Picture): string {
+  const size = `${picture.sourceWidth}×${picture.sourceHeight}`
+  return subject.kind === 'image'
+    ? `${subject.path} (${size})`
+    : `the differences between ${subject.first} and ${subject.second} (${size})`
 }
 
 /**
@@ -213,18 +258,18 @@ async function drawingOf($: EngineInterface, renderer: Renderer): Promise<Drawin
   return value === 'yes' ? 'pixels' : 'blocks'
 }
 
-/** The tree of the picture at `path`, or `undefined` when ic gives none. */
+/** The tree of the picture of `subject`, or `undefined` when ic gives none. */
 async function drawRow(
   $: EngineInterface,
   elements: PictureElements,
   viewport: RenderViewport | undefined,
-  path: string,
+  subject: Subject,
   options: Options,
 ): Promise<RenderElement | undefined> {
-  const loaded = await load($, options.icPath, path, false)
+  const loaded = await load($, options.icPath, subject, false)
   if (!loaded.isLoaded) return undefined
   const drawing = await drawingOf($, options.renderer)
-  return pictureTree(elements, viewport, loaded.picture, path, drawing, options.maxRows)
+  return pictureTree(elements, viewport, loaded.picture, subject, drawing, options.maxRows)
 }
 
 /** Run a blit of the probe from a timer, its failure to the debug log. */
