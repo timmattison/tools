@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod error;
 pub mod types;
+mod format;
 mod ui;
 
 use buildinfo::version_string;

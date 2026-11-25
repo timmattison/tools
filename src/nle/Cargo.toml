@@ -21,6 +21,7 @@ tokio = { workspace = true }
 # Every child process starts through childenv::command, because clippy.toml
 # bans std::process::Command::new.
 childenv = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 toml = { workspace = true }
