@@ -3,9 +3,10 @@
 // pixels and half blocks.
 //
 // The test kit runs no process, so every test answers `process.run` the way
-// `ic --emit-rgba` answers. FIXTURE_JSON is the real output of that flag for
-// tests/fixture.png, which holds the contract between the two halves: a change
-// to the JSON of `ic` that this mod cannot read fails here.
+// `ic --emit-rgba` answers. FIXTURE_JSON is a copy of the output of that flag
+// for tests/fixture.png. These tests cannot see a change of the JSON of `ic`.
+// The Rust test `emit_rgba_prints_the_json_that_the_plugin_tests_hold` in
+// src/ic/tests/emit-rgba.rs holds the copy to the real output.
 
 import type { On, RenderSurface, RenderViewport } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
@@ -19,7 +20,9 @@ const TOOL = 'mcp__ic-inline__show_image'
 const FIXTURE_PATH = 'fixture.png'
 
 /**
- * `ic --emit-rgba 720x720 tests/fixture.png`, as the release build printed it.
+ * `ic --emit-rgba 720x720 -- tests/fixture.png`, as `ic` printed it. The Rust
+ * test `emit_rgba_prints_the_json_that_the_plugin_tests_hold` holds this copy
+ * to the real output.
  *
  * The picture is 4 by 4 pixels: the top two rows red, the bottom two rows
  * blue, and the top right pixel transparent.

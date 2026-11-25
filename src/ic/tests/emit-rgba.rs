@@ -72,6 +72,13 @@ const WINDOW: Window = Window {
     height_px: 0,
 };
 
+/// The fixture picture of the `ic-inline` plugin, from this crate.
+const PLUGIN_FIXTURE: &str = "../../plugins/ic-inline/tests/fixture.png";
+
+/// The test file of the `ic-inline` plugin, from this crate. It holds a copy of
+/// the output of `ic` for [`PLUGIN_FIXTURE`].
+const PLUGIN_TEST: &str = "../../plugins/ic-inline/tests/ic-inline.test.tsx";
+
 /// A directory of pictures that belongs to one test, removed when it drops.
 struct Scratch {
     /// The directory itself.
@@ -467,6 +474,46 @@ fn emit_rgba_takes_one_picture() {
         outcome.stderr
     );
     assert_eq!(outcome.stdout, "", "a refusal must print no JSON");
+}
+
+/// The plugin `ic-inline` tests its reading of the JSON against a copy of the
+/// output of `ic`. This test holds that copy to the real output, so a change
+/// of the JSON fails here and not only in the plugin. The run uses the
+/// argument vector of the plugin, with `--` before the path.
+#[test]
+fn emit_rgba_prints_the_json_that_the_plugin_tests_hold() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = manifest.join(PLUGIN_FIXTURE);
+    let plugin_test = manifest.join(PLUGIN_TEST);
+
+    let outcome = run(ic(TERM_XTERM_256COLOR)
+        .arg(FLAG)
+        .arg("720x720")
+        .arg("--")
+        .arg(&fixture));
+
+    assert_eq!(
+        outcome.code,
+        Some(0),
+        "the run must succeed: {}",
+        outcome.stderr
+    );
+    let json = outcome.stdout.trim_end_matches('\n');
+    assert_eq!(
+        outcome.stdout.len(),
+        json.len() + 1,
+        "the output must end with exactly one newline: {:?}",
+        outcome.stdout
+    );
+    let text = fs::read_to_string(&plugin_test)
+        .unwrap_or_else(|error| panic!("{} must be readable: {error}", plugin_test.display()));
+    assert!(
+        text.contains(json),
+        "{PLUGIN_TEST} does not hold the output of `ic {FLAG} 720x720 -- {PLUGIN_FIXTURE}`. \
+         Copy the new output into FIXTURE_JSON, and into the `rgba` that the test \
+         \"draw as an Image once the terminal takes one\" expects. Then run \
+         `claude plugin test plugins/ic-inline`. The output is: {json}"
+    );
 }
 
 /// The options of a display state cells, a scale or the cursor, the options of

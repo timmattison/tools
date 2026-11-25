@@ -75,7 +75,7 @@ claude plugin validate plugins/ic-inline
 claude plugin test plugins/ic-inline
 ```
 
-`tests/ic-inline.test.tsx` holds the real output of `ic --emit-rgba 720x720 tests/fixture.png`. If the JSON of `ic` changes, that test fails.
+`tests/ic-inline.test.tsx` holds a copy of the output of `ic --emit-rgba 720x720 -- tests/fixture.png`. The sandbox of `claude plugin test` runs no process, so this test cannot see a change of the JSON of `ic`. The Rust test `emit_rgba_prints_the_json_that_the_plugin_tests_hold` in `src/ic/tests/emit-rgba.rs` fails when the output of `ic` is not that copy word for word. When it fails, copy the new output into the test file.
 
 `hooks/register.tsx` is the one file that calls Claude Code. Claude Code reads a hooks module before it runs it, and it follows `$` only into the functions that the module declares at its top. The other modules are pure:
 
