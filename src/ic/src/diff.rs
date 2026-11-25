@@ -541,4 +541,26 @@ mod tests {
             vec![region(0, 0, 9, 9)]
         );
     }
+
+    /// A diff with `regions` regions and `pixels` differing pixels.
+    fn diff_of(regions: usize, pixels: u64) -> Diff {
+        Diff {
+            picture: RgbaImage::new(1, 1),
+            regions: vec![region(0, 0, 0, 0); regions],
+            differing_pixels: pixels,
+        }
+    }
+
+    #[test]
+    fn the_summary_says_when_the_images_are_the_same() {
+        assert_eq!(diff_of(0, 0).summary(), "the images are the same");
+    }
+
+    #[test]
+    fn the_summary_counts_regions_and_pixels_in_the_right_number() {
+        assert_eq!(diff_of(1, 1).summary(), "1 region differs (1 pixel)");
+        assert_eq!(diff_of(1, 5).summary(), "1 region differs (5 pixels)");
+        assert_eq!(diff_of(3, 1204).summary(), "3 regions differ (1204 pixels)");
+        assert_eq!(diff_of(2, 1).summary(), "2 regions differ (1 pixel)");
+    }
 }
