@@ -3482,6 +3482,32 @@ mod tests {
         assert!(mosh_refusal_message().contains("ssh user@host"));
     }
 
+    /// Assert that a refusal names the two ways to force a protocol.
+    ///
+    /// A forced protocol is the way past a wrong refusal: under Zellij, the
+    /// process tree can name the Mosh of a different client. A refusal that
+    /// does not name the way leaves the user with a repair that does not
+    /// apply.
+    fn assert_names_the_forced_protocol(message: &str) {
+        assert!(
+            message.contains("--protocol") && message.contains("IC_PROTOCOL"),
+            "the refusal must name --protocol and IC_PROTOCOL: {message}"
+        );
+    }
+
+    #[test]
+    fn the_mosh_message_names_the_forced_protocol() {
+        assert_names_the_forced_protocol(&mosh_refusal_message());
+    }
+
+    #[test]
+    fn the_tmux_message_names_the_forced_protocol() {
+        let caps = Capabilities::new(TerminalType::ITerm2, true, true);
+        let error = validate_terminal_for_graphics(&caps, &RemoteTransport::None, true, "Image")
+            .expect_err("a tmux that answered no query must be refused");
+        assert_names_the_forced_protocol(&error.to_string());
+    }
+
     // =========================================================================
     // Tests for classify_transport (the whole transport decision)
     // =========================================================================
