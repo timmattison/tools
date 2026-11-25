@@ -376,6 +376,7 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -668,5 +669,87 @@ mod tests {
             state.search("lunch", None, 0, 50),
             Err(MsgsError::CacheError(_))
         ));
+    }
+
+    /// The name of the file where an older msgs kept the search index.
+    const OLD_CACHE_FILE: &str = "text-cache.db";
+
+    /// The paths of a start whose application-support folder is `support`.
+    /// An older msgs kept its index in `support/msgs`, thus that folder
+    /// exists, as on a Mac where an older msgs ran.
+    fn paths_with_support_dir(fixture: &ChatDbFixture, support: &Path) -> DataPaths {
+        let old_cache_dir = support.join("msgs");
+        std::fs::create_dir_all(&old_cache_dir).expect("old cache dir");
+        DataPaths {
+            chat_db: fixture.path().to_path_buf(),
+            cache_db: old_cache_dir.join(OLD_CACHE_FILE),
+        }
+    }
+
+    /// Each file under `dir`, at each depth.
+    fn files_under(dir: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(next) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&next) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        files
+    }
+
+    #[test]
+    fn no_file_under_the_support_dir_holds_message_text_after_a_start_and_a_search() {
+        const SECRET: &str = "zanzibar";
+        let fixture = ChatDbFixture::new();
+        let chat = fixture.add_chat("friend", Some("Friend"), 45);
+        fixture.add_message(MessageSpec {
+            text: Some(format!("the {SECRET} plan")),
+            date: apple_ns(1_700_000_000, 0),
+            chats: vec![chat],
+            ..MessageSpec::default()
+        });
+        let support = fixture.dir().join("Application Support");
+        let (state, seen) =
+            statuses_of_a_finished_build(paths_with_support_dir(&fixture, &support));
+        assert_eq!(seen.last(), Some(&CacheStatus::Ready));
+        assert_eq!(state.search(SECRET, None, 0, 50).expect("search").len(), 1);
+
+        for file in files_under(&support) {
+            let bytes = std::fs::read(&file).expect("read file");
+            assert!(
+                !bytes.windows(SECRET.len()).any(|w| w == SECRET.as_bytes()),
+                "{} holds message text",
+                file.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_start_deletes_the_text_cache_of_an_older_msgs() {
+        let fixture = fixture_with_messages(1);
+        let support = fixture.dir().join("Application Support");
+        let paths = paths_with_support_dir(&fixture, &support);
+        let old_dir = support.join("msgs");
+        let old_files: Vec<PathBuf> = ["", "-journal", "-wal", "-shm"]
+            .iter()
+            .map(|suffix| old_dir.join(format!("{OLD_CACHE_FILE}{suffix}")))
+            .collect();
+        for file in &old_files {
+            std::fs::write(file, "lunch 0, the text of a message").expect("write old cache");
+        }
+        let (_state, _seen) = statuses_of_a_finished_build(paths);
+        for file in &old_files {
+            assert!(!file.exists(), "{} is still there", file.display());
+        }
+        assert!(!old_dir.exists(), "the empty msgs folder is still there");
     }
 }

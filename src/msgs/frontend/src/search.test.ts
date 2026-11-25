@@ -1,7 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Conversation, SearchResult } from "./bindings";
+import type { CacheStatus, Conversation, SearchResult } from "./bindings";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+
+const events = vi.hoisted(() => ({
+  listener: null as null | ((event: { payload: CacheStatus }) => void),
+}));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (_name: string, handler: (event: { payload: CacheStatus }) => void) => {
+    events.listener = handler;
+    return () => {};
+  }),
+}));
+
+function emitCacheStatus(status: CacheStatus): void {
+  if (!events.listener) throw new Error("no listener for cache-status");
+  events.listener({ payload: status });
+}
 
 const MARKUP = `
   <input type="text" id="global-search" />
@@ -83,13 +98,17 @@ async function flush(): Promise<void> {
 }
 
 /** `invoke` answers `search_messages` from `pending` in call order and `list_conversations` with no items. */
-async function mockInvoke(pending: Deferred<SearchResult[]>[]) {
+async function mockInvoke(
+  pending: Deferred<SearchResult[]>[],
+  cacheStatus: CacheStatus = { state: "ready" },
+) {
   const { invoke } = await import("@tauri-apps/api/core");
   const mock = vi.mocked(invoke);
   mock.mockReset();
   let next = 0;
   mock.mockImplementation((command: string) => {
     if (command === "list_conversations") return Promise.resolve([]);
+    if (command === "get_cache_status") return Promise.resolve(cacheStatus);
     const reply = pending[next];
     next += 1;
     if (reply === undefined) return Promise.reject(`unexpected call ${next}`);
@@ -105,6 +124,7 @@ function searchCalls(invoke: Awaited<ReturnType<typeof mockInvoke>>): number {
 describe("global search", () => {
   beforeEach(async () => {
     vi.resetModules();
+    events.listener = null;
     vi.useFakeTimers();
     document.body.innerHTML = MARKUP;
   });
@@ -162,5 +182,48 @@ describe("global search", () => {
     await flush();
 
     expect(searchCalls(invoke)).toBe(0);
+  });
+
+  it("waits for a building index, shows its progress, and searches when it is ready", async () => {
+    const lunch = deferred<SearchResult[]>();
+    const invoke = await mockInvoke([lunch], { state: "building", indexed: 1, total: 4 });
+    const { initSearch } = await import("./search");
+    const { initCacheStatus } = await import("./cache-status");
+    initSearch(() => {});
+    await initCacheStatus();
+
+    type("lunch");
+    vi.advanceTimersByTime(DEBOUNCE_MS);
+    await flush();
+    expect(searchCalls(invoke)).toBe(0);
+    expect(list().textContent).toContain("Indexing messages for search: 25%");
+
+    emitCacheStatus({ state: "building", indexed: 2, total: 4 });
+    expect(list().textContent).toContain("Indexing messages for search: 50%");
+
+    emitCacheStatus({ state: "ready" });
+    await flush();
+    expect(searchCalls(invoke)).toBe(1);
+    lunch.resolve([result(1, "lunch at noon")]);
+    await flush();
+    expect(list().textContent).toContain("lunch at noon");
+  });
+
+  it("drops a search that waits for the index after Escape", async () => {
+    const invoke = await mockInvoke([], { state: "building", indexed: 1, total: 4 });
+    const { initSearch } = await import("./search");
+    const { initCacheStatus } = await import("./cache-status");
+    initSearch(() => {});
+    await initCacheStatus();
+
+    type("lunch");
+    vi.advanceTimersByTime(DEBOUNCE_MS);
+    await flush();
+    pressEscape();
+    emitCacheStatus({ state: "ready" });
+    await flush();
+
+    expect(searchCalls(invoke)).toBe(0);
+    expect(list().dataset.mode).not.toBe("search");
   });
 });
