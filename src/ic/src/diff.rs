@@ -506,4 +506,21 @@ mod tests {
             vec![region(6, 6, 14, 14), region(16, 6, 24, 14)]
         );
     }
+
+    #[test]
+    fn a_box_that_touches_only_the_union_is_merged_too() {
+        let a = region(0, 0, 10, 10);
+        let b = region(11, 5, 20, 15);
+        let c = region(0, 12, 5, 20);
+        assert!(!touches(a, c) && !touches(b, c));
+        assert_eq!(merge_touching(vec![a, b, c]), vec![region(0, 0, 20, 20)]);
+    }
+
+    #[test]
+    fn boxes_that_meet_at_a_corner_are_merged() {
+        assert_eq!(
+            merge_touching(vec![region(0, 0, 5, 5), region(6, 6, 9, 9)]),
+            vec![region(0, 0, 9, 9)]
+        );
+    }
 }
