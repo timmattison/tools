@@ -4002,6 +4002,46 @@ mod tests {
         );
     }
 
+    /// A protocol that the user chose reaches the writer and the file rule.
+    ///
+    /// The draw and [`Capabilities::travels_as_it_stands`] both read the
+    /// routine, and a choice changes the routine. So a Kitty terminal that the
+    /// user forced to Sixel gets a Sixel picture and no Kitty command. The
+    /// same terminal forced to the iTerm2 protocol carries a whole file, where
+    /// the Kitty protocol reads no byte of one.
+    #[test]
+    fn a_forced_protocol_reaches_the_writer_and_the_file_rule() {
+        let kitty = Capabilities::new(TerminalType::Kitty, true, true);
+
+        let mut out = Vec::new();
+        kitty
+            .clone()
+            .with_forced_protocol(crate::ForcedProtocol::Sixel)
+            .draw(&mut out, &test_image(), &test_request())
+            .expect("a write to a vector never fails");
+        let written = String::from_utf8_lossy(&out);
+        assert!(
+            written.contains("\x1bP"),
+            "a Kitty terminal forced to Sixel gets a Sixel picture: {written:?}"
+        );
+        assert!(
+            !written.contains("\x1b_G"),
+            "and it gets no Kitty command: {written:?}"
+        );
+
+        let source = png_file_of(&photograph_fixture());
+        assert!(
+            !kitty.travels_as_it_stands(&source),
+            "the Kitty protocol reads no byte of a file"
+        );
+        assert!(
+            kitty
+                .with_forced_protocol(crate::ForcedProtocol::Iterm2)
+                .travels_as_it_stands(&source),
+            "the iTerm2 protocol of the choice carries the whole file"
+        );
+    }
+
     /// A terminal that sends no file refuses a file of every format.
     ///
     /// The iTerm2 protocol carries a whole file, and [`write_iterm2`] is the

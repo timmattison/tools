@@ -77,6 +77,14 @@
 //! as the file does. A caller that asked about the format alone would keep a
 //! whole PNG or JPEG beside the picture on every terminal of the other two
 //! protocols, which read no byte of it.
+//!
+//! [`Capabilities::with_forced_protocol`] is a second item of that short list. A
+//! person who knows the terminal better than its environment does states the
+//! protocol, and `ic` takes that statement from `--protocol`. The choice
+//! changes the routine of every writer and of the rule about the source file,
+//! so it must reach [`Capabilities`] and not a single writer.
+//! [`TerminalType::Forced`] names the choice, so a gate of the caller can see
+//! it.
 
 mod cursor;
 mod detect;
@@ -85,7 +93,7 @@ mod geometry;
 mod probe;
 mod session;
 
-pub use detect::{AnsweredProtocol, Capabilities, ImageProtocol, TerminalType};
+pub use detect::{AnsweredProtocol, Capabilities, ForcedProtocol, ImageProtocol, TerminalType};
 pub use draw::{Budget, Cursor, DrawError, PayloadBudget, Picture, ProtocolBudgets, Request};
 pub use geometry::{cell_pixels, terminal_cells};
 pub use probe::Refusal;

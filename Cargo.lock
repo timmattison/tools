@@ -4516,6 +4516,7 @@ version = "0.1.0"
 dependencies = [
  "altscreen",
  "anyhow",
+ "base64 0.22.1",
  "buildinfo",
  "childenv",
  "clap",
@@ -4523,6 +4524,7 @@ dependencies = [
  "libc",
  "notify",
  "proctree",
+ "serde_json",
  "termgfx",
  "termion",
  "unicode-width",
@@ -6631,6 +6633,22 @@ dependencies = [
  "shell-words",
  "winapi 0.3.9",
  "winreg",
+]
+
+[[package]]
+name = "portcul"
+version = "0.1.0"
+dependencies = [
+ "altscreen",
+ "anyhow",
+ "buildinfo",
+ "clap",
+ "crossterm",
+ "libc",
+ "listeners",
+ "ratatui",
+ "textfit",
+ "unicode-width",
 ]
 
 [[package]]
@@ -10435,6 +10453,20 @@ dependencies = [
  "buildinfo",
  "clap",
  "get_if_addrs",
+]
+
+[[package]]
+name = "workit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "buildinfo",
+ "childenv",
+ "clap",
+ "regex",
+ "tempfile",
+ "toml_edit 0.22.27",
+ "walkdir",
 ]
 
 [[package]]
