@@ -24,6 +24,16 @@ use crate::{client::UnifiClient, models::Page};
 /// handful of requests instead of dozens.
 const PAGE_SIZE: u32 = 200;
 
+/// The most items one walk reads from one collection.
+///
+/// What a collection can hold is bounded by the controller behind it. A
+/// console adopts devices and serves clients in the thousands, and a site
+/// keeps its vouchers in the thousands too. One million is far above each of
+/// them, and that distance matters more than the number itself, as it does for
+/// [`crate::http`]'s bound on one body. What it bounds is the rest: a server
+/// that states a total with no end and answers each request with a full page.
+const MAX_COLLECTION_ITEMS: u64 = 1_000_000;
+
 /// Fetch every item of the paginated collection at `path`.
 ///
 /// # Arguments
@@ -265,6 +275,73 @@ mod tests {
         assert!(
             report.contains('0'),
             "the failure should say which offset came back, got {report}"
+        );
+    }
+
+    /// A server that answers each request with a full page at the correct
+    /// offset passes both guards above. When it also states a total that has
+    /// no end, `--all` sends requests and keeps items until the memory of the
+    /// machine runs out.
+    ///
+    /// The fake answers the second request with an error, so a walk with no
+    /// cap fails here at once. It does not run until the memory runs out.
+    #[tokio::test]
+    async fn a_total_over_the_cap_is_refused_at_the_first_page() {
+        let requests = Cell::new(0_u32);
+
+        let collected = collect_pages(|offset| {
+            requests.set(requests.get() + 1);
+            let request = requests.get();
+            async move {
+                anyhow::ensure!(request == 1, "the walk sent request {request} past the cap");
+                Ok(Page {
+                    offset,
+                    limit: u32::try_from(SERVER_PAGE_SIZE).unwrap(),
+                    count: u32::try_from(SERVER_PAGE_SIZE).unwrap(),
+                    total_count: u64::MAX,
+                    data: vec![0_u32; SERVER_PAGE_SIZE],
+                })
+            }
+        })
+        .await;
+
+        let error = collected.expect_err("a total with no end must be refused, not walked");
+        let report = format!("{error:#}");
+        assert!(
+            report.contains(&MAX_COLLECTION_ITEMS.to_string()),
+            "the failure must name the cap, got {report}"
+        );
+        assert!(
+            report.contains(&u64::MAX.to_string()),
+            "the failure must name the total the server stated, got {report}"
+        );
+        assert_eq!(requests.get(), 1, "the walk must stop at the first page");
+    }
+
+    /// A server can state a small total first and raise it on a later page, so
+    /// the cap holds for each page and not only for the first one.
+    #[tokio::test]
+    async fn a_total_that_grows_past_the_cap_is_refused() {
+        let collected = collect_pages(|offset| async move {
+            let total_count = if offset == 0 {
+                10
+            } else {
+                MAX_COLLECTION_ITEMS + 1
+            };
+            Ok(Page {
+                offset,
+                limit: 1,
+                count: 1,
+                total_count,
+                data: vec![0_u32],
+            })
+        })
+        .await;
+
+        let error = collected.expect_err("a total that grows past the cap must be refused");
+        assert!(
+            format!("{error:#}").contains(&MAX_COLLECTION_ITEMS.to_string()),
+            "the failure must name the cap, got {error:#}"
         );
     }
 
