@@ -81,7 +81,6 @@ impl Diff {
 /// Returns an error when the canvas holds more than [`MAX_CANVAS_PIXELS`]
 /// pixels.
 pub fn compare(first: &DynamicImage, second: &DynamicImage, mode: Mode) -> Result<Diff> {
-    let _ = mode;
     let first = first.to_rgba8();
     let second = second.to_rgba8();
     let width = first.width().max(second.width());
@@ -90,10 +89,14 @@ pub fn compare(first: &DynamicImage, second: &DynamicImage, mode: Mode) -> Resul
     let mut differing_pixels = 0_u64;
     for (x, y, out) in picture.enumerate_pixels_mut() {
         let one = pixel_at(&first, x, y);
-        if one != pixel_at(&second, x, y) {
+        let differs = one != pixel_at(&second, x, y);
+        if differs {
             differing_pixels = differing_pixels.saturating_add(1);
         }
-        *out = one;
+        *out = match mode {
+            Mode::Highlight if differs => RED,
+            _ => one,
+        };
     }
     Ok(Diff {
         picture,
