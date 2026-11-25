@@ -402,12 +402,51 @@ mod inherited_environment_tests {
             .collect()
     }
 
+    /// The variables that name a proxy for reqwest, in both of the cases that
+    /// it reads.
+    ///
+    /// reqwest names these itself, and no metadata of this crate holds them,
+    /// so they are a list. A list that goes stale is safe here: the test
+    /// clients turn off each proxy, so a variable that reqwest adds later is
+    /// turned off too.
+    const PROXY_VARIABLES: [&str; 6] = [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ];
+
+    /// The variables that exempt a host from a proxy, in both cases. The child
+    /// gets neither, so a loopback entry in the shell of the developer does
+    /// not hide a test client that obeys the proxy.
+    const NO_PROXY_VARIABLES: [&str; 2] = ["NO_PROXY", "no_proxy"];
+
+    /// The address of a proxy that refuses each connection.
+    ///
+    /// The operating system gives a free loopback port, and the listener
+    /// closes it again before the child starts. A request that goes to this
+    /// proxy fails at once, and it does not wait for a timeout.
+    fn a_closed_proxy() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("a loopback port must be free for the closed proxy");
+        let address = listener
+            .local_addr()
+            .expect("a bound listener must have an address");
+        format!("http://{address}")
+    }
+
     /// Re-run the whole suite in a child that inherited a `UNIFI_*`
-    /// environment, which is the one thing a test cannot simulate in-process:
-    /// by the time any test body runs, an inherited variable has already been
-    /// set for the entire process.
+    /// environment and a proxy, which is the one thing a test cannot simulate
+    /// in-process: by the time any test body runs, an inherited variable has
+    /// already been set for the entire process.
+    ///
+    /// reqwest reads the proxy variables when it builds a client. Each test
+    /// that talks to a `TestServer` on the loopback address then sends its
+    /// requests to the proxy, unless the test client turns the proxy off.
     #[test]
-    fn the_suite_ignores_the_unifi_variables_it_inherited() {
+    fn the_suite_ignores_the_environment_it_inherited() {
         if std::env::var_os(CHILD_MARKER).is_some() {
             return;
         }
@@ -418,6 +457,13 @@ mod inherited_environment_tests {
         for (name, value) in hostile_environment(&Args::command()) {
             child.env(name, value);
         }
+        let proxy = a_closed_proxy();
+        for name in PROXY_VARIABLES {
+            child.env(name, &proxy);
+        }
+        for name in NO_PROXY_VARIABLES {
+            child.env_remove(name);
+        }
 
         let output = child
             .output()
@@ -425,8 +471,8 @@ mod inherited_environment_tests {
 
         assert!(
             output.status.success(),
-            "the suite must pass with UNIFI_* exported the way a ufa developer's \
-             shell exports them, got:\n{}{}",
+            "the suite must pass with UNIFI_* and a proxy exported the way a ufa \
+             developer's shell exports them, got:\n{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
