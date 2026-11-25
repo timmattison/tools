@@ -550,9 +550,11 @@ const CALL_MARKER: &str = "--- call: ";
 /// Make a fake `program` in a new directory. It records its environment and its
 /// arguments. It exits 1 when its arguments start with `fails_on`, and else
 /// zero.
+///
+/// The script is written with `write_executable` and not with `fs::write`,
+/// because on Linux a file that this process held open for writing gives
+/// ETXTBSY when the hook runs it while another test thread forks.
 fn install_fake_program(dir: &Path, program: &str, fails_on: Option<&str>) -> FakeRecording {
-    use std::os::unix::fs::PermissionsExt;
-
     let bin_dir = dir.join("fake-bin");
     fs::create_dir_all(&bin_dir).expect("create fake bin dir");
     let log = dir.join(format!("{program}-recording.txt"));
@@ -564,9 +566,7 @@ fn install_fake_program(dir: &Path, program: &str, fails_on: Option<&str>) -> Fa
         log = log.display()
     );
     let fake = bin_dir.join(program);
-    fs::write(&fake, script).unwrap_or_else(|e| panic!("write fake {program}: {e}"));
-    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755))
-        .unwrap_or_else(|e| panic!("chmod fake {program}: {e}"));
+    write_executable(&fake, script).unwrap_or_else(|e| panic!("write fake {program}: {e}"));
     FakeRecording { log, bin_dir }
 }
 
