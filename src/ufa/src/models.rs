@@ -174,8 +174,9 @@ pub struct DeviceDetails {
     #[serde(rename = "ipAddress")]
     pub ip_address: IpAddress,
     pub state: DeviceState,
+    /// The spec leaves it out of the required fields, like `adoptedAt`.
     #[serde(rename = "firmwareVersion")]
-    pub firmware_version: String,
+    pub firmware_version: Option<String>,
     #[serde(rename = "firmwareUpdatable")]
     pub firmware_updatable: bool,
     #[serde(rename = "adoptedAt")]
