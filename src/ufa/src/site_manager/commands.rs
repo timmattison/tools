@@ -396,6 +396,76 @@ mod tests {
         );
     }
 
+    /// The 200 example of `GET /v1/hosts` in the official Site Manager spec.
+    /// Its `userData` holds eleven fields, and `UserData` names none of them.
+    const SPEC_HOSTS_PAGE: &str = include_str!("openapi-examples/hosts-page.json");
+
+    /// The `network-server` example of `GET /v1/hosts/{id}` in the spec. Its
+    /// `reportedState` holds fields that `ReportedState` does not name.
+    const SPEC_HOST_NETWORK_SERVER: &str =
+        include_str!("openapi-examples/host-network-server.json");
+
+    /// The path of the first value of `sent` that `written` does not hold, or
+    /// `None` when `written` holds each of them.
+    ///
+    /// An object holds each key of the object that it is compared with, with a
+    /// value that holds the value of that key. Any other value must be equal.
+    /// `written` can have more keys: a model field that the API did not send
+    /// is written as `null`, and that is not a lost field.
+    fn first_lost_field(written: &serde_json::Value, sent: &serde_json::Value) -> Option<String> {
+        match (written, sent) {
+            (serde_json::Value::Object(written), serde_json::Value::Object(sent)) => {
+                sent.iter().find_map(|(key, value)| match written.get(key) {
+                    None => Some(key.clone()),
+                    Some(kept) => first_lost_field(kept, value).map(|path| format!("{key}.{path}")),
+                })
+            }
+            (serde_json::Value::Array(written), serde_json::Value::Array(sent))
+                if written.len() == sent.len() =>
+            {
+                written
+                    .iter()
+                    .zip(sent)
+                    .enumerate()
+                    .find_map(|(index, (kept, value))| {
+                        first_lost_field(kept, value).map(|path| format!("{index}.{path}"))
+                    })
+            }
+            _ => (written != sent).then(String::new),
+        }
+    }
+
+    /// `--output json` answers with the hosts as the API reported them, so
+    /// each field of a spec example must reach the output, also a field that
+    /// no model names.
+    #[test]
+    fn the_json_listing_keeps_each_field_the_api_sent() {
+        for (example, text) in [
+            ("hosts-page.json", SPEC_HOSTS_PAGE),
+            ("host-network-server.json", SPEC_HOST_NETWORK_SERVER),
+        ] {
+            let answer: serde_json::Value =
+                serde_json::from_str(text).expect("the spec example is JSON");
+            let sent = match &answer["data"] {
+                serde_json::Value::Array(hosts) => serde_json::Value::Array(hosts.clone()),
+                host => serde_json::Value::Array(vec![host.clone()]),
+            };
+            let hosts: Vec<Host> = serde_json::from_value(sent.clone())
+                .unwrap_or_else(|error| panic!("{example} must parse as hosts: {error}"));
+
+            let rendered = render_hosts(&hosts, OutputFormat::Json)
+                .expect("rendering the host listing must succeed");
+            let written: serde_json::Value =
+                serde_json::from_str(&rendered).expect("--output json must produce JSON");
+
+            assert_eq!(
+                first_lost_field(&written, &sent),
+                None,
+                "--output json must keep each field of {example}, got:\n{rendered}"
+            );
+        }
+    }
+
     /// What a report says on standard error, one line for each note.
     fn stderr_of(report: &Report) -> String {
         report.notes().join("\n")
