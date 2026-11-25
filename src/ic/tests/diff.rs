@@ -207,6 +207,11 @@ fn diff_takes_exactly_two_files() {
     assert_refused(&run(ic(TERM_XTERM_256COLOR).arg(FLAG)), "two files");
 }
 
+/// The words of the refusal of a video. The name of the scratch directory
+/// holds `video`, and a decode error names the path, thus the bare word
+/// `video` passes also when no check refuses the video.
+const VIDEO_CAUSE: &str = "is a video";
+
 /// A video is no still image, and the refusal names the reason.
 #[test]
 fn diff_refuses_a_video() {
@@ -216,11 +221,11 @@ fn diff_refuses_a_video() {
 
     assert_refused(
         &run(ic(TERM_XTERM_256COLOR).arg(FLAG).arg(&first).arg(&clip)),
-        "video",
+        VIDEO_CAUSE,
     );
     assert_refused(
         &run(ic(TERM_XTERM_256COLOR).arg(FLAG).arg(&clip).arg(&first)),
-        "video",
+        VIDEO_CAUSE,
     );
 }
 
