@@ -48,8 +48,8 @@ impl Selection {
     }
 }
 
-/// The note that says why a whole listing of an empty collection shows
-/// nothing.
+/// The note that says why a listing of an empty collection, a page or the
+/// whole collection, shows nothing.
 ///
 /// # Arguments
 ///
@@ -84,8 +84,9 @@ fn empty_collection_note(items: &str, filtered: bool) -> String {
 /// # Returns
 ///
 /// The rendered listing. A page carries a note when it leaves items out. A
-/// whole collection carries no note, unless it holds no item. Then one note
-/// says that nothing was found, or that nothing matches the filter.
+/// whole collection carries no note, unless it holds no item. A page of a
+/// collection that holds no item gets the same note as a whole listing: one
+/// note says that nothing was found, or that nothing matches the filter.
 ///
 /// # Errors
 ///
@@ -103,7 +104,7 @@ where
     T: DeserializeOwned + Serialize,
     R: Serialize + Tabled + for<'a> From<&'a T>,
 {
-    match selection {
+    let (report, collection_is_empty) = match selection {
         Selection::Page { limit, offset } => {
             let limit = limit.to_string();
             let offset = offset.to_string();
@@ -114,17 +115,24 @@ where
             }
 
             let page: Page<T> = client.get_with_params(path, &params).await?;
-            render_page_listing::<T, R>(&page, format)
+            (
+                render_page_listing::<T, R>(&page, format)?,
+                page.collection_is_empty(),
+            )
         }
         Selection::All => {
             let found: Vec<T> = fetch_all_matching(client, path, filter).await?;
-            let report = render_whole_listing::<T, R>(&found, format)?;
-            if found.is_empty() {
-                Ok(report.with_note(empty_collection_note(items, filter.is_some())))
-            } else {
-                Ok(report)
-            }
+            (
+                render_whole_listing::<T, R>(&found, format)?,
+                found.is_empty(),
+            )
         }
+    };
+
+    if collection_is_empty {
+        Ok(report.with_note(empty_collection_note(items, filter.is_some())))
+    } else {
+        Ok(report)
     }
 }
 

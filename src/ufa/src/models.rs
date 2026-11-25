@@ -131,6 +131,21 @@ pub struct Page<T> {
     pub data: Vec<T>,
 }
 
+impl<T> Page<T> {
+    /// Whether the collection that this page belongs to holds nothing.
+    ///
+    /// A page past the end of a collection that holds items is not empty. It
+    /// holds no item, but the collection does. If the data is not empty, the
+    /// page shows its rows, even when `totalCount` is 0.
+    ///
+    /// # Returns
+    ///
+    /// True when the server counted no item and the page holds none.
+    pub fn collection_is_empty(&self) -> bool {
+        self.total_count == 0 && self.data.is_empty()
+    }
+}
+
 // Site models
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Site {

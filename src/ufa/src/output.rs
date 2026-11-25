@@ -262,11 +262,13 @@ impl Report {
 
     /// The report of a whole collection that holds nothing.
     ///
-    /// Under `--output json` the document is still the collection: `[]`. A
-    /// program that reads the answer gets an array every time, and
-    /// `jq '.[]'` reads no items rather than failing on a sentence. A table
-    /// of headings and no rows tells a person nothing, so a table has no
-    /// document, and the caller adds the note that says why.
+    /// Under `--output json` the document of a whole listing is still the
+    /// collection: `[]`. A program that reads the answer gets an array every
+    /// time, and `jq '.[]'` reads no items rather than failing on a sentence.
+    /// One page of such a collection keeps its envelope under JSON, with a
+    /// `totalCount` of 0. A table of headings and no rows tells a person
+    /// nothing, so a table has no document, for a whole listing and for one
+    /// page ([`render_page_listing`]). The caller adds the note that says why.
     ///
     /// # Arguments
     ///
@@ -385,7 +387,10 @@ where
 ///
 /// # Returns
 ///
-/// The rendered page, together with the note about whatever it left out.
+/// The rendered page, together with the note about whatever it left out. A
+/// page of a collection that holds nothing has no table, as
+/// [`Report::of_empty_collection`] says. The caller adds the note that says
+/// why.
 ///
 /// # Errors
 ///
@@ -398,15 +403,17 @@ where
     let document = match format {
         // The whole page, `totalCount` included: a program that reads this
         // wants the figure itself rather than a sentence about it.
-        OutputFormat::Json => render_output(page, format)?,
+        OutputFormat::Json => Some(render_output(page, format)?),
+        // A table of headings alone tells a person nothing.
+        OutputFormat::Table if page.collection_is_empty() => None,
         OutputFormat::Table => {
             let rows: Vec<R> = page.data.iter().map(R::from).collect();
-            render_table(&rows)
+            Some(render_table(&rows))
         }
     };
 
     Ok(Report {
-        document: Some(document),
+        document,
         notes: truncation_notice(page.data.len(), page.total_count, page.offset)
             .into_iter()
             .collect(),

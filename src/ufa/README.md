@@ -527,7 +527,9 @@ answer of `ufa cloud hosts` for an account with no consoles, of `ufa devices sta
 with no devices, of each list command with `--all` for a collection that holds nothing, and of
 `ufa vouchers delete-filtered` for a filter that matches no voucher. So `jq '.[]'` reads no items,
 and it does not fail. In a table, these commands draw no table of headings alone, and a note says
-that nothing was found.
+that nothing was found. A list command without `--all` keeps its page envelope under
+`--output json` for a collection that holds nothing, with a `totalCount` of 0. In a table, it also
+draws no table and gives the same note.
 
 Standard output carries the document and nothing else, in both formats. Every note, status sentence
 and hint goes to standard error. That includes the sentence that says a restart started, the count
