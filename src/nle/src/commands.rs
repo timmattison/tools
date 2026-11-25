@@ -307,13 +307,19 @@ fn beta_path_env(var: impl Fn(&'static str) -> Option<OsString>) -> Option<OsStr
     std::env::join_paths(entries).ok()
 }
 
-/// Build the `beta` command with `args` through the shell plugin.
+/// Build the `beta` command with `args` through the shell plugin. Its PATH is
+/// the one that `beta_path_env` builds from `var`. When `beta_path_env` gives
+/// `None`, the command keeps the PATH of the app.
 fn beta_command<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     args: &[String],
-    _var: impl Fn(&'static str) -> Option<OsString>,
+    var: impl Fn(&'static str) -> Option<OsString>,
 ) -> tauri_plugin_shell::process::Command {
-    app.shell().command("beta").args(args)
+    let command = app.shell().command("beta").args(args);
+    match beta_path_env(var) {
+        Some(path) => command.env(PATH_VAR, path),
+        None => command,
+    }
 }
 
 /// Run the `beta` CLI with `args` through the shell plugin.
@@ -323,15 +329,14 @@ async fn run_beta(
     args: &[String],
     output_path: &str,
 ) -> Result<String, NleError> {
-    let mut command = beta_command(app, args, std::env::var_os);
-    if let Some(path) = beta_path_env(std::env::var_os) {
-        command = command.env(PATH_VAR, path);
-    }
-    let output = command.output().await.map_err(|e| {
-        NleError::ExportError(format!(
-            "Failed to run beta CLI (is it on PATH or in ~/.cargo/bin?): {e}"
-        ))
-    })?;
+    let output = beta_command(app, args, std::env::var_os)
+        .output()
+        .await
+        .map_err(|e| {
+            NleError::ExportError(format!(
+                "Failed to run beta CLI (is it on PATH or in ~/.cargo/bin?): {e}"
+            ))
+        })?;
 
     if output.status.success() {
         Ok(output_path.to_string())
