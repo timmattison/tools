@@ -320,13 +320,15 @@ fn beta_path_env(var: impl Fn(&'static str) -> Option<OsString>) -> Option<OsStr
 /// Build the `beta` command with `args`. Its PATH is the one that
 /// `beta_path_env` builds from `var`. When `beta_path_env` gives `None`, the
 /// command keeps the PATH of the app. The command sheds the inherited `GIT_`
-/// variables, because `childenv::command` builds it.
+/// variables, because `childenv::command` builds it. The child gets `/dev/null`
+/// as its stdin, so it never reads the terminal of the app.
 fn beta_command(
     args: &[String],
     var: impl Fn(&'static str) -> Option<OsString>,
 ) -> std::process::Command {
     let mut command = childenv::command("beta");
     command.args(args);
+    command.stdin(std::process::Stdio::null());
     if let Some(path) = beta_path_env(var) {
         command.env(PATH_VAR, path);
     }
