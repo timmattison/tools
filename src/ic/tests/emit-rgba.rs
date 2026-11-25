@@ -469,10 +469,10 @@ fn emit_rgba_takes_one_picture() {
     assert_eq!(outcome.stdout, "", "a refusal must print no JSON");
 }
 
-/// The options of a display state cells, a scale or the cursor, and the flag
-/// puts nothing on the terminal. Each of them with the flag is a mistake that
-/// `ic` reports, where a run that dropped one would print a picture the user
-/// did not ask for.
+/// The options of a display state cells, a scale or the cursor, the options of
+/// a video state how it plays, and the flag puts nothing on the terminal. Each
+/// of them with the flag is a mistake that `ic` reports, where a run that
+/// dropped one would print a picture the user did not ask for.
 #[test]
 fn emit_rgba_refuses_the_options_of_a_display() {
     let scratch = Scratch::new("display");
@@ -484,6 +484,12 @@ fn emit_rgba_refuses_the_options_of_a_display() {
         &["--scale", "50"],
         &["--no-newline"],
         &["--will-display"],
+        &["--loop-video"],
+        &["--fps", "10"],
+        &["--do-not-drop-frames"],
+        &["--memory-cleanup-frequency", "10"],
+        &["--max-fps", "10"],
+        &["--adaptive-fps"],
     ] {
         let outcome = run(ic(TERM_XTERM_256COLOR)
             .arg(FLAG)
