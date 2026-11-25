@@ -585,7 +585,10 @@ fn will_display_asks_nothing_of_a_zellij_pane_with_a_forced_protocol() {
         "and it must still report that the forced protocol displays an image: {}",
         outcome.stderr
     );
-    assert_eq!(outcome.stdout, "", "and success must print nothing to stdout");
+    assert_eq!(
+        outcome.stdout, "",
+        "and success must print nothing to stdout"
+    );
 }
 
 /// `IC_PROTOCOL=auto` forces nothing, so the gate still decides.
