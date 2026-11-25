@@ -661,18 +661,22 @@ fn volume_bind_source(spec: &str) -> Option<String> {
 
 /// The source of the `--mount` value `spec` when it is a bind mount, as in
 /// `type=bind,source=/srv,target=/x`. The type is `volume` when the value
-/// does not say.
+/// does not say. As for docker, a key and the value of `type` are not
+/// case-sensitive, and the source keeps its case.
 fn mount_bind_source(spec: &str) -> Option<String> {
     let mut kind = "volume";
     let mut source = None;
     for field in spec.split(',') {
-        match field.split_once('=') {
-            Some(("type", value)) => kind = value,
-            Some(("source" | "src", value)) => source = Some(value),
+        let Some((key, value)) = field.split_once('=') else {
+            continue;
+        };
+        match key.to_ascii_lowercase().as_str() {
+            "type" => kind = value,
+            "source" | "src" => source = Some(value),
             _ => {}
         }
     }
-    if kind == "bind" {
+    if kind.eq_ignore_ascii_case("bind") {
         source.map(str::to_owned)
     } else {
         None
