@@ -439,6 +439,28 @@ fn a_host_without_the_probe_image_pulls_it_and_answers_the_probe_again() {
 }
 
 #[test]
+fn a_pull_of_the_probe_image_writes_a_note_on_stderr_and_not_on_stdout() {
+    let fixture = two_hosts();
+    fixture.without_probe_image("box-b");
+    let run = fixture.run(&["pick"]);
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert_eq!(run.stdout, "box-b\n");
+    let notes: Vec<&str> = run
+        .stderr
+        .lines()
+        .filter(|line| line.contains("box-b") && line.contains(PROBE_IMAGE))
+        .collect();
+    assert_eq!(notes.len(), 1, "{}", run.stderr);
+    assert!(notes[0].starts_with("drun: "), "{}", run.stderr);
+    assert!(notes[0].contains("120 s"), "{}", run.stderr);
+    assert!(
+        !run.stderr.contains("box-a"),
+        "a host with the image gets no note: {}",
+        run.stderr
+    );
+}
+
+#[test]
 fn a_host_whose_pull_fails_is_skipped_with_the_pull_command() {
     let fixture = two_hosts();
     fixture.without_probe_image("box-b");
