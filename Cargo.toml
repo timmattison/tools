@@ -95,6 +95,9 @@ trippy-privilege = "0.13.0"
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }
 chrono-english = "0.1"
+# The IANA time zone database, for tests that need a zone with summer time
+# without a change to TZ for the whole process.
+chrono-tz = "0.10.4"
 
 # Concurrency
 rayon = "1.11"

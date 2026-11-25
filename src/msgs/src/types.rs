@@ -1,4 +1,4 @@
-use chrono::{DateTime, FixedOffset};
+use chrono::{DateTime, FixedOffset, Offset, TimeZone};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
@@ -62,12 +62,21 @@ pub struct DbStatus {
 
 /// Convert Apple Core Data timestamp (nanoseconds since 2001-01-01) to DateTime.
 pub fn apple_timestamp_to_datetime(apple_ns: i64) -> Option<DateTime<FixedOffset>> {
+    apple_timestamp_in_zone(apple_ns, &chrono::Local)
+}
+
+/// Convert Apple Core Data timestamp (nanoseconds since 2001-01-01) to a
+/// DateTime in `zone`.
+pub fn apple_timestamp_in_zone<Tz: TimeZone>(
+    apple_ns: i64,
+    zone: &Tz,
+) -> Option<DateTime<FixedOffset>> {
     if apple_ns == 0 {
         return None;
     }
     let unix_seconds = apple_ns / 1_000_000_000 + 978_307_200;
-    let local = chrono::Local::now().fixed_offset().timezone();
-    chrono::DateTime::from_timestamp(unix_seconds, 0).map(|dt| dt.with_timezone(&local))
+    let now_offset = chrono::Utc::now().with_timezone(zone).offset().fix();
+    chrono::DateTime::from_timestamp(unix_seconds, 0).map(|dt| dt.with_timezone(&now_offset))
 }
 
 /// Truncate a string to max_chars characters, appending "..." if truncated.
@@ -101,6 +110,68 @@ mod tests {
         // Convert to UTC for a timezone-independent check
         let dt_utc = dt.with_timezone(&chrono::Utc);
         assert_eq!(dt_utc.format("%Y-%m-%d").to_string(), "2024-01-15");
+    }
+
+    /// The Apple date of the instant that `utc` gives as RFC 3339 text.
+    fn apple_ns_at(utc: &str) -> i64 {
+        let instant = DateTime::parse_from_rfc3339(utc).expect("RFC 3339 instant");
+        crate::test_fixture::apple_ns(instant.timestamp(), 0)
+    }
+
+    /// The RFC 3339 text of the instant `utc` in `zone`.
+    fn rfc3339_in<Tz: TimeZone>(utc: &str, zone: &Tz) -> String {
+        apple_timestamp_in_zone(apple_ns_at(utc), zone)
+            .expect("date")
+            .to_rfc3339()
+    }
+
+    #[test]
+    fn a_summer_date_gets_the_summer_offset_of_its_zone() {
+        assert_eq!(
+            rfc3339_in("2024-07-15T14:30:00Z", &chrono_tz::America::New_York),
+            "2024-07-15T10:30:00-04:00"
+        );
+    }
+
+    #[test]
+    fn a_winter_date_gets_the_winter_offset_of_its_zone() {
+        assert_eq!(
+            rfc3339_in("2024-01-15T14:30:00Z", &chrono_tz::America::New_York),
+            "2024-01-15T09:30:00-05:00"
+        );
+    }
+
+    #[test]
+    fn a_date_near_midnight_keeps_its_own_local_date() {
+        // 00:30 on 16 July in New York. With the winter offset, it reads
+        // 23:30 on 15 July.
+        assert_eq!(
+            rfc3339_in("2024-07-16T04:30:00Z", &chrono_tz::America::New_York),
+            "2024-07-16T00:30:00-04:00"
+        );
+        // 23:30 on 15 January in New York. With the summer offset, it reads
+        // 00:30 on 16 January.
+        assert_eq!(
+            rfc3339_in("2024-01-16T04:30:00Z", &chrono_tz::America::New_York),
+            "2024-01-15T23:30:00-05:00"
+        );
+    }
+
+    #[test]
+    fn the_default_zone_is_local_with_the_offset_of_each_date() {
+        // The zone of the process, read and not set, thus parallel tests see
+        // the same zone. A zone with no summer time gives one offset for both.
+        for utc in ["2024-07-15T14:30:00Z", "2024-01-15T14:30:00Z"] {
+            let instant = DateTime::parse_from_rfc3339(utc).expect("RFC 3339 instant");
+            let expected = chrono::Local
+                .from_utc_datetime(&instant.naive_utc())
+                .fixed_offset();
+            assert_eq!(
+                apple_timestamp_to_datetime(apple_ns_at(utc)).map(|d| d.to_rfc3339()),
+                Some(expected.to_rfc3339()),
+                "{utc}"
+            );
+        }
     }
 
     #[test]
