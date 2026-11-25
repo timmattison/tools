@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod emit;
 pub mod pty;
 
 /// The escape byte that starts every escape sequence.
