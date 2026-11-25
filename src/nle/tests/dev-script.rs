@@ -25,7 +25,7 @@ const SYSTEM_PATH: &str = "/usr/bin:/bin";
 const NODE_QUIET_FLAG: &str = "--disable-warning=MODULE_TYPELESS_PACKAGE_JSON";
 
 /// The line that must open the script, so that it runs directly.
-const SHEBANG: &str = "#!/usr/bin/env -S npx tsx";
+const SHEBANG: &str = "#!/usr/bin/env -S pnpx tsx";
 
 /// The port that the `portplz` shim answers by default.
 const DEFAULT_PORT: &str = "34567";

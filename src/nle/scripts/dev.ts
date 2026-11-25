@@ -1,4 +1,4 @@
-#!/usr/bin/env -S npx tsx
+#!/usr/bin/env -S pnpx tsx
 /**
  * Run the NLE (Non-Linear Editor) Tauri application in development mode.
  *
