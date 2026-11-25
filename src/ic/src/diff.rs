@@ -202,4 +202,64 @@ mod tests {
         assert_eq!(line_thickness(10, 801), 3);
         assert_eq!(line_thickness(4000, 3000), 10);
     }
+
+    /// A color that depends on the position, and that is never `OTHER`.
+    fn shade(x: u32, y: u32) -> Rgba<u8> {
+        Rgba([
+            u8::try_from(x * 8 % 256).unwrap(),
+            u8::try_from(y * 8 % 256).unwrap(),
+            50,
+            255,
+        ])
+    }
+
+    /// A picture of the given size that holds `shade`, with `OTHER` at each
+    /// listed position.
+    fn field(width: u32, height: u32, spots: &[(u32, u32)]) -> DynamicImage {
+        DynamicImage::ImageRgba8(RgbaImage::from_fn(width, height, |x, y| {
+            if spots.contains(&(x, y)) {
+                OTHER
+            } else {
+                shade(x, y)
+            }
+        }))
+    }
+
+    /// The region with these four edges.
+    fn region(left: u32, top: u32, right: u32, bottom: u32) -> Region {
+        Region {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    #[test]
+    fn boxes_of_two_equal_pictures_show_the_second_picture() {
+        let second = field(20, 20, &[]);
+        let diff = compare(&field(20, 20, &[]), &second, Mode::Boxes).unwrap();
+        assert!(diff.regions.is_empty());
+        assert_eq!(diff.differing_pixels, 0);
+        assert_eq!(diff.picture, second.to_rgba8());
+    }
+
+    #[test]
+    fn boxes_outline_one_changed_pixel_inside_its_padded_box() {
+        let second = field(30, 30, &[(10, 10)]);
+        let diff = compare(&field(30, 30, &[]), &second, Mode::Boxes).unwrap();
+        assert_eq!(diff.regions, vec![region(6, 6, 14, 14)]);
+        assert_eq!(diff.differing_pixels, 1);
+        for (x, y) in [(6, 10), (7, 10), (13, 10), (14, 10), (10, 6), (10, 14)] {
+            assert_eq!(*diff.picture.get_pixel(x, y), RED, "({x}, {y})");
+        }
+        let second = second.to_rgba8();
+        for (x, y) in [(8, 10), (10, 10), (12, 10), (5, 10)] {
+            assert_eq!(
+                diff.picture.get_pixel(x, y),
+                second.get_pixel(x, y),
+                "({x}, {y})"
+            );
+        }
+    }
 }
