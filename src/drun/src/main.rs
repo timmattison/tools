@@ -669,8 +669,8 @@ Names:
 
 Hosts:
   A host is a Docker context. drun uses the contexts in {CONTEXTS_VARIABLE},
-  separated by commas. When {CONTEXTS_VARIABLE} is not set, drun uses the
-  contexts in {config_path}:
+  separated by commas. When {CONTEXTS_VARIABLE} names no context, drun uses
+  the contexts in {config_path}:
 
       contexts = [\"box-a\", \"box-b\"]
       host_timeout_secs = 10   # how long to wait for each host (optional)

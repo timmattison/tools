@@ -1,8 +1,8 @@
 //! Which Docker hosts `drun` uses, and how long it waits for each.
 //!
-//! The hosts come from the `DRUN_CONTEXTS` environment variable when it is set
-//! and not empty, and from the `contexts` key of the config file when it is
-//! not. The config file is `$XDG_CONFIG_HOME/drun/config.toml`, or
+//! The hosts come from the `DRUN_CONTEXTS` environment variable when it names
+//! a host, and from the `contexts` key of the config file when it does not.
+//! The config file is `$XDG_CONFIG_HOME/drun/config.toml`, or
 //! `~/.config/drun/config.toml` when `XDG_CONFIG_HOME` does not hold an
 //! absolute path.
 
@@ -151,11 +151,7 @@ impl Config {
             Some(path) => read_file(path)?,
             None => None,
         };
-        let names: Vec<String> = match environment
-            .contexts
-            .as_ref()
-            .filter(|value| !value.is_empty())
-        {
+        let from_variable: Vec<String> = match &environment.contexts {
             Some(value) => {
                 let text = value.to_str().ok_or(LoadError::VariableNotUnicode)?;
                 text.split(',')
@@ -164,10 +160,14 @@ impl Config {
                     .map(str::to_owned)
                     .collect()
             }
-            None => file
-                .as_ref()
+            None => Vec::new(),
+        };
+        let names = if from_variable.is_empty() {
+            file.as_ref()
                 .and_then(|file| file.contexts.clone())
-                .unwrap_or_default(),
+                .unwrap_or_default()
+        } else {
+            from_variable
         };
         if names.is_empty() {
             return Err(LoadError::NoContexts { path });
