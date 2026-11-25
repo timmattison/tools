@@ -494,7 +494,17 @@ describe('/ic diff draws', () => {
     const raster = await ui.find({ type: 'Raster' })
     expect(raster?.props.columns).toBe(4)
     expect(raster?.props.rows).toBe(2)
-    expect((await ui.find({ type: 'Text', text: /before\.png vs after\.png/ }))?.text).toContain('4×4')
+    expect((await ui.find({ type: 'Text', text: /4×4/ }))?.text).toBe(`${FIRST} vs ${SECOND} · 4×4`)
+  })
+
+  test('only the two file names in the caption when the paths have folders', async ($, on) => {
+    stubIc(on, { 'old/before.png vs new/after.png': printed(FIXTURE_JSON) })
+    const args = 'diff old/before.png new/after.png'
+
+    const ui = await $.ui.mount(commandRow(args, await runIc($, args)))
+
+    expect((await ui.find({ type: 'Raster' }))?.props.columns).toBe(4)
+    expect((await ui.find({ type: 'Text', text: /4×4/ }))?.text).toBe('before.png vs after.png · 4×4')
   })
 
   test('the two paths in the caption when the two files have the same name', async ($, on) => {
@@ -678,7 +688,7 @@ describe('show_diff', () => {
     expect(id).not.toBe('')
     const ui = await $.ui.mount(resultRow(DIFF_TOOL, id, called.result))
     expect(await ui.find({ type: 'Raster' })).toBeDefined()
-    expect((await ui.find({ type: 'Text', text: /before\.png vs after\.png/ }))?.text).toContain('4×4')
+    expect((await ui.find({ type: 'Text', text: /before\.png vs after\.png/ }))?.text).toBe(`${FIRST} vs ${SECOND} · 4×4`)
   })
 
   test('draws the result row in the mode of the call, from the decode of the call', async ($, on) => {
