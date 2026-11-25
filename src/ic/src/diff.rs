@@ -195,4 +195,12 @@ mod tests {
         assert_eq!(*diff.picture.get_pixel(0, 0), RED);
         assert_eq!(*diff.picture.get_pixel(2, 2), BLANK);
     }
+
+    #[test]
+    fn the_line_thickness_grows_with_the_longer_side() {
+        assert_eq!(line_thickness(1, 1), 2);
+        assert_eq!(line_thickness(800, 10), 2);
+        assert_eq!(line_thickness(10, 801), 3);
+        assert_eq!(line_thickness(4000, 3000), 10);
+    }
 }
