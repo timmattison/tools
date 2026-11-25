@@ -375,21 +375,8 @@ struct Args {
 enum Commands {
     /// List all sites
     Sites {
-        /// Maximum number of sites to return
-        #[clap(long, default_value = "25")]
-        limit: u32,
-
-        /// Offset for pagination
-        #[clap(long, default_value = "0")]
-        offset: u64,
-
-        /// Filter expression
-        #[clap(long)]
-        filter: Option<String>,
-
-        /// Return every site: read all the pages, not one page
-        #[clap(long, conflicts_with_all = ["limit", "offset"])]
-        all: bool,
+        #[clap(flatten)]
+        args: sites::SitesArgs,
     },
 
     /// Manage devices
@@ -601,20 +588,7 @@ async fn run_controller_command(
     output: output::OutputFormat,
 ) -> Result<()> {
     match command {
-        Commands::Sites {
-            limit,
-            offset,
-            filter,
-            all,
-        } => {
-            let cmd = sites::SitesCommand::List {
-                limit,
-                offset,
-                filter,
-                all,
-            };
-            sites::handle_sites_command(cmd, client, output).await
-        }
+        Commands::Sites { args } => sites::handle_sites_command(args, client, output).await,
         Commands::Devices { site_id, command } => {
             devices::handle_devices_command(command, site_id, client, output).await
         }

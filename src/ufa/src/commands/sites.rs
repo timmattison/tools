@@ -5,29 +5,29 @@ use crate::{
     output::{OutputFormat, Report},
 };
 use anyhow::Result;
-use clap::Subcommand;
+use clap::Args;
 use tabled::Tabled;
 
-#[derive(Subcommand, Debug)]
-pub enum SitesCommand {
-    /// List all sites
-    List {
-        /// Maximum number of sites to return
-        #[clap(long, default_value = "25")]
-        limit: u32,
+/// The arguments of `ufa sites`. `Commands::Sites` in `main.rs` flattens this
+/// struct, so the four arguments, their defaults and their help text have one
+/// copy.
+#[derive(Args, Debug, Clone)]
+pub struct SitesArgs {
+    /// Maximum number of sites to return
+    #[clap(long, default_value = "25")]
+    limit: u32,
 
-        /// Offset for pagination
-        #[clap(long, default_value = "0")]
-        offset: u64,
+    /// Offset for pagination
+    #[clap(long, default_value = "0")]
+    offset: u64,
 
-        /// Filter expression
-        #[clap(long)]
-        filter: Option<String>,
+    /// Filter expression
+    #[clap(long)]
+    filter: Option<String>,
 
-        /// Return every site: read all the pages, not one page
-        #[clap(long, conflicts_with_all = ["limit", "offset"])]
-        all: bool,
-    },
+    /// Return every site: read all the pages, not one page
+    #[clap(long, conflicts_with_all = ["limit", "offset"])]
+    all: bool,
 }
 
 #[derive(Tabled, serde::Serialize)]
@@ -51,25 +51,25 @@ impl From<&Site> for SiteRow {
 }
 
 pub async fn handle_sites_command(
-    command: SitesCommand,
+    args: SitesArgs,
     client: &UnifiClient,
     output_format: OutputFormat,
 ) -> Result<()> {
-    match command {
-        SitesCommand::List {
-            limit,
-            offset,
-            filter,
-            all,
-        } => list_sites(
-            client,
-            Selection::from_flags(limit, offset, all),
-            filter,
-            output_format,
-        )
-        .await
-        .map(Report::print),
-    }
+    let SitesArgs {
+        limit,
+        offset,
+        filter,
+        all,
+    } = args;
+
+    list_sites(
+        client,
+        Selection::from_flags(limit, offset, all),
+        filter,
+        output_format,
+    )
+    .await
+    .map(Report::print)
 }
 
 /// List the sites the controller serves: one page, or every site.
