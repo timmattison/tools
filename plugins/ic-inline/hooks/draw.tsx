@@ -93,9 +93,12 @@ export function pictureTree(
   )
 }
 
-/** The names in the caption: the file, or `first vs second` for a diff, as ic names them. */
+/**
+ * The names in the caption: the file name, or `first vs second` for a diff,
+ * joined as ic joins them. Two equal file names show as the two paths.
+ */
 function titleOf(subject: Subject): string {
-  return subject.kind === 'image'
-    ? fileName(subject.path)
-    : `${fileName(subject.first)} vs ${fileName(subject.second)}`
+  if (subject.kind === 'image') return fileName(subject.path)
+  const [first, second] = [fileName(subject.first), fileName(subject.second)]
+  return first === second ? `${subject.first} vs ${subject.second}` : `${first} vs ${second}`
 }

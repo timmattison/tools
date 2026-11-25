@@ -37,7 +37,7 @@ claude --plugin-dir ~/code/tools/plugins/ic-inline
 /ic diff --mode mask "~/shots/before change.png" ~/shots/after.png
 ```
 
-The plugin runs `ic --diff [--diff-mode MODE] --emit-rgba 720x720 -- <first> <second>`, and it draws that picture the same way as `/ic` draws one image. The caption names the two files: `before.png vs after.png · 800×600`. [`ic --diff`](../../src/ic/README.md#show-the-differences-between-two-images) compares the two images pixel by pixel, with no tolerance, and it scales neither one.
+The plugin runs `ic --diff [--diff-mode MODE] --emit-rgba 720x720 -- <first> <second>`, and it draws that picture the same way as `/ic` draws one image. The caption names the two files: `before.png vs after.png · 800×600`. When the two files have the same name, the caption shows the two paths: `old/shot.png vs new/shot.png`. [`ic --diff`](../../src/ic/README.md#show-the-differences-between-two-images) compares the two images pixel by pixel, with no tolerance, and it scales neither one.
 
 `--mode` selects how the picture shows the differences. With no `--mode`, the plugin gives no `--diff-mode` to `ic`, thus `ic` applies its default, `boxes`. Red is RGBA `(255, 0, 0, 255)`.
 
