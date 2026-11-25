@@ -42,13 +42,16 @@ set -euo pipefail
 # shellcheck source=scripts/without-git-environment.sh
 . "$(dirname "$0")/../scripts/without-git-environment.sh"
 
-# Each path that the commit adds, copies, changes or deletes, one on each line.
-# git diff finds renames by default, and --name-only then prints only the new
-# path of a move. --no-renames shows a move as a deletion of the old path and
-# an addition of the new path, so a block that matches the old path sees a move
-# out of it. Each block below whose path a removal can break reads this list.
+# Each path that the commit adds, deletes, changes, or gives a new type (a file
+# that becomes a symbolic link), one on each line. The list takes no
+# --diff-filter, because a status that a filter leaves out hides its path from
+# each block that reads the list. git diff finds renames by default, and
+# --name-only then prints only the new path of a move. --no-renames shows a
+# move as a deletion of the old path and an addition of the new path, so a
+# block that matches the old path sees a move out of it. The index block, the
+# plugin block and the ic-inline block below read this list.
 staged_paths_with_deletions() {
-    git diff --cached --name-only --no-renames --diff-filter=ACMD
+    git diff --cached --name-only --no-renames
 }
 
 if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$|(^|/)Cargo\.(toml|lock)$|^(rustfmt|rust-toolchain)\.toml$'; then
