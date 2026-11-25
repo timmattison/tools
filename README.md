@@ -3365,6 +3365,11 @@ does not call them yet. `ts-rs` generates a TypeScript type from each Rust
 struct that the commands use, and a test fails when the committed types drift
 from the Rust structs.
 
+The export commands run `beta` with the PATH of the app, then
+`$CARGO_HOME/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.
+A macOS app that starts from Finder or the Dock gets only the system PATH.
+`beta` runs `ffmpeg` through the same PATH.
+
 `cargo install` does not build this tool, because the application carries a
 frontend that a bundler must build first. To run it from a checkout:
 

@@ -290,8 +290,20 @@ fn beta_path_env(
     cargo_home: Option<&OsStr>,
     home: Option<&OsStr>,
 ) -> Option<OsString> {
-    let _ = (cargo_home, home);
-    app_path.map(OsStr::to_os_string)
+    let mut entries: Vec<PathBuf> = app_path
+        .map(|p| std::env::split_paths(p).collect())
+        .unwrap_or_default();
+    let extras = cargo_home
+        .map(|dir| PathBuf::from(dir).join("bin"))
+        .into_iter()
+        .chain(home.map(|dir| PathBuf::from(dir).join(".cargo").join("bin")))
+        .chain(HOMEBREW_BIN_DIRS.iter().map(PathBuf::from));
+    for extra in extras {
+        if !entries.contains(&extra) {
+            entries.push(extra);
+        }
+    }
+    std::env::join_paths(entries).ok()
 }
 
 /// Run the `beta` CLI with `args` through the shell plugin.
@@ -311,7 +323,7 @@ async fn run_beta(
     }
     let output = command.output().await.map_err(|e| {
         NleError::ExportError(format!(
-            "Failed to run beta CLI (is it installed and on PATH?): {e}"
+            "Failed to run beta CLI (is it on PATH or in ~/.cargo/bin?): {e}"
         ))
     })?;
 
