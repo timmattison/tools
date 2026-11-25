@@ -43,6 +43,7 @@ use crate::duration::Span;
 use crate::machine::{Machine, MachineError, Signal};
 use crate::pid::{Pid, Uid};
 use crate::ranking::{ClaudeRole, Viewer};
+use crate::stream::{first_line, FaultStream, TopStream};
 use crate::table::{self, ProcessRow};
 use crate::top::{self, TopSample};
 use crate::vm::{SwapUsage, VmCounters};
@@ -74,10 +75,6 @@ const NEWEST_PID_PROGRAM: &str = "/usr/bin/true";
 /// than the truth, and never larger than it. `sysconf` does not fail on any
 /// Mac that Apple ships.
 const SMALLEST_PAGE: u64 = 4096;
-
-/// The text that an error states when a command wrote nothing to explain
-/// itself.
-const NO_MESSAGE: &str = "the command wrote no message";
 
 /// The call that sends a signal to a process.
 const KILL_CALL: &str = "kill";
@@ -176,6 +173,11 @@ impl Machine for Mac {
         let output = run(top::PROGRAM, &arguments, &[])?;
         let wall = started.elapsed();
         Ok((top::parse(&output)?, wall))
+    }
+
+    fn fault_stream(&self, interval: Span) -> Result<Box<dyn FaultStream>, MachineError> {
+        let arguments = top::stream_arguments(interval, self.max_processes()?);
+        Ok(Box::new(TopStream::spawn(top::PROGRAM, &arguments)?))
     }
 
     fn process_table(&self) -> Result<Vec<ProcessRow>, MachineError> {
@@ -358,17 +360,6 @@ pub fn run(
         });
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// Gives the first line that a command wrote, for an error message.
-///
-/// One line is enough to name the fault, and a command that failed can write
-/// many lines. The bytes are read without a check of UTF-8, because a message
-/// that `faulte` cannot read is still a message that a person can.
-fn first_line(bytes: &[u8]) -> String {
-    let text = String::from_utf8_lossy(bytes);
-    let line = text.lines().map(str::trim).find(|line| !line.is_empty());
-    line.unwrap_or(NO_MESSAGE).to_owned()
 }
 
 /// Reads the counters of the virtual memory system of this Mac.

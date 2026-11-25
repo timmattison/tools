@@ -30,6 +30,10 @@ pub const PROGRAM: &str = "/usr/bin/top";
 /// the window to get the rate that it ranks by.
 const SAMPLES: usize = 2;
 
+/// The value of `-l` for a run that never ends. `top` reads zero as "print
+/// samples until the process stops".
+const ENDLESS: &str = "0";
+
 /// The value of `-stats`: the columns that `faulte` asks `top` for. Both are
 /// numbers, so no command name with spaces can move a column.
 const STATS: &str = "pid,faults";
@@ -41,11 +45,28 @@ const STATS: &str = "pid,faults";
 /// drops no process.
 #[must_use]
 pub fn arguments(interval: Span, max_processes: u32) -> Vec<String> {
+    build_arguments(&SAMPLES.to_string(), interval, max_processes)
+}
+
+/// Gives the arguments of [`PROGRAM`] for a run that never ends.
+///
+/// The list is the one of [`arguments`] with `-l 0`. `top` prints one sample
+/// after the other until the caller stops it, so one run gives a stream of
+/// samples. The first sample holds the counter since each process started, and
+/// each later sample holds the change over the interval.
+#[must_use]
+pub fn stream_arguments(interval: Span, max_processes: u32) -> Vec<String> {
+    build_arguments(ENDLESS, interval, max_processes)
+}
+
+/// Builds the one list of arguments that [`arguments`] and
+/// [`stream_arguments`] share. `count` is the value of `-l`.
+fn build_arguments(count: &str, interval: Span, max_processes: u32) -> Vec<String> {
     let seconds = Duration::from(interval).as_secs();
     vec![
         // Logging mode: print this count of samples, then stop.
         "-l".to_owned(),
-        SAMPLES.to_string(),
+        count.to_owned(),
         // The delay between the samples, in whole seconds.
         "-s".to_owned(),
         seconds.to_string(),
@@ -201,11 +222,11 @@ pub fn parse(output: &str) -> Result<TopSample, TopParseError> {
 }
 
 /// The first token of the first line of the header block of each sample.
-const PROCESSES: &str = "Processes:";
+pub(crate) const PROCESSES: &str = "Processes:";
 
 /// The format of the clock line under each `Processes:` line. It is local
 /// time, and it names no zone.
-const CLOCK_FORMAT: &str = "%Y/%m/%d %H:%M:%S";
+pub(crate) const CLOCK_FORMAT: &str = "%Y/%m/%d %H:%M:%S";
 
 /// Gives the time from the first clock line to the second one.
 ///
@@ -240,19 +261,19 @@ const FAULTS_HEADER: &str = "FAULTS";
 
 /// The header row that `top` prints for [`STATS`], as tokens. The parser
 /// compares tokens, so the column widths of `top` do not matter.
-const HEADER: [&str; 2] = [PID_HEADER, FAULTS_HEADER];
+pub(crate) const HEADER: [&str; 2] = [PID_HEADER, FAULTS_HEADER];
 
 /// Tells whether `line` is a header row: its first token is `PID`. No other
 /// line of the output starts with that token.
 ///
 /// The parser splits each line on ASCII white space only. `top` prints ASCII,
 /// so a line that another separator splits is not a line of `top`.
-fn is_header_row(line: &str) -> bool {
+pub(crate) fn is_header_row(line: &str) -> bool {
     line.split_ascii_whitespace().next() == Some(PID_HEADER)
 }
 
 /// Reads a row: a PID, then a fault count, and no other token.
-fn parse_row(line: &str) -> Option<FaultCount> {
+pub(crate) fn parse_row(line: &str) -> Option<FaultCount> {
     let mut tokens = line.split_ascii_whitespace();
     let (Some(pid), Some(faults), None) = (tokens.next(), tokens.next(), tokens.next()) else {
         return None;
@@ -716,6 +737,25 @@ mod tests {
 
     /// `top` reads the delay as a number of seconds. The text of a [`Span`]
     /// carries a unit, so the arguments give the seconds, not that text.
+    #[test]
+    fn the_stream_arguments_ask_for_endless_samples() {
+        assert_eq!(
+            stream_arguments(span("5s"), 16_000),
+            [
+                "-l",
+                "0",
+                "-s",
+                "5",
+                "-c",
+                "d",
+                "-n",
+                "16000",
+                "-stats",
+                "pid,faults"
+            ]
+        );
+    }
+
     #[test]
     fn the_delay_is_a_bare_number_of_seconds() {
         let arguments = arguments(span("10m"), 4_000);
