@@ -417,4 +417,39 @@ mod tests {
             );
         }
     }
+
+    /// The regions of two pictures that differ at the listed positions.
+    fn regions_of(width: u32, height: u32, spots: &[(u32, u32)]) -> Vec<Region> {
+        compare(
+            &field(width, height, &[]),
+            &field(width, height, spots),
+            Mode::Boxes,
+        )
+        .unwrap()
+        .regions
+    }
+
+    #[test]
+    fn far_changes_make_two_regions() {
+        assert_eq!(
+            regions_of(60, 20, &[(10, 10), (50, 10)]),
+            vec![region(6, 6, 14, 14), region(46, 6, 54, 14)]
+        );
+    }
+
+    #[test]
+    fn padded_boxes_that_touch_make_one_region() {
+        assert_eq!(
+            regions_of(40, 20, &[(10, 10), (19, 10)]),
+            vec![region(6, 6, 23, 14)]
+        );
+    }
+
+    #[test]
+    fn padded_boxes_with_a_gap_of_one_pixel_stay_apart() {
+        assert_eq!(
+            regions_of(40, 20, &[(10, 10), (20, 10)]),
+            vec![region(6, 6, 14, 14), region(16, 6, 24, 14)]
+        );
+    }
 }
