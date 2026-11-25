@@ -211,6 +211,79 @@ fn a_crate_config_that_replaces_the_root_is_flagged() {
     );
 }
 
+/// A crate file that keeps the path of a root ban and changes its reason. The
+/// ban still fires in the crate, but clippy prints advice that the root file
+/// no longer gives.
+const CHANGED_REASON_CONFIG: &str = r#"disallowed-methods = [
+    { path = "colored::control::set_override", reason = "call testcolor::with_forced_ansi instead" },
+    { path = "crossterm::terminal::size", reason = "an old reason that the root file replaced" },
+]
+"#;
+
+/// A crate file that keeps the path of a root ban and drops its reason.
+const DROPPED_REASON_CONFIG: &str = r#"disallowed-methods = [
+    "colored::control::set_override",
+    { path = "crossterm::terminal::size", reason = "call termsize::controlling_size instead" },
+]
+"#;
+
+/// A crate file that restates each root ban with its keys in another order.
+/// The order of the keys of an inline table carries no meaning.
+const REORDERED_KEYS_CONFIG: &str = r#"disallowed-methods = [
+    { reason = "call testcolor::with_forced_ansi instead", path = "colored::control::set_override" },
+    { reason = "call termsize::controlling_size instead", path = "crossterm::terminal::size" },
+]
+"#;
+
+/// A ban is the whole entry, not only its path. A crate file that keeps the
+/// path and changes or drops the reason is not the restatement that
+/// `src/ufa/clippy.toml` promises, and each such entry is named.
+#[test]
+fn a_crate_config_that_changes_the_reason_of_a_ban_is_flagged() {
+    for (form, config, dropped) in [
+        (
+            "a changed reason",
+            CHANGED_REASON_CONFIG,
+            "disallowed-methods entry `crossterm::terminal::size`",
+        ),
+        (
+            "a dropped reason",
+            DROPPED_REASON_CONFIG,
+            "disallowed-methods entry `colored::control::set_override`",
+        ),
+    ] {
+        let repo = synthetic_repo(ROOT_CONFIG);
+        write_crate_config(repo.path(), "drifted", CONFIG_NAMES[0], config);
+
+        let report = audit_fixture(&repo);
+
+        let missing: Vec<String> = report
+            .offenders()
+            .iter()
+            .flat_map(|offender| offender.missing().iter().map(ToString::to_string))
+            .collect();
+        assert_eq!(
+            missing,
+            vec![dropped.to_string()],
+            "the entry with {form} must be named, and only that entry, got:\n{report}"
+        );
+    }
+}
+
+/// The comparison of whole entries does not depend on the order of their keys.
+#[test]
+fn a_crate_config_that_reorders_the_keys_of_a_ban_is_clean() {
+    let repo = synthetic_repo(ROOT_CONFIG);
+    write_crate_config(repo.path(), "reordered", CONFIG_NAMES[0], REORDERED_KEYS_CONFIG);
+
+    let report = audit_fixture(&repo);
+
+    assert!(
+        report.is_compliant(),
+        "the same keys in another order are the same ban, got:\n{report}"
+    );
+}
+
 /// A crate file that restates the root bans and adds one of its own is clean.
 /// Without this, every assertion above would still pass for a guard that flags
 /// everything unconditionally.
