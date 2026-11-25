@@ -128,7 +128,6 @@ pub fn export_conversation_range(
 mod tests {
     use super::*;
     use crate::test_fixture::{apple_ns, ChatDbFixture, MessageSpec};
-    use crate::util::expand_tilde;
 
     const BASE: i64 = 1_700_000_000;
 
@@ -318,27 +317,19 @@ mod tests {
         });
         let outside = fx.dir().join("outside");
         std::fs::create_dir_all(&outside).expect("outside dir");
-        let secret = outside.join("secret.txt");
-        std::fs::write(&secret, "top secret").expect("write secret");
-
-        let home = dirs::home_dir().expect("home directory");
-        let climbs = home.components().count() + 3 + 4;
-        let traversal = format!(
-            "~/Library/Messages/Attachments/{}{}",
-            "../".repeat(climbs),
-            secret.display().to_string().trim_start_matches('/')
-        );
-        // The path reaches the file when the shell resolves it.
+        std::fs::write(outside.join("secret.txt"), "top secret").expect("write secret");
+        // The kernel resolves `Attachments/..` only when the root exists.
+        let root = fx.dir().join("Attachments");
+        std::fs::create_dir_all(&root).expect("attachments root");
+        let traversal = format!("{}/../outside/secret.txt", root.display());
+        // The path reaches the file when the kernel resolves it.
         assert_eq!(
-            std::fs::read_to_string(expand_tilde(&traversal))
-                .ok()
-                .as_deref(),
+            std::fs::read_to_string(&traversal).ok().as_deref(),
             Some("top secret")
         );
         fx.add_attachment(id, &traversal, Some("secret.txt"));
         let db = fx.open_db();
         let export_dir = fx.dir().join("export-traversal");
-        let root = home.join("Library/Messages/Attachments");
 
         let result =
             export_conversation_range(&db, chat, id, id, true, &export_dir, &root).expect("export");
