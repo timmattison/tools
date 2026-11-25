@@ -1,11 +1,15 @@
 use crate::http::{build_client, read_json_response, Api, Timeouts};
-use crate::site_manager::models::{Host, HostsResponse};
+use crate::site_manager::models::{Host, HostResponse, HostsResponse};
 use anyhow::{Context, Result};
 use reqwest::{Client, Url};
 use serde::de::DeserializeOwned;
+use std::collections::HashSet;
 
 /// The Site Manager API path segment that cloud hosts live under.
 const HOSTS_SEGMENT: &str = "hosts";
+
+/// The query parameter that carries the token of the next page of a listing.
+const NEXT_TOKEN_PARAMETER: &str = "nextToken";
 
 /// Path segments that name no resource, and that a path-segment builder
 /// silently discards rather than appending.
@@ -91,37 +95,6 @@ fn hosts_url(base_url: &Url) -> Result<Url> {
     api_url(base_url, &[HOSTS_SEGMENT])
 }
 
-/// Take the hosts out of `response`, but only when they are all of them.
-///
-/// # Arguments
-///
-/// * `response` - The listing the Site Manager API answered with.
-///
-/// # Returns
-///
-/// Every host the response carried.
-///
-/// # Errors
-///
-/// Returns an error if the response carries fewer hosts than the `total` it
-/// states for the collection.
-fn whole_listing(response: HostsResponse) -> Result<Vec<Host>> {
-    let HostsResponse { hosts, total } = response;
-
-    if let Some(total) = total {
-        let arrived = u64::try_from(hosts.len()).unwrap_or(u64::MAX);
-
-        anyhow::ensure!(
-            arrived >= u64::from(total),
-            "The Site Manager API answered with {arrived} of the {total} cloud hosts it states \
-             exist. The listing takes one request, which reaches one page, so this answer is \
-             incomplete."
-        );
-    }
-
-    Ok(hosts)
-}
-
 pub struct SiteManagerClient {
     client: Client,
     base_url: Url,
@@ -174,44 +147,75 @@ impl SiteManagerClient {
 
     /// Fetch every cloud host on the account.
     ///
-    /// # One request, checked against the total the server states
+    /// The API answers one page of hosts (25 by default) and, when more
+    /// follow, a `nextToken` for the next page. This method follows the
+    /// tokens. The first request carries no query. Each later request carries
+    /// the one pair `nextToken=<token>`, with the token percent-encoded as one
+    /// value. The hosts of each page are appended in order, and the walk
+    /// stops when an answer has no token or an empty one. The request sends
+    /// no `pageSize`: the spec states no maximum for it, and the default costs
+    /// only more requests.
     ///
-    /// The listing endpoint answers one page, and this client sends no paging
-    /// parameters with the request. `total` is what the server states for the
-    /// whole collection, so a listing shorter than `total` is a page and not
-    /// the answer. Such a listing is refused, rather than reported as the
-    /// whole account.
-    ///
-    /// A walk over the pages is the better answer, and it needs the name of
-    /// the field the endpoint returns for the next page. No document in this
-    /// repository records that name: `integration.json` is the controller
-    /// API, and it holds no host listing at all. A walk against a guessed
-    /// field name reads the first page again and reports it as complete,
-    /// which is the same defect with more code behind it. So the check stands
-    /// here until the real field name is known.
-    ///
-    /// A server that states no `total` says nothing about completeness. There
-    /// is nothing to compare such an answer against, so the listing is taken
-    /// as it arrived. A refusal there stops a command that works today over a
-    /// field the server never sent.
+    /// One guard protects the walk. The method keeps each token that it has
+    /// sent, and an answer that gives one of them again is an error, because
+    /// the walk would read the same pages again without end. There is no
+    /// guard against an empty page that carries a token, because a paged
+    /// store can answer an empty page before the end of the listing, and the
+    /// walk follows it. There is no bound on the number of pages either.
     ///
     /// # Returns
     ///
-    /// Every cloud host on the account.
+    /// Every cloud host on the account, in the order the pages gave them.
     ///
     /// # Errors
     ///
-    /// Returns an error if the request fails, if the answer cannot be read,
-    /// or if the listing is shorter than the total the server states.
+    /// Returns an error if a request fails, if an answer cannot be read, or
+    /// if an answer gives a page token that the walk already sent.
     pub async fn get_hosts(&self) -> Result<Vec<Host>> {
-        let response: HostsResponse = self.get(hosts_url(&self.base_url)?).await?;
+        let first = hosts_url(&self.base_url)?;
+        let mut hosts = Vec::new();
+        let mut sent_tokens: HashSet<String> = HashSet::new();
+        let mut url = first.clone();
 
-        whole_listing(response)
+        loop {
+            let page: HostsResponse = self.get(url).await?;
+            hosts.extend(page.data);
+
+            let Some(token) = page.next_token.filter(|token| !token.is_empty()) else {
+                return Ok(hosts);
+            };
+            if !sent_tokens.insert(token.clone()) {
+                anyhow::bail!(
+                    "The Site Manager API gave the page token {token:?} a second time, so the \
+                     walk would read the same pages again."
+                );
+            }
+
+            url = first.clone();
+            url.query_pairs_mut()
+                .append_pair(NEXT_TOKEN_PARAMETER, &token);
+        }
     }
 
+    /// Fetch one cloud host.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The host id, exactly as the user supplied it.
+    ///
+    /// # Returns
+    ///
+    /// The host that `id` names. The API gives it in the `data` key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `id` names no host, if the request fails, or if
+    /// the answer cannot be read.
     pub async fn get_host(&self, id: &str) -> Result<Host> {
         let url = host_url(&self.base_url, id)?;
-        self.get(url).await
+        let response: HostResponse = self.get(url).await?;
+
+        Ok(response.data)
     }
 
     async fn get<T>(&self, url: Url) -> Result<T>
@@ -233,10 +237,6 @@ impl SiteManagerClient {
 mod tests {
     use super::*;
     use crate::test_server::{json_response, TestServer};
-
-    /// One cloud host, with every field the model demands of it.
-    const A_HOST: &str =
-        r#"{"id":"h1","hardwareId":"hw1","type":"console","isBlocked":false,"owner":true}"#;
 
     /// The Site Manager API base URL every request is built from.
     fn base_url() -> Url {
@@ -356,78 +356,6 @@ mod tests {
         SiteManagerClient::talking_to(origin, "an-api-key")
     }
 
-    /// The listing body that carries `hosts` hosts, and the `total` the server
-    /// states for the whole collection.
-    ///
-    /// A `total` of `None` leaves the field out altogether, which is what a
-    /// server that states no total sends.
-    fn hosts_body(hosts: usize, total: Option<u32>) -> String {
-        let listed = vec![A_HOST; hosts].join(",");
-
-        match total {
-            Some(total) => format!(r#"{{"hosts":[{listed}],"total":{total}}}"#),
-            None => format!(r#"{{"hosts":[{listed}]}}"#),
-        }
-    }
-
-    /// The listing endpoint answers one page. An account with more hosts than
-    /// fit in it therefore hands back a fraction of the collection, and the
-    /// server says so in `total`. Reporting that fraction as the whole
-    /// listing is the failure `crate::pagination` exists to prevent: `ufa
-    /// cloud hosts` prints a short table, and the "Total hosts" line under it
-    /// agrees with the short table.
-    #[tokio::test]
-    async fn a_host_listing_shorter_than_the_stated_total_is_refused() {
-        let server = TestServer::replying(&json_response(&hosts_body(2, Some(41)))).await;
-        let client = client_talking_to(server.origin());
-
-        let error = client
-            .get_hosts()
-            .await
-            .expect_err("2 of 41 hosts is not the listing, and must not be reported as one");
-
-        let report = format!("{error:#}");
-        assert!(
-            report.contains("41"),
-            "the refusal must say how many hosts the server states exist, got: {report}"
-        );
-        assert!(
-            report.contains('2'),
-            "the refusal must say how many hosts arrived, got: {report}"
-        );
-    }
-
-    /// The ordinary answer must stay ordinary: as many hosts as the server
-    /// states exist is the whole listing.
-    #[tokio::test]
-    async fn a_host_listing_that_matches_the_stated_total_is_returned() {
-        let server = TestServer::replying(&json_response(&hosts_body(3, Some(3)))).await;
-        let client = client_talking_to(server.origin());
-
-        let hosts = client
-            .get_hosts()
-            .await
-            .expect("a listing that matches the stated total is complete");
-
-        assert_eq!(hosts.len(), 3, "every host the server sent must come back");
-    }
-
-    /// A server that states no total says nothing about completeness, so
-    /// there is nothing to compare the answer against. The listing is taken
-    /// as it arrived, because a refusal here breaks a command that works.
-    #[tokio::test]
-    async fn a_host_listing_the_server_states_no_total_for_is_returned() {
-        let server = TestServer::replying(&json_response(&hosts_body(2, None))).await;
-        let client = client_talking_to(server.origin());
-
-        let hosts = client
-            .get_hosts()
-            .await
-            .expect("a listing with no stated total is not evidence of a short answer");
-
-        assert_eq!(hosts.len(), 2, "every host the server sent must come back");
-    }
-
     /// The 200 example of `GET /v1/hosts` in the official Site Manager spec.
     const SPEC_HOSTS_PAGE: &str = include_str!("openapi-examples/hosts-page.json");
 
@@ -515,10 +443,9 @@ mod tests {
         let server = TestServer::replying(&json_response(SPEC_HOSTS_PAGE)).await;
         let client = client_talking_to(server.origin());
 
-        let outcome =
-            tokio::time::timeout(std::time::Duration::from_secs(60), client.get_hosts())
-                .await
-                .expect("the walk must stop on its own");
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(60), client.get_hosts())
+            .await
+            .expect("the walk must stop on its own");
 
         let error = outcome.expect_err("a repeated token is not a listing");
         let report = format!("{error:#}");

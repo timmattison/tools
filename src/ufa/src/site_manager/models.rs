@@ -1,6 +1,10 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// One cloud host, in the shape of the `Host` schema of the official Site
+/// Manager OpenAPI document (`https://developer.ui.com/site-manager/v1.0.0/openapi.json`).
+///
+/// A time field is kept as the API sent it. The spec sends an empty string
+/// for a time that it does not know, and a date type refuses that string.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Host {
@@ -10,36 +14,34 @@ pub struct Host {
     pub host_type: String,
     pub ip_address: Option<String>,
     pub is_blocked: bool,
-    pub last_connection_state_change: Option<DateTime<Utc>>,
-    pub latest_backup_time: Option<DateTime<Utc>>,
+    /// When the host last changed its connection state, as the API sent it:
+    /// an RFC 3339 time, or an empty string.
+    pub last_connection_state_change: Option<String>,
+    /// When the host last made a backup, as the API sent it: an RFC 3339
+    /// time, or an empty string.
+    pub latest_backup_time: Option<String>,
     pub owner: bool,
-    pub registration_time: Option<DateTime<Utc>>,
+    /// When the host registered, as the API sent it: an RFC 3339 time, or an
+    /// empty string.
+    pub registration_time: Option<String>,
     pub reported_state: Option<ReportedState>,
     pub user_data: Option<UserData>,
 }
 
+/// The state that a host reports about itself.
+///
+/// The spec gives `reportedState` no schema, so it promises no field in it.
+/// Each field is thus optional.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReportedState {
-    pub controllers: Option<Vec<Controller>>,
+    /// The controllers of the host, as raw JSON. The spec gives no shape for
+    /// them, and nothing in this crate reads one.
+    pub controllers: Option<Vec<serde_json::Value>>,
     pub firmware_version: Option<String>,
     pub hostname: Option<String>,
     pub model: Option<String>,
     pub name: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Controller {
-    pub is_running: bool,
-    pub name: String,
-    pub port: u16,
-    pub release_channel: Option<String>,
-    pub status: String,
-    #[serde(rename = "type")]
-    pub controller_type: String,
-    pub ui_version: Option<String>,
-    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,9 +51,25 @@ pub struct UserData {
     pub note: Option<String>,
 }
 
+/// One page of the answer of `GET /v1/hosts`, in the shape that the official
+/// Site Manager OpenAPI document gives it.
+///
+/// The answer also carries `httpStatusCode` and `traceId`. Nothing reads them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostsResponse {
-    pub hosts: Vec<Host>,
-    pub total: Option<u32>,
+    /// The hosts of this page.
+    pub data: Vec<Host>,
+    /// The token that names the next page. It is absent, or empty, on the
+    /// last page.
+    pub next_token: Option<String>,
+}
+
+/// The answer of `GET /v1/hosts/{id}`, in the shape that the official Site
+/// Manager OpenAPI document gives it: the host sits in the `data` key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostResponse {
+    /// The host that the id names.
+    pub data: Host,
 }

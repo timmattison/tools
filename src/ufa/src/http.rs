@@ -74,10 +74,9 @@ const ERROR_BODY_DISPLAY_CHARS: usize = 500;
 /// bounded by the account behind it. The controller's collections arrive a
 /// page at a time -- 200 items per request, per [`crate::pagination`] -- and
 /// the largest item either API returns is a device record of a few kilobytes,
-/// so a page stays under a megabyte. The Site Manager host listing is the
-/// largest single answer, because nothing pages it: one document for every
-/// console on the account. A thousand consoles at eight kilobytes each comes
-/// to eight megabytes.
+/// so a page stays under a megabyte. The Site Manager host listing arrives a
+/// page at a time too, 25 hosts by default, so each answer of either API is a
+/// page or one record.
 ///
 /// 32 MiB is far above both. That distance matters more than the number
 /// itself, because a ceiling a real answer trips is worse than no ceiling at

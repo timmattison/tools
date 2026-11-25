@@ -1457,7 +1457,9 @@ mod key_rotation_tests {
 
     /// The answer of a Site Manager API that takes the key.
     fn no_hosts() -> String {
-        json_response(r#"{"hosts":[]}"#)
+        json_response(
+            r#"{"data":[],"httpStatusCode":200,"traceId":"a7dc15e0eb4527142d7823515b15f87d"}"#,
+        )
     }
 
     /// The configuration of a user who keeps the controller key in 1Password.

@@ -64,11 +64,32 @@ impl From<&Host> for HostRow {
                 .unwrap_or_else(|| NO_DATA.to_string()),
             host_type: host.host_type.clone(),
             owner: host.owner.to_string(),
-            last_seen: host
-                .last_connection_state_change
-                .map(|changed| changed.format(LAST_SEEN_FORMAT).to_string())
-                .unwrap_or_else(|| NO_DATA.to_string()),
+            last_seen: last_seen(host.last_connection_state_change.as_deref()),
         }
+    }
+}
+
+/// Spell the time of a host's last state change for the listing.
+///
+/// # Arguments
+///
+/// * `changed` - The time as the API sent it.
+///
+/// # Returns
+///
+/// The time in UTC in [`LAST_SEEN_FORMAT`] when it is RFC 3339. [`NO_DATA`]
+/// when it is absent or empty. The text as the API sent it otherwise.
+fn last_seen(changed: Option<&str>) -> String {
+    match changed {
+        None | Some("") => NO_DATA.to_string(),
+        Some(text) => chrono::DateTime::parse_from_rfc3339(text).map_or_else(
+            |_| text.to_string(),
+            |time| {
+                time.with_timezone(&chrono::Utc)
+                    .format(LAST_SEEN_FORMAT)
+                    .to_string()
+            },
+        ),
     }
 }
 
@@ -195,7 +216,6 @@ fn host_report(host: &Host, format: OutputFormat) -> Result<Report> {
 mod tests {
     use super::*;
     use crate::site_manager::models::ReportedState;
-    use chrono::TimeZone;
 
     /// Box-drawing corner produced by the crate's table renderer.
     const TABLE_CORNER: char = '┌';
@@ -220,14 +240,10 @@ mod tests {
             host_type: "console".to_string(),
             ip_address: Some("192.168.1.1".to_string()),
             is_blocked: false,
-            last_connection_state_change: Some(
-                chrono::Utc
-                    .with_ymd_and_hms(2026, 4, 20, 13, 45, 6)
-                    .unwrap(),
-            ),
-            latest_backup_time: None,
+            last_connection_state_change: Some("2026-04-20T13:45:06Z".to_string()),
+            latest_backup_time: Some(String::new()),
             owner: true,
-            registration_time: None,
+            registration_time: Some(String::new()),
             reported_state: Some(ReportedState {
                 controllers: None,
                 firmware_version: Some("4.0.6".to_string()),
@@ -272,6 +288,28 @@ mod tests {
                 "missing the value {value}, got:\n{rendered}"
             );
         }
+    }
+
+    /// The spec sends an empty string for a time that it does not know. The
+    /// Last Seen cell then shows that no data exists.
+    #[test]
+    fn an_empty_last_state_change_shows_no_data() {
+        let mut host = test_host("edge");
+        host.last_connection_state_change = Some(String::new());
+
+        let rendered = render_hosts(&[host], OutputFormat::Table)
+            .expect("rendering the host listing must succeed");
+
+        let row = rendered
+            .lines()
+            .find(|line| line.contains("edge"))
+            .unwrap_or_else(|| panic!("the listing must have a row, got:\n{rendered}"));
+        let last_cell = row
+            .trim_end_matches(CELL_SEPARATOR)
+            .rsplit(CELL_SEPARATOR)
+            .next()
+            .map(str::trim);
+        assert_eq!(last_cell, Some("N/A"), "got:\n{rendered}");
     }
 
     /// A console the user named at length must not push every column after it
