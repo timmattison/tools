@@ -2,9 +2,11 @@
 //!
 //! The test builds a JSON document from each answer schema of
 //! `integration.json` and deserializes it into the model that reads that
-//! answer. A model that refuses a document the spec allows is a defect. A
-//! hand-written fixture repeats the assumption of its author, so only a
-//! document built from the spec can disagree with the model.
+//! answer. A model that refuses a document the spec allows is a defect, except
+//! for a pair of [`REFUSED_ON_PURPOSE`]. ufa cannot act on such a document, and
+//! a test holds each of those pairs refused. A hand-written fixture repeats the
+//! assumption of its author, so only a document built from the spec can
+//! disagree with the model.
 //!
 //! Known limit: the client schemas use `allOf` and discriminators. The
 //! generator refuses those constructs, so the client models are not covered.
@@ -364,18 +366,59 @@ const CASES: &[Case] = &[
     ),
 ];
 
-/// Every documented answer reads into its model, in both document kinds.
+/// The pairs that a model refuses on purpose, each with its reason.
+///
+/// The spec allows each of these documents, but ufa cannot act on it. The
+/// model refuses it, and the command reports the answer as unreadable. A
+/// test holds each pair refused, so a model that starts to read one fails
+/// the guard until the pair moves into [`CASES`].
+const REFUSED_ON_PURPOSE: &[(Case, &str)] = &[
+    (
+        (
+            "IntegrationVoucherCreationResultDto",
+            Document::Minimal,
+            reads::<models::VoucherCreateResponse>,
+        ),
+        "ufa prints the vouchers that the answer lists, and an answer with no list has no vouchers to print",
+    ),
+    (
+        (
+            "Voucher deletion results",
+            Document::Minimal,
+            reads::<models::VoucherDeletionResults>,
+        ),
+        "ufa counts the deleted vouchers, and the deletion tally counts an answer with no count as unreadable",
+    ),
+];
+
+/// Finds one schema of the spec by its name.
+///
+/// # Arguments
+///
+/// * `spec` - The spec root.
+/// * `name` - The name of the schema under `components.schemas`.
+///
+/// # Returns
+///
+/// The schema node.
+///
+/// # Panics
+///
+/// Panics when the spec has no schema of that name.
+fn schema<'a>(spec: &'a Value, name: &str) -> &'a Value {
+    spec.get("components")
+        .and_then(|components| components.get("schemas"))
+        .and_then(|schemas| schemas.get(name))
+        .unwrap_or_else(|| panic!("the spec has no schema {name}"))
+}
+
+/// Each pair of [`CASES`] reads into its model.
 #[test]
 fn each_documented_answer_reads_into_its_model() {
     let spec = load_spec();
     let mut failures = Vec::new();
     for (name, kind, read) in CASES {
-        let schema = spec
-            .get("components")
-            .and_then(|components| components.get("schemas"))
-            .and_then(|schemas| schemas.get(*name))
-            .unwrap_or_else(|| panic!("the spec has no schema {name}"));
-        let document = generate(&spec, schema, *kind, name, 0);
+        let document = generate(&spec, schema(&spec, name), *kind, name, 0);
         if let Err(error) = read(&document) {
             failures.push(format!("{name} ({kind:?}): {error}"));
         }
@@ -384,6 +427,26 @@ fn each_documented_answer_reads_into_its_model() {
         failures.is_empty(),
         "models refuse documents that the spec allows:\n{}",
         failures.join("\n")
+    );
+}
+
+/// Each pair of [`REFUSED_ON_PURPOSE`] is still refused by its model.
+#[test]
+fn each_refusal_on_purpose_is_still_refused() {
+    let spec = load_spec();
+    let mut reads_now = Vec::new();
+    for ((name, kind, read), reason) in REFUSED_ON_PURPOSE {
+        let document = generate(&spec, schema(&spec, name), *kind, name, 0);
+        if read(&document).is_ok() {
+            reads_now.push(format!(
+                "{name} ({kind:?}) reads now, but it is refused on purpose because {reason}. Move it into CASES."
+            ));
+        }
+    }
+    assert!(
+        reads_now.is_empty(),
+        "a refusal on purpose is gone:\n{}",
+        reads_now.join("\n")
     );
 }
 
