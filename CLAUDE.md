@@ -490,10 +490,17 @@ visible in the file it applies to.
 ### The Runners
 
 The ban covers the Rust code of this workspace. It does not cover code that
-other crates own, for example the build script of a dependency. So
-`.husky/pre-commit` and `test.sh` start each cargo command through
-`without_git_environment` in `scripts/without-git-environment.sh`, which removes
-the whole prefix. The hook is started by `sh`, so that function does not use
+other crates own, for example the build script of a dependency. So each runner
+starts each cargo command through `without_git_environment` in
+`scripts/without-git-environment.sh`, which removes the whole prefix:
+
+- `scripts/rust-checks.sh` runs the four gates. The pre-commit hook and CI both
+  start it, so a cargo command that you add to it gets the sweep.
+- `.husky/pre-commit` itself starts only the cargo command of the tool-index
+  guard.
+- `test.sh` runs the workspace tests.
+
+The hook is started by `sh`, so `without_git_environment` does not use
 `compgen`, which a shell other than bash does not have.
 
 ### The Trap: A Lint Cannot Say This
@@ -549,9 +556,9 @@ constructor or states an exemption at its site. It does not prove three things:
 
 - `clippy.toml` `disallowed-methods` — a raw `Command::new`,
   `tokio::process::Command::new` or `CommandBuilder::new` fails the build
-- `src/repo-guards/tests/pre_commit_hook.rs` — no cargo command of the hook or
-  of `test.sh` sees a `GIT_` variable, under a fake `cargo` that writes its
-  environment to a file
+- `src/repo-guards/tests/pre_commit_hook.rs` — no cargo command of the hook, of
+  the `scripts/rust-checks.sh` that the hook starts, or of `test.sh` sees a
+  `GIT_` variable, under a fake `cargo` that writes its environment to a file
 - `repo_guards::git_env_sweep` (`src/repo-guards/src/git_env_sweep.rs`) — no
   file cargo compiles removes a `GIT_`-prefixed variable by name. Its companion
   test asks `cargo metadata` whether the read set holds every target root cargo
