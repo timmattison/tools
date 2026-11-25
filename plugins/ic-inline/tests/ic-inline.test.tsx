@@ -37,6 +37,17 @@ const FIXTURE_JSON =
 const OLD_IC_STDERR =
   "error: unexpected argument '--emit-rgba' found\n\n  tip: to pass '--emit-rgba' as a value, use '-- --emit-rgba'\n\nUsage: ic [OPTIONS] [FILE]...\n\nFor more information, try '--help'.\n"
 
+/** What an `ic` of a release before --diff writes for the flag. */
+const OLD_DIFF_STDERR =
+  "error: unexpected argument '--diff' found\n\n  tip: to pass '--diff' as a value, use '-- --diff'\n\nUsage: ic [OPTIONS] [FILE]...\n\nFor more information, try '--help'.\n"
+
+/** The two images that the diff tests compare. */
+const FIRST = 'before.png'
+const SECOND = 'after.png'
+
+/** The modes of `ic --diff-mode`. */
+const DIFF_MODES = ['boxes', 'highlight', 'mask'] as const
+
 const UPPER_HALF = 0x2580
 const LOWER_HALF = 0x2584
 const SPACE = 0x20
@@ -86,19 +97,28 @@ function grayJson(width: number, height: number): string {
 }
 
 /**
- * Answer `process.run` as `ic` would, from `answers` by the path argument, and
- * record every argument vector. A path with no answer is a missing file.
+ * The key under which stubIc answers a run of ic: the paths after `--`, joined
+ * by ` vs `. One path is its own key, and the diff of two is `a.png vs b.png`.
+ */
+function pathsKey(argv: readonly string[]): string {
+  return argv.slice(argv.indexOf('--') + 1).join(' vs ')
+}
+
+/**
+ * Answer `process.run` as `ic` would, from `answers` by the paths of the run
+ * (see pathsKey), and record every argument vector. Paths with no answer are a
+ * missing file.
  */
 function stubIc(on: On, answers: Record<string, IcAnswer>): { calls: string[][] } {
   stubEngine(on)
   const calls: string[][] = []
   on('process.run', async ($, e) => {
     calls.push([...e.argv])
-    const path = e.argv[e.argv.length - 1] ?? ''
-    const answer = answers[path] ?? {
+    const key = pathsKey(e.argv)
+    const answer = answers[key] ?? {
       exitCode: 1,
       stdout: '',
-      stderr: `Error: File not found: ${path}\n`,
+      stderr: `Error: File not found: ${key}\n`,
     }
     return { value: { ...answer, isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -107,6 +127,9 @@ function stubIc(on: On, answers: Record<string, IcAnswer>): { calls: string[][] 
 
 /** The fixture at FIXTURE_PATH, and nothing else. */
 const stubFixture = (on: On) => stubIc(on, { [FIXTURE_PATH]: printed(FIXTURE_JSON) })
+
+/** The differences of FIRST and SECOND, printed as the fixture, and nothing else. */
+const stubDiff = (on: On) => stubIc(on, { [`${FIRST} vs ${SECOND}`]: printed(FIXTURE_JSON) })
 
 /** The props of the output row of `/ic <args>`. */
 function commandRow(args: string, text: string, surface: RenderSurface = 'terminal', viewport = WIDE) {
@@ -302,6 +325,7 @@ describe('/ic reads its argument', () => {
     const text = await runIc($, '   ')
 
     expect(text).toContain('Usage: /ic <image file>')
+    expect(text).toContain('/ic diff [--mode boxes|highlight|mask] <first> <second>')
     expect(calls).toHaveLength(0)
   })
 })
@@ -369,6 +393,165 @@ describe('/ic reports', () => {
       expect(await runIc($, FIXTURE_PATH)).toContain('could not read the output of ic')
     })
   }
+})
+
+describe('/ic diff reads its arguments', () => {
+  test('and gives ic --diff, the box, and the two paths after --', async ($, on) => {
+    const { calls } = stubDiff(on)
+
+    await runIc($, `diff ${FIRST} ${SECOND}`)
+
+    expect(calls).toEqual([['ic', '--diff', '--emit-rgba', '720x720', '--', FIRST, SECOND]])
+  })
+
+  for (const mode of DIFF_MODES) {
+    test(`and gives ic --diff-mode ${mode} for --mode ${mode}`, async ($, on) => {
+      const { calls } = stubDiff(on)
+
+      await runIc($, `diff --mode ${mode} ${FIRST} ${SECOND}`)
+
+      expect(calls).toEqual([['ic', '--diff', '--diff-mode', mode, '--emit-rgba', '720x720', '--', FIRST, SECOND]])
+    })
+  }
+
+  test('with --mode before, between, or after the paths, and as --mode=MODE', async ($, on) => {
+    const { calls } = stubDiff(on)
+
+    await runIc($, `diff ${FIRST} --mode mask ${SECOND}`)
+    await runIc($, `diff ${FIRST} ${SECOND} --mode mask`)
+    await runIc($, `diff --mode=mask ${FIRST} ${SECOND}`)
+
+    const masked = ['ic', '--diff', '--diff-mode', 'mask', '--emit-rgba', '720x720', '--', FIRST, SECOND]
+    expect(calls).toEqual([masked, masked, masked])
+  })
+
+  test('as paths in double quotes, spaces included', async ($, on) => {
+    const { calls } = stubIc(on, { 'my before.png vs my after.png': printed(FIXTURE_JSON) })
+
+    await runIc($, '  diff "my before.png"   "my after.png"  ')
+
+    expect(calls.map(argv => argv.slice(-2))).toEqual([['my before.png', 'my after.png']])
+  })
+
+  test('with ~ expanded in each path, quoted or not', async ($, on) => {
+    mock.env(on, { HOME: '/home/tim' })
+    const { calls } = stubIc(on, { '/home/tim/before.png vs /home/tim/my after.png': printed(FIXTURE_JSON) })
+
+    await runIc($, 'diff ~/before.png "~/my after.png"')
+
+    expect(calls.map(argv => argv.slice(-2))).toEqual([['/home/tim/before.png', '/home/tim/my after.png']])
+  })
+
+  test('as a path every word after --, also --mode and a word that starts with -', async ($, on) => {
+    const { calls } = stubIc(on, { '--mode vs -after.png': printed(FIXTURE_JSON) })
+
+    await runIc($, 'diff --mode mask -- --mode -after.png')
+
+    expect(calls).toEqual([['ic', '--diff', '--diff-mode', 'mask', '--emit-rgba', '720x720', '--', '--mode', '-after.png']])
+  })
+
+  test('as one image for diff.png, and for diff in quotes', async ($, on) => {
+    const { calls } = stubIc(on, { 'diff.png': printed(FIXTURE_JSON), diff: printed(FIXTURE_JSON) })
+
+    await runIc($, 'diff.png')
+    await runIc($, '"diff"')
+
+    expect(calls).toEqual([
+      ['ic', '--emit-rgba', '720x720', '--', 'diff.png'],
+      ['ic', '--emit-rgba', '720x720', '--', 'diff'],
+    ])
+  })
+})
+
+describe('/ic diff draws', () => {
+  test('the differences under the command, with the two names in the caption', async ($, on) => {
+    stubDiff(on)
+    const args = `diff ${FIRST} ${SECOND}`
+
+    const text = await runIc($, args)
+    expect(text).toContain(FIRST)
+    expect(text).toContain(SECOND)
+    expect(text).toContain('4×4')
+
+    const ui = await $.ui.mount(commandRow(args, text))
+    const raster = await ui.find({ type: 'Raster' })
+    expect(raster?.props.columns).toBe(4)
+    expect(raster?.props.rows).toBe(2)
+    expect((await ui.find({ type: 'Text', text: /before\.png vs after\.png/ }))?.text).toContain('4×4')
+  })
+
+  test('the differences again without a second run of ic', async ($, on) => {
+    const { calls } = stubDiff(on)
+    const args = `diff ${FIRST} ${SECOND}`
+
+    const text = await runIc($, args)
+    await $.ui.mount(commandRow(args, text))
+    await $.ui.mount(commandRow(args, text))
+
+    expect(calls).toHaveLength(1)
+  })
+
+  test('the differences after a hot reload, in the mode of the command', async ($, on) => {
+    const { calls } = stubDiff(on)
+
+    const ui = await $.ui.mount(commandRow(`diff --mode highlight ${FIRST} ${SECOND}`, 'Showed'))
+
+    expect(await ui.find({ type: 'Raster' })).toBeDefined()
+    expect(calls).toEqual([['ic', '--diff', '--diff-mode', 'highlight', '--emit-rgba', '720x720', '--', FIRST, SECOND]])
+  })
+})
+
+describe('/ic diff refuses', () => {
+  for (const { cause, args, reason } of [
+    { cause: 'no path', args: 'diff', reason: 'takes exactly two paths, and it got 0' },
+    { cause: 'one path', args: 'diff a.png', reason: 'takes exactly two paths, and it got 1' },
+    { cause: 'three paths', args: 'diff a.png b.png c.png', reason: 'takes exactly two paths, and it got 3' },
+    {
+      cause: 'a mode that ic does not have',
+      args: 'diff --mode red a.png b.png',
+      reason: '--mode takes boxes, highlight or mask, and it got red',
+    },
+    { cause: '--mode with no mode', args: 'diff a.png b.png --mode', reason: '--mode needs a mode: boxes, highlight or mask' },
+    { cause: '--mode two times', args: 'diff --mode mask --mode boxes a.png b.png', reason: '--mode occurs two times' },
+    { cause: 'an option that it does not know', args: 'diff --fast a.png b.png', reason: 'does not know the option --fast' },
+    { cause: 'a double quote that is not closed', args: 'diff "a.png b.png', reason: 'a double quote is not closed' },
+    { cause: 'an empty path', args: 'diff "" b.png', reason: 'a path is empty' },
+  ]) {
+    test(`${cause}, with the cause and the usage, and runs no ic`, async ($, on) => {
+      const { calls } = stubDiff(on)
+
+      const text = await runIc($, args)
+      expect(text).toContain(reason)
+      expect(text).toContain('Usage: /ic diff [--mode boxes|highlight|mask] <first> <second>')
+      expect(calls).toHaveLength(0)
+
+      const ui = await $.ui.mount(commandRow(args, text))
+      expect(await ui.find({ type: 'Text', text: ENGINE_ROW })).toBeDefined()
+    })
+  }
+})
+
+describe('/ic diff reports', () => {
+  test('what ic said when a file does not open, and draws no picture', async ($, on) => {
+    stubDiff(on)
+    const args = `diff ${FIRST} missing.png`
+
+    const text = await runIc($, args)
+    expect(text).toContain(`Could not compare ${FIRST} and missing.png`)
+    expect(text).toContain('File not found')
+
+    const ui = await $.ui.mount(commandRow(args, text))
+    expect(await ui.find({ type: 'Text', text: ENGINE_ROW })).toBeDefined()
+  })
+
+  test('an ic that does not know --diff, and how to update it', async ($, on) => {
+    stubIc(on, { [`${FIRST} vs ${SECOND}`]: { exitCode: 2, stdout: '', stderr: OLD_DIFF_STDERR } })
+
+    const text = await runIc($, `diff ${FIRST} ${SECOND}`)
+
+    expect(text).toContain('does not know --diff')
+    expect(text).toContain('cargo install --git https://github.com/timmattison/tools ic')
+  })
 })
 
 describe('show_image', () => {
