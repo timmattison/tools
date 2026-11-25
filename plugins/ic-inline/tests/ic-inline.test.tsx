@@ -253,7 +253,19 @@ describe('/ic reads its argument', () => {
 
     await runIc($, '~/pics/a.png')
 
-    expect(calls).toEqual([['ic', '--emit-rgba', '720x720', '/home/tim/pics/a.png']])
+    expect(calls).toEqual([['ic', '--emit-rgba', '720x720', '--', '/home/tim/pics/a.png']])
+  })
+
+  test('as a path after --, also from show_image, when the path starts with -', async ($, on) => {
+    const { calls } = stubIc(on, { '-chart.png': printed(FIXTURE_JSON), '--help': printed(FIXTURE_JSON) })
+
+    await runIc($, '-chart.png')
+    await $.tool.call({ tool: TOOL, path: '--help' })
+
+    expect(calls).toEqual([
+      ['ic', '--emit-rgba', '720x720', '--', '-chart.png'],
+      ['ic', '--emit-rgba', '720x720', '--', '--help'],
+    ])
   })
 
   test('as one path, spaces and quotes included', async ($, on) => {
