@@ -571,6 +571,68 @@ fn run_beta_reports_the_stderr_of_a_failed_beta() {
     assert!(text.contains("no-such-file"), "got {text}");
 }
 
+/// The variable that makes the probe test run. It is set only by the outer
+/// test, which runs this test binary again.
+#[cfg(unix)]
+const STDIN_PROBE_VAR: &str = "NLE_STDIN_PROBE";
+
+/// Runs `run_beta` with a `beta` that exits 0 only when its stdin is
+/// `/dev/null`. The stdin of `beta` is the stdin of this process unless the
+/// code changes it, so only the outer test gives a meaningful answer.
+#[cfg(unix)]
+#[test]
+#[ignore = "the outer test runs it in a re-run of this binary, with a pipe as stdin"]
+fn stdin_probe_runs_beta_with_the_stdin_of_this_process() {
+    if std::env::var_os(STDIN_PROBE_VAR).is_none() {
+        return;
+    }
+    let home = home_with_beta_linked_to("/bin/sh");
+    let args = strings(&[
+        "-c",
+        "if [ /dev/fd/0 -ef /dev/null ]; then exit 0; fi; echo 'the stdin of beta is not /dev/null' >&2; exit 1",
+    ]);
+
+    let result = block_on(run_beta(&args, "out.mp4", finder_vars(&home)));
+
+    assert_eq!(result.unwrap(), "out.mp4");
+}
+
+/// `cargo test` can run with `/dev/null` as its stdin, and then a test that
+/// runs `beta` in this process passes without any fix. So this test runs the
+/// probe in a re-run of this binary, with a pipe as its stdin.
+#[cfg(unix)]
+#[test]
+fn run_beta_gives_beta_a_null_stdin_when_the_app_stdin_is_a_pipe() {
+    let (_, module) = module_path!().split_once("::").unwrap();
+    let name = format!("{module}::stdin_probe_runs_beta_with_the_stdin_of_this_process");
+
+    let output = childenv::fixture_command(std::env::current_exe().unwrap())
+        .args([
+            name.as_str(),
+            "--exact",
+            "--ignored",
+            "--color",
+            "never",
+            "--test-threads",
+            "1",
+        ])
+        .env(STDIN_PROBE_VAR, "1")
+        .stdin(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the probe failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("1 passed"),
+        "the probe did not run\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
 #[test]
 fn beta_command_sets_only_a_path_from_the_cargo_home_and_home_vars() {
     let args = vec!["web".to_string(), "in.cast".to_string()];
