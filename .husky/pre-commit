@@ -119,9 +119,9 @@ if [ "${rust_gate_ran:-}" != yes ] &&
     without_git_environment cargo test -p repo-guards --test tool_index_coverage
 fi
 
-# The msgs frontend is the one TypeScript package of this repository, and no
-# Rust gate reads it. A commit that stages a file under it, or under the
-# scripts of msgs, runs its type check and its tests. The install is frozen,
+# The msgs frontend is a TypeScript package, and no Rust gate reads it. A
+# commit that stages a file under it, or under the scripts of msgs, runs its
+# type check and its tests. The install is frozen,
 # so the gate never changes the lockfile, and offline-first, so a warm store
 # needs no network.
 #
