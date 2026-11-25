@@ -889,6 +889,176 @@ mod flag_position_tests {
     }
 }
 
+/// Pins the claim that each list command reads the whole collection when the
+/// user gives `--all`, and refuses `--all` beside a flag that names one page.
+#[cfg(test)]
+mod all_pages_tests {
+    use crate::client::UnifiClient;
+    use crate::test_server::{json_response, Answer, TestServer};
+    use crate::test_support::parse_args_for_test;
+
+    /// The filter the walk must send with each request. It holds only ASCII
+    /// letters, so the query does not percent-encode it.
+    const FILTER: &str = "nameMatches";
+
+    /// The site the argv of each case names, so no site lookup is needed.
+    const SITE: &str = "00000000-0000-0000-0000-0000000000aa";
+
+    /// The API key a test hands the client. Nothing reads it back.
+    const API_KEY: &str = "an-api-key";
+
+    /// One list command: its name, its argv, whether the argv holds the
+    /// filter, and one item of its collection as the API writes it.
+    struct Case {
+        name: &'static str,
+        argv: Vec<&'static str>,
+        filtered: bool,
+        item: &'static str,
+    }
+
+    const SITE_ITEM: &str = r#"{"id":"00000000-0000-0000-0000-000000000004","internalReference":"default","name":"Home"}"#;
+    const DEVICE_ITEM: &str = r#"{"id":"00000000-0000-0000-0000-000000000001","name":"ap-lr","model":"U6-LR","macAddress":"00:11:22:33:44:55","ipAddress":"192.168.1.2","state":"ONLINE","features":[],"interfaces":[]}"#;
+    const CLIENT_ITEM: &str = r#"{"type":"WIRED","id":"00000000-0000-0000-0000-000000000002","name":"nas","ipAddress":"192.168.1.10","macAddress":"00:11:22:33:44:10","uplinkDeviceId":"00000000-0000-0000-0000-000000000003","access":{"type":"DEFAULT"}}"#;
+    const VOUCHER_ITEM: &str = r#"{"id":"00000000-0000-0000-0000-000000000005","createdAt":"2026-07-21T00:00:00Z","name":"lobby","code":"1234567890","authorizedGuestCount":0,"expired":false,"timeLimitMinutes":60}"#;
+
+    /// The four list commands, each with `--all`.
+    fn cases() -> Vec<Case> {
+        vec![
+            Case {
+                name: "sites",
+                argv: vec!["ufa", "sites", "--all", "--filter", FILTER],
+                filtered: true,
+                item: SITE_ITEM,
+            },
+            Case {
+                name: "devices",
+                argv: vec!["ufa", "devices", "--site-id", SITE, "list", "--all"],
+                filtered: false,
+                item: DEVICE_ITEM,
+            },
+            Case {
+                name: "clients",
+                argv: vec![
+                    "ufa",
+                    "clients",
+                    "--site-id",
+                    SITE,
+                    "list",
+                    "--all",
+                    "--filter",
+                    FILTER,
+                ],
+                filtered: true,
+                item: CLIENT_ITEM,
+            },
+            Case {
+                name: "vouchers",
+                argv: vec![
+                    "ufa",
+                    "vouchers",
+                    "--site-id",
+                    SITE,
+                    "list",
+                    "--all",
+                    "--filter",
+                    FILTER,
+                ],
+                filtered: true,
+                item: VOUCHER_ITEM,
+            },
+        ]
+    }
+
+    /// Run one case against a two-page collection of three items.
+    ///
+    /// # Returns
+    ///
+    /// The problem with the run, or `None` when the run was right.
+    async fn problem_with(case: &Case) -> Option<String> {
+        let item = case.item;
+        let first = format!(
+            r#"{{"offset":0,"limit":200,"count":2,"totalCount":3,"data":[{item},{item}]}}"#
+        );
+        let second =
+            format!(r#"{{"offset":2,"limit":200,"count":1,"totalCount":3,"data":[{item}]}}"#);
+        let routes: Vec<(String, Answer)> = vec![
+            ("offset=0".to_string(), json_response(&first).into()),
+            ("offset=2".to_string(), json_response(&second).into()),
+        ];
+        let server = TestServer::routing(&routes, &json_response("{}")).await;
+        let client = UnifiClient::new(server.origin(), API_KEY, false).expect("a loopback URL");
+
+        let args = match parse_args_for_test(&case.argv) {
+            Ok(args) => args,
+            Err(error) => {
+                return Some(format!("`{}` must parse, got {error}", case.argv.join(" ")))
+            }
+        };
+        if let Err(error) = crate::run_controller_command(args.command, &client, args.output).await
+        {
+            return Some(format!("the command failed: {error:#}"));
+        }
+
+        let lines: Vec<String> = server
+            .requests()
+            .iter()
+            .map(|request| request.request_line().to_string())
+            .filter(|line| line.contains("offset="))
+            .collect();
+        let offsets_are_right = matches!(
+            lines.as_slice(),
+            [first, second] if first.contains("offset=0") && second.contains("offset=2")
+        );
+        if !offsets_are_right {
+            return Some(format!(
+                "expected a GET with offset=0, then one with offset=2, got {lines:?}"
+            ));
+        }
+        let wanted = format!("filter={FILTER}");
+        if case.filtered && lines.iter().any(|line| !line.contains(&wanted)) {
+            return Some(format!("each GET must hold {wanted}, got {lines:?}"));
+        }
+        None
+    }
+
+    /// `--all` on each list command walks every page: a GET with offset 0,
+    /// then a GET with the offset where the first page ended, and the filter
+    /// rides on each GET.
+    #[tokio::test]
+    async fn all_reads_every_page_of_each_list_command() {
+        let mut failures = Vec::new();
+        for case in cases() {
+            if let Some(problem) = problem_with(&case).await {
+                failures.push(format!("{}: {problem}", case.name));
+            }
+        }
+        assert!(failures.is_empty(), "failed cases: {failures:#?}");
+    }
+
+    /// `--all` beside `--limit` or `--offset` is a usage error of the kind
+    /// that names two arguments that exclude each other.
+    #[test]
+    fn all_conflicts_with_limit_and_offset_on_each_list_command() {
+        let mut failures = Vec::new();
+        for case in cases() {
+            for extra in [["--limit", "5"], ["--offset", "5"]] {
+                let mut argv = case.argv.clone();
+                argv.extend(extra);
+                match parse_args_for_test(&argv) {
+                    Err(error) if error.kind() == clap::error::ErrorKind::ArgumentConflict => {}
+                    Err(error) => failures.push(format!(
+                        "`{}`: expected ArgumentConflict, got {:?}",
+                        argv.join(" "),
+                        error.kind()
+                    )),
+                    Ok(_) => failures.push(format!("`{}` must not parse", argv.join(" "))),
+                }
+            }
+        }
+        assert!(failures.is_empty(), "failed cases: {failures:#?}");
+    }
+}
+
 /// Pins the claim that a run with certificate verification off says so,
 /// whatever turned it off.
 ///
