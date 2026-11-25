@@ -661,12 +661,15 @@ fn volume_bind_source(spec: &str) -> Option<String> {
 
 /// The source of the `--mount` value `spec` when it is a bind mount, as in
 /// `type=bind,source=/srv,target=/x`. The type is `volume` when the value
-/// does not say. As for docker, the value is one CSV record (see
-/// [`csv_record`]), so a quoted field can hold a comma. A value that docker
-/// refuses gives no source, because no container starts. A key and the value
-/// of `type` are not case-sensitive, and the source keeps its case.
+/// does not say. As for docker, the value without the white space at its two
+/// ends is one CSV record (see [`csv_record`]), so a quoted field can hold a
+/// comma. A value that docker refuses gives no source, because no container
+/// starts. A key and the value of `type` are not case-sensitive, and the
+/// source keeps its case.
 fn mount_bind_source(spec: &str) -> Option<String> {
-    let fields = csv_record(spec)?;
+    // Docker calls strings.TrimSpace first. Go and Rust both remove the
+    // Unicode White_Space characters.
+    let fields = csv_record(spec.trim())?;
     let mut kind = "volume";
     let mut source = None;
     for field in &fields {
