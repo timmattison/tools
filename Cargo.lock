@@ -9502,6 +9502,9 @@ dependencies = [
  "clap",
  "colored",
  "op-cache",
+ "serde_json",
+ "shellquote",
+ "tempfile",
  "which",
 ]
 
