@@ -1056,6 +1056,56 @@ mod tests {
     }
 
     #[test]
+    fn a_mount_value_is_one_csv_record_as_docker_reads_it() {
+        // Each expected source is what Go encoding/csv reads, as the docker CLI
+        // reads a --mount value in opts/mount.go.
+        let cases: [(&str, Option<&str>); 16] = [
+            ("type=bind,\"source=/tmp/a,b\",target=/x", Some("/tmp/a,b")),
+            (
+                "\"type=bind\",src=/quoted-type,dst=/q",
+                Some("/quoted-type"),
+            ),
+            (
+                "type=bind,\"src=/say \"\"hi\"\"\",dst=/h",
+                Some("/say \"hi\""),
+            ),
+            ("type=bind,\"src=/quoted-end\"", Some("/quoted-end")),
+            (
+                "type=bind,src=/first-line\nsrc=/second-line,dst=/n",
+                Some("/first-line"),
+            ),
+            (
+                "type=bind,\"src=/quoted-nl\"\nsrc=/ignored",
+                Some("/quoted-nl"),
+            ),
+            ("type=bind,\"src=/two\nlines\",dst=/t", Some("/two\nlines")),
+            (
+                "type=bind,\"src=/crlf\r\nlines\",dst=/t",
+                Some("/crlf\nlines"),
+            ),
+            (
+                "\n\ntype=bind,src=/after-blank,dst=/b",
+                Some("/after-blank"),
+            ),
+            (
+                "\r\ntype=bind,src=/after-crlf-blank,dst=/b",
+                Some("/after-crlf-blank"),
+            ),
+            ("type=bind,dst=/r,src=/trailing-cr\r", Some("/trailing-cr")),
+            ("type=bind,dst=/r,src=/mid\rcr", Some("/mid\rcr")),
+            ("type=bind,src=/bare\"quote,dst=/b", None),
+            ("type=bind,src=/x\"", None),
+            ("\"type=bind,src=/unclosed,dst=/u", None),
+            ("\"type=bind\"x,src=/after-quote,dst=/a", None),
+        ];
+        for (value, expected) in cases {
+            let parsed = run(&["--mount", value, "alpine"]).unwrap();
+            let expected: Vec<String> = expected.into_iter().map(str::to_owned).collect();
+            assert_eq!(parsed.bind_sources, expected, "--mount {value:?}");
+        }
+    }
+
+    #[test]
     fn a_double_dash_ends_the_flags() {
         assert!(run(&["-d", "--", "alpine"]).unwrap().detach);
         assert_eq!(
