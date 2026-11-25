@@ -661,12 +661,15 @@ fn volume_bind_source(spec: &str) -> Option<String> {
 
 /// The source of the `--mount` value `spec` when it is a bind mount, as in
 /// `type=bind,source=/srv,target=/x`. The type is `volume` when the value
-/// does not say. As for docker, a key and the value of `type` are not
-/// case-sensitive, and the source keeps its case.
+/// does not say. As for docker, the value is one CSV record (see
+/// [`csv_record`]), so a quoted field can hold a comma. A value that docker
+/// refuses gives no source, because no container starts. A key and the value
+/// of `type` are not case-sensitive, and the source keeps its case.
 fn mount_bind_source(spec: &str) -> Option<String> {
+    let fields = csv_record(spec)?;
     let mut kind = "volume";
     let mut source = None;
-    for field in spec.split(',') {
+    for field in &fields {
         let Some((key, value)) = field.split_once('=') else {
             continue;
         };
@@ -680,6 +683,55 @@ fn mount_bind_source(spec: &str) -> Option<String> {
         source.map(str::to_owned)
     } else {
         None
+    }
+}
+
+/// The fields of the first CSV record in `text`.
+///
+/// Go `encoding/csv` with its default settings reads a record in the same
+/// way, and the docker CLI reads a `--mount` value with it (`opts/mount.go`).
+/// A field that starts with a quote ends at the next lone quote, and `""` in
+/// it is one quote. A line break ends the record, and the rest of the text is
+/// not read. The function gives `None` where Go gives an error: no record, a
+/// quote inside a field that does not start with a quote, a quoted field with
+/// no closing quote, or a closing quote that a character other than a comma or
+/// a line break follows.
+fn csv_record(text: &str) -> Option<Vec<String>> {
+    let text = text
+        .strip_suffix('\r')
+        .unwrap_or(text)
+        .replace("\r\n", "\n");
+    let mut chars = text.trim_start_matches('\n').chars().peekable();
+    chars.peek()?;
+    let mut fields = Vec::new();
+    loop {
+        let mut field = String::new();
+        if chars.next_if_eq(&'"').is_some() {
+            loop {
+                match chars.next()? {
+                    '"' => match chars.peek() {
+                        Some('"') => {
+                            field.push('"');
+                            chars.next();
+                        }
+                        Some(',' | '\n') | None => break,
+                        Some(_) => return None,
+                    },
+                    other => field.push(other),
+                }
+            }
+        } else {
+            while let Some(c) = chars.next_if(|c| *c != ',' && *c != '\n') {
+                if c == '"' {
+                    return None;
+                }
+                field.push(c);
+            }
+        }
+        fields.push(field);
+        if chars.next() != Some(',') {
+            return Some(fields);
+        }
     }
 }
 
