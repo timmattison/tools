@@ -49,7 +49,7 @@ set -euo pipefail
 # --name-only then prints only the new path of a move. --no-renames shows a
 # move as a deletion of the old path and an addition of the new path, so a
 # block that matches the old path sees a move out of it. The index block, the
-# plugin block and the ic-inline block below read this list.
+# msgs block, the plugin block and the ic-inline block below read this list.
 staged_paths_with_deletions() {
     git diff --cached --name-only --no-renames
 }
@@ -124,7 +124,11 @@ fi
 # scripts of msgs, runs its type check and its tests. The install is frozen,
 # so the gate never changes the lockfile, and offline-first, so a warm store
 # needs no network.
-if git diff --cached --name-only --diff-filter=ACMRD | grep -qE '^src/msgs/(frontend|scripts)/'; then
+#
+# The block reads staged_paths_with_deletions, as the index gate above does: a
+# move of a file out of the frontend, a deletion, or a link in its place breaks
+# each import of that file as surely as an edit can.
+if staged_paths_with_deletions | grep -qE '^src/msgs/(frontend|scripts)/'; then
     msgs_frontend="$(dirname "$0")/../src/msgs/frontend"
     echo "pre-commit: running the msgs frontend checks (tsc --noEmit, vitest run)"
     without_git_environment pnpm --dir "$msgs_frontend" install --frozen-lockfile --prefer-offline
