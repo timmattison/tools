@@ -18,6 +18,7 @@ import { halfBlockCells } from '../hooks/cells'
 const PLUGIN = 'ic-inline'
 const COMMAND = 'ic'
 const TOOL = 'mcp__ic-inline__show_image'
+const DIFF_TOOL = 'mcp__ic-inline__show_diff'
 
 /** The path that the fixture answers to. */
 const FIXTURE_PATH = 'fixture.png'
@@ -183,14 +184,29 @@ function cellsOf(base64: string): number[][] {
   return cells
 }
 
-/** Record the `tool_use_id` of every picture that show_image keeps. */
-function recordShown(on: On): string[] {
+/**
+ * Record the `tool_use_id` of every picture that a tool keeps under `key`:
+ * `shown` for show_image, `diffed` for show_diff.
+ */
+function recordShown(on: On, key: 'shown' | 'diffed' = 'shown'): string[] {
   const ids: string[] = []
-  on('state.set', { plugin: PLUGIN, key: 'shown' }, ($, e, next) => {
+  on('state.set', { plugin: PLUGIN, key }, ($, e, next) => {
     if (e.id !== undefined) ids.push(e.id)
     return next(e)
   })
   return ids
+}
+
+/** The props of the result row of the call `id` of `tool`, which gave `output`. */
+function resultRow(tool: string, id: string, output: unknown) {
+  return {
+    plugin: PLUGIN,
+    surface: 'terminal' as const,
+    component: 'ToolResult' as const,
+    requestId: id,
+    props: { tool_use_id: id, tool, output, isErrored: false },
+    viewport: WIDE,
+  }
 }
 
 describe('/ic draws', () => {
@@ -609,6 +625,109 @@ describe('show_image', () => {
   })
 })
 
+describe('show_diff', () => {
+  test('gives ic --diff, the box, and the two paths after --, with no mode', async ($, on) => {
+    const { calls } = stubDiff(on)
+
+    await $.tool.call({ tool: DIFF_TOOL, first: FIRST, second: SECOND })
+
+    expect(calls).toEqual([['ic', '--diff', '--emit-rgba', '720x720', '--', FIRST, SECOND]])
+  })
+
+  for (const mode of DIFF_MODES) {
+    test(`gives ic --diff-mode ${mode} for the mode ${mode}`, async ($, on) => {
+      const { calls } = stubDiff(on)
+
+      await $.tool.call({ tool: DIFF_TOOL, first: FIRST, second: SECOND, mode })
+
+      expect(calls).toEqual([['ic', '--diff', '--diff-mode', mode, '--emit-rgba', '720x720', '--', FIRST, SECOND]])
+    })
+  }
+
+  test('reads ~ and a path that starts with - as show_image does', async ($, on) => {
+    mock.env(on, { HOME: '/home/tim' })
+    const { calls } = stubIc(on, { '/home/tim/before.png vs --help': printed(FIXTURE_JSON) })
+
+    await $.tool.call({ tool: DIFF_TOOL, first: '~/before.png', second: '--help' })
+
+    expect(calls.map(argv => argv.slice(-3))).toEqual([['--', '/home/tim/before.png', '--help']])
+  })
+
+  test('shows the differences in the result row of the call', async ($, on) => {
+    stubDiff(on)
+    const ids = recordShown(on, 'diffed')
+
+    const called = await $.tool.call({ tool: DIFF_TOOL, first: FIRST, second: SECOND, mode: 'mask' })
+    expect(called.deny).toBeUndefined()
+    expect(String(called.result)).toContain(`Showed the differences between ${FIRST} and ${SECOND} to the user`)
+    expect(String(called.result)).toContain('4×4')
+
+    const id = ids[0] ?? ''
+    expect(id).not.toBe('')
+    const ui = await $.ui.mount(resultRow(DIFF_TOOL, id, called.result))
+    expect(await ui.find({ type: 'Raster' })).toBeDefined()
+    expect((await ui.find({ type: 'Text', text: /before\.png vs after\.png/ }))?.text).toContain('4×4')
+  })
+
+  test('draws the result row in the mode of the call, from the decode of the call', async ($, on) => {
+    const { calls } = stubDiff(on)
+    const ids = recordShown(on, 'diffed')
+
+    const called = await $.tool.call({ tool: DIFF_TOOL, first: FIRST, second: SECOND, mode: 'highlight' })
+    const ui = await $.ui.mount(resultRow(DIFF_TOOL, ids[0] ?? '', called.result))
+
+    // A row that lost the mode would ask for a decode of another argument vector, and run ic again.
+    expect(await ui.find({ type: 'Raster' })).toBeDefined()
+    expect(calls).toEqual([['ic', '--diff', '--diff-mode', 'highlight', '--emit-rgba', '720x720', '--', FIRST, SECOND]])
+  })
+
+  for (const { cause, input } of [
+    { cause: 'no second path', input: { first: FIRST } },
+    { cause: 'a path that is not text', input: { first: FIRST, second: 7 } },
+    { cause: 'an empty path', input: { first: '  ', second: SECOND } },
+  ]) {
+    test(`refuses ${cause}, and runs no ic`, async ($, on) => {
+      const { calls } = stubDiff(on)
+
+      const called = await $.tool.call({ tool: DIFF_TOOL, ...input })
+
+      expect(called.deny).toContain('show_diff needs two paths: first and second')
+      expect(calls).toHaveLength(0)
+    })
+  }
+
+  for (const { cause, mode, got } of [
+    { cause: 'a mode that ic does not have', mode: 'red', got: 'red' },
+    { cause: 'a mode that is not text', mode: 3, got: '3' },
+  ]) {
+    test(`refuses ${cause}, with the modes, and runs no ic`, async ($, on) => {
+      const { calls } = stubDiff(on)
+
+      const called = await $.tool.call({ tool: DIFF_TOOL, first: FIRST, second: SECOND, mode })
+
+      expect(called.deny).toContain(`show_diff takes a mode of boxes, highlight or mask, and it got ${got}`)
+      expect(calls).toHaveLength(0)
+    })
+  }
+
+  test('refuses a file that ic cannot read, with the reason', async ($, on) => {
+    stubDiff(on)
+
+    const called = await $.tool.call({ tool: DIFF_TOOL, first: FIRST, second: 'missing.png' })
+
+    expect(called.deny).toContain(`Could not compare ${FIRST} and missing.png`)
+    expect(called.deny).toContain('File not found')
+  })
+
+  test('leaves the result row of another call to the engine', async ($, on) => {
+    stubDiff(on)
+
+    const ui = await $.ui.mount(resultRow(DIFF_TOOL, 'toolu_unknown', 'Showed'))
+
+    expect(await ui.find({ type: 'Text', text: ENGINE_ROW })).toBeDefined()
+  })
+})
+
 describe('pixels', () => {
   test('draw as an Image once the terminal takes one', async ($, on) => {
     const clock = mock.clock(on)
@@ -682,7 +801,7 @@ describe('pixels', () => {
 })
 
 describe('the session', () => {
-  test('registers /ic and show_image', async ($, on) => {
+  test('registers /ic, show_image and show_diff', async ($, on) => {
     const commands: string[] = []
     const tools: string[] = []
     on('command.register', ($, e) => {
@@ -698,7 +817,7 @@ describe('the session', () => {
     await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
 
     expect(commands).toEqual([COMMAND])
-    expect(tools).toEqual(['show_image'])
+    expect(tools).toEqual(['show_image', 'show_diff'])
   })
 })
 
