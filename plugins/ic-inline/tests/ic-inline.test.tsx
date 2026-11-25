@@ -1,6 +1,7 @@
-// The behavior of ic-inline, through the engine alone: the /ic command, the
+// The behavior of ic-inline, through the engine: the /ic command, the
 // show_image tool, the rows they draw, and the probe that decides between
-// pixels and half blocks.
+// pixels and half blocks. One block calls the pure half-block arithmetic of
+// hooks/cells.ts directly.
 //
 // The test kit runs no process, so every test answers `process.run` the way
 // `ic --emit-rgba` answers. FIXTURE_JSON is a copy of the output of that flag
@@ -11,6 +12,8 @@
 import type { On, RenderSurface, RenderViewport } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 import { describe, expect, mock, test } from 'claude-code/testing'
+
+import { halfBlockCells } from '../hooks/cells'
 
 const PLUGIN = 'ic-inline'
 const COMMAND = 'ic'
@@ -36,8 +39,13 @@ const OLD_IC_STDERR =
 
 const UPPER_HALF = 0x2580
 const LOWER_HALF = 0x2584
+const SPACE = 0x20
 const RED = 0xff0000
 const BLUE = 0x0000ff
+/** The mean of the four opaque pixels (200, 0, 0), (0, 200, 0), (0, 0, 200) and (100, 100, 100): 300 / 4 = 75 in each channel. */
+const MEAN_GRAY = 0x4b4b4b
+/** The color of a pixel [0, 255, 0, 255], full green. */
+const GREEN = 0x00ff00
 const TERMINAL_DEFAULT = 0x01000000
 
 /** A transcript wide enough for every picture of these tests. */
@@ -511,3 +519,34 @@ describe('the session', () => {
   })
 })
 
+/**
+ * The bytes of a picture from a table of rows. Each row is a list of pixels,
+ * and each pixel is `[red, green, blue, alpha]`.
+ */
+function rgbaOf(rows: number[][][]): Uint8Array {
+  return Uint8Array.from(rows.flat(2))
+}
+
+describe('half blocks', () => {
+  test('take the mean of the pixels that each half covers, weighted by alpha, and a space where both halves are transparent', () => {
+    const opaqueRed = [255, 0, 0, 255]
+    const clearBlue = [0, 0, 255, 0]
+    const clear = [0, 0, 0, 0]
+    const clearWhite = [255, 255, 255, 0]
+    const green = [0, 255, 0, 255]
+    const pixels = rgbaOf([
+      [opaqueRed, opaqueRed, [200, 0, 0, 255], [0, 200, 0, 255], clearWhite, clearWhite],
+      [opaqueRed, clearBlue, [0, 0, 200, 255], [100, 100, 100, 255], clearWhite, clearWhite],
+      [clear, clear, green, green, clearWhite, clearWhite],
+      [clear, clear, green, green, clearWhite, clearWhite],
+    ])
+
+    const cells = cellsOf(halfBlockCells(pixels, { width: 6, height: 4 }, { columns: 3, rows: 1 }))
+
+    expect(cells).toEqual([
+      [UPPER_HALF, RED, TERMINAL_DEFAULT],
+      [UPPER_HALF, MEAN_GRAY, GREEN],
+      [SPACE, TERMINAL_DEFAULT, TERMINAL_DEFAULT],
+    ])
+  })
+})
