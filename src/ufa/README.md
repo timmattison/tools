@@ -219,8 +219,8 @@ Caused by:
 
 ### What a listing shows
 
-Every list command answers with one page of a collection: 25 items, unless
-`--limit` says otherwise. `--all` reads every page and shows the whole
+Without `--all`, a list command answers with one page of a collection: 25
+items (100 for `vouchers list`), unless `--limit` says otherwise. `--all` reads every page and shows the whole
 collection, with no note. `--all` does not take `--limit` or `--offset`, and it
 does take `--filter`. A page that holds less than the whole collection says
 so, under the table:
