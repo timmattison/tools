@@ -123,8 +123,7 @@ fn pixel_at(image: &RgbaImage, x: u32, y: u32) -> Rgba<u8> {
 /// * `canvas_width` - The width of the canvas, in pixels.
 /// * `canvas_height` - The height of the canvas, in pixels.
 pub fn line_thickness(canvas_width: u32, canvas_height: u32) -> u32 {
-    let _ = (canvas_width, canvas_height);
-    1
+    canvas_width.max(canvas_height).div_ceil(400).max(2)
 }
 
 #[cfg(test)]
