@@ -26,7 +26,7 @@ uuid = { workspace = true, features = ["serde"] }
 # Crate-local: the workspace does not define these.
 dotenvy = "0.15"
 mdns-sd = "0.11"
-tabled = "0.20.0"
+tabled = "0.22.0"
 
 # Crate-local deliberately: the workspace's reqwest keeps default features
 # (native-tls). ufa talks to controllers over rustls only, and
