@@ -516,10 +516,10 @@ fn emit_rgba_prints_the_json_that_the_plugin_tests_hold() {
     );
 }
 
-/// The options of a display state cells, a scale or the cursor, the options of
-/// a video state how it plays, and the flag puts nothing on the terminal. Each
-/// of them with the flag is a mistake that `ic` reports, where a run that
-/// dropped one would print a picture the user did not ask for.
+/// The options of a display state cells, a scale, the cursor or the protocol,
+/// the options of a video state how it plays, and the flag puts nothing on the
+/// terminal. Each of them with the flag is a mistake that `ic` reports, where a
+/// run that dropped one would print a picture the user did not ask for.
 #[test]
 fn emit_rgba_refuses_the_options_of_a_display() {
     let scratch = Scratch::new("display");
@@ -537,6 +537,7 @@ fn emit_rgba_refuses_the_options_of_a_display() {
         &["--memory-cleanup-frequency", "10"],
         &["--max-fps", "10"],
         &["--adaptive-fps"],
+        &["--protocol", "kitty"],
     ] {
         let outcome = run(ic(TERM_XTERM_256COLOR)
             .arg(FLAG)
@@ -556,6 +557,24 @@ fn emit_rgba_refuses_the_options_of_a_display() {
             outcome.stderr
         );
     }
+}
+
+/// `IC_PROTOCOL` holds the protocol for a whole shell session, and the README
+/// tells a user to export it. A program that runs the flag in such a shell
+/// states no protocol, thus the flag ignores the variable where it refuses
+/// `--protocol`.
+#[test]
+fn emit_rgba_ignores_the_protocol_of_the_session() {
+    let scratch = Scratch::new("session-protocol");
+    let path = scratch.png("session.png", &pattern(2, 2));
+
+    let outcome = run(ic(TERM_XTERM_256COLOR)
+        .env("IC_PROTOCOL", "kitty")
+        .arg(FLAG)
+        .arg("8x8")
+        .arg(&path));
+
+    assert_eq!(emitted(&outcome).width, 2);
 }
 
 /// `--monitor` shows each new file on the terminal, and the flag shows
