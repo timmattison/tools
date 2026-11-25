@@ -229,6 +229,7 @@ struct Args {
             "memory_cleanup_frequency",
             "max_fps",
             "adaptive_fps",
+            "protocol",
         ]
     )]
     emit_rgba: Option<PixelBox>,

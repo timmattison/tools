@@ -134,7 +134,7 @@ The flag decodes the picture, fits it inside the box of `WIDTHxHEIGHT` pixels, a
 
 Each side of the box takes 1 to 4096 pixels. A picture that fits the box keeps its size, because a larger copy holds no detail that the file did not hold.
 
-`--emit-rgba` reads no terminal and writes nothing to the terminal, thus a terminal that draws no image, tmux, and mosh do not change the result. Do not combine it with a display option (`--width`, `--height`, `--scale`, `--no-newline`, or a video option), with `--monitor`, or with `--will-display`. It takes one file or `--stdin`. A video gives an error, because the flag prints one picture.
+`--emit-rgba` reads no terminal and writes nothing to the terminal, thus a terminal that draws no image, tmux, and mosh do not change the result. Do not combine it with a display option (`--width`, `--height`, `--scale`, `--no-newline`, `--protocol`, or a video option), with `--monitor`, or with `--will-display`. The flag ignores `IC_PROTOCOL`, because it draws no picture. It takes one file or `--stdin`. A video gives an error, because the flag prints one picture.
 
 ## Command Line Options
 
