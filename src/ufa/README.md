@@ -222,7 +222,9 @@ Caused by:
 Without `--all`, a list command answers with one page of a collection: 25
 items (100 for `vouchers list`), unless `--limit` says otherwise. `--all`
 reads every page and shows the whole collection, with no note. `--all` does
-not take `--limit` or `--offset`, and it does take `--filter`. A page that
+not take `--limit` or `--offset`. It takes `--filter` on each list command
+that has one: `sites`, `clients list` and `vouchers list`. `devices list`
+has no `--filter`, because the API filters no device listing. A page that
 holds less than the whole collection says so, under the table:
 
 ```
