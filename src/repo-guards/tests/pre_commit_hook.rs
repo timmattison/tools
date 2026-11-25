@@ -462,12 +462,7 @@ const MARKETPLACE_FILE: &str = ".claude-plugin/marketplace.json";
 /// Write one plugin and the marketplace file into `dir`. The fake `claude`
 /// reads neither, so their text does not matter.
 fn write_fixture_plugin(dir: &Path) {
-    for file in [FIXTURE_PLUGIN_FILE, MARKETPLACE_FILE] {
-        let path = dir.join(file);
-        fs::create_dir_all(path.parent().expect("a fixture file has a parent"))
-            .unwrap_or_else(|e| panic!("create the directory of {file}: {e}"));
-        fs::write(&path, "{}\n").unwrap_or_else(|e| panic!("write {file}: {e}"));
-    }
+    write_files(dir, &[FIXTURE_PLUGIN_FILE, MARKETPLACE_FILE]);
 }
 
 /// The `claude` calls of the plugin block for the one fixture plugin, in order.
@@ -602,5 +597,103 @@ fn failed_plugin_test_fails_the_commit() {
     assert!(
         !passed,
         "a failed claude plugin test must fail the commit: {output}"
+    );
+}
+
+/// The two files of `plugins/ic-inline` that the test
+/// `emit_rgba_prints_the_json_that_the_plugin_tests_hold` of `ic` reads.
+const IC_INLINE_FILES: [&str; 2] = [
+    "plugins/ic-inline/tests/fixture.png",
+    "plugins/ic-inline/tests/ic-inline.test.tsx",
+];
+
+/// The cargo call that holds the copy of the output of `ic` in the plugin
+/// tests to the real output.
+const IC_INLINE_CARGO_CALL: &str = "test -p ic --test emit-rgba";
+
+/// Write each of `files` into `dir`. The fake programs read none of them, so
+/// their text does not matter.
+fn write_files(dir: &Path, files: &[&str]) {
+    for file in files {
+        let path = dir.join(file);
+        fs::create_dir_all(path.parent().expect("a fixture file has a parent"))
+            .unwrap_or_else(|e| panic!("create the directory of {file}: {e}"));
+        fs::write(&path, "{}\n").unwrap_or_else(|e| panic!("write {file}: {e}"));
+    }
+}
+
+/// Run the real hook in `dir` with a fake `cargo` and a fake `claude`, under
+/// the planted `GIT_` variables. Gives back the run and the calls of the fake
+/// `cargo`.
+fn run_hook_with_fake_cargo_and_claude(dir: &Path) -> (HookRun, RecordedCalls) {
+    let cargo = install_fake_cargo(dir);
+    install_fake_program(dir, "claude", None);
+    let run = run_hook_with_planted_git_variables(dir, &cargo);
+    let calls = read_recording(&cargo);
+    (run, calls)
+}
+
+/// A staged file of `plugins/ic-inline` alone must run the test target of `ic`
+/// that reads the plugin, with no `GIT_` variable. The sandbox of
+/// `claude plugin test` runs no process, so the plugin block cannot see that
+/// the copy of the output of `ic` is stale. Without this block, a stale copy
+/// passes the commit and fails the next commit that stages a Rust file.
+#[test]
+fn staged_ic_inline_file_alone_runs_the_emit_rgba_tests() {
+    for staged in IC_INLINE_FILES {
+        let dir = unique_fixture_dir();
+        write_files(&dir, &[staged]);
+        git_init_and_stage(&dir, &[staged]);
+
+        let (HookRun { passed, output }, calls) = run_hook_with_fake_cargo_and_claude(&dir);
+        cleanup(&dir);
+
+        assert!(
+            passed,
+            "the hook must pass with a fake cargo ({staged}): {output}"
+        );
+        assert_eq!(
+            calls.arguments,
+            [IC_INLINE_CARGO_CALL],
+            "staging {staged} must run the emit-rgba tests of ic: {output}"
+        );
+        assert!(
+            calls.git_lines.is_empty(),
+            "a cargo command saw GIT_ variables ({staged}): {:?}",
+            calls.git_lines
+        );
+    }
+}
+
+/// A commit that stages a Rust file and a file of `plugins/ic-inline` runs the
+/// workspace tests, which hold the emit-rgba tests of `ic`. The block of the
+/// plugin must then not run that target a second time.
+#[test]
+fn staged_ic_inline_file_with_rust_runs_the_emit_rgba_tests_once() {
+    let staged = IC_INLINE_FILES[0];
+    let dir = unique_fixture_dir();
+    write_fixture_package(&dir);
+    write_files(&dir, &[staged]);
+    git_init_and_stage(&dir, &["src/main.rs", staged]);
+
+    let (HookRun { passed, output }, calls) = run_hook_with_fake_cargo_and_claude(&dir);
+    cleanup(&dir);
+
+    assert!(passed, "the hook must pass with a fake cargo: {output}");
+    assert!(
+        calls
+            .arguments
+            .iter()
+            .any(|args| args == "test --workspace"),
+        "a staged Rust file must run the workspace tests: {:?}",
+        calls.arguments
+    );
+    assert!(
+        !calls
+            .arguments
+            .iter()
+            .any(|args| args == IC_INLINE_CARGO_CALL),
+        "the workspace tests hold the emit-rgba tests, so they must not run again: {:?}",
+        calls.arguments
     );
 }
