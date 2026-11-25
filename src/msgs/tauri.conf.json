@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "msgs",
+  "version": "0.1.0",
+  "identifier": "com.timmattison.msgs",
+  "build": {
+    "frontendDist": "../../target/msgs-frontend",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "cd src/msgs/frontend && pnpm exec vite --port 1420 --strictPort",
+    "beforeBuildCommand": "cd src/msgs/frontend && pnpm build"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "msgs — iMessage Browser",
+        "width": 1100,
+        "height": 700,
+        "minWidth": 800,
+        "minHeight": 500
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'"
+    }
+  }
+}

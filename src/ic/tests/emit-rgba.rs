@@ -25,23 +25,22 @@
 //!
 //! Every run starts from a cleared environment and a `PATH` that reaches
 //! nothing, as the other targets of `ic` do. Each test writes its pictures
-//! into a directory of its own, named for the test, the process and a
-//! nanosecond stamp, so two concurrent runs of this file never share a file.
+//! into a directory of its own, named for the test, the process, a nanosecond
+//! stamp and a count of the directories of the process, so two tests or two
+//! concurrent runs of this file never share a file.
 
 use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{self, Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
+use std::process::Command;
 
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine as _;
-use image::{Rgba, RgbaImage};
-use serde_json::Value;
+use image::Rgba;
 
 mod common;
 
-use common::pty::{run_with_terminal, take_the_terminal_away, Window};
+use common::emit::{
+    emitted, pattern, rgba_len, run, run_with_input, Run, Scratch, BYTES_PER_PIXEL,
+};
+use common::pty::{run_with_terminal, Window};
 use common::{unreachable_path_dir, TERM_XTERM_256COLOR, TEST_IMAGE};
 
 /// The name that this target puts in the unreachable `PATH` of its children.
@@ -53,9 +52,6 @@ const FLAG: &str = "--emit-rgba";
 /// The value name that every refusal of a box must show, so the user sees the
 /// shape that the flag takes.
 const BOX_SHAPE: &str = "WIDTHxHEIGHT";
-
-/// The number of bytes that one RGBA pixel takes.
-const BYTES_PER_PIXEL: usize = 4;
 
 /// The exit status of a run that clap refused before `ic` read anything.
 const USAGE_ERROR: Option<i32> = Some(2);
@@ -79,79 +75,6 @@ const PLUGIN_FIXTURE: &str = "../../plugins/ic-inline/tests/fixture.png";
 /// the output of `ic` for [`PLUGIN_FIXTURE`].
 const PLUGIN_TEST: &str = "../../plugins/ic-inline/tests/ic-inline.test.tsx";
 
-/// A directory of pictures that belongs to one test, removed when it drops.
-struct Scratch {
-    /// The directory itself.
-    dir: PathBuf,
-}
-
-impl Scratch {
-    /// Make an empty directory for the test called `test`.
-    ///
-    /// # Panics
-    /// Panics when the clock is before the epoch or the directory does not
-    /// make.
-    fn new(test: &str) -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("the clock must be after the epoch")
-            .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("ic-{TARGET_NAME}-{test}-{}-{nanos}", process::id()));
-        fs::create_dir_all(&dir).expect("the scratch directory must make");
-        Scratch { dir }
-    }
-
-    /// The path of `name` inside the directory.
-    fn path(&self, name: &str) -> PathBuf {
-        self.dir.join(name)
-    }
-
-    /// Write `picture` as a PNG called `name`, and give its path.
-    ///
-    /// # Panics
-    /// Panics when the PNG does not write.
-    fn png(&self, name: &str, picture: &RgbaImage) -> PathBuf {
-        let path = self.path(name);
-        picture.save(&path).expect("the PNG must write");
-        path
-    }
-
-    /// Write `bytes` as a file called `name`, and give its path.
-    ///
-    /// # Panics
-    /// Panics when the file does not write.
-    fn file(&self, name: &str, bytes: &[u8]) -> PathBuf {
-        let path = self.path(name);
-        fs::write(&path, bytes).expect("the file must write");
-        path
-    }
-}
-
-impl Drop for Scratch {
-    /// Remove the directory and everything in it.
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
-    }
-}
-
-/// A picture of `width` by `height` pixels in which no two neighbors match,
-/// so a resize that moved a pixel shows in the bytes.
-///
-/// # Panics
-/// Panics never: each channel is reduced modulo 256 before it narrows.
-fn pattern(width: u32, height: u32) -> RgbaImage {
-    let channel = |value: u32| u8::try_from(value % 256).expect("a value modulo 256 fits a byte");
-    RgbaImage::from_fn(width, height, |x, y| {
-        Rgba([
-            channel(x * 37 + 11),
-            channel(y * 53 + 7),
-            channel(x * y + 101),
-            255,
-        ])
-    })
-}
-
 /// Invoke the freshly-built `ic` binary in a known-empty environment.
 fn ic(term: &str) -> Command {
     let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_ic"));
@@ -161,107 +84,16 @@ fn ic(term: &str) -> Command {
     command
 }
 
-/// What one run with no terminal did.
-struct Run {
-    /// The exit status of the run, as a number.
-    code: Option<i32>,
-    /// Every byte that the run wrote to standard output.
-    stdout: String,
-    /// Every byte that the run wrote to standard error.
-    stderr: String,
-}
-
-/// Run `command` with no terminal at all, and with `stdin` on its standard
-/// input.
-///
-/// # Panics
-/// Panics when `ic` does not start, or when the input does not reach it.
-fn run_with_input(command: &mut Command, stdin: &[u8]) -> Run {
-    take_the_terminal_away(command);
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().expect("ic must run");
-    child
-        .stdin
-        .take()
-        .expect("the run must hold a pipe for stdin")
-        .write_all(stdin)
-        .expect("the input must reach ic");
-    let done = child.wait_with_output().expect("ic must exit");
-
-    Run {
-        code: done.status.code(),
-        stdout: String::from_utf8_lossy(&done.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&done.stderr).into_owned(),
-    }
-}
-
-/// Run `command` with no terminal and an empty standard input.
-fn run(command: &mut Command) -> Run {
-    run_with_input(command, &[])
-}
-
 /// Run the flag over the picture at `path`, inside `pixel_box`.
 fn emit(path: &Path, pixel_box: &str) -> Run {
     run(ic(TERM_XTERM_256COLOR).arg(FLAG).arg(pixel_box).arg(path))
-}
-
-/// The picture that one run printed.
-#[derive(Debug, PartialEq, Eq)]
-struct Emitted {
-    /// The width of the printed picture, in pixels.
-    width: u64,
-    /// The height of the printed picture, in pixels.
-    height: u64,
-    /// The width of the picture in the file, in pixels.
-    source_width: u64,
-    /// The height of the picture in the file, in pixels.
-    source_height: u64,
-    /// The pixels, four bytes each, row by row.
-    rgba: Vec<u8>,
-}
-
-/// Read the JSON that a successful run printed.
-///
-/// # Panics
-/// Panics when the run failed, when the output is not one JSON object, or when
-/// a field is absent or of the wrong type. Each panic names the output.
-fn emitted(run: &Run) -> Emitted {
-    assert_eq!(run.code, Some(0), "the run must succeed: {}", run.stderr);
-    let value: Value = serde_json::from_str(run.stdout.trim_end())
-        .unwrap_or_else(|error| panic!("stdout must be one JSON object ({error}): {}", run.stdout));
-    let number = |field: &str| {
-        value[field]
-            .as_u64()
-            .unwrap_or_else(|| panic!("`{field}` must be a whole number: {value}"))
-    };
-    let rgba = value["rgba"]
-        .as_str()
-        .unwrap_or_else(|| panic!("`rgba` must be a string: {value}"));
-
-    Emitted {
-        width: number("width"),
-        height: number("height"),
-        source_width: number("source_width"),
-        source_height: number("source_height"),
-        rgba: STANDARD
-            .decode(rgba)
-            .unwrap_or_else(|error| panic!("`rgba` must be standard base64: {error}")),
-    }
-}
-
-/// The number of bytes that a picture of `width` by `height` pixels takes.
-fn rgba_len(width: u64, height: u64) -> usize {
-    usize::try_from(width * height).expect("a test picture is small") * BYTES_PER_PIXEL
 }
 
 /// A picture wider than the box takes the width of the box, and its height
 /// keeps the shape of the picture.
 #[test]
 fn emit_rgba_fits_a_wide_picture_inside_the_box() {
-    let scratch = Scratch::new("wide");
+    let scratch = Scratch::new(TARGET_NAME, "wide");
     let path = scratch.png("wide.png", &pattern(40, 20));
 
     let picture = emitted(&emit(&path, "10x10"));
@@ -275,7 +107,7 @@ fn emit_rgba_fits_a_wide_picture_inside_the_box() {
 /// keeps the shape of the picture.
 #[test]
 fn emit_rgba_fits_a_tall_picture_inside_the_box() {
-    let scratch = Scratch::new("tall");
+    let scratch = Scratch::new(TARGET_NAME, "tall");
     let path = scratch.png("tall.png", &pattern(20, 40));
 
     let picture = emitted(&emit(&path, "10x10"));
@@ -291,7 +123,7 @@ fn emit_rgba_fits_a_tall_picture_inside_the_box() {
 /// draws it scales it itself.
 #[test]
 fn emit_rgba_gives_a_picture_that_fits_pixel_for_pixel() {
-    let scratch = Scratch::new("fits");
+    let scratch = Scratch::new(TARGET_NAME, "fits");
     let mut source = pattern(4, 3);
     source.put_pixel(2, 1, Rgba([9, 8, 7, 0]));
     let path = scratch.png("small.png", &source);
@@ -306,7 +138,7 @@ fn emit_rgba_gives_a_picture_that_fits_pixel_for_pixel() {
 /// a picture of no pixels is no picture.
 #[test]
 fn emit_rgba_keeps_one_pixel_of_a_thin_picture() {
-    let scratch = Scratch::new("thin");
+    let scratch = Scratch::new(TARGET_NAME, "thin");
     let path = scratch.png("thin.png", &pattern(3, 300));
 
     let picture = emitted(&emit(&path, "100x10"));
@@ -333,7 +165,7 @@ fn emit_rgba_reads_a_picture_from_stdin() {
 /// and the program that runs the flag reads that answer as keys of the user.
 #[test]
 fn emit_rgba_writes_nothing_to_the_terminal() {
-    let scratch = Scratch::new("terminal");
+    let scratch = Scratch::new(TARGET_NAME, "terminal");
     let path = scratch.png("quiet.png", &pattern(6, 6));
 
     let outcome = run_with_terminal(
@@ -358,7 +190,7 @@ fn emit_rgba_writes_nothing_to_the_terminal() {
 /// because the flag puts nothing on that terminal.
 #[test]
 fn emit_rgba_ignores_a_terminal_that_draws_no_picture() {
-    let scratch = Scratch::new("linux");
+    let scratch = Scratch::new(TARGET_NAME, "linux");
     let path = scratch.png("console.png", &pattern(2, 2));
 
     let outcome = run(ic("linux")
@@ -374,7 +206,7 @@ fn emit_rgba_ignores_a_terminal_that_draws_no_picture() {
 /// mistake of usage, and the refusal shows the shape the flag takes.
 #[test]
 fn emit_rgba_refuses_a_box_it_cannot_read() {
-    let scratch = Scratch::new("box");
+    let scratch = Scratch::new(TARGET_NAME, "box");
     let path = scratch.png("box.png", &pattern(2, 2));
 
     for pixel_box in ["10", "0x5", "5x0", "axb", "5x", "4097x5", "5x4097", "-5x5"] {
@@ -396,7 +228,7 @@ fn emit_rgba_refuses_a_box_it_cannot_read() {
 /// The largest box the flag takes is 4096 pixels on each side.
 #[test]
 fn emit_rgba_takes_the_largest_box() {
-    let scratch = Scratch::new("largest");
+    let scratch = Scratch::new(TARGET_NAME, "largest");
     let path = scratch.png("largest.png", &pattern(3, 2));
 
     let picture = emitted(&emit(&path, "4096x4096"));
@@ -408,7 +240,7 @@ fn emit_rgba_takes_the_largest_box() {
 /// reason, where a decode of the container would name a format it never read.
 #[test]
 fn emit_rgba_refuses_a_video() {
-    let scratch = Scratch::new("video");
+    let scratch = Scratch::new(TARGET_NAME, "video");
     let path = scratch.file("clip.mp4", b"not really a video");
 
     let outcome = emit(&path, "8x8");
@@ -424,7 +256,7 @@ fn emit_rgba_refuses_a_video() {
 /// A file that holds no picture fails, and the failure names the file.
 #[test]
 fn emit_rgba_names_a_file_that_holds_no_picture() {
-    let scratch = Scratch::new("text");
+    let scratch = Scratch::new(TARGET_NAME, "text");
     let path = scratch.file("notes.png", b"hello, this is text");
 
     let outcome = emit(&path, "8x8");
@@ -441,7 +273,7 @@ fn emit_rgba_names_a_file_that_holds_no_picture() {
 /// A path that does not exist fails as it does for a display.
 #[test]
 fn emit_rgba_names_a_file_that_does_not_exist() {
-    let scratch = Scratch::new("missing");
+    let scratch = Scratch::new(TARGET_NAME, "missing");
     let path = scratch.path("gone.png");
 
     let outcome = emit(&path, "8x8");
@@ -457,7 +289,7 @@ fn emit_rgba_names_a_file_that_does_not_exist() {
 /// The flag prints one JSON object, so it takes one picture.
 #[test]
 fn emit_rgba_takes_one_picture() {
-    let scratch = Scratch::new("two");
+    let scratch = Scratch::new(TARGET_NAME, "two");
     let first = scratch.png("first.png", &pattern(2, 2));
     let second = scratch.png("second.png", &pattern(2, 2));
 
@@ -522,7 +354,7 @@ fn emit_rgba_prints_the_json_that_the_plugin_tests_hold() {
 /// run that dropped one would print a picture the user did not ask for.
 #[test]
 fn emit_rgba_refuses_the_options_of_a_display() {
-    let scratch = Scratch::new("display");
+    let scratch = Scratch::new(TARGET_NAME, "display");
     let path = scratch.png("display.png", &pattern(2, 2));
 
     for display_option in [
@@ -565,7 +397,7 @@ fn emit_rgba_refuses_the_options_of_a_display() {
 /// `--protocol`.
 #[test]
 fn emit_rgba_ignores_the_protocol_of_the_session() {
-    let scratch = Scratch::new("session-protocol");
+    let scratch = Scratch::new(TARGET_NAME, "session-protocol");
     let path = scratch.png("session.png", &pattern(2, 2));
 
     let outcome = run(ic(TERM_XTERM_256COLOR)
@@ -581,7 +413,7 @@ fn emit_rgba_ignores_the_protocol_of_the_session() {
 /// nothing. The two together are a mistake of usage.
 #[test]
 fn emit_rgba_refuses_monitor_mode() {
-    let scratch = Scratch::new("monitor");
+    let scratch = Scratch::new(TARGET_NAME, "monitor");
 
     let outcome = run(ic(TERM_XTERM_256COLOR)
         .arg(FLAG)

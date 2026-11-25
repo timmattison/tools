@@ -1072,13 +1072,14 @@ fn each_removal(destination: &'static str) -> [Removal; 3] {
 /// stages a link whose target does not exist, and no fake program reads it.
 const SYMLINK_TARGET: &str = "elsewhere";
 
-/// Commit `committed` in a new repository in `dir`, then stage its removal.
+/// Commit `committed` in a new repository in `dir`.
 ///
-/// `git diff --cached` compares the index to `HEAD`, so a removal shows only
-/// after a commit holds the file. The identity, the signature setting and the
-/// hooks path go on the command line, so the commit reads none of them from the
-/// configuration of this machine, and it writes no configuration.
-fn commit_then_stage_removal(dir: &Path, committed: &str, removal: Removal) {
+/// `git diff --cached` compares the index to `HEAD`, so a removal or an edit
+/// shows only after a commit holds the file. The identity, the signature
+/// setting and the hooks path go on the command line, so the commit reads none
+/// of them from the configuration of this machine, and it writes no
+/// configuration.
+fn commit_fixture(dir: &Path, committed: &str) {
     git_init_and_stage(dir, &[committed]);
     run_git(
         dir,
@@ -1098,6 +1099,26 @@ fn commit_then_stage_removal(dir: &Path, committed: &str, removal: Removal) {
             "fixture",
         ],
     );
+}
+
+/// The status and the path of each staged change, one on each line, as
+/// `git diff --cached --name-status` shows them with no rename detection.
+fn staged_name_status(dir: &Path) -> String {
+    run_git(
+        dir,
+        &[
+            "diff",
+            "--cached",
+            "--name-status",
+            "--no-renames",
+            "--no-color",
+        ],
+    )
+}
+
+/// Commit `committed` in a new repository in `dir`, then stage its removal.
+fn commit_then_stage_removal(dir: &Path, committed: &str, removal: Removal) {
+    commit_fixture(dir, committed);
     match removal {
         Removal::MoveTo(destination) => {
             let parent = dir
@@ -1118,18 +1139,8 @@ fn commit_then_stage_removal(dir: &Path, committed: &str, removal: Removal) {
             std::os::unix::fs::symlink(SYMLINK_TARGET, &path)
                 .unwrap_or_else(|e| panic!("link {committed} to {SYMLINK_TARGET}: {e}"));
             run_git(dir, &["add", committed]);
-            let status = run_git(
-                dir,
-                &[
-                    "diff",
-                    "--cached",
-                    "--name-status",
-                    "--no-renames",
-                    "--no-color",
-                ],
-            );
             assert_eq!(
-                status,
+                staged_name_status(dir),
                 format!("T\t{committed}\n"),
                 "a link in place of {committed} must stage as a type change"
             );
@@ -1232,5 +1243,129 @@ fn removed_plugin_file_runs_the_plugin_checks() {
             calls.arguments, EXPECTED_CLAUDE_CALLS,
             "{removal:?} of {FIXTURE_PLUGIN_FILE} must run each check of the plugin block: {output}"
         );
+    }
+}
+
+/// The files of msgs that the msgs fixtures stage: one of the frontend, and
+/// one of the scripts. The msgs block reads both folders.
+const MSGS_FILES: [&str; 2] = ["src/msgs/frontend/src/a.ts", "src/msgs/scripts/a.ts"];
+
+/// The `pnpm` calls of the msgs block, in order. Each one names the frontend
+/// of msgs in this repository, through the folder of the hook.
+fn expected_msgs_pnpm_calls() -> [String; 2] {
+    let frontend = format!(
+        "{}/../src/msgs/frontend",
+        hook_path()
+            .parent()
+            .expect("the hook has a parent")
+            .display()
+    );
+    [
+        format!("--dir {frontend} install --frozen-lockfile --prefer-offline"),
+        format!("--dir {frontend} run check"),
+    ]
+}
+
+/// Install a fake `pnpm` in `dir`, run the real hook once with the planted
+/// `GIT_` variables, remove `dir`, and assert three things: the hook passed,
+/// the fake `pnpm` got exactly `expected_msgs_pnpm_calls()`, and no `pnpm` call
+/// saw a `GIT_` variable. `case` names the staged change in each failure
+/// message.
+fn assert_msgs_checks_ran(dir: &Path, case: &str) {
+    let pnpm = install_fake_program(dir, "pnpm", None);
+
+    let HookRun { passed, output } = run_hook_with_planted_git_variables(dir, &pnpm);
+    let calls = read_recording(&pnpm);
+    cleanup(dir);
+
+    assert!(
+        passed,
+        "the hook must pass with a fake pnpm ({case}): {output}"
+    );
+    assert_eq!(
+        calls.arguments,
+        expected_msgs_pnpm_calls(),
+        "{case} must run the checks of msgs: {output}"
+    );
+    assert!(
+        calls.git_lines.is_empty(),
+        "a pnpm command saw GIT_ variables ({case}): {:?}",
+        calls.git_lines
+    );
+}
+
+/// A move of a file of the msgs frontend or of the msgs scripts out of its
+/// folder, a deletion of it, and a symbolic link in its place must each run the
+/// type check and the tests of msgs, with no `GIT_` variable. Each one takes the
+/// file away from the code that imports it, and that breaks the type check as
+/// an edit can. `git diff` finds renames by default, and `--name-only` then
+/// prints only the new path, so a block that matches the old path misses the
+/// move.
+#[test]
+fn removed_msgs_file_runs_the_msgs_checks() {
+    for committed in MSGS_FILES {
+        for removal in each_removal("src/msgs/other/a.ts") {
+            let dir = unique_fixture_dir();
+            write_files(&dir, &[committed]);
+            commit_then_stage_removal(&dir, committed, removal);
+            assert_msgs_checks_ran(&dir, &format!("{removal:?} of {committed}"));
+        }
+    }
+}
+
+/// The two ways that a commit stages a file that stays at its path.
+#[derive(Clone, Copy, Debug)]
+enum InPlace {
+    /// A new file, staged with `git add`. `git diff` shows the status `A`.
+    Add,
+    /// A committed file with new text, staged with `git add`. `git diff` shows
+    /// the status `M`.
+    Edit,
+}
+
+impl InPlace {
+    /// The status letter that `git diff --name-status` shows for the path.
+    fn status(self) -> char {
+        match self {
+            Self::Add => 'A',
+            Self::Edit => 'M',
+        }
+    }
+}
+
+/// Write `staged` in a new repository in `dir` and stage it as `how` says.
+/// The staging asserts the status that git shows, so a fixture that stages a
+/// different status fails here and not in the hook.
+fn stage_in_place(dir: &Path, staged: &str, how: InPlace) {
+    write_files(dir, &[staged]);
+    match how {
+        InPlace::Add => git_init_and_stage(dir, &[staged]),
+        InPlace::Edit => {
+            commit_fixture(dir, staged);
+            fs::write(dir.join(staged), "[]\n")
+                .unwrap_or_else(|e| panic!("write new text into {staged}: {e}"));
+            run_git(dir, &["add", staged]);
+        }
+    }
+    assert_eq!(
+        staged_name_status(dir),
+        format!("{}\t{staged}\n", how.status()),
+        "{how:?} of {staged} must stage as the status {}",
+        how.status()
+    );
+}
+
+/// A new file and an edit of a file, in the msgs frontend or in the msgs
+/// scripts, must each run the type check and the tests of msgs, with no `GIT_`
+/// variable. These two are the usual trigger of the msgs block, so a filter on
+/// the statuses of the block that leaves out `A` or `M` fails this test.
+#[test]
+fn staged_msgs_file_runs_the_msgs_checks() {
+    for staged in MSGS_FILES {
+        for how in [InPlace::Add, InPlace::Edit] {
+            let dir = unique_fixture_dir();
+            stage_in_place(&dir, staged, how);
+            assert_msgs_checks_ran(&dir, &format!("{how:?} of {staged}"));
+        }
     }
 }
