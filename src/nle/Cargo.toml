@@ -22,5 +22,8 @@ tokio = { workspace = true }
 # bans std::process::Command::new.
 childenv = { workspace = true }
 
+[dev-dependencies]
+toml = { workspace = true }
+
 [lints]
 workspace = true
