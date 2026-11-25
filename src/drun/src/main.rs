@@ -21,6 +21,7 @@ mod survey;
 mod table;
 
 use std::ffi::OsString;
+use std::io::{self, ErrorKind, Write};
 use std::path::Path;
 use std::process::{Command, ExitCode, ExitStatus, Stdio};
 use std::thread;
@@ -101,11 +102,12 @@ fn dispatch(
     if matches!(name, "-h" | "--help" | "help")
         || (wants_help && COMMANDS_WITHOUT_FLAGS.contains(&name))
     {
-        return Ok(print_usage(environment));
+        return print_usage(environment);
     }
     match name {
         "-V" | "--version" => {
-            println!("drun {}", version_string!());
+            print_out(&format!("drun {}\n", version_string!()))
+                .map_err(|error| cannot_write(&error))?;
             Ok(ExitCode::SUCCESS)
         }
         "run" => unless_help(environment, docker_args::parse_run(args), |parsed| {
@@ -152,9 +154,9 @@ fn dispatch(
 
 /// Prints the usage of `drun` on standard output. Gives the exit status of a
 /// help.
-fn print_usage(environment: &Environment) -> ExitCode {
-    print!("{}", usage(environment));
-    ExitCode::SUCCESS
+fn print_usage(environment: &Environment) -> Result<ExitCode, Failure> {
+    print_out(&usage(environment)).map_err(|error| cannot_write(&error))?;
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Prints the usage for a [`Request::Help`], and so asks no host. Else runs
@@ -166,7 +168,7 @@ fn unless_help<T>(
     command: impl FnOnce(T) -> Result<ExitCode, Failure>,
 ) -> Result<ExitCode, Failure> {
     match request.map_err(usage_error)? {
-        Request::Help => Ok(print_usage(environment)),
+        Request::Help => print_usage(environment),
         Request::Command(parsed) => command(parsed),
     }
 }
@@ -255,7 +257,7 @@ fn buildx(
 fn hosts(environment: &Environment) -> Result<ExitCode, Failure> {
     let config = load(environment)?;
     let survey = survey::survey(&config);
-    print!("{}", survey.table());
+    print_out(&survey.table()).map_err(|error| cannot_write(&error))?;
     if survey.chosen().is_some() {
         Ok(ExitCode::SUCCESS)
     } else {
@@ -271,7 +273,7 @@ fn pick(environment: &Environment) -> Result<ExitCode, Failure> {
         return Err(no_host_answered(&survey));
     };
     report_skipped(&survey);
-    println!("{host}");
+    print_out(&format!("{host}\n")).map_err(|error| cannot_write(&error))?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -279,7 +281,7 @@ fn pick(environment: &Environment) -> Result<ExitCode, Failure> {
 fn ps(environment: &Environment) -> Result<ExitCode, Failure> {
     let config = load(environment)?;
     let inventory = fleet::inventory(&config, Scope::Managed);
-    print!("{}", inventory.table());
+    print_out(&inventory.table()).map_err(|error| cannot_write(&error))?;
     let mut complete = true;
     for (context, failure) in inventory.failures() {
         eprintln!("drun: {context} did not answer: {failure}");
@@ -316,7 +318,7 @@ fn status(environment: &Environment, args: &[OsString]) -> Result<ExitCode, Fail
             answer.trim()
         ))
     })?;
-    println!("{host} {state}");
+    print_out(&format!("{host} {state}\n")).map_err(|error| cannot_write(&error))?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -344,7 +346,7 @@ fn wait(environment: &Environment, args: &[OsString]) -> Result<ExitCode, Failur
             text.trim()
         ))
     })?;
-    println!("{code}");
+    print_out(&format!("{code}\n")).map_err(|error| cannot_write(&error))?;
     Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
 }
 
@@ -405,12 +407,14 @@ fn check_flags() -> Result<ExitCode, Failure> {
     let mut count = 0_usize;
     for (command, differences) in &report {
         for difference in differences {
-            println!("docker {command}: {difference}");
+            print_out(&format!("docker {command}: {difference}\n"))
+                .map_err(|error| cannot_write(&error))?;
             count += 1;
         }
     }
     if count == 0 {
-        println!("The flag tables of drun agree with the docker CLI on this computer.");
+        print_out("The flag tables of drun agree with the docker CLI on this computer.\n")
+            .map_err(|error| cannot_write(&error))?;
         return Ok(ExitCode::SUCCESS);
     }
     eprintln!(
@@ -526,7 +530,9 @@ fn warn_about(parsed: &RunArgs, host: &ContextName) {
 
 /// Runs a detached `docker run` and prints `<host> <name>` when it starts the
 /// container. The ID that docker prints does not show, so stdout holds the
-/// two words alone.
+/// two words alone. The exit status is the one of docker: a container that
+/// runs is never a failure of `drun`. If the write fails, `drun` names the
+/// host and the container on stderr.
 fn start_detached(
     mut command: Command,
     host: &ContextName,
@@ -539,7 +545,11 @@ fn start_detached(
         .output()
         .map_err(cannot_start)?;
     if output.status.success() {
-        println!("{host} {name}");
+        if let Err(error) = print_out(&format!("{host} {name}\n")) {
+            eprintln!(
+                "drun: {name} runs on {host}, but drun cannot write that on standard output: {error}"
+            );
+        }
     }
     Ok(exit_code(output.status))
 }
@@ -566,6 +576,29 @@ fn hand_over(mut command: Command) -> ExitCode {
             ExitCode::from(EXIT_NOT_STARTED)
         }
     }
+}
+
+/// Writes `text` on standard output, and flushes it.
+///
+/// `print!` panics when the write fails, and Rust ignores `SIGPIPE`. Thus a
+/// reader that exits first, as `head -1` does, made `drun` panic with exit
+/// status 101. A reader that closed the pipe wants no more text, so a
+/// broken pipe gives `Ok`, and the command keeps its exit status. Each
+/// other failure is the error.
+fn print_out(text: &str) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    match stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        Err(error) if error.kind() == ErrorKind::BrokenPipe => Ok(()),
+        result => result,
+    }
+}
+
+/// The failure when `drun` cannot write on standard output.
+fn cannot_write(error: &io::Error) -> Failure {
+    Failure::NotStarted(format!("cannot write on standard output: {error}"))
 }
 
 /// The exit status that `drun` gives for a docker that stopped with
