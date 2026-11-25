@@ -496,9 +496,11 @@ starts each cargo command through `without_git_environment` in
 
 - `scripts/rust-checks.sh` runs the four gates. The pre-commit hook and CI both
   start it, so a cargo command that you add to it gets the sweep.
+- `scripts/plugin-checks.sh` runs the checks of the claude CLI on the plugins
+  under `plugins/`. The pre-commit hook and CI both start it, and it starts
+  each `claude` command through the same function.
 - `.husky/pre-commit` itself starts only the cargo commands of the tool-index
-  guard and of the `ic-inline` block. It also starts each `claude` command of
-  its plugin block through the same function.
+  guard and of the `ic-inline` block.
 - `test.sh` runs the workspace tests.
 
 The hook is started by `sh`, so `without_git_environment` does not use
@@ -559,8 +561,8 @@ constructor or states an exemption at its site. It does not prove three things:
   `tokio::process::Command::new` or `CommandBuilder::new` fails the build
 - `src/repo-guards/tests/pre_commit_hook.rs` — no cargo command of the hook, of
   the `scripts/rust-checks.sh` that the hook starts, or of `test.sh`, and no
-  `claude` command of the hook, sees a `GIT_` variable, under a fake program
-  that writes its environment to a file
+  `claude` command of the `scripts/plugin-checks.sh` that the hook starts, sees
+  a `GIT_` variable, under a fake program that writes its environment to a file
 - `repo_guards::git_env_sweep` (`src/repo-guards/src/git_env_sweep.rs`) — no
   file cargo compiles removes a `GIT_`-prefixed variable by name. Its companion
   test asks `cargo metadata` whether the read set holds every target root cargo
