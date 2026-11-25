@@ -170,7 +170,7 @@ In `boxes`, two pixels that differ are in one region when they touch, also at a 
 
 `--width`, `--height`, `--scale`, `--preserve-aspect`, `--no-newline`, and `--protocol` apply to the picture as they apply to a still image. With `--emit-rgba WIDTHxHEIGHT`, `ic` prints the picture as the JSON of [`--emit-rgba`](#give-the-pixels-to-a-program-that-draws-the-picture-itself), and it prints no header.
 
-`--diff` takes exactly two image files. A video, a text file, `--stdin`, `--monitor`, `--will-display`, or a video option gives an error that names the cause. A file is text when neither its extension nor its first bytes name an image format, thus a screenshot with no extension works. `--diff-mode` without `--diff` gives an error.
+`--diff` takes exactly two image files. A video, a text file, `--stdin`, `--monitor`, `--will-display`, or a video option gives an error that names the cause. A file is text when its extension names no image format and its first bytes start no image, thus a screenshot with no extension works. When the first bytes are text, the header of the format that they name must also read, so a note that starts with `BM` or `P1` is still a text file. `--diff-mode` without `--diff` gives an error.
 
 ## Command Line Options
 

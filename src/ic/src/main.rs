@@ -2238,9 +2238,9 @@ fn decode_picture(source: &[u8], name: &Path) -> Result<DynamicImage> {
 ///
 /// The run checks both paths before it decodes either one, so a bad second
 /// path does not wait for a slow decode of the first. A video or a text file
-/// is no still image, and the error names it. A file is text when neither its
-/// extension nor its first bytes name an image format. The picture comes from
-/// [`diff::compare`] in the mode of `--diff-mode`, or `boxes` when none is
+/// is no still image, and the error names it. A file is text when its extension
+/// names no image format and its first bytes start no image. The picture comes
+/// from [`diff::compare`] in the mode of `--diff-mode`, or `boxes` when none is
 /// given.
 ///
 /// With `--emit-rgba`, the run prints the picture as JSON and prints no
@@ -2271,7 +2271,7 @@ fn show_diff(args: &Args) -> Result<()> {
                 path.display()
             );
         }
-        if is_text_file(path) && names_no_image_format(path) {
+        if is_text_file(path) && starts_no_image(path) {
             anyhow::bail!(
                 "--diff compares two still images, and {} is a text file",
                 path.display()
@@ -2308,13 +2308,16 @@ fn load_still_image(path: &Path) -> Result<DynamicImage> {
     with_image_file(path, |source| decode_picture(&source, path))
 }
 
-/// Whether the file at `path` opens, and neither its extension nor its first
-/// bytes name an image format.
+/// Whether the file at `path` opens, and its first bytes start no image.
 ///
 /// [`is_text_file`] reads only the extension. A screenshot with no extension,
 /// or a format that the decoder reads and `ic` does not list, is still a
-/// picture, and [`decode_picture`] reads it. This check reads only the first
-/// bytes, so `--diff` still checks both paths before it decodes either one.
+/// picture, and [`decode_picture`] reads it. The first block of the file
+/// starts an image when it names an image format. When the block is also
+/// plain text, the header of that format must read too, because the
+/// signatures `BM` and `P1` to `P7` start many lines of text. A binary image
+/// thus costs one read of its first block, and `--diff` still checks both
+/// paths before it decodes either one.
 ///
 /// # Arguments
 /// * `path` - The path of the file.
@@ -2322,10 +2325,20 @@ fn load_still_image(path: &Path) -> Result<DynamicImage> {
 /// # Returns
 /// `false` also when the file does not open, because that file is not text.
 /// The decode then reports the failure with its cause.
-fn names_no_image_format(path: &Path) -> bool {
-    image::ImageReader::open(path)
-        .and_then(|reader| reader.with_guessed_format())
-        .is_ok_and(|reader| reader.format().is_none())
+fn starts_no_image(path: &Path) -> bool {
+    let mut block = Vec::new();
+    let read = fs::File::open(path)
+        .and_then(|file| file.take(FIRST_BLOCK_BYTES).read_to_end(&mut block));
+    if read.is_err() {
+        return false;
+    }
+    if image::guess_format(&block).is_err() {
+        return true;
+    }
+    first_block_can_be_text(&block)
+        && image::ImageReader::open(path)
+            .and_then(image::ImageReader::with_guessed_format)
+            .is_ok_and(|reader| reader.into_dimensions().is_err())
 }
 
 /// Make a picture out of the bytes of an image file, and keep the bytes when
@@ -2496,7 +2509,8 @@ fn read_new_text_file(path: &Path) -> io::Result<Option<String>> {
 }
 
 /// The number of bytes at the start of a file that the text rule of monitor
-/// mode reads before it reads the rest.
+/// mode reads before it reads the rest. The text check of `--diff`
+/// ([`starts_no_image`]) reads the same block.
 ///
 /// [`read_text_to_show`] decides on this first block, and it reads the rest of
 /// the file only when the block is text. The start of a binary file, such as
