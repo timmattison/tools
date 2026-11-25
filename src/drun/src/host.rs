@@ -116,6 +116,20 @@ pub enum HostFailure {
     /// The host answered, but `drun` cannot read the answer.
     #[error("the answer is not readable: {0}")]
     Unreadable(String),
+    /// The host does not have an image that `drun` needs, and the pull of the
+    /// image failed. The message gives the command that pulls the image.
+    #[error(
+        "the host does not have {image}, and the pull failed: {cause}. To get the image, \
+         run: docker --context {context} pull {image}"
+    )]
+    PullFailed {
+        /// The host.
+        context: ContextName,
+        /// The image that the host does not have.
+        image: String,
+        /// Why the pull failed.
+        cause: Box<HostFailure>,
+    },
 }
 
 /// Words for an exit status, for an error message.

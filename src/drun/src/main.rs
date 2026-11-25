@@ -31,7 +31,7 @@ use crate::config::{Config, Environment, CONTEXTS_VARIABLE};
 use crate::docker_args::{BuildxArgs, Request, RmArgs, RunArgs};
 use crate::fleet::{Inventory, Scope, MANAGED_LABEL, STATE_FORMAT};
 use crate::host::ContextName;
-use crate::survey::{Survey, PROBE_IMAGE};
+use crate::survey::{Survey, PROBE_IMAGE, PULL_TIMEOUT};
 
 /// The exit status of a usage error.
 const EXIT_USAGE: u8 = 2;
@@ -591,6 +591,7 @@ fn usage(environment: &Environment) -> String {
         || "~/.config/drun/config.toml (HOME is not set)".to_owned(),
         |path| path.display().to_string(),
     );
+    let pull_seconds = PULL_TIMEOUT.as_secs();
     format!(
         "\
 drun runs a Docker container on the least busy of your Docker hosts.
@@ -684,6 +685,10 @@ How drun chooses a host:
   host. A host is as busy as the larger of two fractions: the memory in use,
   and the one-minute load average for each CPU. drun chooses the least busy
   host.
+
+  When a host does not have {PROBE_IMAGE}, drun pulls it, with a limit of
+  {pull_seconds} s, and then starts the container again. When the pull fails, drun
+  skips the host and names the command that pulls the image.
 
 Exit status:
   The exit status of docker, or of the container in the foreground. 1 when

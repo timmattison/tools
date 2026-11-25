@@ -154,8 +154,22 @@ These commands find any container on the hosts, not only the containers that
 
 `drun` starts one small `busybox:1.37` container on each host, all at the
 same time. The container prints `/proc/meminfo`, `/proc/loadavg`, and the
-count of CPUs, and Docker removes it when it stops. Docker gets the image one
-time for each host.
+count of CPUs, and Docker removes it when it stops.
+
+The probe container never pulls its image, so `host_timeout_secs` limits only
+the probe. Each host gets the image one time, in a separate step:
+
+1. When the probe fails, `drun` runs `docker image inspect busybox:1.37` on
+   the host.
+2. When the host does not have the image, `drun` runs
+   `docker pull busybox:1.37` on the host, with a limit of 120 s.
+3. When the pull succeeds, `drun` starts the probe again.
+
+When the pull fails or takes more than 120 s, `drun` skips the host. The
+warning gives the cause and the command that pulls the image, as in
+`docker --context box-b pull busybox:1.37`. Run that command one time, and the
+host answers the next probe. Until the host has the image, each `drun` command
+that chooses a host can wait up to 120 s for that host.
 
 A host is as busy as the larger of two fractions:
 

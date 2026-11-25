@@ -3,6 +3,8 @@
 //! `drun` starts one small `busybox` container on each host, all at the same
 //! time. The container prints the memory figures of the host, its load
 //! average, and its count of CPUs. Docker removes the container when it stops.
+//! The probe never pulls its image. A host that does not have the image gets
+//! it in a separate pull, which has its own limit, and then the probe again.
 //! On a Linux host the figures are those of the host. On a host that runs
 //! Docker Desktop they are those of the virtual machine that runs the
 //! containers, which is the memory that a container can use.
@@ -21,6 +23,16 @@ use crate::table;
 /// The image of the probe container. It is small, and it has `sh`, `cat`,
 /// and `nproc` for every CPU architecture that Docker supports.
 pub const PROBE_IMAGE: &str = "busybox:1.37";
+
+/// How long `drun` waits for a host to pull [`PROBE_IMAGE`]. A pull goes to a
+/// registry, so it gets more time than the probe. Each run of `drun` waits up
+/// to this limit for a host that does not have the image and whose registry
+/// does not answer.
+pub const PULL_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The words of the Docker engine when a host does not have an image, as in
+/// `Error response from daemon: No such image: busybox:1.37`.
+const NO_SUCH_IMAGE: &str = "No such image";
 
 /// The label of the probe container, so a person who sees it knows what it is.
 const PROBE_LABEL: &str = "drun.probe=true";
@@ -56,13 +68,21 @@ pub fn survey(config: &Config) -> Survey {
 
 /// Asks the host `context` how busy it is.
 ///
+/// The probe never pulls its image, so `host_timeout` limits only the probe.
+/// When the probe fails, `drun` asks the host if it has [`PROBE_IMAGE`]. When
+/// the host does not have it, `drun` pulls it with the limit [`PULL_TIMEOUT`],
+/// and then runs the probe again. When a probe or an image inspect gets no
+/// answer in `host_timeout`, `drun` does not pull: a host that does not answer
+/// a small question does not answer a pull either.
+///
 /// `ask` runs one docker command on a host, as [`host::ask`] does, and the
-/// tests give their own. `host_timeout` is the limit of the probe.
+/// tests give their own.
 ///
 /// # Errors
 ///
-/// Returns the [`HostFailure`] of the probe, or [`HostFailure::Unreadable`]
-/// when `drun` cannot read the answer of the probe.
+/// Returns the [`HostFailure`] of the probe, [`HostFailure::PullFailed`] when
+/// the host does not have the image and the pull fails, or
+/// [`HostFailure::Unreadable`] when `drun` cannot read the answer of the probe.
 fn survey_host<A>(
     context: &ContextName,
     host_timeout: Duration,
@@ -72,11 +92,11 @@ where
     A: Fn(&ContextName, &[&str], Duration) -> Result<String, HostFailure>,
 {
     let script = probe_script();
-    let args = [
+    let probe = [
         "run",
         "--rm",
         "--pull",
-        "missing",
+        "never",
         "--network",
         "none",
         "--label",
@@ -86,8 +106,43 @@ where
         "-c",
         &script,
     ];
-    let text = ask(context, &args, host_timeout)?;
+    let text = match ask(context, &probe, host_timeout) {
+        Ok(text) => text,
+        Err(failure @ HostFailure::Failed { .. }) => {
+            if !lacks_probe_image(context, host_timeout, &ask) {
+                return Err(failure);
+            }
+            ask(context, &["pull", PROBE_IMAGE], PULL_TIMEOUT).map_err(|cause| {
+                HostFailure::PullFailed {
+                    context: context.clone(),
+                    image: PROBE_IMAGE.to_owned(),
+                    cause: Box::new(cause),
+                }
+            })?;
+            ask(context, &probe, host_timeout)?
+        }
+        Err(failure) => return Err(failure),
+    };
     Load::parse(&text).map_err(HostFailure::Unreadable)
+}
+
+/// `true` when the host `context` answers that it does not have
+/// [`PROBE_IMAGE`].
+///
+/// `docker image inspect` gives exit status 1 and the stdout `[]` for a host
+/// without the image, and also for a host whose engine does not answer. Only
+/// the error text of the engine tells the two apart: [`NO_SUCH_IMAGE`].
+/// Measured with the docker 29.9.2 CLI and the docker 27.5.1 engine. A host
+/// that gives a different answer, or no answer in `limit`, is not a host
+/// without the image, so `drun` does not pull there.
+fn lacks_probe_image<A>(context: &ContextName, limit: Duration, ask: &A) -> bool
+where
+    A: Fn(&ContextName, &[&str], Duration) -> Result<String, HostFailure>,
+{
+    matches!(
+        ask(context, &["image", "inspect", PROBE_IMAGE], limit),
+        Err(HostFailure::Failed { detail, .. }) if detail.contains(NO_SUCH_IMAGE)
+    )
 }
 
 /// The shell script that the probe container runs.
