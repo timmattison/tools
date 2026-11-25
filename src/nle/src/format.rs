@@ -1,19 +1,57 @@
 //! Text formats of the values that the interface shows.
 
+/// Tenths of a second in one minute.
+const TENTHS_PER_MINUTE: u64 = 600;
+/// Tenths of a second in one hour.
+const TENTHS_PER_HOUR: u64 = 36_000;
+/// The largest count of tenths that the formatter accepts, about 3 million
+/// years. A larger value stops here, so a bad file cannot cause garbage.
+const MAX_TENTHS: f64 = 1e15;
+/// The text for a timestamp that cannot be shown.
+const UNKNOWN: &str = "unknown";
+/// The `chrono` format of a record time.
+const RECORDED_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
+/// The largest count of milliseconds that an `f64` holds as a whole number.
+const MAX_MILLISECONDS: f64 = 9e15;
+
 /// Formats a duration in seconds as `Xm Y.Ys`, or as `Xh Xm Y.Ys` from one hour.
 ///
 /// The function rounds to tenths of a second before it splits the duration, so
 /// 59.96 is `1m 0.0s` and never `0m 60.0s`. A value that is not finite, or
 /// that is below zero, formats as `0m 0.0s`.
 pub(crate) fn format_duration(total_seconds: f64) -> String {
-    let _ = total_seconds;
-    String::new()
+    let tenths = tenths_of_a_second(total_seconds);
+    let hours = tenths / TENTHS_PER_HOUR;
+    let minutes = tenths % TENTHS_PER_HOUR / TENTHS_PER_MINUTE;
+    let remainder = tenths % TENTHS_PER_MINUTE;
+    let seconds = format!("{}.{}", remainder / 10, remainder % 10);
+    if tenths >= TENTHS_PER_HOUR {
+        format!("{hours}h {minutes}m {seconds}s")
+    } else {
+        format!("{minutes}m {seconds}s")
+    }
+}
+
+/// Rounds `total_seconds` to whole tenths of a second. A value that is not
+/// finite, or that is below zero, gives zero. A very large value stops at
+/// `MAX_TENTHS`.
+fn tenths_of_a_second(total_seconds: f64) -> u64 {
+    if !total_seconds.is_finite() || total_seconds < 0.0 {
+        return 0;
+    }
+    let tenths = (total_seconds * 10.0).round().min(MAX_TENTHS);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the value is a whole number between 0 and MAX_TENTHS"
+    )]
+    let whole = tenths as u64;
+    whole
 }
 
 /// Returns the part of `path` after the last `/` or `\`.
 pub(crate) fn file_name(path: &str) -> &str {
-    let _ = path;
-    ""
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 /// Formats a Unix timestamp in seconds as `%Y-%m-%d %H:%M:%S` in `zone`.
@@ -25,8 +63,24 @@ where
     Tz: chrono::TimeZone,
     Tz::Offset: std::fmt::Display,
 {
-    let _ = (timestamp, zone);
-    String::new()
+    if !timestamp.is_finite() {
+        return UNKNOWN.to_owned();
+    }
+    let milliseconds = (timestamp * 1000.0).round();
+    if milliseconds.abs() > MAX_MILLISECONDS {
+        return UNKNOWN.to_owned();
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the value is a whole number inside the range of i64"
+    )]
+    let milliseconds = milliseconds as i64;
+    zone.timestamp_millis_opt(milliseconds)
+        .single()
+        .map_or_else(
+            || UNKNOWN.to_owned(),
+            |time| time.format(RECORDED_FORMAT).to_string(),
+        )
 }
 
 /// Formats a Unix timestamp in the local time zone of the machine.
@@ -69,7 +123,10 @@ mod tests {
     #[test]
     fn file_name_takes_the_part_after_the_last_separator() {
         assert_eq!(file_name("/home/user/recordings/demo.json"), "demo.json");
-        assert_eq!(file_name(r"C:\Users\test\recordings\demo.json"), "demo.json");
+        assert_eq!(
+            file_name(r"C:\Users\test\recordings\demo.json"),
+            "demo.json"
+        );
         assert_eq!(file_name("demo.json"), "demo.json");
         assert_eq!(file_name("/tmp/日本語🎉.json"), "日本語🎉.json");
         assert_eq!(file_name("/tmp/dir/"), "");
