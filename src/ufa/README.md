@@ -222,11 +222,11 @@ Caused by:
 Without `--all`, a list command answers with one page of a collection: 25
 items (100 for `vouchers list`), unless `--limit` says otherwise. `--all`
 reads every page and shows the whole collection, with no note, unless the
-collection holds nothing. Then a note says so. `--all` does
-not take `--limit` or `--offset`. It takes `--filter` on each list command
-that has one: `sites`, `clients list` and `vouchers list`. `devices list`
-has no `--filter`, because the API filters no device listing. A page that
-holds less than the whole collection says so, under the table:
+collection holds nothing. Then a note says so. `--all` does not take
+`--limit` or `--offset`. It takes `--filter` on each list command that has
+one: `sites`, `clients list` and `vouchers list`. `devices list` has no
+`--filter`, because the API filters no device listing. A page that holds
+less than the whole collection says so, under the table:
 
 ```
 This page shows 1-25 of 100. Use --limit and --offset to see the rest, or --all to see every item.
@@ -522,9 +522,9 @@ $ ufa devices list --all --output json | jq '.[] | select(.state == "OFFLINE")'
 A command that finds nothing still answers `--output json` with a document: `[]`. That is the
 answer of `ufa cloud hosts` for an account with no consoles, of `ufa devices stats --all` for a site
 with no devices, of each list command with `--all` for a collection that holds nothing, and of
-`ufa vouchers delete-filtered` for a filter that matches no voucher. So
-`jq '.[]'` reads no items, and it does not fail. In a table, these commands draw no table of
-headings alone, and a note says that nothing was found.
+`ufa vouchers delete-filtered` for a filter that matches no voucher. So `jq '.[]'` reads no items,
+and it does not fail. In a table, these commands draw no table of headings alone, and a note says
+that nothing was found.
 
 Standard output carries the document and nothing else, in both formats. Every note, status sentence
 and hint goes to standard error. That includes the sentence that says a restart started, the count
