@@ -47,8 +47,9 @@ const MAX_COLLECTION_ITEMS: u64 = 1_000_000;
 ///
 /// # Errors
 ///
-/// Returns an error if any request fails, if a response cannot be parsed, or
-/// if the server stops making progress before the collection is exhausted.
+/// Returns an error if any request fails, if a response cannot be parsed, if
+/// the server stops making progress before the collection is exhausted, or if
+/// it states more than [`MAX_COLLECTION_ITEMS`] items.
 pub async fn fetch_all<T>(client: &UnifiClient, path: &str) -> Result<Vec<T>>
 where
     T: DeserializeOwned,
@@ -75,8 +76,9 @@ where
 ///
 /// # Errors
 ///
-/// Returns an error if any request fails, if a response cannot be parsed, or
-/// if the server stops making progress before the collection is exhausted.
+/// Returns an error if any request fails, if a response cannot be parsed, if
+/// the server stops making progress before the collection is exhausted, or if
+/// it states more than [`MAX_COLLECTION_ITEMS`] items.
 pub async fn fetch_all_matching<T>(
     client: &UnifiClient,
     path: &str,
@@ -119,6 +121,13 @@ where
 /// items over and over until the count reaches `totalCount`, and reports that
 /// pile as the collection. The page's own `offset` is what tells the two
 /// apart, so it is compared against the offset the walk asked for.
+///
+/// A server that passes both of those guards can still state a total with no
+/// end, and answer each request with a full page. So each page must state a
+/// total of at most [`MAX_COLLECTION_ITEMS`]. The walk goes on only while it
+/// holds fewer items than that total, and each page adds at least one item, so
+/// the check on each page bounds the walk. A check on the first page alone
+/// does not, because a server can raise the total on a later page.
 async fn collect_pages<T, F, Fut>(mut fetch_page: F) -> Result<Vec<T>>
 where
     F: FnMut(u64) -> Fut,
@@ -136,6 +145,14 @@ where
              offset {}. It is not advancing through the collection, so the answer repeats the \
              items it keeps sending and leaves the rest of them out.",
             page.offset
+        );
+
+        anyhow::ensure!(
+            page.total_count <= MAX_COLLECTION_ITEMS,
+            "The server states {} items in the collection, more than the {MAX_COLLECTION_ITEMS} \
+             items ufa reads in one walk. Ask for a smaller part of the collection, or check the \
+             server that answered.",
+            page.total_count
         );
 
         if page.data.is_empty() {
