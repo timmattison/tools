@@ -7,7 +7,8 @@
 //! step from the copy of `scripts/rust-checks.sh` that each fixture runs, watch
 //! `staged_misformatted_rust_file_fails_the_gate` fail, restore, watch it pass)
 //! is documented in the commit body, not committed as code. The tests of the
-//! `GIT_` variables are different: each one failed first, in a red commit.
+//! `GIT_` variables and `stale_lock_file_fails_the_gate` are different: each
+//! one failed first, in a red commit.
 //!
 //! Parallel safety: a `bacon` loop runs `cargo test` concurrently with the
 //! pre-commit hook's own `cargo test`, so two copies of each test can execute
