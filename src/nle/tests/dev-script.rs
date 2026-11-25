@@ -84,7 +84,7 @@ impl Shims {
         let log = self.dir.join(LOG_FILE);
         let log = log.display();
         if install_pnpm {
-            write_executable(
+            write_shim(
                 &self.dir.join("pnpm"),
                 &format!("#!/bin/sh\necho \"pnpm $* @ $(pwd -P)\" >> \"{log}\"\nexit 0\n"),
             );
@@ -94,7 +94,7 @@ impl Shims {
         } else {
             "echo \"error: no such command: \\`tauri\\`\" >&2; exit 101"
         };
-        write_executable(
+        write_shim(
             &self.dir.join("cargo"),
             &format!(
                 "#!/bin/sh\n\
@@ -107,7 +107,7 @@ impl Shims {
             ),
         );
         if install_portplz {
-            write_executable(
+            write_shim(
                 &self.dir.join("portplz"),
                 &format!(
                     "#!/bin/sh\necho \"portplz @ $(pwd -P)\" >> \"{log}\"\necho '{}'\n",
@@ -165,15 +165,17 @@ fn unique_dir(label: &str) -> PathBuf {
     dir
 }
 
-/// Write a file and give it the execute bit.
-fn write_executable(path: &Path, body: &str) {
-    fs::write(path, body).unwrap_or_else(|e| panic!("cannot write {}: {e}", path.display()));
+/// Write a shim and give it the execute bit.
+///
+/// On Unix, the writer of `gitscratch` writes the file from a child process.
+/// Thus this process holds no write descriptor that a fork on another test
+/// thread can copy, and Linux does not refuse the run of the shim (`ETXTBSY`).
+fn write_shim(path: &Path, body: &str) {
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-            .unwrap_or_else(|e| panic!("cannot make {} executable: {e}", path.display()));
-    }
+    gitscratch::testing::executable::write_executable(path, body)
+        .unwrap_or_else(|e| panic!("cannot write {}: {e}", path.display()));
+    #[cfg(not(unix))]
+    fs::write(path, body).unwrap_or_else(|e| panic!("cannot write {}: {e}", path.display()));
 }
 
 /// The directory of the nle crate.
