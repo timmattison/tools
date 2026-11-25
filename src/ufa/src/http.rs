@@ -234,7 +234,7 @@ impl Api {
     fn authentication_failure(self, status: StatusCode) -> String {
         match self {
             Api::Controller => format!(
-                "Authentication failed (HTTP {status}). Please check your API key or generate a new one in Settings -> Control Plane -> Integrations"
+                "Authentication failed (HTTP {status}). Please check your API key or generate a new one in Settings -> Control Plane -> Integrations."
             ),
             Api::SiteManager => format!(
                 "Site Manager authentication failed (HTTP {status}). Please check your Site Manager API key."
