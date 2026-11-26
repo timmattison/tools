@@ -109,7 +109,10 @@ impl EditProject {
     ///
     /// # Errors
     /// Returns `NleError::InvalidTime` when the duration of `source` or the
-    /// time of one of its chapters is not a valid time.
+    /// time of one of its chapters is not a valid time, and
+    /// `NleError::InvalidProject` when the project breaks a rule of
+    /// `EditProject::validate`, for example a chapter label that holds only
+    /// white space.
     pub fn from_recording(source: Arc<Recording>) -> Result<Self, NleError> {
         let out_point = Seconds::new(source.duration)?;
         let chapters = (1..)
@@ -129,7 +132,7 @@ impl EditProject {
             out_point,
             timeline_offset: Seconds::ZERO,
         };
-        Ok(Self {
+        let project = Self {
             clips: vec![clip],
             timeline: vec![TimelineTrack {
                 id: TrackId(1),
@@ -137,7 +140,9 @@ impl EditProject {
             }],
             filters: Vec::new(),
             chapters,
-        })
+        };
+        project.validate()?;
+        Ok(project)
     }
 
     /// The id for a new clip: one more than the largest id in use, or 1 when

@@ -6265,7 +6265,9 @@ redo include it, and the project file keeps the chapters.
 
 When `nle` opens a recording, each chapter of the recording becomes a marker.
 Thus a render with no filter keeps the chapters of the recording. A chapter
-time below zero stops the open, and the banner gives the time.
+time below zero stops the open, and the banner gives the time. A chapter label
+that is empty or holds only white space also stops the open, and the banner
+gives the number of the chapter in the recording.
 
 The time of a chapter is on the timeline before the filters. The render moves
 each chapter with the events around it. Thus a filter that changes the timing,
