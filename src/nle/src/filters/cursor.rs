@@ -1,18 +1,24 @@
 //! The filter that sets how the cursor looks.
 //!
 //! The filter rewrites the escape sequences that set the cursor, in the data
-//! of the output events. The options, with their keys in the project file:
+//! of the output events. Input events stay as they are. The options, with
+//! their keys in the project file:
 //!
 //! - `visibility`: `honor` (the default) obeys the recording.
-//!   `always-visible` and `always-hidden` set the cursor and drop each
-//!   DECTCEM change (`CSI ? 25 h` and `CSI ? 25 l`) of the recording.
-//!   `smart` obeys the recording, but hides the cursor during a burst of
-//!   output.
+//!   `always-visible` and `always-hidden` set the cursor and drop mode 25
+//!   (DECTCEM) from each `CSI ? Pm h`, `l`, `s`, and `r` of the recording.
+//!   `smart` obeys the recording, but hides the cursor during a burst: two or
+//!   more output events, each less than `burst_gap` seconds after the one
+//!   before it, with no input event between them.
 //! - `burst_gap`: for `smart` only, in seconds, above zero. The default is
 //!   `DEFAULT_BURST_GAP`.
-//! - `shape`: `block`, `underline`, or `bar`.
-//! - `blink`: `true` or `false`.
-//! - `color`: `#rrggbb`.
+//! - `shape`: `block`, `underline`, or `bar`, through DECSCUSR
+//!   (`CSI Ps SP q`). The blink of the recording stays.
+//! - `blink`: `true` or `false`, through DECSCUSR. The shape of the recording
+//!   stays. The filter also drops mode 12, which starts and stops the blink.
+//! - `color`: `#rrggbb`, through OSC 12. The filter drops OSC 12, OSC 112,
+//!   and the cursor slot of an OSC 10 or 11 list of the recording. A query
+//!   stays.
 //!
 //! An option that the options do not name obeys the recording. An unknown
 //! key or value fails the render.
