@@ -59,7 +59,7 @@ impl Selection {
 /// # Returns
 ///
 /// `No {items} found.`, or `No {items} match the filter.` when `filtered`.
-fn empty_collection_note(items: &str, filtered: bool) -> String {
+pub fn empty_collection_note(items: &str, filtered: bool) -> String {
     if filtered {
         format!("No {items} match the filter.")
     } else {

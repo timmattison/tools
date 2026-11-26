@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::{
     client::UnifiClient,
     device_helper::get_device_id_or_prompt,
-    listing::{list_collection, Selection},
+    listing::{empty_collection_note, list_collection, Selection},
     models::{Device, DeviceAction, DeviceDetails, DeviceStatistics, PortAction},
     output::{
         print_output, print_vec_table, render_collection, render_output, OutputFormat, Report,
@@ -24,6 +24,9 @@ const NO_DATA: &str = "N/A";
 /// mistaken for a device that simply had nothing to report. The JSON document
 /// gives the reason for the failure instead.
 const FETCH_FAILED: &str = "ERROR";
+
+/// The plural name of a device, as a note names the devices of a site.
+const DEVICES: &str = "devices";
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum DevicesCommand {
@@ -371,7 +374,7 @@ async fn list_devices(
     let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/devices", site_id);
 
-    list_collection::<Device, DeviceRow>(client, &path, None, "devices", selection, output_format)
+    list_collection::<Device, DeviceRow>(client, &path, None, DEVICES, selection, output_format)
         .await
 }
 
@@ -560,7 +563,7 @@ fn all_device_stats_report(fetched: &[DeviceStatsOutcome], format: OutputFormat)
     };
 
     if fetched.is_empty() {
-        return Ok(report.with_note("No devices found on this site."));
+        return Ok(report.with_note(empty_collection_note(DEVICES, false)));
     }
 
     Ok(fetched
