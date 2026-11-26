@@ -469,8 +469,8 @@ fn speed_change(start: &str, end: &str, speed: &str) -> Result<AppliedFilter, St
 fn edited_duration(document: &Option<Document>) -> String {
     match document {
         None => String::new(),
-        Some(open) => match open.editor.render() {
-            Ok(recording) => format_duration(recording.duration),
+        Some(open) => match open.editor.rendered_duration() {
+            Ok(duration) => format_duration(duration),
             Err(error) => error.to_string(),
         },
     }
