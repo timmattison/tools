@@ -401,3 +401,98 @@ fn summary_of_short_output_leaves_the_span_unchanged() {
     let got = run_summary(&input, &summary(10.0, 30.0, 2, 2));
     assert_eq!(got, input);
 }
+
+#[test]
+fn summary_of_all_lines_in_one_event_splits_the_event() {
+    let input = vec![out(12.0, "a\r\nb\r\nc\r\nd\r\ne\r\n"), out(35.0, "late")];
+    let got = run_summary(&input, &summary(10.0, 30.0, 1, 1));
+    assert_eq!(
+        got,
+        vec![
+            out(12.0, "a\r\n"),
+            out(12.0, "...\r\n"),
+            out(12.0, "e\r\n"),
+            out(35.0, "late"),
+        ]
+    );
+}
+
+#[test]
+fn summary_of_lines_that_cross_events_joins_their_pieces() {
+    let input = vec![
+        out(11.0, "a\r\nb"),
+        out(12.0, "\r\nc\r\nd\r\n"),
+        out(13.0, "e\r\nf"),
+    ];
+    let got = run_summary(&input, &summary(10.0, 30.0, 1, 2));
+    assert_eq!(
+        got,
+        vec![
+            out(11.0, "a\r\n"),
+            out(11.0, "...\r\n"),
+            out(12.0, "e\r\nf")
+        ]
+    );
+}
+
+#[test]
+fn summary_keeps_multibyte_text_whole() {
+    let input = vec![
+        out(11.0, "日本語\r\n"),
+        out(12.0, "🎉🎊\r\n"),
+        out(13.0, "café\r\n"),
+        out(14.0, "x\r\n"),
+        out(15.0, "y\r\n"),
+    ];
+    let got = run_summary(&input, &summary(10.0, 30.0, 1, 1));
+    assert_eq!(
+        got,
+        vec![
+            out(11.0, "日本語\r\n"),
+            out(12.0, "...\r\n"),
+            out(13.0, "y\r\n")
+        ]
+    );
+
+    let one = vec![out(12.0, "日本語\r\n🎉\r\ncafé\r\n")];
+    let got = run_summary(&one, &summary(10.0, 30.0, 1, 1));
+    assert_eq!(
+        got,
+        vec![
+            out(12.0, "日本語\r\n"),
+            out(12.0, "...\r\n"),
+            out(12.0, "café\r\n")
+        ]
+    );
+}
+
+#[test]
+fn summary_shortens_the_length_by_the_dropped_time() {
+    let recording = Recording {
+        version: 2,
+        width: 80,
+        height: 24,
+        timestamp: 0.0,
+        duration: 40.0,
+        command: String::new(),
+        title: String::new(),
+        env: BTreeMap::new(),
+        events: (1..=10)
+            .map(|n| Event {
+                time: 10.0 + f64::from(n),
+                event_type: EventType::Output,
+                data: format!("l{n}\r\n"),
+            })
+            .chain([Event {
+                time: 35.0,
+                event_type: EventType::Output,
+                data: "late".to_string(),
+            }])
+            .collect(),
+    };
+    let mut project = EditProject::from_recording(Arc::new(recording)).unwrap();
+    project.filters.push(summary(10.0, 30.0, 2, 2));
+    let rendered = filters::registry().render(&project).unwrap();
+    assert_eq!(rendered.duration, 35.0);
+    assert_eq!(rendered.events.last().map(|e| e.time), Some(30.0));
+}
