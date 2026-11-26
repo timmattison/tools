@@ -1,8 +1,10 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use tokio::io::AsyncBufReadExt;
+
 use crate::error::NleError;
-use crate::export::ExportProgress;
+use crate::export::{parse_progress_line, ExportProgress};
 use crate::types::{ExportFormat, ExportOptions, LoadedRecording, Recording, RecordingMetadata};
 
 /// Run blocking file work on the blocking pool of the tokio runtime that the
@@ -319,27 +321,82 @@ fn beta_command(
     command
 }
 
+/// Read the stdout of `beta` line by line, as it arrives, and give each line
+/// that is a frame report to `on_progress`.
+///
+/// A line is the bytes up to a `\n`. A byte that is not UTF-8 becomes a
+/// replacement character, and it does not stop the read.
+async fn read_progress(
+    stdout: impl tokio::io::AsyncBufRead + Unpin,
+    mut on_progress: impl FnMut(ExportProgress),
+) -> Result<(), NleError> {
+    let mut lines = stdout.split(b'\n');
+    while let Some(line) = lines.next_segment().await.map_err(read_error)? {
+        if let Some(progress) = parse_progress_line(&String::from_utf8_lossy(&line)) {
+            on_progress(progress);
+        }
+    }
+    Ok(())
+}
+
+/// The export error for a failed read of a stream of `beta`.
+fn read_error(error: std::io::Error) -> NleError {
+    NleError::ExportError(format!("Failed to read the output of beta: {error}"))
+}
+
 /// Run the `beta` CLI with `args` as a child process.
 /// Returns `output_path` when `beta` succeeds.
+///
+/// `beta` runs with its stdout and stderr piped. The stdout is read line by
+/// line while `beta` runs, and each frame report goes to `on_progress` at
+/// once. The stderr is read in full at the same time, so a full pipe never
+/// stops `beta`. The child is killed when the future is dropped.
 async fn run_beta(
     args: &[String],
     output_path: &str,
     var: impl Fn(&'static str) -> Option<OsString>,
-    _on_progress: impl FnMut(ExportProgress) + Send,
+    on_progress: impl FnMut(ExportProgress) + Send,
 ) -> Result<String, NleError> {
-    let output = tokio::process::Command::from(beta_command(args, var))
-        .output()
-        .await
+    let mut child = tokio::process::Command::from(beta_command(args, var))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
         .map_err(|e| {
             NleError::ExportError(format!(
                 "Failed to run beta CLI (is it on PATH or in ~/.cargo/bin?): {e}"
             ))
         })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| NleError::ExportError("beta gave no stdout".into()))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| NleError::ExportError("beta gave no stderr".into()))?;
 
-    if output.status.success() {
+    let read_stderr = async {
+        let mut bytes = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut bytes)
+            .await
+            .map_err(read_error)?;
+        Ok::<_, NleError>(bytes)
+    };
+    let (progress_result, stderr_result, status) = tokio::join!(
+        read_progress(tokio::io::BufReader::new(stdout), on_progress),
+        read_stderr,
+        child.wait()
+    );
+    progress_result?;
+    let stderr = stderr_result?;
+    let status =
+        status.map_err(|e| NleError::ExportError(format!("Failed to wait for beta: {e}")))?;
+
+    if status.success() {
         Ok(output_path.to_string())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = String::from_utf8_lossy(&stderr);
         Err(NleError::ExportError(format!(
             "beta export failed: {stderr}"
         )))
