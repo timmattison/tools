@@ -315,6 +315,7 @@ impl Drop for ScopedVar {
 /// exported in the shell they run `cargo test` from.
 #[cfg(test)]
 mod inherited_environment_tests {
+    use crate::test_server::TestServer;
     use crate::Args;
     use clap::{Arg, Command, CommandFactory};
     use std::collections::BTreeSet;
@@ -423,20 +424,6 @@ mod inherited_environment_tests {
     /// not hide a test client that obeys the proxy.
     const NO_PROXY_VARIABLES: [&str; 2] = ["NO_PROXY", "no_proxy"];
 
-    /// The address of a proxy that refuses each connection.
-    ///
-    /// The operating system gives a free loopback port, and the listener
-    /// closes it again before the child starts. A request that goes to this
-    /// proxy fails at once, and it does not wait for a timeout.
-    fn a_closed_proxy() -> String {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("a loopback port must be free for the closed proxy");
-        let address = listener
-            .local_addr()
-            .expect("a bound listener must have an address");
-        format!("http://{address}")
-    }
-
     /// Re-run the whole suite in a child that inherited a `UNIFI_*`
     /// environment and a proxy, which is the one thing a test cannot simulate
     /// in-process: by the time any test body runs, an inherited variable has
@@ -445,6 +432,10 @@ mod inherited_environment_tests {
     /// reqwest reads the proxy variables when it builds a client. Each test
     /// that talks to a `TestServer` on the loopback address then sends its
     /// requests to the proxy, unless the test client turns the proxy off.
+    ///
+    /// The proxy is a `TestServer` that hangs up, so a request that goes to
+    /// it fails at once. It holds its port until the child ends, so no
+    /// `TestServer` of the child suite can get that port.
     #[test]
     fn the_suite_ignores_the_environment_it_inherited() {
         if std::env::var_os(CHILD_MARKER).is_some() {
@@ -457,9 +448,11 @@ mod inherited_environment_tests {
         for (name, value) in hostile_environment(&Args::command()) {
             child.env(name, value);
         }
-        let proxy = a_closed_proxy();
+        let runtime =
+            tokio::runtime::Runtime::new().expect("a test must be able to start a runtime");
+        let proxy = runtime.block_on(TestServer::hanging_up());
         for name in PROXY_VARIABLES {
-            child.env(name, &proxy);
+            child.env(name, proxy.origin());
         }
         for name in NO_PROXY_VARIABLES {
             child.env_remove(name);
