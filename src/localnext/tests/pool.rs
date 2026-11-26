@@ -6,8 +6,9 @@
 //! worker per event, through the crate's internal message queue, and both
 //! surface to that one worker as an `Err` — nothing in the error's `Display`
 //! text or its `ErrorKind` tells the two apart (`ErrorKind::Other` covers
-//! both), so this suite never inspects either. `Pool` tells them apart with a
-//! shutdown flag it owns instead.
+//! both), so this suite never inspects either. `httpfile::Pool`, which
+//! `localnext::serve` returns, tells them apart with a shutdown flag it owns
+//! instead.
 //!
 //! A real accept failure (EMFILE, say) can't be triggered safely or reliably
 //! in a test — exhausting the file-descriptor table would be a hostile test
@@ -69,7 +70,7 @@ fn an_unexplained_release_brings_down_every_worker_and_surfaces() {
     let (_dir, root) = canonical_root();
     let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port"));
 
-    let pool = localnext::serve(Arc::clone(&server), Arc::new(root), WORKERS);
+    let pool = localnext::serve(Arc::clone(&server), root, WORKERS);
 
     // One release, with `Pool`'s own shutdown flag still clear — see the
     // module doc for why this reproduces a dead acceptor's failure shape
@@ -92,7 +93,7 @@ fn a_deliberate_shutdown_ends_every_worker_cleanly() {
     let (_dir, root) = canonical_root();
     let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port"));
 
-    let pool = localnext::serve(server, Arc::new(root), WORKERS);
+    let pool = localnext::serve(server, root, WORKERS);
 
     let result = within_timeout(move || pool.shutdown());
 

@@ -97,7 +97,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // as an `Err` instead of leaving the pool silently hung: `Pool::join`
     // returns it once every worker has exited, and `?` reports it the same
     // way every other startup failure in this function already is.
-    localnext::serve(server, Arc::new(root), WORKER_THREADS).join()?;
+    localnext::serve(server, root, WORKER_THREADS).join()?;
     Ok(())
 }
 
