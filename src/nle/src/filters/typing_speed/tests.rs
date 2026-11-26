@@ -241,3 +241,67 @@ fn a_jitter_must_be_from_zero_up_to_one() {
         assert!(error.to_string().contains("jitter"), "{bad}: {error}");
     }
 }
+
+fn with_options(options: FilterOptions) -> AppliedFilter {
+    AppliedFilter {
+        kind: kind(),
+        region: FilterRegion::All,
+        options,
+    }
+}
+
+#[test]
+fn a_filter_with_only_a_rate_has_a_pause_of_two_seconds_and_no_jitter() {
+    let input = vec![key(0.0, "a"), key(1.9, "b"), key(4.5, "c")];
+    let filter = with_options(FilterOptions::new().with(RATE_OPTION, 4.0));
+
+    let got = run(input, &[filter]);
+
+    // 1.9 s is typing, and 2.6 s is a pause.
+    assert_eq!(times(&got), vec![0.0, 0.25, 2.85]);
+}
+
+#[test]
+fn a_bad_option_fails_the_render_with_a_message_that_names_it() {
+    let rate = || FilterOptions::new().with(RATE_OPTION, 4.0);
+    let cases = [
+        (
+            FilterOptions::new(),
+            "the option \"chars_per_second\" is missing or is not a number",
+        ),
+        (
+            FilterOptions::new().with(RATE_OPTION, "fast"),
+            "the option \"chars_per_second\" is missing or is not a number",
+        ),
+        (
+            FilterOptions::new().with(RATE_OPTION, 0.0),
+            "the option \"chars_per_second\" is not valid: Invalid typing rate: 0",
+        ),
+        (
+            rate().with(PAUSE_OPTION, -1.0),
+            "the option \"pause\" is not valid: Invalid time: -1",
+        ),
+        (
+            rate().with(PAUSE_OPTION, "long"),
+            "the option \"pause\" is not a number",
+        ),
+        (
+            rate().with(JITTER_OPTION, 1.5),
+            "the option \"jitter\" is not valid: Invalid jitter: 1.5",
+        ),
+        (
+            rate().with(JITTER_OPTION, "some"),
+            "the option \"jitter\" is not a number",
+        ),
+    ];
+    for (options, expected) in cases {
+        let error = filters::registry()
+            .run(vec![key(0.0, "a"), key(1.0, "b")], &[with_options(options)])
+            .expect_err("a bad option must fail the render");
+        let message = error.to_string();
+        assert!(
+            message.contains("filter \"typing-speed\" failed") && message.contains(expected),
+            "expected {expected:?} in {message:?}"
+        );
+    }
+}
