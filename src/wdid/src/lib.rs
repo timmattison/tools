@@ -9,6 +9,7 @@
 //! - [`catalog`] reads the tools of the workspace: names, crate directories,
 //!   added dates, and install state.
 //! - [`command_words`] gives the command words of one command line.
+//! - [`defs`] counts the uses of each alias and each function of the shell.
 //! - [`history`] gets the full atuin history as a list of rows.
 //! - [`render`] writes the report as text, as JSON, and as a list of the
 //!   commands that did not parse.
@@ -21,6 +22,7 @@
 
 pub mod catalog;
 pub mod command_words;
+pub mod defs;
 pub mod history;
 pub mod render;
 pub mod rules;
