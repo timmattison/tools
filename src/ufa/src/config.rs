@@ -1769,6 +1769,68 @@ mod tests {
         );
     }
 
+    /// A config file can be a symbolic link to a file that does not exist
+    /// yet, for example a link that a dotfiles manager made. The save makes
+    /// that file and keeps the link. The link is relative, so the save must
+    /// read it from the directory of the link.
+    #[cfg(unix)]
+    #[test]
+    fn saving_through_a_dangling_symlinked_config_file_keeps_the_link() {
+        let temp = TempConfigDir::new("dangling-config");
+        create_directory(&temp.dir);
+        let real = temp.dir.join("real-config.toml");
+        let link = temp.config_file();
+        std::os::unix::fs::symlink("real-config.toml", &link).expect("the link must be creatable");
+
+        Config {
+            api_key: Some("plaintext-controller-key".into()),
+            ..Config::default()
+        }
+        .save_to(&link)
+        .expect("saving through the dangling link must succeed");
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .expect("the link must exist")
+                .file_type()
+                .is_symlink(),
+            "the save must keep the config file a symbolic link"
+        );
+        assert!(
+            fs::read_to_string(&real)
+                .expect("the save must make the file that the link points at")
+                .contains("plaintext-controller-key"),
+            "the file that the link points at must hold the key"
+        );
+    }
+
+    /// A config path in a loop of symbolic links names no file. The save is
+    /// an error, and it leaves both links as they were.
+    #[cfg(unix)]
+    #[test]
+    fn saving_through_a_loop_of_symlinks_is_an_error() {
+        let temp = TempConfigDir::new("looped-config");
+        create_directory(&temp.dir);
+        let link = temp.config_file();
+        let other = temp.dir.join("other.toml");
+        std::os::unix::fs::symlink("other.toml", &link).expect("the link must be creatable");
+        std::os::unix::fs::symlink("config.toml", &other).expect("the link must be creatable");
+
+        let result = replace_config_file(&link, |file| file.write_all(b"insecure = true\n"));
+
+        assert!(result.is_err(), "a loop of links must be an error");
+        for path in [&link, &other] {
+            assert!(
+                fs::symlink_metadata(path)
+                    .expect("the link must exist")
+                    .file_type()
+                    .is_symlink(),
+                "the failed save must leave {} a symbolic link",
+                path.display()
+            );
+        }
+    }
+
     /// A 1Password reference names the item that holds the key. It is not the
     /// key, and a dump that hides it says nothing a reader can act on.
     const OP_REFERENCE: &str = "op://Private/ufa/key - 192.168.1.1 port 443";
