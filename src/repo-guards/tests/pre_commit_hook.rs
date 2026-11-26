@@ -1450,7 +1450,13 @@ fn stage_with_large_filler(dir: &Path, staged: &[&str]) {
 
     let list = run_git(
         dir,
-        &["diff", "--cached", "--name-only", "--no-renames", "--no-color"],
+        &[
+            "diff",
+            "--cached",
+            "--name-only",
+            "--no-renames",
+            "--no-color",
+        ],
     );
     assert!(
         list.len() > LARGE_LIST_MIN_BYTES,
