@@ -427,6 +427,15 @@ impl Window {
             .unwrap_or_else(|| panic!("no FPS field in {}", self.html()))
     }
 
+    /// The ids of the listeners of the event `name` that the newest render of
+    /// such listeners created, in creation order.
+    fn newest_listeners_of(&self, name: &str) -> Vec<ElementId> {
+        self.newest_listeners
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| panic!("no `{name}` listeners in {}", self.html()))
+    }
+
     /// Sends a change of a form control to the element, and renders.
     fn change(&mut self, id: ElementId, value: &str) {
         self.send_form_event("change", id, value);
@@ -953,4 +962,117 @@ async fn a_cancelled_save_dialog_exports_nothing() {
     assert!(!window.export_is_disabled(), "{page}");
     assert!(!page.contains("role=\"alert\""), "{page}");
     assert!(!page.contains("role=\"status\""), "{page}");
+}
+
+/// The markup of the Theme menu with its label.
+const THEME_MARKUP: &str = "<label>Theme<select>";
+/// The markup of the FPS field with its label.
+const FPS_MARKUP: &str = "<label>FPS<input";
+/// The markup of the Resolution field with its label.
+const RESOLUTION_MARKUP: &str = "<label>Resolution<input";
+/// The markup of the end of the Optimize for web box with its label.
+const OPTIMIZE_MARKUP: &str = "/>Optimize for web</label>";
+/// The markup of the end of the Compress box with its label.
+const COMPRESS_MARKUP: &str = "/>Compress</label>";
+
+/// Whether each of the five controls of the export bar is on the page, in the
+/// order Theme, FPS, Resolution, Optimize for web, Compress.
+fn shown_controls(page: &str) -> [bool; 5] {
+    [
+        THEME_MARKUP,
+        FPS_MARKUP,
+        RESOLUTION_MARKUP,
+        OPTIMIZE_MARKUP,
+        COMPRESS_MARKUP,
+    ]
+    .map(|markup| page.contains(markup))
+}
+
+#[tokio::test]
+async fn each_kind_shows_its_own_controls() {
+    let cases: [(&str, [bool; 5]); 5] = [
+        ("json", [false, false, false, false, false]),
+        ("json-gz", [false, false, false, false, false]),
+        ("html", [true, false, false, false, true]),
+        ("mp4", [true, true, true, true, false]),
+        ("gif", [true, true, true, true, false]),
+    ];
+    for (key, expected) in cases {
+        let fakes = fakes_with_recording();
+        let mut window = window_with_recording(&fakes).await;
+        window.change(window.kind_select(), key);
+        let page = window.html();
+        assert_eq!(
+            shown_controls(&page),
+            expected,
+            "controls of {key} (Theme, FPS, Resolution, Optimize, Compress): {page}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_web_export_carries_the_theme_and_the_compress_box() {
+    let fakes = fakes_with_recording()
+        .dialog(Answer::Ready(Some(PathBuf::from(EXPORT_PICKED))))
+        .export(
+            Vec::new(),
+            Answer::Ready(Ok(PathBuf::from("/tmp/out.html"))),
+        );
+    let mut window = window_with_recording(&fakes).await;
+    window.change(window.kind_select(), "html");
+    // The newest `change` listeners are the Theme menu and the Compress box.
+    let listeners = window.newest_listeners_of("change");
+    let [theme, compress] = listeners[..] else {
+        panic!("expected the Theme menu and the Compress box: {listeners:?}");
+    };
+    window.change(theme, "dracula");
+    window.change(compress, "true");
+    window.click(window.export_button());
+    window.settle().await;
+    assert_eq!(
+        fakes.export_requests(),
+        vec![ExportRequest {
+            output_path: PathBuf::from("/tmp/out.html"),
+            target: ExportTarget::Web {
+                theme: Theme::Dracula,
+                compress: true,
+            },
+        }]
+    );
+}
+
+#[tokio::test]
+async fn a_video_export_carries_the_theme_the_resolution_and_the_optimize_box() {
+    let fakes = fakes_with_recording()
+        .dialog(Answer::Ready(Some(PathBuf::from(EXPORT_PICKED))))
+        .export(Vec::new(), Answer::Ready(Ok(PathBuf::from("/tmp/out.gif"))));
+    let mut window = window_with_recording(&fakes).await;
+    window.change(window.kind_select(), "gif");
+    // The newest `change` listeners are the Theme menu and the Optimize box,
+    // and the newest `input` listeners are the FPS field and the Resolution field.
+    let changes = window.newest_listeners_of("change");
+    let [theme, optimize] = changes[..] else {
+        panic!("expected the Theme menu and the Optimize box: {changes:?}");
+    };
+    let inputs = window.newest_listeners_of("input");
+    let [_fps, resolution] = inputs[..] else {
+        panic!("expected the FPS and Resolution fields: {inputs:?}");
+    };
+    window.change(theme, "monokai");
+    window.input(resolution, "1280x720");
+    window.change(optimize, "true");
+    window.click(window.export_button());
+    window.settle().await;
+    assert_eq!(
+        fakes.export_requests(),
+        vec![ExportRequest {
+            output_path: PathBuf::from("/tmp/out.gif"),
+            target: ExportTarget::Video {
+                theme: Theme::Monokai,
+                fps: None,
+                resolution: Some("1280x720".parse().expect("a valid resolution")),
+                optimize_web: true,
+            },
+        }]
+    );
 }
