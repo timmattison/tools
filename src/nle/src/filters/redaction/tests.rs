@@ -1,0 +1,68 @@
+//! Tests for the redaction filter.
+
+use super::*;
+use crate::filters;
+use crate::types::{Event, EventType};
+
+fn out(time: f64, data: &str) -> Event {
+    Event {
+        time,
+        event_type: EventType::Output,
+        data: data.to_string(),
+    }
+}
+
+fn inp(time: f64, data: &str) -> Event {
+    Event {
+        time,
+        event_type: EventType::Input,
+        data: data.to_string(),
+    }
+}
+
+fn text(find: &str, replacement: &str) -> Redaction {
+    Redaction::new(
+        Find::Text(find.to_string()),
+        Replacement::Text(replacement.to_string()),
+        false,
+    )
+    .unwrap()
+}
+
+fn run(events: Vec<Event>, redaction: &Redaction) -> Vec<Event> {
+    filters::registry()
+        .run(events, &[applied(FilterRegion::All, redaction)])
+        .unwrap()
+}
+
+fn datas(events: &[Event]) -> Vec<&str> {
+    events.iter().map(|e| e.data.as_str()).collect()
+}
+
+#[test]
+fn the_registry_holds_the_redaction_filter() {
+    assert!(filters::registry().contains(&kind()));
+}
+
+#[test]
+fn text_is_replaced_in_one_output_event() {
+    let got = run(
+        vec![out(1.0, "token=hunter2\r\n")],
+        &text("hunter2", "[REDACTED]"),
+    );
+    assert_eq!(datas(&got), vec!["token=[REDACTED]\r\n"]);
+}
+
+#[test]
+fn input_events_and_times_stay() {
+    let got = run(
+        vec![out(1.0, "a hunter2"), inp(2.5, "hunter2"), out(4.0, "b")],
+        &text("hunter2", "x"),
+    );
+    assert_eq!(datas(&got), vec!["a x", "hunter2", "b"]);
+    assert_eq!(
+        got.iter().map(|e| e.time).collect::<Vec<_>>(),
+        vec![1.0, 2.5, 4.0]
+    );
+    assert_eq!(got[1].event_type, EventType::Input);
+}

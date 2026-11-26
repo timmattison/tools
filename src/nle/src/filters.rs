@@ -1,5 +1,6 @@
 //! The filters that ship with the app.
 
+pub mod redaction;
 pub mod time_dilation;
 
 use crate::pipeline::FilterRegistry;
@@ -9,5 +10,6 @@ use crate::pipeline::FilterRegistry;
 pub fn registry() -> FilterRegistry {
     let mut registry = FilterRegistry::new();
     time_dilation::register(&mut registry);
+    redaction::register(&mut registry);
     registry
 }
