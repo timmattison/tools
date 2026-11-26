@@ -122,12 +122,15 @@ pub async fn discover_controllers() -> Result<Vec<DiscoveredController>> {
     Ok(without_duplicates(controllers))
 }
 
-/// Keep the first controller at each IP address, and remove each later one.
+/// Keep the first controller at each IP address and port, and remove each
+/// later one.
 ///
 /// mDNS and the probe of the common addresses can find one controller two
 /// times, and `unifi` and `unifi.local` can resolve to one address. The
 /// controllers from mDNS come first, so the controller that stays is the one
-/// that has a name.
+/// that has a name. The port is part of the rule: a console and a Network
+/// application on one host answer on 443 and on 8443, and the user must be
+/// able to pick either of them.
 ///
 /// # Arguments
 ///
@@ -135,12 +138,12 @@ pub async fn discover_controllers() -> Result<Vec<DiscoveredController>> {
 ///
 /// # Returns
 ///
-/// The controllers, with each repeated IP address removed.
+/// The controllers, with each repeated pair of IP address and port removed.
 fn without_duplicates(controllers: Vec<DiscoveredController>) -> Vec<DiscoveredController> {
     let mut seen = HashSet::new();
     controllers
         .into_iter()
-        .filter(|controller| seen.insert(controller.ip.clone()))
+        .filter(|controller| seen.insert((controller.ip.clone(), controller.port)))
         .collect()
 }
 
