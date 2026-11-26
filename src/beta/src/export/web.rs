@@ -634,6 +634,7 @@ mod tests {
     const LABEL_JAPANESE: &str = "日本語テスト";
     const LABEL_CAFE: &str = "café 🎉";
     const LABEL_SCRIPT_END: &str = "</script><b>x";
+    const LABEL_COMMENT_SCRIPT: &str = "<!--<script>";
     const THEME: &str = "auto";
 
     /// The smallest fakes that the player script needs when it loads.
@@ -775,6 +776,21 @@ console.log(String(player.pausedAt));
     fn a_label_cannot_end_the_script() {
         let html = page(&recording(vec![chapter(1.0, LABEL_SCRIPT_END)]), false);
         assert!(!html.contains("</script><b>"), "label ended the script");
+    }
+
+    #[test]
+    fn a_label_cannot_put_the_script_into_an_escaped_state() {
+        // In script data, `<!--` and then `<script` make the HTML tokenizer
+        // read the closing `</script>` of the page as text.
+        let html = page(&recording(vec![chapter(1.0, LABEL_COMMENT_SCRIPT)]), false);
+        let (_, data) = html
+            .split_once("const recording = ")
+            .expect("the recording data");
+        let (json, _) = data.split_once(";\n").expect("the end of the recording data");
+        assert!(!json.contains("<!--"), "{json}");
+        assert!(!json.to_ascii_lowercase().contains("<script"), "{json}");
+        let value: serde_json::Value = serde_json::from_str(json).expect("valid json");
+        assert_eq!(value["chapters"][0]["label"], LABEL_COMMENT_SCRIPT);
     }
 
     #[test]
