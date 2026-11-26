@@ -566,7 +566,8 @@ except a folder whose name starts with `.`.
 and `$XDG_DATA_HOME` or `~/.local/share` on Linux. A plugin that fails to load
 does not stop the editor. The editor shows each failed folder with its reason.
 If two folders have the same `name`, neither loads, and the error names both
-folders.
+folders. A development folder of [hot reload](#hot-reload) is the one
+exception.
 
 ### Load from a URL
 
@@ -600,8 +601,14 @@ compare it with the one that the author publishes.
 installed plugins, and it watches `<dir>` with `notify`. The flag can occur
 more than one time. When the manifest or the component changes, the editor
 loads the plugin again and builds a new `FilterRegistry`. It gives the new
-registry to the editor, and it renders the preview again. If the new version fails to load, the editor
-keeps the old version and shows the error.
+registry to the editor, and it renders the preview again. If the new version
+fails to load, the editor keeps the old version and shows the error.
+
+A development folder takes the place of an installed plugin with the same
+`name`, and the plugin list shows that replacement. Thus an author can
+develop a new version of a plugin that is also installed. The rule of two
+folders with the same `name` applies inside the plugins directory, and among
+the development folders.
 
 The editor does not watch the plugins directory. Only the install flow of the
 editor writes there, and that flow loads the plugin that it installs.
@@ -815,6 +822,8 @@ it.
   [hot reload](#hot-reload).
 - A change of the component gives a new render with the new plugin.
 - A broken change keeps the old plugin and shows the error.
+- A development folder takes the place of an installed plugin with the same
+  `name`, and the plugin list shows that replacement.
 
 ### The 1.0.0 gate
 
