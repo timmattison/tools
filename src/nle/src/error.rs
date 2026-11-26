@@ -25,6 +25,9 @@ pub enum NleError {
     #[error("Invalid time: {0} (a time must be finite and not below zero)")]
     InvalidTime(f64),
 
+    #[error("Invalid speed: {0} (a speed must be finite and above zero)")]
+    InvalidSpeed(f64),
+
     #[error("Invalid project: {0}")]
     InvalidProject(String),
 
