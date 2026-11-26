@@ -70,15 +70,12 @@ where
         .unwrap_or_else(|_| panic!("did not finish within {JOIN_TIMEOUT:?}"))
 }
 
-/// Writes `big.bin` and `small.txt` into `dir` and routes both.
+/// Writes `small.txt` into `dir` and routes it.
 fn routes_for(dir: &TempDir) -> BTreeMap<String, std::path::PathBuf> {
-    let big = dir.path().join("big.bin");
-    std::fs::write(&big, vec![0xAB_u8; BIG_FILE_BYTES]).expect("write big file");
     let small = dir.path().join("small.txt");
     std::fs::write(&small, SMALL_BYTES).expect("write small file");
 
     let mut routes = BTreeMap::new();
-    routes.insert("/big.bin".to_string(), big);
     routes.insert("/small.txt".to_string(), small);
     routes
 }
@@ -122,12 +119,19 @@ fn a_deliberate_shutdown_ends_every_worker_cleanly() {
 /// worker. The pool has one worker, so the same worker serves the next request.
 /// `tiny_http` itself turns a closed-connection error into `Ok`, so this test
 /// guards the worker against a panic, not the `Err` path of the handler.
+/// `a_handler_error_leaves_the_worker_serving` in `src/httpfile/tests/pool.rs`
+/// covers that path: its handler returns `Err`, and the worker answers the
+/// next request.
 #[test]
 fn a_client_that_hangs_up_mid_response_leaves_the_pool_serving() {
     let dir = TempDir::new().expect("temp dir");
+    let mut routes = routes_for(&dir);
+    let big = dir.path().join("big.bin");
+    std::fs::write(&big, vec![0xAB_u8; BIG_FILE_BYTES]).expect("write big file");
+    routes.insert("/big.bin".to_string(), big);
     let server = bind();
     let addr = server.server_addr().to_ip().expect("ip addr");
-    let mode = sirn::ServeMode::Files(Arc::new(routes_for(&dir)));
+    let mode = sirn::ServeMode::Files(Arc::new(routes));
     let pool = sirn::serve(Arc::clone(&server), mode, 1);
 
     let mut client = TcpStream::connect(addr).expect("connect to server");
