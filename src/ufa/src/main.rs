@@ -1409,18 +1409,6 @@ mod credential_tests {
     }
 }
 
-/// Pins the claim that a key which 1Password rotated after op-cache kept a
-/// copy of it costs the user no manual step.
-///
-/// op-cache answers every read of a reference from its copy, and it asks
-/// 1Password only when it holds no copy. So after a rotation in 1Password,
-/// every command sent the old key and failed on a 401. The error said to check
-/// the key or to make a new one, which is what the user had just done.
-///
-/// Each case runs the real client against a local server, and the key reaches
-/// the server in the real header. The store is a test vault in front of a
-/// real cache file, so each forget runs the real `OpCache::invalidate` and no
-/// read starts the real `op`.
 #[cfg(test)]
 mod url_tests {
     use super::{resolve_url, Config, MISSING_URL_MESSAGE};
@@ -1497,6 +1485,18 @@ mod url_tests {
     }
 }
 
+/// Pins the claim that a key which 1Password rotated after op-cache kept a
+/// copy of it costs the user no manual step.
+///
+/// op-cache answers every read of a reference from its copy, and it asks
+/// 1Password only when it holds no copy. So after a rotation in 1Password,
+/// every command sent the old key and failed on a 401. The error said to check
+/// the key or to make a new one, which is what the user had just done.
+///
+/// Each case runs the real client against a local server, and the key reaches
+/// the server in the real header. The store is a test vault in front of a
+/// real cache file, so each forget runs the real `OpCache::invalidate` and no
+/// read starts the real `op`.
 #[cfg(test)]
 mod key_rotation_tests {
     use super::{resolve_credential, run_with_the_current_key, Config, Credential, Secret};
