@@ -838,3 +838,88 @@ fn a_whole_timeline_filter_shows_a_row_and_the_edited_duration() {
     let expected = crate::format::format_duration(65.3 / 2.0);
     assert!(page.contains(&edited_row(&expected)), "{page}");
 }
+
+// The renders that an edit and its edited duration cost.
+
+/// The kind of the filter of `counting_filters`.
+const COUNTED_KIND: &str = "counted";
+
+/// A registry with one filter that keeps each event, and the count of the
+/// renders that ran that filter.
+fn counting_filters() -> (Arc<FilterRegistry>, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let renders = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&renders);
+    let mut registry = FilterRegistry::new();
+    registry.register(
+        crate::types::FilterKind::new(COUNTED_KIND),
+        move |events, _| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            events.to_vec()
+        },
+    );
+    (Arc::new(registry), renders)
+}
+
+#[test]
+fn an_edit_that_renders_and_its_edited_duration_cost_one_render() {
+    let (filters, renders) = counting_filters();
+    let mut document = Document::open(fixture(), filters).expect("a document");
+    let filter = AppliedFilter {
+        kind: crate::types::FilterKind::new(COUNTED_KIND),
+        region: FilterRegion::All,
+        options: crate::types::FilterOptions::new(),
+    };
+
+    document
+        .editor
+        .apply_renderable(Edit::AddFilter { index: 0, filter })
+        .expect("an edit that renders");
+    let edited = edited_duration(&Some(document));
+
+    assert_eq!(edited, "1m 5.3s");
+    assert_eq!(renders.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// The document of the fixture, with the filters of the app.
+fn app_document() -> Document {
+    Document::open(fixture(), Arc::new(crate::filters::registry())).expect("a document")
+}
+
+/// An edit that doubles the speed of the whole timeline.
+fn double_speed() -> Edit {
+    let filter = time_dilation::applied(FilterRegion::All, Speed::new(2.0).expect("a speed"));
+    Edit::AddFilter { index: 0, filter }
+}
+
+#[test]
+fn an_undo_after_a_speed_change_shows_the_duration_before_it() {
+    let mut document = app_document();
+    document
+        .editor
+        .apply_renderable(double_speed())
+        .expect("an edit that renders");
+
+    assert!(document.editor.undo());
+
+    assert_eq!(edited_duration(&Some(document)), "1m 5.3s");
+}
+
+#[test]
+fn an_edit_after_a_speed_change_shows_the_duration_after_it() {
+    let mut document = app_document();
+    document
+        .editor
+        .apply_renderable(double_speed())
+        .expect("an edit that renders");
+
+    document
+        .editor
+        .apply(double_speed())
+        .expect("an edit that applies");
+
+    assert_eq!(
+        edited_duration(&Some(document)),
+        format_duration(65.3 / 4.0)
+    );
+}
