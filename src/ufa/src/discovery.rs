@@ -260,7 +260,7 @@ async fn probe(url: Url) -> Result<ProbeVerdict> {
         clippy::disallowed_methods,
         reason = "a probe carries no API key, so it needs no client that guards one, and it follows a redirect on purpose: the host behind one is still a controller"
     )]
-    let client = crate::http::without_proxy_in_tests(reqwest::Client::builder())
+    let client = crate::http::with_ufa_transport(reqwest::Client::builder())
         .danger_accept_invalid_certs(true)
         .timeout(PROBE_TIMEOUT)
         .build()?;

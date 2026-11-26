@@ -29,9 +29,14 @@ mdns-sd = "0.11"
 tabled = "0.22.0"
 
 # Crate-local deliberately: the workspace's reqwest keeps default features
-# (native-tls). ufa talks to controllers over rustls only, and
-# `default-features = false` cannot be expressed against an inherited
-# dependency that enables them.
+# (native-tls), and `default-features = false` cannot be expressed against an
+# inherited dependency that enables them. This list keeps native-tls out of a
+# build of ufa alone, such as `cargo install`.
+#
+# ufa talks to controllers over rustls only, but this list alone does not make
+# it so. In a build of the whole workspace, cargo unifies the features of
+# reqwest, native-tls comes back, and reqwest picks it when no builder names a
+# backend. Thus `crate::http::with_ufa_transport` names rustls for each client.
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
 [dev-dependencies]

@@ -259,7 +259,23 @@ impl Api {
     }
 }
 
-/// Turn off each proxy of the environment, in a build for the tests.
+/// Give `builder` the transport that each client of `ufa` uses.
+///
+/// Both builders of the crate start here: [`build_client`], and the probe of
+/// `crate::discovery`. This function names the TLS backend, and in a build for
+/// the tests, it turns off each proxy of the environment.
+///
+/// # rustls, in each build
+///
+/// The features of reqwest in `src/ufa/Cargo.toml` do not decide the backend
+/// in a build of the whole workspace. Cargo unifies the features of reqwest
+/// over each package that it builds. `gitrdun`, `krt` and `tvfind` take the
+/// default features, and `default-tls` is one of them. When no builder names a
+/// backend, reqwest then picks native-tls. native-tls reports a refused
+/// handshake as an error of its own, and `is_tls_failure` in `crate::client`
+/// finds only the shape of a rustls refusal. Thus this function names rustls.
+///
+/// # No proxy in a build for the tests
 ///
 /// reqwest reads `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` when it builds a
 /// client. A test talks to a `TestServer` on the loopback address, so a proxy
@@ -272,9 +288,10 @@ impl Api {
 ///
 /// # Returns
 ///
-/// The builder, with no proxy in a build for the tests, and as it was in any
-/// other build.
-pub(crate) fn without_proxy_in_tests(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+/// The builder, with rustls as its TLS backend, and with no proxy in a build
+/// for the tests.
+pub(crate) fn with_ufa_transport(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    let builder = builder.use_rustls_tls();
     #[cfg(test)]
     {
         builder.no_proxy()
@@ -355,7 +372,7 @@ pub fn build_client(api: Api, api_key: &str, insecure: bool, timeouts: Timeouts)
     )]
     let builder = Client::builder();
 
-    without_proxy_in_tests(builder)
+    with_ufa_transport(builder)
         .default_headers(headers)
         .redirect(redirect::Policy::none())
         .timeout(timeouts.request)
