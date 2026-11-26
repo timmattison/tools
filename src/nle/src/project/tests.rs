@@ -33,7 +33,7 @@ use crate::types::{
     AppliedFilter, Clip, ClipId, EditProject, Event, EventType, FilterKind, FilterOptions,
     FilterRegion, Recording, TimelineTrack, TrackId,
 };
-use crate::types::{ChapterId, ChapterMarker};
+use crate::types::{Chapter, ChapterId, ChapterMarker};
 use std::sync::Arc;
 
 #[test]
@@ -67,6 +67,52 @@ fn from_recording_refuses_a_negative_duration() {
     let result = EditProject::from_recording(Arc::new(source));
 
     assert!(matches!(result, Err(NleError::InvalidTime(_))));
+}
+
+#[test]
+fn from_recording_makes_one_marker_for_each_chapter_of_the_source() {
+    let mut source = Recording::test_fixture();
+    source.chapters = vec![
+        Chapter {
+            time: 2.5,
+            label: "日本語テスト".to_string(),
+        },
+        Chapter {
+            time: 1.0,
+            label: "café 🎉".to_string(),
+        },
+    ];
+
+    let project = EditProject::from_recording(Arc::new(source)).unwrap();
+
+    assert_eq!(
+        project.chapters,
+        vec![
+            ChapterMarker {
+                id: ChapterId(1),
+                time: Seconds::new(2.5).unwrap(),
+                label: "日本語テスト".to_string(),
+            },
+            ChapterMarker {
+                id: ChapterId(2),
+                time: Seconds::new(1.0).unwrap(),
+                label: "café 🎉".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn from_recording_refuses_a_chapter_time_below_zero() {
+    let mut source = Recording::test_fixture();
+    source.chapters = vec![Chapter {
+        time: -1.0,
+        label: "early".to_string(),
+    }];
+
+    let result = EditProject::from_recording(Arc::new(source));
+
+    assert!(matches!(result, Err(NleError::InvalidTime(_))), "{result:?}");
 }
 
 fn clip(id: u64, in_point: f64, out_point: f64, offset: f64) -> Clip {

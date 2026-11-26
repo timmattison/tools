@@ -407,6 +407,26 @@ fn render_of_a_whole_recording_with_no_filter_equals_its_source() {
     assert_eq!(rendered, recording);
 }
 
+#[test]
+fn render_of_a_whole_recording_with_chapters_and_no_filter_equals_its_source() {
+    let mut recording = source("chaptered", &[0.0, 1.0, 2.0], 3.0);
+    recording.chapters = vec![
+        Chapter {
+            time: 0.5,
+            label: "日本語テスト".to_string(),
+        },
+        Chapter {
+            time: 2.0,
+            label: "café 🎉".to_string(),
+        },
+    ];
+    let project = EditProject::from_recording(Arc::new(recording.clone())).unwrap();
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    assert_eq!(rendered, recording);
+}
+
 // Tests of the render of two clips on two tracks.
 
 fn clip_of(id: u64, source: Recording, offset: f64) -> Clip {
