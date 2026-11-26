@@ -4256,6 +4256,53 @@ mod tests {
         assert!(!user_projects(parent, "other", "me").is_self);
     }
 
+    /// The root of the data volume, which a firmlink joins to each top-level
+    /// folder of the system volume (`/private`, `/Users`, `/Volumes`).
+    #[cfg(target_os = "macos")]
+    const DATA_VOLUME: &str = "/System/Volumes/Data";
+
+    /// Makes a second name for the home `<parent>/<name>` that `realpath` does
+    /// not fold to the first, and returns that name.
+    ///
+    /// The second name is a symlink to the same home through the firmlink of
+    /// the data volume. `realpath` resolves the symlink but keeps the
+    /// [`DATA_VOLUME`] prefix, so the two names give two canonical paths for
+    /// one directory. glibc `realpath` does the same to a case variant on a
+    /// case-insensitive Linux home (ext4 casefold, CIFS, ntfs3), which a test
+    /// cannot make without root.
+    #[cfg(target_os = "macos")]
+    fn unfolded_alias_of(parent: &Path, name: &str) -> String {
+        let home = fs::canonicalize(parent.join(name)).unwrap();
+        let through_data_volume = Path::new(DATA_VOLUME).join(home.strip_prefix("/").unwrap());
+        let alias = format!("{name}-data");
+        std::os::unix::fs::symlink(&through_data_volume, parent.join(&alias)).unwrap();
+        let resolved = fs::canonicalize(parent.join(&alias))
+            .expect("the temp dir must sit on the data volume, under a firmlink");
+        assert_ne!(
+            resolved, home,
+            "realpath must keep two spellings of one home, else this test proves nothing"
+        );
+        alias
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn user_projects_treats_a_name_that_realpath_does_not_fold_as_self() {
+        // `realpath` gives two paths for the two names, but the tree is one
+        // directory. The root is the current user's own, as it is for
+        // `--user Tim` on a case-insensitive Linux home of `tim`.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        fs::create_dir_all(parent.join("me").join(".claude").join("projects")).unwrap();
+        let alias = unfolded_alias_of(parent, "me");
+
+        let root = user_projects(parent, &alias, "me");
+        assert!(
+            root.is_self,
+            "--user {alias} names the tree of `me`, so it is a same-user root"
+        );
+    }
+
     #[test]
     fn self_projects_marks_the_current_users_tree() {
         let home = Path::new("/Users/timmattison");
@@ -4576,6 +4623,23 @@ mod tests {
         assert_eq!(users, ["me", "alice"]);
         assert!(roots[0].is_self);
         assert!(roots[1..].iter().all(|r| !r.is_self));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn enumerate_user_projects_drops_a_home_name_that_realpath_does_not_fold() {
+        // A second name of the home of self is one tree, also when `realpath`
+        // gives it a different path. A search of it is a second search of the
+        // tree of self, under the label of another user.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        fs::create_dir_all(parent.join("me").join(".claude").join("projects")).unwrap();
+        unfolded_alias_of(parent, "me");
+
+        let roots = enumerate_user_projects(parent, "me");
+        let users: Vec<&str> = roots.iter().map(|r| r.user.as_str()).collect();
+        assert_eq!(users, ["me"]);
+        assert!(roots[0].is_self);
     }
 
     #[test]
