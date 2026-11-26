@@ -166,8 +166,8 @@ fn table_rows() {
     assert_eq!(row(&report, "gx")[1], "global alias");
     let names: Vec<&str> = table_lines(&report)
         .iter()
-        .skip(1)
-        .filter_map(|line| line.trim_start_matches('│').split('┆').next())
+        .filter_map(|line| line.strip_prefix('│'))
+        .filter_map(|line| line.split('┆').next())
         .map(str::trim)
         .collect();
     assert_eq!(names, ["Name", "zz", "wt", "gx"]);
