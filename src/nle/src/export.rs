@@ -232,25 +232,35 @@ pub(crate) async fn export_recording_with(
 /// The options of a `beta export` run for `request`, with an empty input
 /// path, or `None` when the target is not a run of `beta`.
 fn beta_options(request: &ExportRequest) -> Option<ExportOptions> {
-    let ExportTarget::Video {
-        theme,
-        fps,
-        resolution,
-        optimize_web,
-    } = &request.target
-    else {
-        return None;
-    };
-    Some(ExportOptions {
-        input_path: String::new(),
-        output_path: request.output_path.to_string_lossy().into_owned(),
-        format: ExportFormat::Video,
-        theme: Some(theme.as_str().to_string()),
-        compress: None,
-        fps: fps.map(NonZeroU32::get),
-        resolution: resolution.map(|size| size.to_string()),
-        optimize_web: Some(*optimize_web),
-    })
+    let output_path = request.output_path.to_string_lossy().into_owned();
+    match &request.target {
+        ExportTarget::Recording { .. } => None,
+        ExportTarget::Web { theme, compress } => Some(ExportOptions {
+            input_path: String::new(),
+            output_path,
+            format: ExportFormat::Web,
+            theme: Some(theme.as_str().to_string()),
+            compress: Some(*compress),
+            fps: None,
+            resolution: None,
+            optimize_web: None,
+        }),
+        ExportTarget::Video {
+            theme,
+            fps,
+            resolution,
+            optimize_web,
+        } => Some(ExportOptions {
+            input_path: String::new(),
+            output_path,
+            format: ExportFormat::Video,
+            theme: Some(theme.as_str().to_string()),
+            compress: None,
+            fps: fps.map(NonZeroU32::get),
+            resolution: resolution.map(|size| size.to_string()),
+            optimize_web: Some(*optimize_web),
+        }),
+    }
 }
 
 /// The text that starts a frame line of `beta`.
