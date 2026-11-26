@@ -215,7 +215,10 @@ fn an_unknown_mode_lists_the_known_modes() {
     let options = FilterOptions::new().with(MODE_OPTION, "rewind");
     match filters::registry().run(events(&[5.0]), &[with_options(options)]) {
         Err(NleError::RenderError(message)) => {
-            assert!(message.contains("skip-to-end, accelerate"), "{message}");
+            assert!(
+                message.contains("skip-to-end, accelerate, summary"),
+                "{message}"
+            );
         }
         other => panic!("expected a render error, got {other:?}"),
     }
@@ -260,4 +263,133 @@ fn options_keep_their_json_form() {
     );
     let json = serde_json::to_value(&applied(FilterRegion::All, Mode::SkipToEnd).options).unwrap();
     assert_eq!(json, serde_json::json!({"mode": "skip-to-end"}));
+}
+
+fn summary_options(
+    head: Option<serde_json::Value>,
+    tail: Option<serde_json::Value>,
+) -> FilterOptions {
+    let mut options = FilterOptions::new().with(MODE_OPTION, SUMMARY);
+    if let Some(head) = head {
+        options = options.with(HEAD_OPTION, head);
+    }
+    if let Some(tail) = tail {
+        options = options.with(TAIL_OPTION, tail);
+    }
+    options
+}
+
+#[test]
+fn bad_summary_options_fail_the_run() {
+    use serde_json::json;
+    let cases = [
+        ("no head", summary_options(None, Some(json!(1)))),
+        (
+            "negative head",
+            summary_options(Some(json!(-1)), Some(json!(1))),
+        ),
+        (
+            "fraction head",
+            summary_options(Some(json!(1.5)), Some(json!(1))),
+        ),
+        (
+            "string head",
+            summary_options(Some(json!("3")), Some(json!(1))),
+        ),
+        ("no tail", summary_options(Some(json!(1)), None)),
+    ];
+    for (name, options) in cases {
+        let result = filters::registry().run(events(&[5.0, 12.0]), &[with_options(options)]);
+        match result {
+            Err(NleError::RenderError(message)) => {
+                assert!(message.contains(KIND), "{name}: {message}");
+            }
+            other => panic!("{name}: expected a render error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn mode_of_reads_back_a_summary_and_keeps_its_json_form() {
+    let mode = Mode::Summary { head: 3, tail: 2 };
+    let filter = applied(range(1.0, 2.0), mode);
+    assert_eq!(mode_of(&filter), Some(mode));
+    assert_eq!(
+        serde_json::to_value(&filter.options).unwrap(),
+        serde_json::json!({"mode": "summary", "head": 3, "tail": 2})
+    );
+}
+
+#[test]
+fn mode_of_is_none_for_bad_summary_options() {
+    use serde_json::json;
+    assert_eq!(
+        mode_of(&with_options(summary_options(None, Some(json!(1))))),
+        None
+    );
+    assert_eq!(
+        mode_of(&with_options(summary_options(
+            Some(json!(-1)),
+            Some(json!(1))
+        ))),
+        None
+    );
+}
+
+type Triple = (f64, EventType, String);
+
+fn triples(events: &[Event]) -> Vec<Triple> {
+    events
+        .iter()
+        .map(|e| (e.time, e.event_type.clone(), e.data.clone()))
+        .collect()
+}
+
+fn out(time: f64, data: &str) -> Triple {
+    (time, EventType::Output, data.to_string())
+}
+
+fn inp(time: f64, data: &str) -> Triple {
+    (time, EventType::Input, data.to_string())
+}
+
+fn event_of(triple: &Triple) -> Event {
+    Event {
+        time: triple.0,
+        event_type: triple.1.clone(),
+        data: triple.2.clone(),
+    }
+}
+
+fn summary(start: f64, end: f64, head: usize, tail: usize) -> AppliedFilter {
+    applied(range(start, end), Mode::Summary { head, tail })
+}
+
+fn run_summary(input: &[Triple], filter: &AppliedFilter) -> Vec<Triple> {
+    let events: Vec<Event> = input.iter().map(event_of).collect();
+    triples(
+        &filters::registry()
+            .run(events, std::slice::from_ref(filter))
+            .unwrap(),
+    )
+}
+
+#[test]
+fn summary_of_one_event_for_each_line_drops_the_middle_and_the_time() {
+    let mut input: Vec<Triple> = (1..=10)
+        .map(|n| out(10.0 + f64::from(n), &format!("l{n}\r\n")))
+        .collect();
+    input.push(out(35.0, "late"));
+    let got = run_summary(&input, &summary(10.0, 30.0, 2, 2));
+    assert_eq!(
+        got,
+        vec![
+            out(11.0, "l1\r\n"),
+            out(12.0, "l2\r\n"),
+            out(13.0, "...\r\n"),
+            out(14.0, "l9\r\n"),
+            out(15.0, "l10\r\n"),
+            out(30.0, "late"),
+        ]
+    );
 }
