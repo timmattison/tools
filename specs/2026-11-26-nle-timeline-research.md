@@ -268,8 +268,10 @@ The prototype of decision D-159-2 measured five ways to draw the timeline on
 ### The prototype
 
 - **The scene.** 4 tracks with 2 clips on each track. Each clip is 600 s
-  long, with a gap of 30 s between the clips of a track. The window is
-  1,200 × 240 CSS px, at a device pixel ratio of 2.
+  long, and a gap of 30 s comes after each clip, also after the last clip.
+  Thus the clips of a track start at 0 s and 630 s, and the timeline is
+  1,260 s long. The window is 1,200 × 240 CSS px, at a device pixel ratio
+  of 2.
 - **The events.** 10,000, 100,000, or 1,000,000 events in total, divided
   equally between the 8 clips. Each clip has 200 bursts, as in a terminal
   recording, and each event is within 2 s of the center of its burst. The
