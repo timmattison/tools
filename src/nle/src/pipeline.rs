@@ -72,7 +72,9 @@ pub type FilterFn = dyn Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync
 /// 2. An answer of `None` leaves the shift of step 6 on `FilterFn`.
 /// 3. An answer of `Some(shift)` is the shift. The events after the region
 ///    move by it, also when no event of the region moves, and so does the end
-///    by step 8 on `FilterFn`.
+///    by step 8 on `FilterFn`. It is an error when `shift` is not finite, and
+///    when it moves an event after the region below zero. The error is a
+///    render error that names the kind.
 ///
 /// Thus a filter that cuts the time after its last event answers that time
 /// as the end. A plain filter cannot do this, because step 8 on `FilterFn`
@@ -246,7 +248,23 @@ impl FilterRegistry {
                 Some(time)
             }
         };
-        let shift = answered_shift.unwrap_or_else(|| last_time(&answer) - inside_last);
+        let shift = match answered_shift {
+            None => last_time(&answer) - inside_last,
+            Some(shift) => {
+                // A shift below zero moves the first event after the region
+                // below zero first.
+                let first_after = after
+                    .iter()
+                    .map(|event| event.time)
+                    .fold(f64::INFINITY, f64::min);
+                if !(shift.is_finite() && first_after + shift >= 0.0) {
+                    return Err(NleError::RenderError(format!(
+                        "filter \"{name}\" answered the shift {shift} s, which is not finite or moves an event after its region below zero"
+                    )));
+                }
+                shift
+            }
+        };
 
         let mut result = before;
         result.extend(answer.into_iter().map(|event| Event {
@@ -277,8 +295,10 @@ impl FilterRegistry {
     /// Returns `NleError::RenderError` when a filter kind is not registered,
     /// when the options of a typed filter do not parse, when a filter answers
     /// a time or an end that is not finite or is below zero on the timeline,
-    /// when a filter answers an end that it did not see, or when an event time
-    /// or the end of the timeline that the filters give is not finite.
+    /// when a filter answers an end that it did not see, when a filter answers
+    /// a shift that is not finite or moves an event below zero, or when an
+    /// event time or the end of the timeline that the filters give is not
+    /// finite.
     pub fn run(
         &self,
         events: Vec<Event>,
