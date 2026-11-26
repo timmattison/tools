@@ -118,6 +118,15 @@ impl FilterRegistry {
         }
 
         let answer = filter(&inside, &applied.options);
+        for event in &answer {
+            let time = event.time + start;
+            if !(time.is_finite() && time >= 0.0) {
+                return Err(NleError::RenderError(format!(
+                    "filter \"{}\" answered the time {time} s, which is not finite or is below zero",
+                    applied.kind.as_str()
+                )));
+            }
+        }
         let shift = last_time(&answer) - last_time(&inside);
 
         let mut result = before;
