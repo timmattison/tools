@@ -2324,6 +2324,45 @@ mod help_text_tests {
              first paragraph of the doc comment on `Args` holds is printed here"
         );
     }
+
+    /// What `--help` says about `--site-id`.
+    ///
+    /// Stated here rather than read from the doc comment, for the reason that
+    /// [`TOOL_DESCRIPTION`] gives.
+    const SITE_ID_HELP: &str = "Site ID (if omitted: the only site, else a choice at a terminal)";
+
+    /// The subcommands that take `--site-id`.
+    const SITE_ID_SUBCOMMANDS: [&str; 3] = ["devices", "clients", "vouchers"];
+
+    /// The help of `--site-id` states the rule for an omitted site.
+    ///
+    /// A controller with one site gives that site. A controller with several
+    /// sites gives a choice only at a terminal, and a run with no terminal
+    /// stops. Help that promises detection tells a script that it can omit
+    /// the flag, and the script then stops on a controller with several sites.
+    #[test]
+    fn the_site_id_help_states_the_rule_for_an_omitted_site() {
+        let command = Args::command();
+
+        for name in SITE_ID_SUBCOMMANDS {
+            let subcommand = command
+                .find_subcommand(name)
+                .unwrap_or_else(|| panic!("ufa must have the subcommand {name}"));
+            let site_id = subcommand
+                .get_arguments()
+                .find(|argument| argument.get_long() == Some("site-id"))
+                .unwrap_or_else(|| panic!("ufa {name} must take --site-id"));
+            let help = site_id
+                .get_help()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+
+            assert_eq!(
+                help, SITE_ID_HELP,
+                "`ufa {name} --help` must state the rule for an omitted --site-id"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
