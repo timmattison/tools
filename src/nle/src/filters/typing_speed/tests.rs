@@ -3,9 +3,12 @@
 //! Most tests use 4 characters per second, so each interval is 0.25 s, which
 //! a float holds exactly.
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
 use super::*;
 use crate::filters;
-use crate::types::{Event, EventType};
+use crate::types::{EditProject, Event, EventType, Recording};
 
 fn key(time: f64, data: &str) -> Event {
     Event {
@@ -15,8 +18,23 @@ fn key(time: f64, data: &str) -> Event {
     }
 }
 
+fn out(time: f64, data: &str) -> Event {
+    Event {
+        time,
+        event_type: EventType::Output,
+        data: data.to_owned(),
+    }
+}
+
 fn times(events: &[Event]) -> Vec<f64> {
     events.iter().map(|event| event.time).collect()
+}
+
+fn range(start: f64, end: f64) -> FilterRegion {
+    FilterRegion::Range {
+        start: Seconds::new(start).unwrap(),
+        end: Seconds::new(end).unwrap(),
+    }
 }
 
 /// A normalization at `rate` characters per second, with a pause threshold
@@ -48,4 +66,44 @@ fn each_key_of_a_burst_comes_at_the_target_rate() {
     let data: Vec<&str> = got.iter().map(|event| event.data.as_str()).collect();
     assert_eq!(data, vec!["a", "é", "🎉", "日本"]);
     assert!(got.iter().all(|event| event.event_type == EventType::Input));
+}
+
+#[test]
+fn the_events_after_the_last_key_move_by_its_change() {
+    let input = vec![
+        key(10.0, "l"),
+        key(11.0, "s"),
+        out(12.0, "Cargo.toml\r\n"),
+        out(25.0, "after the region"),
+    ];
+
+    let got = run(input, &[applied(range(10.0, 20.0), typing(4.0))]);
+
+    // The second key moves from 11 s to 10.25 s, so each later event moves
+    // 0.75 s earlier, also the event after the region.
+    assert_eq!(times(&got), vec![10.0, 10.25, 11.25, 24.25]);
+}
+
+#[test]
+fn a_render_moves_the_duration_by_the_change_of_the_last_key() {
+    let recording = Recording {
+        version: 2,
+        width: 80,
+        height: 24,
+        timestamp: 0.0,
+        duration: 10.0,
+        command: String::new(),
+        title: String::new(),
+        env: BTreeMap::new(),
+        events: vec![key(1.0, "a"), key(2.0, "b"), out(5.0, "x")],
+    };
+    let mut project = EditProject::from_recording(Arc::new(recording)).unwrap();
+    project
+        .filters
+        .push(applied(FilterRegion::All, typing(4.0)));
+
+    let rendered = filters::registry().render(&project).unwrap();
+
+    assert_eq!(times(&rendered.events), vec![1.0, 1.25, 4.25]);
+    assert_eq!(rendered.duration, 9.25);
 }
