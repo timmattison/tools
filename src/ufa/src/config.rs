@@ -914,9 +914,9 @@ const OWNER_ONLY: u32 = 0o600;
 /// the old file keeps the old file, and a failure before the rename leaves the
 /// old file whole. The mode goes on the creation of the new file, so the
 /// process umask cannot widen it. A `path` that is a symbolic link stays a link,
-/// and the rename replaces the file that the link points at. Windows has no
-/// mode bits to ask for. The new file inherits the ACL of the directory, which
-/// is per-user under `%APPDATA%`.
+/// and the rename puts the new file at the end of its chain of links, also when
+/// no file is there yet. Windows has no mode bits to ask for. The new file
+/// inherits the ACL of the directory, which is per-user under `%APPDATA%`.
 ///
 /// # Arguments
 ///
@@ -925,17 +925,14 @@ const OWNER_ONLY: u32 = 0o600;
 ///
 /// # Errors
 ///
-/// Returns the error of the creation of the new file, of `write`, of the sync,
-/// or of the rename. The old file is whole after each of them.
+/// Returns the error of a read of the chain of links, of the creation of the
+/// new file, of `write`, of the sync, or of the rename. The old file is whole
+/// after each of them.
 fn replace_config_file(
     path: &Path,
     write: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    let target = match fs::canonicalize(path) {
-        Ok(real) => real,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
-        Err(error) => return Err(error),
-    };
+    let target = end_of_link_chain(path)?;
     let directory = target.parent().unwrap_or_else(|| Path::new("."));
 
     let mut builder = tempfile::Builder::new();
@@ -951,6 +948,48 @@ fn replace_config_file(
     temp.as_file().sync_all()?;
     temp.persist(&target).map_err(|error| error.error)?;
     Ok(())
+}
+
+/// The most symbolic links that a save follows from the config path. Linux
+/// stops a path lookup after 40 links, and macOS stops after 32.
+const MAX_LINK_HOPS: usize = 40;
+
+/// The file that `path` names after each symbolic link in its last component
+/// is followed. That file does not have to exist.
+///
+/// A rename does not follow a link in the last component of its target, thus
+/// the save renames onto the end of the chain. `fs::canonicalize` cannot give
+/// that end when the last link points at a file that does not exist yet. A
+/// relative link is read from the directory of the link.
+///
+/// # Arguments
+///
+/// * `path` - The config path, which can be a symbolic link.
+///
+/// # Errors
+///
+/// Returns the error of a read of a link, or an error when the chain holds
+/// more than [`MAX_LINK_HOPS`] links, for example a loop.
+fn end_of_link_chain(path: &Path) -> io::Result<PathBuf> {
+    let mut current = path.to_path_buf();
+    for _ in 0..=MAX_LINK_HOPS {
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let destination = fs::read_link(&current)?;
+                current = match current.parent() {
+                    Some(directory) => directory.join(destination),
+                    None => destination,
+                };
+            }
+            Ok(_) => return Ok(current),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(current),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::other(format!(
+        "more than {MAX_LINK_HOPS} symbolic links from {}",
+        path.display()
+    )))
 }
 
 /// The store that reads the keys that 1Password holds.
