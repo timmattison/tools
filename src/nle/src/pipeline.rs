@@ -243,8 +243,9 @@ impl FilterRegistry {
         Ok(result)
     }
 
-    /// Run `filters` in order over `events`, by the steps on `FilterFn`. The
-    /// end of the timeline starts at the time of the last event.
+    /// Run `filters` in order over `events`, by the steps on `FilterFn` or on
+    /// `SpanFilterFn`. The end of the timeline starts at the time of the last
+    /// event.
     ///
     /// # Errors
     /// Returns `NleError::RenderError` when a filter kind is not registered,
@@ -305,8 +306,9 @@ impl FilterRegistry {
     /// 2. The events are the events of each clip on the timeline, track by
     ///    track and clip by clip, in a stable time order. Events at one time
     ///    keep track order, then clip order.
-    /// 3. The filters of the project run on them by the steps on `FilterFn`,
-    ///    with the end of the timeline starting at `EditProject::duration`.
+    /// 3. The filters of the project run on them by the steps on `FilterFn` or
+    ///    on `SpanFilterFn`, with the end of the timeline starting at
+    ///    `EditProject::duration`.
     /// 4. The header (`version`, `width`, `height`, `timestamp`, `command`,
     ///    `title`, `env`) is the header of the source of the clip that starts
     ///    first on the timeline. A tie goes to the clip that comes first in
