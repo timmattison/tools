@@ -15,6 +15,8 @@ use crate::command_words::{parse_line, AliasKind, CommandWord, Line};
 use crate::history::HistoryEntry;
 use crate::shell::Definitions;
 
+pub mod render;
+
 /// The label of a regular alias.
 const LABEL_ALIAS: &str = "alias";
 /// The label of a global alias.
