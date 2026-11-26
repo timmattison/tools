@@ -4168,6 +4168,73 @@ mod tests {
         assert!(!other.is_self);
     }
 
+    /// Makes the upper-case form of `name` a second name for the home
+    /// `<parent>/<name>`, and returns that form.
+    ///
+    /// On a case-insensitive filesystem (the macOS default) the upper-case form
+    /// names the same directory already, so the function adds nothing. On a
+    /// case-sensitive filesystem it adds a symlink of that name, so the test gets
+    /// the same aliasing on each filesystem.
+    #[cfg(unix)]
+    fn case_variant_of(parent: &Path, name: &str) -> String {
+        let variant = name.to_uppercase();
+        assert_ne!(variant, name, "the variant must differ from {name:?}");
+        let alias = parent.join(&variant);
+        if fs::symlink_metadata(&alias).is_err() {
+            std::os::unix::fs::symlink(parent.join(name), &alias).unwrap();
+        }
+        variant
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_projects_treats_a_case_variant_of_self_as_self() {
+        // `--user ME` names the current account `me` on a case-insensitive
+        // filesystem. The names differ but the tree is the same, so the root is
+        // the current user's own (issue #314).
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        fs::create_dir_all(parent.join("me").join(".claude").join("projects")).unwrap();
+        let variant = case_variant_of(parent, "me");
+
+        let root = user_projects(parent, &variant, "me");
+        assert_eq!(root.user, variant);
+        assert!(
+            root.is_self,
+            "--user {variant} names the tree of `me`, so it is a same-user root"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_projects_treats_a_symlinked_alias_of_self_as_self() {
+        // A symlinked home alias (`me-alias -> me`) is the same tree as the
+        // current user's own, whatever the filesystem does with case.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        fs::create_dir_all(parent.join("me").join(".claude").join("projects")).unwrap();
+        std::os::unix::fs::symlink(parent.join("me"), parent.join("me-alias")).unwrap();
+
+        let root = user_projects(parent, "me-alias", "me");
+        assert!(
+            root.is_self,
+            "--user me-alias names the tree of `me`, so it is a same-user root"
+        );
+    }
+
+    #[test]
+    fn user_projects_keeps_a_distinct_account_foreign() {
+        // Two real homes with two real trees are two accounts, also when both
+        // trees resolve. Only the same tree makes a same-user root.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        for user in ["me", "other"] {
+            fs::create_dir_all(parent.join(user).join(".claude").join("projects")).unwrap();
+        }
+
+        assert!(!user_projects(parent, "other", "me").is_self);
+    }
+
     #[test]
     fn self_projects_marks_the_current_users_tree() {
         let home = Path::new("/Users/timmattison");
