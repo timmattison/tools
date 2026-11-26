@@ -219,3 +219,25 @@ fn a_jitter_changes_each_interval_inside_its_bound_and_the_same_way_each_time() 
         "the intervals do not vary: {intervals:?}"
     );
 }
+
+#[test]
+fn a_typing_rate_must_be_finite_and_above_zero() {
+    for good in [0.5, 4.0, 12.0] {
+        assert_eq!(TypingRate::new(good).unwrap().get(), good);
+    }
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let error = TypingRate::new(bad).expect_err("a bad rate must be refused");
+        assert!(error.to_string().contains("typing rate"), "{bad}: {error}");
+    }
+}
+
+#[test]
+fn a_jitter_must_be_from_zero_up_to_one() {
+    for good in [0.0, 0.25, 0.99] {
+        assert_eq!(Jitter::new(good).unwrap().get(), good);
+    }
+    for bad in [-0.1, 1.0, 1.5, f64::NAN, f64::INFINITY] {
+        let error = Jitter::new(bad).expect_err("a bad jitter must be refused");
+        assert!(error.to_string().contains("jitter"), "{bad}: {error}");
+    }
+}
