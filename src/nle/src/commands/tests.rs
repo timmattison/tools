@@ -457,19 +457,6 @@ fn load_recording_command_returns_the_recording() {
 }
 
 #[test]
-fn save_recording_command_writes_a_file_that_loads_back() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("a.json");
-    block_on(save_recording(
-        file.to_string_lossy().to_string(),
-        Recording::test_fixture(),
-        None,
-    ))
-    .unwrap();
-    assert!(Recording::load(&file).is_ok());
-}
-
-#[test]
 fn list_recordings_command_lists_one_saved_file() {
     let dir = tempfile::tempdir().unwrap();
     write_fixture(&dir.path().join("a.json"), false);

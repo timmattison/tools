@@ -2,7 +2,9 @@
 //!
 //! This module holds the window settings, the root component, and the four
 //! regions of the window: the menu bar, the preview pane, the timeline, and
-//! the properties panel. The open recording lives in the state of `App`.
+//! the properties panel. The open document lives in the state of `App`: the
+//! `Editor` of its project, and the metadata of the recording file that it
+//! came from.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -12,7 +14,10 @@ use std::sync::Arc;
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 
+use crate::editor::Editor;
 use crate::error::NleError;
+use crate::pipeline::FilterRegistry;
+use crate::types::EditProject;
 
 use crate::format::{file_name, format_duration, format_recorded};
 use crate::types::{LoadedRecording, RecordingMetadata};
@@ -120,19 +125,42 @@ impl Services {
     }
 }
 
+/// The open document of the window: the editor of its project, and the
+/// metadata of the recording file that it came from.
+struct Document {
+    editor: Editor,
+    metadata: RecordingMetadata,
+}
+
+impl Document {
+    /// Builds the document of a loaded recording: a project of one clip that
+    /// holds the whole recording, and an editor for it.
+    fn open(loaded: LoadedRecording, filters: Arc<FilterRegistry>) -> Result<Self, NleError> {
+        let project = EditProject::from_recording(Arc::new(loaded.recording))?;
+        Ok(Self {
+            editor: Editor::new(project, filters)?,
+            metadata: loaded.metadata,
+        })
+    }
+}
+
 /// The root component of the application.
 #[component]
 pub(crate) fn App() -> Element {
-    let mut loaded = use_signal(|| None::<LoadedRecording>);
+    let filters = use_hook(|| Arc::new(FilterRegistry::new()));
+    let mut loaded = use_signal(|| None::<Document>);
     let mut error = use_signal(|| None::<String>);
 
     rsx! {
         style { {STYLE} }
         div { class: "app-layout",
             MenuBar {
-                on_loaded: move |recording| {
-                    loaded.set(Some(recording));
-                    error.set(None);
+                on_loaded: move |recording| match Document::open(recording, filters.clone()) {
+                    Ok(document) => {
+                        loaded.set(Some(document));
+                        error.set(None);
+                    }
+                    Err(failure) => error.set(Some(format!("{OPEN_FAILED_PREFIX}: {failure}"))),
                 },
                 on_error: move |message| error.set(Some(message)),
             }
@@ -184,7 +212,7 @@ fn MenuBar(on_loaded: EventHandler<LoadedRecording>, on_error: EventHandler<Stri
 
 /// The preview of the open recording.
 #[component]
-fn PreviewPane(loaded: ReadSignal<Option<LoadedRecording>>) -> Element {
+fn PreviewPane(loaded: ReadSignal<Option<Document>>) -> Element {
     let loaded = loaded.read();
     rsx! {
         div { class: "preview-pane",
@@ -192,7 +220,7 @@ fn PreviewPane(loaded: ReadSignal<Option<LoadedRecording>>) -> Element {
                 div { class: "placeholder",
                     "Terminal preview \u{2014} coming in #151"
                     br {}
-                    "{open.recording.width}x{open.recording.height}"
+                    "{open.metadata.width}x{open.metadata.height}"
                 }
             } else {
                 div { class: "placeholder", "Open a recording to preview it here" }
@@ -203,7 +231,7 @@ fn PreviewPane(loaded: ReadSignal<Option<LoadedRecording>>) -> Element {
 
 /// The timeline of the open recording.
 #[component]
-fn Timeline(loaded: ReadSignal<Option<LoadedRecording>>) -> Element {
+fn Timeline(loaded: ReadSignal<Option<Document>>) -> Element {
     let loaded = loaded.read();
     rsx! {
         div { class: "timeline",
@@ -212,7 +240,7 @@ fn Timeline(loaded: ReadSignal<Option<LoadedRecording>>) -> Element {
                 div { class: "placeholder",
                     "Timeline editor \u{2014} coming in #150"
                     br {}
-                    "{open.recording.events.len()} events | {format_duration(open.recording.duration)}"
+                    "{summary(open)}"
                 }
             } else {
                 div { class: "placeholder", "No recording loaded" }
@@ -221,9 +249,19 @@ fn Timeline(loaded: ReadSignal<Option<LoadedRecording>>) -> Element {
     }
 }
 
+/// The event count and the duration of the project of the document.
+fn summary(open: &Document) -> String {
+    let project = open.editor.project();
+    format!(
+        "{} events | {}",
+        project.event_count(),
+        format_duration(project.duration())
+    )
+}
+
 /// The metadata of the open recording.
 #[component]
-fn PropertiesPanel(loaded: ReadSignal<Option<LoadedRecording>>) -> Element {
+fn PropertiesPanel(loaded: ReadSignal<Option<Document>>) -> Element {
     let loaded = loaded.read();
     rsx! {
         div { class: "properties-panel",
