@@ -246,3 +246,80 @@ fn a_repo_that_is_not_a_workspace_is_an_error_also_with_a_record() {
 
     assert!(error.to_string().contains("--repo <path>"), "{error}");
 }
+
+/// Gives the key of a `path+file` record of `package` in `crate_dir`, as cargo
+/// writes it: a file URL, with a percent escape for each byte outside the
+/// safe set.
+fn path_key(package: &str, crate_dir: &Path) -> String {
+    let url = url::Url::from_file_path(crate_dir).unwrap();
+    format!("{package} 0.1.0 (path+{url})")
+}
+
+/// Makes a cargo home whose records file holds only `key`, for [`BINARY`].
+fn home_with_record(key: &str) -> CargoHome {
+    let home = CargoHome::new();
+    home.write_records(&[(key, &[BINARY])]);
+    home
+}
+
+#[test]
+fn a_path_record_gives_the_workspace_that_holds_its_crate_directory() {
+    let source = workspace_repository();
+    let crate_dir = source.path().join("one");
+    let home = home_with_record(&path_key(BINARY, &crate_dir));
+    let cwd = not_a_repository();
+
+    let workspace = find_from(cwd.path(), &home.location());
+
+    assert_eq!(canonical(&workspace.root), canonical(source.path()));
+    assert_eq!(workspace.found_by, FoundBy::InstalledPath { crate_dir });
+}
+
+/// A crate that is not a member of a workspace is its own workspace.
+#[test]
+fn a_path_record_of_a_crate_without_a_workspace_gives_the_crate_directory() {
+    let crate_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(crate_dir.path().join("src")).unwrap();
+    std::fs::write(
+        crate_dir.path().join("Cargo.toml"),
+        "[package]\nname = \"wdid-fixture-alone\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(crate_dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+    let home = home_with_record(&path_key(BINARY, crate_dir.path()));
+    let cwd = not_a_repository();
+
+    let workspace = find_from(cwd.path(), &home.location());
+
+    assert_eq!(canonical(&workspace.root), canonical(crate_dir.path()));
+}
+
+/// cargo writes a space and each multibyte character of the path as percent
+/// escapes. wdid reads them back.
+#[test]
+fn a_path_record_with_a_space_and_multibyte_characters_in_the_path_counts() {
+    let root = tempfile::tempdir().unwrap();
+    let member = "日本語 🎉 café";
+    std::fs::write(
+        root.path().join("Cargo.toml"),
+        format!("[workspace]\nresolver = \"2\"\nmembers = [\"{member}\"]\n"),
+    )
+    .unwrap();
+    let crate_dir = root.path().join(member);
+    std::fs::create_dir_all(crate_dir.join("src")).unwrap();
+    std::fs::write(
+        crate_dir.join("Cargo.toml"),
+        "[package]\nname = \"wdid-fixture-multibyte\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(crate_dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let key = path_key(BINARY, &crate_dir);
+    assert!(key.contains("%20"), "the fixture key has no escape: {key}");
+    let home = home_with_record(&key);
+    let cwd = not_a_repository();
+
+    let workspace = find_from(cwd.path(), &home.location());
+
+    assert_eq!(canonical(&workspace.root), canonical(root.path()));
+    assert_eq!(workspace.found_by, FoundBy::InstalledPath { crate_dir });
+}
