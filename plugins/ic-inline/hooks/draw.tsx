@@ -6,7 +6,7 @@ import type { Elements, RenderElement, RenderViewport } from 'claude-code'
 
 import { fileName } from './argument'
 import { fitCells, HALF_BLOCK_CELL, halfBlockCells, TERMINAL_CELL } from './cells'
-import type { Picture } from './picture'
+import type { Picture, Subject } from './picture'
 
 /** The elements of the terminal that a picture draws with. */
 export type PictureElements = Pick<Elements['terminal'], 'Box' | 'Text' | 'Raster' | 'Image'>
@@ -33,12 +33,12 @@ const RASTER_LIMIT = { columns: 512, rows: 256 }
 const IMAGE_LIMIT = { columns: 255, rows: 255 }
 
 /**
- * The tree that shows `picture` from `path`.
+ * The tree that shows `picture`, which ic decoded from `subject`.
  *
  * @param elements the terminal's elements, from `$.ui.resolve(e)`
  * @param viewport what the transcript measured, from `e.viewport`
  * @param picture the picture that ic decoded
- * @param path the file, for the caption
+ * @param subject the file, or the two files of a diff, for the caption
  * @param drawing pixels or half blocks
  * @param maxRows the tallest that the picture can be, in rows
  * @returns the picture over its caption
@@ -47,13 +47,13 @@ export function pictureTree(
   elements: PictureElements,
   viewport: RenderViewport | undefined,
   picture: Picture,
-  path: string,
+  subject: Subject,
   drawing: Drawing,
   maxRows: number,
 ): RenderElement {
   const { Box, Text, Raster, Image } = elements
   const columns = Math.max(1, (viewport?.columns ?? UNMEASURED_COLUMNS) - MARGIN_COLUMNS)
-  const caption = `${fileName(path)} · ${picture.sourceWidth}×${picture.sourceHeight}`
+  const caption = `${titleOf(subject)} · ${picture.sourceWidth}×${picture.sourceHeight}`
 
   if (drawing === 'pixels') {
     const size = fitCells(
@@ -91,4 +91,14 @@ export function pictureTree(
       <Text dimColor>{caption}</Text>
     </Box>
   )
+}
+
+/**
+ * The names in the caption: the file name, or `first vs second` for a diff,
+ * joined as ic joins them. Two equal file names show as the two paths.
+ */
+function titleOf(subject: Subject): string {
+  if (subject.kind === 'image') return fileName(subject.path)
+  const [first, second] = [fileName(subject.first), fileName(subject.second)]
+  return first === second ? `${subject.first} vs ${subject.second}` : `${first} vs ${second}`
 }
