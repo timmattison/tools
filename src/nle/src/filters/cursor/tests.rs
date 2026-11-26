@@ -730,3 +730,47 @@ fn smart_in_a_range_leaves_the_cursor_as_the_recording_has_it() {
         ]
     );
 }
+
+// Tests of the save and the restore of a DEC private mode (XTSAVE, XTRESTORE).
+
+#[test]
+fn a_restore_of_a_saved_mode_cannot_bring_the_cursor_back() {
+    let events = vec![out(0.0, "\x1b[?25;1049s\x1b[?25ha\x1b[?25;12r")];
+
+    let got = run(
+        events,
+        json!({ "visibility": "always-hidden" }),
+        FilterRegion::All,
+    )
+    .unwrap();
+
+    // Mode 1049 and mode 12 are not the filter's, so they stay.
+    assert_eq!(got, vec![out(0.0, HIDE), out(0.0, "\x1b[?1049sa\x1b[?12r")]);
+}
+
+#[test]
+fn a_restore_of_a_saved_mode_sets_the_state_that_comes_back_after_a_range() {
+    let events = vec![
+        out(1.0, "\x1b[?25l\x1b[?25;12sb\x1b[?25h\x1b[?12h\x1b[?25;12rc"),
+        out(3.0, "d"),
+    ];
+
+    let got = run(
+        events,
+        json!({ "visibility": "always-visible", "blink": true }),
+        range(0.5, 2.0),
+    )
+    .unwrap();
+
+    // The restore gives back the hidden cursor and the mode 12 of no value,
+    // so the restore at the end hides the cursor and sets no mode 12.
+    assert_eq!(
+        got,
+        vec![
+            out(0.5, "\x1b[?25h\x1b[1 q"),
+            out(1.0, "bc"),
+            out(2.0, "\x1b[?25l\x1b[0 q"),
+            out(3.0, "d"),
+        ]
+    );
+}
