@@ -94,6 +94,13 @@ pub fn applied(region: FilterRegion, mode: Mode) -> AppliedFilter {
     }
 }
 
+/// The mode of a fast-forward filter. It is `None` when the filter is of
+/// another kind, or when its options do not give a valid mode.
+#[must_use]
+pub fn mode_of(_filter: &AppliedFilter) -> Option<Mode> {
+    None
+}
+
 /// Add the fast-forward filter to `registry`.
 pub fn register(registry: &mut FilterRegistry) {
     registry.register_span(kind(), fast_forward);

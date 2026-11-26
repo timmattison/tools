@@ -158,3 +158,106 @@ fn accelerate_divides_times_and_length_and_moves_later_events() {
     let got = run_times(&[4.0, 12.0, 24.0], &[accelerate(8.0, 24.0, 16.0)]);
     assert_eq!(got, vec![4.0, 8.25, 9.0]);
 }
+
+fn with_options(options: FilterOptions) -> AppliedFilter {
+    AppliedFilter {
+        kind: kind(),
+        region: range(10.0, 20.0),
+        options,
+    }
+}
+
+#[test]
+fn bad_options_fail_the_run() {
+    let cases = [
+        ("no mode", FilterOptions::new()),
+        ("number mode", FilterOptions::new().with(MODE_OPTION, 3)),
+        (
+            "unknown mode",
+            FilterOptions::new().with(MODE_OPTION, "rewind"),
+        ),
+        (
+            "no speed",
+            FilterOptions::new().with(MODE_OPTION, ACCELERATE),
+        ),
+        (
+            "string speed",
+            FilterOptions::new()
+                .with(MODE_OPTION, ACCELERATE)
+                .with(SPEED_OPTION, "fast"),
+        ),
+        (
+            "speed one",
+            FilterOptions::new()
+                .with(MODE_OPTION, ACCELERATE)
+                .with(SPEED_OPTION, 1.0),
+        ),
+        (
+            "speed below one",
+            FilterOptions::new()
+                .with(MODE_OPTION, ACCELERATE)
+                .with(SPEED_OPTION, 0.5),
+        ),
+    ];
+    for (name, options) in cases {
+        let result = filters::registry().run(events(&[5.0, 12.0]), &[with_options(options)]);
+        match result {
+            Err(NleError::RenderError(message)) => {
+                assert!(message.contains(KIND), "{name}: {message}");
+            }
+            other => panic!("{name}: expected a render error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn an_unknown_mode_lists_the_known_modes() {
+    let options = FilterOptions::new().with(MODE_OPTION, "rewind");
+    match filters::registry().run(events(&[5.0]), &[with_options(options)]) {
+        Err(NleError::RenderError(message)) => {
+            assert!(message.contains("skip-to-end, accelerate"), "{message}");
+        }
+        other => panic!("expected a render error, got {other:?}"),
+    }
+}
+
+#[test]
+fn mode_of_reads_back_an_applied_filter() {
+    let accelerate = Mode::Accelerate(Acceleration::new(20.0).unwrap());
+    for mode in [Mode::SkipToEnd, accelerate] {
+        assert_eq!(mode_of(&applied(range(1.0, 2.0), mode)), Some(mode));
+    }
+}
+
+#[test]
+fn mode_of_is_none_for_other_kinds_and_bad_options() {
+    let other_kind = AppliedFilter {
+        kind: FilterKind::new("other"),
+        region: FilterRegion::All,
+        options: FilterOptions::new().with(MODE_OPTION, SKIP_TO_END),
+    };
+    assert_eq!(mode_of(&other_kind), None);
+    for options in [
+        FilterOptions::new(),
+        FilterOptions::new().with(MODE_OPTION, 3),
+        FilterOptions::new().with(MODE_OPTION, "rewind"),
+        FilterOptions::new().with(MODE_OPTION, ACCELERATE),
+        FilterOptions::new()
+            .with(MODE_OPTION, ACCELERATE)
+            .with(SPEED_OPTION, 1.0),
+    ] {
+        assert_eq!(mode_of(&with_options(options)), None);
+    }
+}
+
+#[test]
+fn options_keep_their_json_form() {
+    let accelerate = Mode::Accelerate(Acceleration::new(20.0).unwrap());
+    let json = serde_json::to_value(&applied(FilterRegion::All, accelerate).options).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"mode": "accelerate", "speed": 20.0})
+    );
+    let json = serde_json::to_value(&applied(FilterRegion::All, Mode::SkipToEnd).options).unwrap();
+    assert_eq!(json, serde_json::json!({"mode": "skip-to-end"}));
+}
