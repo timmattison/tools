@@ -8,7 +8,7 @@
 use serde::Deserialize;
 
 use crate::pipeline::{FilterRegistry, Span};
-use crate::types::{Event, FilterKind, Seconds};
+use crate::types::{Event, EventType, FilterKind, Seconds};
 
 /// The kind of the filter that shortens the long pauses between events.
 ///
@@ -30,6 +30,17 @@ pub const PAUSE_REMOVAL: &str = "pause-removal";
 pub const PAUSE_INSERTION: &str = "pause-insertion";
 
 /// The kind of the filter that cuts the silence at the start and at the end.
+///
+/// Options: `leading` and `trailing`, each `true` when the options do not name
+/// it. The leading silence is the time before the first input event: the
+/// first input event moves to the start of the region, each later event moves
+/// back by the same time, and each output event before it moves to the start,
+/// in its order. Thus the screen that the user saw before the first key is
+/// still there. The trailing silence is the time after the last output event:
+/// each event after it moves back to it, and the end of the timeline comes
+/// back to it. A region with no input event keeps its start, and a region
+/// with no output event keeps its end. On a range, the events after the range
+/// move by the shift, as for each filter.
 pub const AUTO_TRIM: &str = "auto-trim";
 
 /// A registry that holds each built-in filter under its kind.
@@ -38,6 +49,7 @@ pub fn builtin() -> FilterRegistry {
     let mut registry = FilterRegistry::new();
     registry.register_typed(FilterKind::new(PAUSE_REMOVAL), remove_pauses);
     registry.register_typed(FilterKind::new(PAUSE_INSERTION), insert_pause);
+    registry.register_typed(FilterKind::new(AUTO_TRIM), trim_silence);
     registry
 }
 
@@ -136,6 +148,61 @@ fn insert_pause(span: Span, options: &PauseInsertion) -> Span {
             .collect(),
         end: span.end.map(later),
     }
+}
+
+/// The options of auto-trim.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AutoTrim {
+    #[serde(default = "on")]
+    leading: bool,
+    #[serde(default = "on")]
+    trailing: bool,
+}
+
+/// The value of an auto-trim option that the options do not name.
+fn on() -> bool {
+    true
+}
+
+/// The times of the events of `events` that have the type `event_type`.
+fn times_of<'a>(
+    events: &'a [Event],
+    event_type: &'a EventType,
+) -> impl Iterator<Item = f64> + 'a {
+    events
+        .iter()
+        .filter(move |event| event.event_type == *event_type)
+        .map(|event| event.time)
+}
+
+/// Cut the silence at the two ends of `span`, by the rules on `AUTO_TRIM`.
+///
+/// When the filter sees the end of the timeline, the answer sets it: back by
+/// the time of the first input event, then to the time of the last output
+/// event. Else the end moves by the shift.
+fn trim_silence(span: Span, options: &AutoTrim) -> Span {
+    let Span {
+        mut events,
+        mut end,
+    } = span;
+    if options.leading {
+        if let Some(first_input) = times_of(&events, &EventType::Input).min_by(f64::total_cmp) {
+            for event in &mut events {
+                event.time = (event.time - first_input).max(0.0);
+            }
+            end = end.map(|end| (end - first_input).max(0.0));
+        }
+    }
+    if options.trailing {
+        if let Some(last_output) = times_of(&events, &EventType::Output).max_by(f64::total_cmp) {
+            for event in &mut events {
+                event.time = event.time.min(last_output);
+            }
+            end = end.map(|_| last_output);
+        }
+    }
+    Span { events, end }
 }
 
 #[cfg(test)]
