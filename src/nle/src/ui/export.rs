@@ -8,6 +8,9 @@ use std::ffi::OsString;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
+use dioxus::prelude::*;
+
+use super::Document;
 use crate::error::NleError;
 use crate::export::{ExportProgress, ExportRequest, ExportTarget, Resolution, Theme};
 use crate::format::file_name;
@@ -270,6 +273,16 @@ impl ExportSettings {
             target: self.target()?,
         })
     }
+}
+
+/// The export bar of the menu bar. With no open document, it shows nothing.
+#[component]
+pub(super) fn ExportBar(
+    loaded: ReadSignal<Option<Document>>,
+    on_result: EventHandler<Result<(), String>>,
+) -> Element {
+    let _ = (loaded, on_result);
+    rsx! {}
 }
 
 #[cfg(test)]

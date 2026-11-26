@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use crate::format::format_recorded;
 use crate::types::{Event, EventType, Recording, RecordingMetadata};
+use dioxus::html::SerializedFormData;
 use dioxus_core::{ElementId, Mutation};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -17,6 +18,8 @@ use tokio::sync::oneshot;
 
 use crate::editor::Edit;
 use crate::error::NleError;
+use crate::export::{ExportProgress, ExportRequest, ExportTarget};
+use crate::ui::export::SaveDialog;
 use crate::types::{ClipId, Seconds};
 
 const FIXTURE_PATH: &str = "/home/user/recordings/demo.json";
@@ -147,6 +150,21 @@ impl<T> Answer<T> {
     }
 }
 
+type ExportOutcome = Result<PathBuf, NleError>;
+
+/// What a fake export does: it sends each stage of `progress` at once, then it
+/// waits for `outcome`.
+struct FakeExport {
+    progress: Vec<ExportProgress>,
+    outcome: Answer<ExportOutcome>,
+}
+
+/// What a fake export got: the request, and the render of the editor.
+struct ExportCall {
+    request: ExportRequest,
+    render: Recording,
+}
+
 /// What the fakes saw and what they will answer.
 #[derive(Default)]
 struct Script {
@@ -154,6 +172,11 @@ struct Script {
     loads: Vec<PathBuf>,
     pick_answers: VecDeque<Answer<Option<PathBuf>>>,
     load_answers: VecDeque<Answer<LoadResult>>,
+    /// Each save dialog that the fake showed.
+    dialogs: Vec<SaveDialog>,
+    dialog_answers: VecDeque<Answer<Option<PathBuf>>>,
+    exports: Vec<ExportCall>,
+    export_answers: VecDeque<FakeExport>,
 }
 
 /// A fake dialog and a fake load. Each takes its answer from a queue.
@@ -184,6 +207,37 @@ impl Fakes {
         self
     }
 
+    /// Queues the answer of the next save dialog.
+    fn dialog(self, answer: Answer<Option<PathBuf>>) -> Self {
+        self.script().dialog_answers.push_back(answer);
+        self
+    }
+
+    /// Queues the next export: the stages that it reports at once, and its end.
+    fn export(self, progress: Vec<ExportProgress>, outcome: Answer<ExportOutcome>) -> Self {
+        self.script()
+            .export_answers
+            .push_back(FakeExport { progress, outcome });
+        self
+    }
+
+    /// The save dialogs that the fake showed, oldest first.
+    fn dialogs(&self) -> Vec<SaveDialog> {
+        self.script().dialogs.clone()
+    }
+
+    /// The requests of the exports that the fake got, oldest first.
+    fn export_requests(&self) -> Vec<ExportRequest> {
+        let script = self.script();
+        script.exports.iter().map(|call| call.request.clone()).collect()
+    }
+
+    /// The renders of the editors that the exports got, oldest first.
+    fn export_renders(&self) -> Vec<Recording> {
+        let script = self.script();
+        script.exports.iter().map(|call| call.render.clone()).collect()
+    }
+
     fn picks(&self) -> usize {
         self.script().picks
     }
@@ -196,6 +250,8 @@ impl Fakes {
     fn services(&self) -> Services {
         let pick_script = Arc::clone(&self.script);
         let load_script = Arc::clone(&self.script);
+        let dialog_script = Arc::clone(&self.script);
+        let export_script = Arc::clone(&self.script);
         Services::new(
             move || {
                 let mut script = pick_script.lock().expect("the script lock");
@@ -214,6 +270,30 @@ impl Fakes {
                 drop(script);
                 Box::pin(answer.resolve())
             },
+            move |dialog| {
+                let mut script = dialog_script.lock().expect("the script lock");
+                script.dialogs.push(dialog);
+                let answer = script
+                    .dialog_answers
+                    .pop_front()
+                    .expect("an unexpected save dialog");
+                drop(script);
+                Box::pin(answer.resolve())
+            },
+            move |editor, request, sender| {
+                let render = editor.render().expect("a render");
+                let mut script = export_script.lock().expect("the script lock");
+                script.exports.push(ExportCall { request, render });
+                let fake = script
+                    .export_answers
+                    .pop_front()
+                    .expect("an unexpected export");
+                drop(script);
+                for stage in fake.progress {
+                    sender.send(stage).expect("the export bar listens");
+                }
+                Box::pin(fake.outcome.resolve())
+            },
         )
     }
 }
@@ -228,6 +308,11 @@ struct Window {
     newest: Vec<ElementId>,
     /// The click listeners of the first render.
     first_render: Vec<ElementId>,
+    /// The id of each element that got a listener, by event name, in creation
+    /// order.
+    listeners: BTreeMap<String, Vec<ElementId>>,
+    /// For each event name, the ids that the newest render created for it.
+    newest_listeners: BTreeMap<String, Vec<ElementId>>,
 }
 
 impl Window {
@@ -244,6 +329,8 @@ impl Window {
             clicks: Vec::new(),
             newest: Vec::new(),
             first_render: Vec::new(),
+            listeners: BTreeMap::new(),
+            newest_listeners: BTreeMap::new(),
         };
         window.note_listeners(&edits);
         window.first_render = window.clicks.clone();
@@ -252,6 +339,16 @@ impl Window {
 
     /// Keeps the id of each new click listener in `edits`.
     fn note_listeners(&mut self, edits: &[Mutation]) {
+        let mut created_by_name: BTreeMap<String, Vec<ElementId>> = BTreeMap::new();
+        for edit in edits {
+            if let Mutation::NewEventListener { name, id } = edit {
+                created_by_name.entry(name.clone()).or_default().push(*id);
+            }
+        }
+        for (name, ids) in created_by_name {
+            self.listeners.entry(name.clone()).or_default().extend(&ids);
+            self.newest_listeners.insert(name, ids);
+        }
         let created: Vec<ElementId> = edits
             .iter()
             .filter_map(|edit| match edit {
@@ -287,6 +384,60 @@ impl Window {
             self.newest
         );
         self.newest[0]
+    }
+
+    /// The Export button. It is the second click listener that the app ever
+    /// made: the first is the Open Recording button, and the export bar
+    /// appears with the first document, before any banner.
+    fn export_button(&self) -> ElementId {
+        assert!(self.html().contains("export-bar"), "no export bar");
+        let clicks = &self.listeners["click"];
+        assert!(clicks.len() >= 2, "{clicks:?}");
+        clicks[1]
+    }
+
+    /// The select of the kind of file. It is the first `change` listener that
+    /// the app ever made, because the export bar starts with it, and the other
+    /// controls of the bar come after it.
+    fn kind_select(&self) -> ElementId {
+        assert!(self.html().contains("export-bar"), "no export bar");
+        self.listeners["change"][0]
+    }
+
+    /// The FPS field. It is the first of the `input` listeners that the newest
+    /// render of such listeners made, because the FPS field comes before the
+    /// resolution field in a bar that shows both.
+    fn fps_input(&self) -> ElementId {
+        self.newest_listeners["input"][0]
+    }
+
+    /// Sends a change of a form control to the element, and renders.
+    fn change(&mut self, id: ElementId, value: &str) {
+        self.send_form_event("change", id, value);
+    }
+
+    /// Sends an input to a text field, and renders.
+    fn input(&mut self, id: ElementId, value: &str) {
+        self.send_form_event("input", id, value);
+    }
+
+    /// Sends a form event with `value` under the event `name`, and renders.
+    fn send_form_event(&mut self, name: &str, id: ElementId, value: &str) {
+        let form = SerializedFormData::new(value.to_string(), vec![]);
+        let data = Rc::new(PlatformEventData::new(Box::new(form)));
+        let event = dioxus::prelude::Event::new(data as Rc<dyn Any>, true);
+        self.dom.runtime().handle_event(name, event, id);
+        self.render();
+    }
+
+    /// Whether the start tag of the Export button holds `disabled`.
+    fn export_is_disabled(&self) -> bool {
+        let page = self.html();
+        let (before, _) = page
+            .split_once(">Export</button>")
+            .unwrap_or_else(|| panic!("no Export button in {page}"));
+        let (_, tag) = before.rsplit_once("<button").expect("a button start tag");
+        tag.split([' ', '>', '=']).any(|word| word == "disabled")
     }
 
     /// Sends a click to the element and renders.
@@ -599,4 +750,68 @@ async fn a_load_after_an_error_removes_the_banner() {
     let page = window.html();
     assert!(!page.contains("role=\"alert\""), "{page}");
     assert!(page.contains("Demo Recording"), "{page}");
+}
+
+/// The path that the fake save dialog picks.
+const EXPORT_PICKED: &str = "/tmp/out";
+/// The file that the fake export writes.
+const EXPORT_WRITTEN: &str = "/tmp/out.json";
+
+/// A fake script that opens the fixture recording.
+fn fakes_with_recording() -> Fakes {
+    Fakes::new()
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())))
+}
+
+/// Opens a window and loads the fixture recording into it.
+async fn window_with_recording(fakes: &Fakes) -> Window {
+    let mut window = Window::open(fakes);
+    window.click(window.open_button());
+    window.settle().await;
+    window
+}
+
+#[tokio::test]
+async fn an_export_with_the_default_settings_writes_a_recording() {
+    let fakes = fakes_with_recording()
+        .dialog(Answer::Ready(Some(PathBuf::from(EXPORT_PICKED))))
+        .export(
+            Vec::new(),
+            Answer::Ready(Ok(PathBuf::from(EXPORT_WRITTEN))),
+        );
+    let mut window = window_with_recording(&fakes).await;
+    window.click(window.export_button());
+    window.settle().await;
+    assert_eq!(
+        fakes.dialogs(),
+        vec![SaveDialog {
+            file_name: "demo-edited.json".into(),
+            directory: Some(PathBuf::from("/home/user/recordings")),
+            filter_name: "Beta recording",
+            extensions: &["json"],
+        }]
+    );
+    assert_eq!(
+        fakes.export_requests(),
+        vec![ExportRequest {
+            output_path: PathBuf::from(EXPORT_WRITTEN),
+            target: ExportTarget::Recording {
+                compress: Some(false)
+            },
+        }]
+    );
+    assert_eq!(fakes.export_renders(), vec![fixture().recording]);
+    let page = window.html();
+    assert!(
+        page.contains("<span class=\"export-status\" role=\"status\">Exported to /tmp/out.json</span>"),
+        "{page}"
+    );
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[test]
+fn app_with_no_recording_has_no_export_bar() {
+    let page = render_empty_app();
+    assert!(!page.contains("export-bar"), "{page}");
 }
