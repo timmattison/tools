@@ -146,3 +146,180 @@ fn remove_track_with_a_missing_id_fails() {
 
     assert_edit_error(editor.apply(Edit::RemoveTrack { id: TrackId(50) }));
 }
+
+// Group 3: clip edits.
+
+fn clip_ids_of(project: &EditProject, track: u64) -> Vec<ClipId> {
+    project
+        .timeline
+        .iter()
+        .find(|t| t.id == TrackId(track))
+        .unwrap()
+        .clips
+        .clone()
+}
+
+fn clip_in(project: &EditProject, id: u64) -> &Clip {
+    project.clips.iter().find(|c| c.id == ClipId(id)).unwrap()
+}
+
+#[test]
+fn add_clip_appends_to_the_clips_and_to_the_end_of_the_track() {
+    let mut editor = editor();
+    let new = clip(2, &source(), 1.0, 2.0, 3.0);
+
+    editor
+        .apply(Edit::AddClip {
+            clip: new.clone(),
+            track: TrackId(1),
+        })
+        .unwrap();
+
+    assert_eq!(editor.project().clips.last().unwrap(), &new);
+    assert_eq!(
+        clip_ids_of(editor.project(), 1),
+        vec![ClipId(1), ClipId(2)]
+    );
+}
+
+#[test]
+fn add_clip_with_an_id_in_use_fails() {
+    let mut editor = editor();
+
+    assert_edit_error(editor.apply(Edit::AddClip {
+        clip: clip(1, &source(), 0.0, 1.0, 0.0),
+        track: TrackId(2),
+    }));
+}
+
+#[test]
+fn add_clip_to_a_missing_track_fails() {
+    let mut editor = editor();
+
+    assert_edit_error(editor.apply(Edit::AddClip {
+        clip: clip(2, &source(), 0.0, 1.0, 0.0),
+        track: TrackId(50),
+    }));
+}
+
+#[test]
+fn remove_clip_removes_it_from_the_clips_and_from_its_track() {
+    let mut editor = editor();
+
+    editor.apply(Edit::RemoveClip { id: ClipId(1) }).unwrap();
+
+    assert!(editor.project().clips.is_empty());
+    assert!(clip_ids_of(editor.project(), 1).is_empty());
+}
+
+#[test]
+fn remove_clip_with_a_missing_id_fails() {
+    let mut editor = editor();
+
+    assert_edit_error(editor.apply(Edit::RemoveClip { id: ClipId(50) }));
+}
+
+#[test]
+fn trim_clip_sets_the_in_and_out_points() {
+    let mut editor = editor();
+
+    editor
+        .apply(Edit::TrimClip {
+            id: ClipId(1),
+            in_point: secs(1.0),
+            out_point: secs(3.0),
+        })
+        .unwrap();
+
+    let trimmed = clip_in(editor.project(), 1);
+    assert_eq!(trimmed.in_point, secs(1.0));
+    assert_eq!(trimmed.out_point, secs(3.0));
+}
+
+#[test]
+fn trim_clip_past_the_source_duration_fails_as_an_invalid_project() {
+    let mut editor = editor();
+
+    assert_invalid_project(editor.apply(Edit::TrimClip {
+        id: ClipId(1),
+        in_point: secs(0.0),
+        out_point: secs(5.5),
+    }));
+}
+
+#[test]
+fn trim_clip_with_a_missing_id_fails() {
+    let mut editor = editor();
+
+    assert_edit_error(editor.apply(Edit::TrimClip {
+        id: ClipId(50),
+        in_point: secs(0.0),
+        out_point: secs(1.0),
+    }));
+}
+
+#[test]
+fn move_clip_sets_the_offset_and_moves_it_to_the_end_of_the_track() {
+    let mut editor = editor();
+    editor
+        .apply(Edit::AddClip {
+            clip: clip(2, &source(), 0.0, 1.0, 0.0),
+            track: TrackId(2),
+        })
+        .unwrap();
+
+    editor
+        .apply(Edit::MoveClip {
+            id: ClipId(1),
+            track: TrackId(2),
+            timeline_offset: secs(4.0),
+        })
+        .unwrap();
+
+    assert_eq!(clip_in(editor.project(), 1).timeline_offset, secs(4.0));
+    assert!(clip_ids_of(editor.project(), 1).is_empty());
+    assert_eq!(
+        clip_ids_of(editor.project(), 2),
+        vec![ClipId(2), ClipId(1)]
+    );
+}
+
+#[test]
+fn move_clip_to_its_own_track_puts_it_at_the_end() {
+    let mut editor = editor();
+    editor
+        .apply(Edit::AddClip {
+            clip: clip(2, &source(), 0.0, 1.0, 0.0),
+            track: TrackId(1),
+        })
+        .unwrap();
+
+    editor
+        .apply(Edit::MoveClip {
+            id: ClipId(1),
+            track: TrackId(1),
+            timeline_offset: secs(2.0),
+        })
+        .unwrap();
+
+    assert_eq!(
+        clip_ids_of(editor.project(), 1),
+        vec![ClipId(2), ClipId(1)]
+    );
+}
+
+#[test]
+fn move_clip_with_a_missing_clip_or_track_fails() {
+    let mut editor = editor();
+
+    assert_edit_error(editor.apply(Edit::MoveClip {
+        id: ClipId(50),
+        track: TrackId(1),
+        timeline_offset: secs(0.0),
+    }));
+    assert_edit_error(editor.apply(Edit::MoveClip {
+        id: ClipId(1),
+        track: TrackId(50),
+        timeline_offset: secs(0.0),
+    }));
+}
