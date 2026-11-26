@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::error::NleError;
 use crate::types::{
-    Clip, ClipId, EditProject, FilterRegion, Recording, Seconds, TimelineTrack, TrackId,
+    Clip, ClipId, EditProject, Event, FilterRegion, Recording, Seconds, TimelineTrack, TrackId,
 };
 
 impl EditProject {
@@ -137,6 +137,21 @@ impl EditProject {
         }
 
         Ok(())
+    }
+}
+
+impl Clip {
+    /// The events that this clip holds, with their times moved onto the timeline.
+    ///
+    /// A clip holds each event of its source with `in_point <= time < out_point`.
+    /// A clip whose `out_point` is the end of its source
+    /// (`out_point >= source.duration`) also holds an event at exactly
+    /// `out_point`. A recording sets its duration to the time of the last
+    /// event, so a clip of the whole recording keeps the last event, and two
+    /// clips that a cut splits at one time do not both hold an event at that
+    /// time. An event at time `t` goes to `t - in_point + timeline_offset`.
+    pub fn timeline_events(&self) -> impl Iterator<Item = Event> + '_ {
+        std::iter::empty()
     }
 }
 

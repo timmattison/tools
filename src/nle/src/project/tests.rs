@@ -31,8 +31,8 @@ fn seconds_is_a_plain_json_number_and_refuses_a_negative_one() {
 }
 
 use crate::types::{
-    AppliedFilter, Clip, ClipId, EditProject, FilterKind, FilterOptions, FilterRegion, Recording,
-    TimelineTrack, TrackId,
+    AppliedFilter, Clip, ClipId, EditProject, Event, EventType, FilterKind, FilterOptions,
+    FilterRegion, Recording, TimelineTrack, TrackId,
 };
 use std::sync::Arc;
 
@@ -205,4 +205,85 @@ fn next_ids_saturate_instead_of_overflowing() {
     project.timeline[1].id = TrackId(u64::MAX);
     assert_eq!(project.next_clip_id(), ClipId(u64::MAX));
     assert_eq!(project.next_track_id(), TrackId(u64::MAX));
+}
+
+fn event(time: f64, data: &str) -> Event {
+    Event {
+        time,
+        event_type: EventType::Output,
+        data: data.to_string(),
+    }
+}
+
+/// A source of 5 s with one event at each whole second from 0 to 5.
+fn source_with_events() -> Arc<Recording> {
+    let mut source = Recording::test_fixture();
+    source.duration = 5.0;
+    source.events = (0..=5)
+        .map(|t| event(f64::from(t), &format!("e{t}")))
+        .collect();
+    Arc::new(source)
+}
+
+fn clip_of(source: &Arc<Recording>, in_point: f64, out_point: f64, offset: f64) -> Clip {
+    Clip {
+        source: Arc::clone(source),
+        ..clip(1, in_point, out_point, offset)
+    }
+}
+
+fn times_and_data(clip: &Clip) -> Vec<(f64, String)> {
+    clip.timeline_events().map(|e| (e.time, e.data)).collect()
+}
+
+#[test]
+fn a_clip_holds_the_event_at_its_in_point_and_not_the_event_at_its_out_point() {
+    let source = source_with_events();
+    let clip = clip_of(&source, 1.0, 3.0, 0.0);
+    let held: Vec<String> = clip.timeline_events().map(|e| e.data).collect();
+    assert_eq!(held, ["e1", "e2"]);
+}
+
+#[test]
+fn a_clip_that_ends_at_the_end_of_its_source_holds_the_event_at_that_time() {
+    let source = source_with_events();
+    let clip = clip_of(&source, 3.0, 5.0, 0.0);
+    let held: Vec<String> = clip.timeline_events().map(|e| e.data).collect();
+    assert_eq!(held, ["e3", "e4", "e5"]);
+}
+
+#[test]
+fn two_clips_cut_at_one_time_hold_the_event_at_that_time_once() {
+    let source = source_with_events();
+    let first = clip_of(&source, 0.0, 2.0, 0.0);
+    let second = clip_of(&source, 2.0, 5.0, 2.0);
+    let count = |data: &str| {
+        first
+            .timeline_events()
+            .chain(second.timeline_events())
+            .filter(|e| e.data == data)
+            .count()
+    };
+    assert_eq!(count("e2"), 1);
+    assert_eq!(count("e5"), 1);
+}
+
+#[test]
+fn a_clip_moves_event_times_onto_the_timeline() {
+    let source = source_with_events();
+    let clip = clip_of(&source, 1.0, 3.0, 10.0);
+    assert_eq!(
+        times_and_data(&clip),
+        [(10.0, "e1".to_string()), (11.0, "e2".to_string())]
+    );
+}
+
+#[test]
+fn a_clip_passes_multi_byte_event_data_through_unchanged() {
+    let mut source = Recording::test_fixture();
+    source.duration = 2.0;
+    source.events = vec![event(1.0, "日本語🎉")];
+    let source = Arc::new(source);
+    let clip = clip_of(&source, 0.0, 2.0, 0.5);
+    assert_eq!(times_and_data(&clip), [(1.5, "日本語🎉".to_string())]);
 }
