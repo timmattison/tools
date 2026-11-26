@@ -594,7 +594,7 @@ not finish.
 | A plugin reads the environment, for example a token | The WASI context gives no environment variable. |
 | A plugin runs forever | The epoch deadline stops the call. |
 | A plugin takes all of the memory | `StoreLimits` stops the growth. |
-| A plugin escapes through a defect of the runtime | The host pins an LTS line of wasmtime, which gets security fixes for 24 months. A `cargo audit` check of the workspace must exist before slice 2 merges. The repository has no such check now. |
+| A plugin escapes through a defect of the runtime | The host pins an LTS line of wasmtime, which gets security fixes for 24 months. A known advisory against wasmtime must stop the checks, thus slice 2 waits for issue #740, which puts `cargo audit` in the one list of `scripts/rust-checks.sh`, at pre-push and in CI. |
 | A renderer writes outside its frame | The frame resource is the only target, and each method clips to the frame. |
 | A plugin puts HTML or JavaScript into the webview | A plugin gets no access to the webview. The settings panel comes from the options schema. |
 | A URL serves a changed component | The install shows the SHA-256, the editor never downloads an update by itself, and the sandbox applies to the changed component too. |
@@ -652,34 +652,20 @@ The issue closes with six open questions. Each one gets a recommendation.
 ## The implementation slices
 
 Each slice fits one review: at most 1,500 changed lines and 5 acceptance
-criteria. Each slice keeps its documentation and its tests. Slices A, 0, and 1
-can start at once.
+criteria. Each slice keeps its documentation and its tests. Slices 0 and 1 can
+start at once.
 
 | Slice | Content | Comes after |
 | --- | --- | --- |
-| A | A `cargo audit` check of the workspace | nothing |
 | 0 | `FilterFn` returns a `Result` | nothing |
 | 1 | The manifest and the options schema | nothing |
-| 2 | The WASM filter host | slices A, 0, and 1 |
+| 2 | The WASM filter host | slices 0 and 1, and issue #740 |
 | 3 | The plugins directory in the editor | slice 2 |
 | 4 | The generated settings panel | slices 1 and 3 |
 | 5 | Analyzer plugins | slice 3 |
 | 6 | Renderer plugins | slice 3, issue #151, and issue #158 |
 | 7 | Install from a URL | slice 3 |
 | 8 | Hot reload of development plugins | slice 3 |
-
-### Slice A: A `cargo audit` check
-
-The runtime is the security boundary of each plugin, thus a known advisory
-against wasmtime must stop the checks. The repository has no `cargo audit`
-check now. This slice belongs to the whole workspace, not to the editor.
-
-- CI runs `cargo audit` on each pull request and on each push to `main`.
-- The pre-commit hook does not run the check, because the check reads the
-  advisory database from the network. The repository has no pre-push hook,
-  thus CI is the stage of this check.
-- A known advisory fails the check. An advisory that the repository accepts is
-  in an ignore list, with the reason beside it.
 
 ### Slice 0: `FilterFn` returns a `Result`
 
