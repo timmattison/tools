@@ -96,17 +96,31 @@ pub fn register(registry: &mut FilterRegistry) {
     registry.register_span(kind(), normalize);
 }
 
-/// Put each key after the first one interval after the key before it.
+/// Read one number option. It is an error when the option is missing or is
+/// not a number.
+fn number(options: &FilterOptions, key: &str) -> Result<f64, String> {
+    options
+        .get(key)
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| format!("the option \"{key}\" is missing or is not a number"))
+}
+
+impl Normalization {
+    /// Read the settings from the options of a filter.
+    fn from_options(options: &FilterOptions) -> Result<Self, String> {
+        Ok(Self {
+            rate: TypingRate::new(number(options, RATE_OPTION)?).map_err(|e| e.to_string())?,
+            pause: Seconds::new(number(options, PAUSE_OPTION)?).map_err(|e| e.to_string())?,
+            jitter: Jitter::new(number(options, JITTER_OPTION)?).map_err(|e| e.to_string())?,
+        })
+    }
+}
+
+/// Put the keys of each burst at the rate, and move the other events with
+/// them.
 fn normalize(span: Span, options: &FilterOptions) -> Result<Span, String> {
-    let rate = options
-        .get(RATE_OPTION)
-        .and_then(serde_json::Value::as_f64)
-        .ok_or_else(|| format!("the option \"{RATE_OPTION}\" is missing or is not a number"))?;
-    let pause = options
-        .get(PAUSE_OPTION)
-        .and_then(serde_json::Value::as_f64)
-        .ok_or_else(|| format!("the option \"{PAUSE_OPTION}\" is missing or is not a number"))?;
-    let keys = new_keys(&span.events, 1.0 / rate, pause);
+    let settings = Normalization::from_options(options)?;
+    let keys = new_keys(&span.events, &settings);
     let length = new_time(span.length, keys.last().copied(), None);
     let mut upcoming = keys.into_iter().peekable();
     let mut before = None;
@@ -147,9 +161,12 @@ struct Key {
 const LINE_ENDS: [char; 2] = ['\r', '\n'];
 
 /// The keys of `events`, in order. The first key keeps its time. A gap
-/// longer than `pause`, and the gap after a key that holds a line end, keep
-/// their length. Each other key comes `interval` after the key before it.
-fn new_keys(events: &[Event], interval: f64, pause: f64) -> Vec<Key> {
+/// longer than the pause threshold, and the gap after a key that holds a line
+/// end, keep their length. Each other key comes one interval after the key
+/// before it. The interval is one character at the rate, changed by the
+/// jitter.
+fn new_keys(events: &[Event], settings: &Normalization) -> Vec<Key> {
+    let interval = 1.0 / settings.rate.get();
     let mut keys: Vec<Key> = Vec::new();
     for event in events {
         if event.event_type != EventType::Input {
@@ -158,10 +175,10 @@ fn new_keys(events: &[Event], interval: f64, pause: f64) -> Vec<Key> {
         let new = keys.last().map_or(event.time, |before| {
             let gap = event.time - before.old;
             before.new
-                + if before.ends_line || gap > pause {
+                + if before.ends_line || gap > settings.pause.get() {
                     gap
                 } else {
-                    interval
+                    interval * settings.jitter.get().mul_add(noise(keys.len()), 1.0)
                 }
         });
         keys.push(Key {
@@ -197,6 +214,28 @@ fn new_time(time: f64, before: Option<Key>, after: Option<Key>) -> f64 {
     };
     // `max` and `min`, not `clamp`: `clamp` panics when its bounds cross.
     (before.new + delay * ratio).max(before.new).min(after.new)
+}
+
+/// The multiplier of SplitMix64: the golden ratio in 64 bits.
+const SPLITMIX_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// 2 to the power 32, the count of the values of a `u32`.
+const TWO_TO_THE_32: f64 = 4_294_967_296.0;
+
+/// A number from -1 up to, and not including, 1. It depends only on `index`.
+///
+/// The filter is a pure function, so its jitter comes from the position of a
+/// key and not from a random source. Thus each render gives the same times.
+/// The number is the output of SplitMix64 for the step `index`.
+fn noise(index: usize) -> f64 {
+    let step = u64::try_from(index).unwrap_or(u64::MAX).wrapping_add(1);
+    let mut z = step.wrapping_mul(SPLITMIX_GAMMA);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    // The top 32 bits, as a fraction from 0 up to, and not including, 1.
+    let fraction = f64::from(u32::try_from(z >> 32).unwrap_or(u32::MAX)) / TWO_TO_THE_32;
+    fraction.mul_add(2.0, -1.0)
 }
 
 #[cfg(test)]
