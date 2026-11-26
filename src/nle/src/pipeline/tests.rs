@@ -422,3 +422,69 @@ fn render_takes_the_header_from_the_clip_that_starts_first() {
     assert_eq!(rendered.duration, project.duration());
     assert_eq!(rendered.duration, 3.0);
 }
+
+// Group 9: the duration through filters.
+
+fn one_clip_project(filters: Vec<AppliedFilter>) -> EditProject {
+    let mut project =
+        EditProject::from_recording(Arc::new(source("one", &[0.0, 8.0], 10.0))).unwrap();
+    project.filters = filters;
+    project
+}
+
+#[test]
+fn render_moves_the_duration_by_the_shift_of_a_filter() {
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("halve"), mapper(|t| t / 2.0));
+
+    let rendered = registry
+        .render(&one_clip_project(vec![all("halve")]))
+        .unwrap();
+
+    assert_eq!(times(&rendered.events), vec![0.0, 4.0]);
+    // The end 10 moves by the shift 4 - 8.
+    assert_eq!(rendered.duration, 6.0);
+}
+
+#[test]
+fn render_keeps_the_duration_for_a_range_that_starts_after_the_end() {
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("double"), double());
+
+    let rendered = registry
+        .render(&one_clip_project(vec![range("double", 20.0, 30.0)]))
+        .unwrap();
+
+    assert_eq!(times(&rendered.events), vec![0.0, 8.0]);
+    assert_eq!(rendered.duration, 10.0);
+}
+
+#[test]
+fn render_never_ends_before_the_last_event() {
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("double"), double());
+
+    let rendered = registry
+        .render(&one_clip_project(vec![all("double")]))
+        .unwrap();
+
+    // The end 10 moves by 16 - 8 to 18, and the last event is at 16.
+    assert_eq!(rendered.duration, 18.0);
+
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("far"), |_, _| vec![ev(50.0)]);
+    let rendered = registry
+        .render(&one_clip_project(vec![all("far")]))
+        .unwrap();
+    assert_eq!(rendered.duration, 50.0);
+}
+
+#[test]
+fn render_with_an_unknown_filter_kind_fails() {
+    let result = FilterRegistry::new().render(&one_clip_project(vec![all("missing")]));
+
+    match result {
+        Err(NleError::RenderError(message)) => assert!(message.contains("missing"), "{message}"),
+        other => panic!("expected a RenderError, got {other:?}"),
+    }
+}
