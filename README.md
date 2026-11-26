@@ -5554,6 +5554,8 @@ The transcript of a session stays on disk after the stop, so `crap` takes that s
 
 Count which tools of this workspace you really use. `wdid` reads the whole shell history through atuin. It gives each tool a use count, the date of the first use and of the last use, and the way you ran it. It also lists the tools that you never used, and the tools that you stopped using.
 
+`wdid defs` gives a second report: one row for each alias and each function of your shell. See [wdid defs: the aliases and the functions](#wdid-defs-the-aliases-and-the-functions).
+
 `atuin stats` cannot answer this question. It ranks the first word of each command. A tool that you run through an alias (`wtm`), through a function (`wt`), after a pipe, or after `sudo` has no count under its own name. `wdid` parses each command line, finds each word in command position, and follows aliases and functions down to the tool.
 
 ### How it reads the history
@@ -5594,6 +5596,7 @@ wdid --since 2026-01-01
 wdid --unparsed
 wdid --repo ~/code/tools --no-shell
 cd ~ && wdid   # the workspace that the installed wdid came from
+wdid defs      # the aliases and the functions, in any directory
 ```
 
 ### Options
@@ -5607,6 +5610,8 @@ cd ~ && wdid   # the workspace that the installed wdid came from
 - `--idle-days <DAYS>`: A tool is idle when its last use is older than this. Defaults to 180.
 - `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
 - `-h`, `--help`: Print the usage.
+
+These options are for the tools report. `wdid defs` has its own options (see [wdid defs](#wdid-defs-the-aliases-and-the-functions)).
 
 The table fits `COLUMNS` when that variable is set, else the width of the terminal. An error prints `wdid: <reason>` on standard error and exits 1. A usage error exits 2.
 
@@ -5696,6 +5701,110 @@ Shell: 276 aliases, 1,267 functions (24 did not parse).
 ```
 
 The excerpt leaves out rows of the table and entries of the groups. The run was before `wdid` named its workspace, thus it has no `Workspace:` line. `si` is a shell function that runs `nwt -b <branch>`, so each `si` is a use of `nwt`.
+
+### wdid defs: the aliases and the functions
+
+`wdid defs` reports on each alias and each function of your interactive shell. Use it to find the definitions that you use, the definitions that you can remove, and the definitions that you forgot. The tools report shows an alias or a function only through a tool of the workspace that it runs. `wdid defs` shows each definition, also an alias that runs `git` and a definition with zero uses.
+
+`wdid defs` reads the history and the shell definitions as the tools report does. It needs no cargo workspace, and it starts no `cargo` process and no `git` process. Thus it runs in any directory.
+
+```bash
+wdid defs
+wdid defs --json
+wdid defs --since 2026-01-01 --idle-days 90
+```
+
+#### What counts
+
+- A typed alias or a typed function. A zsh global alias counts in each word position where zsh expands it. A zsh suffix alias counts with its marker as its name (`*.md`).
+- An alias at the start of the value of an alias. With `alias wtf='wt -f'` and `alias wt=cwt`, a typed `wtf` is a typed use of `wtf` and a use of `wt` through `wtf`.
+- A function that a function calls, to any depth. With `myf() { helper "$@" }`, a typed `myf` is a typed use of `myf` and a use of `helper` through `myf`. The walk visits each function one time, thus a cycle stops.
+- A function that an alias calls. With `alias g='myf --x'`, a typed `g` is a use of `myf` through `g`.
+
+A use through other definitions names the definition that you typed. With `a` that calls `b` and `b` that calls `c`, a typed `a` gives `c` a use through `a`.
+
+#### What does not count
+
+- An alias in the body of a function. zsh and bash expand each alias in a function body when they read the definition. Thus the body that `wdid` gets holds the value of the alias, not its name, and the alias gets no use from the function.
+- A name in quoted text, a row with exit code 127, and a line that does not parse, as in the tools report.
+- A function whose name starts with `_`. The completion system makes these functions by the hundred, and nobody types them. The report does not show them. A call through such a function still counts: with `f() { _helper }` and `_helper() { g }`, a typed `f` is a use of `g` through `f`.
+
+#### The report
+
+Two header lines start the report. The first line gives the history rows, the rows with exit code 127, and the rows that did not parse. The second line gives the shell, the number of aliases, and the number of functions.
+
+The table has one row for each definition, the most used first:
+
+- `Name`: the name. A suffix alias has its marker (`*.md`).
+- `Kind`: `alias`, `global alias`, `suffix alias`, or `function`.
+- `Uses`: the typed uses plus the uses through other definitions.
+- `Typed`: the uses where you typed the name.
+- `Through`: the definitions that gave the other uses, each with its count.
+- `First use` and `Last use`: the dates of the first and the last counted use.
+- `Definition`: the value of an alias, or the first line of a function body. The cell is one line. When `COLUMNS` or the terminal gives a width, `wdid` cuts the cell to fit that width and ends it with `…`.
+
+An alias and a function can have the same name. They are two rows.
+
+Two groups follow the table:
+
+- **Never used.** The definitions with zero uses, each with its kind.
+- **Idle.** The definitions whose last use is older than `--idle-days` days, each with its kind, its uses, and the date of its last use.
+
+#### Options of wdid defs
+
+- `--since <YYYY-MM-DD>`: Count only the rows from this date on. A row on this date counts.
+- `--json`: Print the report as one JSON document. `definitions` holds each definition, also the ones with zero uses, and its `definition` is never cut. `never_used` and `idle` hold the name and the kind of each entry of the two groups.
+- `--idle-days <DAYS>`: A definition is idle when its last use is older than this. Defaults to 180.
+
+The options of the tools report (`--repo`, `--no-shell`, `--unparsed`, `--new-days`) do not apply. An option of the tools report before `defs` is a usage error.
+
+#### Example of wdid defs
+
+A run on a small history. zsh itself defines `run-help` and `which-command`.
+
+```text
+History: 12 rows. 1 not counted (exit 127). 0 did not parse.
+Shell: /bin/zsh, 7 aliases, 3 functions (0 did not parse).
+
+┌───────────────┬──────────────┬──────┬───────┬─────────┬────────────┬────────────┬─────────────────────────┐
+│ Name          ┆ Kind         ┆ Uses ┆ Typed ┆ Through ┆ First use  ┆ Last use   ┆ Definition              │
+╞═══════════════╪══════════════╪══════╪═══════╪═════════╪════════════╪════════════╪═════════════════════════╡
+│ wt            ┆ alias        ┆    4 ┆     1 ┆ wtf 3   ┆ 2026-11-23 ┆ 2026-11-25 ┆ cwt                     │
+│ gs            ┆ alias        ┆    3 ┆     3 ┆         ┆ 2026-11-20 ┆ 2026-11-22 ┆ git status              │
+│ wtf           ┆ alias        ┆    3 ┆     3 ┆         ┆ 2026-11-23 ┆ 2026-11-25 ┆ wt -f                   │
+│ *.md          ┆ suffix alias ┆    1 ┆     1 ┆         ┆ 2026-11-24 ┆ 2026-11-24 ┆ glow                    │
+│ G             ┆ global alias ┆    1 ┆     1 ┆         ┆ 2026-11-23 ┆ 2026-11-23 ┆ | grep                  │
+│ helper        ┆ function     ┆    1 ┆     0 ┆ myf 1   ┆ 2026-11-25 ┆ 2026-11-25 ┆ echo "helping $1"       │
+│ myf           ┆ function     ┆    1 ┆     1 ┆         ┆ 2026-11-25 ┆ 2026-11-25 ┆ helper "$@"             │
+│ oldfn         ┆ function     ┆    1 ┆     1 ┆         ┆ 2026-03-21 ┆ 2026-03-21 ┆ tar czf backup.tgz "$@" │
+│ run-help      ┆ alias        ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ man                     │
+│ which-command ┆ alias        ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ whence                  │
+└───────────────┴──────────────┴──────┴───────┴─────────┴────────────┴────────────┴─────────────────────────┘
+
+Never used:
+  run-help (alias)
+  which-command (alias)
+Idle (no use in the last 180 days):
+  oldfn (function, 1 use, last use 2026-03-21)
+```
+
+One entry of the `--json` document:
+
+```json
+{
+  "name": "wt",
+  "kind": "alias",
+  "definition": "cwt",
+  "uses": 4,
+  "typed": 1,
+  "through": [{ "name": "wtf", "uses": 3 }],
+  "first_use": "2026-11-23",
+  "last_use": "2026-11-25",
+  "classification": "used"
+}
+```
+
+`kind` is `alias`, `global_alias`, `suffix_alias`, or `function`. `classification` is `used`, `idle`, or `never_used`.
 
 ### Install
 
