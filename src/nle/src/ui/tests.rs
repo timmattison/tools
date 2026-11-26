@@ -29,7 +29,7 @@ const METADATA_TIMESTAMP: f64 = 1_600_000_000.0;
 
 /// A recording with the metadata of the React tests: 65.3 seconds, 42 events,
 /// 120x40 cells.
-fn fixture() -> LoadedRecording {
+pub(super) fn fixture() -> LoadedRecording {
     LoadedRecording {
         recording: Recording {
             version: 2,
@@ -106,7 +106,7 @@ fn panels_root() -> Element {
     rsx! {
         PreviewPane { loaded }
         Timeline { loaded }
-        PropertiesPanel { loaded }
+        PropertiesPanel { loaded, on_result: move |_| {} }
     }
 }
 
@@ -600,4 +600,18 @@ async fn a_load_after_an_error_removes_the_banner() {
     let page = window.html();
     assert!(!page.contains("role=\"alert\""), "{page}");
     assert!(page.contains("Demo Recording"), "{page}");
+}
+
+#[test]
+fn properties_of_an_open_document_show_the_chapter_panel() {
+    let page = render_panels(fixture());
+    assert!(page.contains("class=\"chapters-panel\""), "{page}");
+    assert!(page.contains(">Chapters<"), "{page}");
+    assert!(page.contains("No chapters yet"), "{page}");
+}
+
+#[test]
+fn properties_with_no_recording_show_no_chapter_panel() {
+    let page = render_empty_app();
+    assert!(!page.contains("chapters-panel"), "{page}");
 }

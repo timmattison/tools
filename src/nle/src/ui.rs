@@ -2,9 +2,9 @@
 //!
 //! This module holds the window settings, the root component, and the four
 //! regions of the window: the menu bar, the preview pane, the timeline, and
-//! the properties panel. The open document lives in the state of `App`: the
-//! `Editor` of its project, and the metadata of the recording file that it
-//! came from.
+//! the properties panel, which holds the chapter panel. The open document lives
+//! in the state of `App`: the `Editor` of its project, and the metadata of the
+//! recording file that it came from.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -18,6 +18,8 @@ use crate::editor::Editor;
 use crate::error::NleError;
 use crate::pipeline::FilterRegistry;
 use crate::types::EditProject;
+
+use chapters::ChaptersPanel;
 
 use crate::format::{file_name, format_duration, format_recorded};
 use crate::types::{LoadedRecording, RecordingMetadata};
@@ -172,7 +174,10 @@ pub(crate) fn App() -> Element {
             }
             PreviewPane { loaded }
             Timeline { loaded }
-            PropertiesPanel { loaded }
+            PropertiesPanel {
+                loaded,
+                on_result: move |result: Result<(), String>| error.set(result.err()),
+            }
         }
     }
 }
@@ -259,15 +264,20 @@ fn summary(open: &Document) -> String {
     )
 }
 
-/// The metadata of the open recording.
+/// The metadata of the open recording, and the chapter panel. `on_result` gets
+/// the outcome of each chapter change: `Ok`, or the message of the banner.
 #[component]
-fn PropertiesPanel(loaded: ReadSignal<Option<Document>>) -> Element {
-    let loaded = loaded.read();
+fn PropertiesPanel(
+    loaded: Signal<Option<Document>>,
+    on_result: EventHandler<Result<(), String>>,
+) -> Element {
+    let metadata = loaded.read().as_ref().map(|open| open.metadata.clone());
     rsx! {
         div { class: "properties-panel",
             h3 { "Properties" }
-            if let Some(open) = loaded.as_ref() {
-                {metadata_rows(&open.metadata)}
+            if let Some(metadata) = metadata {
+                {metadata_rows(&metadata)}
+                ChaptersPanel { loaded, on_result }
             } else {
                 div { class: "placeholder", "No recording loaded" }
             }
@@ -308,6 +318,8 @@ fn metadata_rows(metadata: &RecordingMetadata) -> Element {
         }
     }
 }
+
+mod chapters;
 
 #[cfg(test)]
 mod tests;
