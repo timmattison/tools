@@ -668,6 +668,23 @@ fn an_in_place_mark_at_the_region_end_comes_before_an_event_at_that_time() {
 }
 
 #[test]
+fn an_in_place_mark_at_the_region_end_lands_on_the_end_when_the_sum_rounds_up() {
+    // The length is 5.79 - 1.73, and that length plus 1.73 is
+    // 5.790000000000001 in f64, one step after the end of the region.
+    assert!((5.79 - 1.73) + 1.73 > 5.79);
+    let (registry, _seen) = in_place_spy(|view| view.length);
+
+    let out = registry
+        .run(events(&[0.0, 1.73, 5.79]), &[range("spot", 1.73, 5.79)])
+        .unwrap();
+
+    assert_eq!(
+        with_data(&out),
+        vec![(0.0, "e0"), (1.73, "e1.73"), (5.79, "mark"), (5.79, "e5.79")]
+    );
+}
+
+#[test]
 fn an_in_place_filter_gets_the_length_and_the_openness_of_its_region() {
     let cases = [
         // The region All reaches the end of the timeline at 4.
