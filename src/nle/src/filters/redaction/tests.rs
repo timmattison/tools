@@ -66,3 +66,30 @@ fn input_events_and_times_stay() {
     );
     assert_eq!(got[1].event_type, EventType::Input);
 }
+
+#[test]
+fn a_match_split_across_two_output_events_is_replaced() {
+    let got = run(
+        vec![out(1.0, "hun"), out(1.1, "ter2")],
+        &text("hunter2", "[REDACTED]"),
+    );
+    assert_eq!(datas(&got), vec!["[REDACTED]", ""]);
+}
+
+#[test]
+fn an_input_event_between_two_output_events_does_not_break_a_match() {
+    let got = run(
+        vec![out(1.0, "hun"), inp(1.05, "x"), out(1.1, "ter2")],
+        &text("hunter2", "[R]"),
+    );
+    assert_eq!(datas(&got), vec!["[R]", "x", ""]);
+}
+
+#[test]
+fn multi_byte_text_split_across_events_is_replaced() {
+    let got = run(
+        vec![out(1.0, "日本"), out(1.1, "語 🎉 café")],
+        &text("日本語", "?"),
+    );
+    assert_eq!(datas(&got), vec!["?", " 🎉 café"]);
+}
