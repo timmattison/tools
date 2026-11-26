@@ -182,8 +182,11 @@ pub async fn export_video(
     println!("Resolution: {}x{}", width, height);
     println!("FPS: {}", fps);
     println!("Theme: {}", theme);
-    if let Some(metadata) = &chapters {
-        println!("Chapters: {}", metadata.count);
+    if !is_gif(&output_path) {
+        let kept = chapters.as_ref().map_or(0, |metadata| metadata.count);
+        for line in chapter_report(recording.chapters.len(), kept) {
+            println!("{line}");
+        }
     }
 
     let total_frames = generate_and_encode_video(
@@ -633,6 +636,16 @@ fn chapter_metadata(chapters: &[Chapter], duration: f64) -> Option<ChapterMetada
     (count > 0).then_some(ChapterMetadata { text, count })
 }
 
+/// The lines that an MP4 export prints about the chapters of a recording that
+/// has `total` chapters, of which the MP4 holds `kept`.
+fn chapter_report(_total: usize, kept: usize) -> Vec<String> {
+    if kept == 0 {
+        Vec::new()
+    } else {
+        vec![format!("Chapters: {kept}")]
+    }
+}
+
 /// Converts a finite, non-negative number of seconds to whole milliseconds.
 #[expect(
     clippy::cast_possible_truncation,
@@ -845,6 +858,38 @@ mod tests {
         assert_eq!(
             text.as_ref().map(|metadata| metadata.text.as_str()),
             Some(";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=1000\nEND=10000\ntitle=A\n")
+        );
+    }
+
+    #[test]
+    fn the_report_of_a_recording_with_no_chapter_is_empty() {
+        assert!(chapter_report(0, 0).is_empty());
+    }
+
+    #[test]
+    fn the_report_gives_the_count_when_the_export_keeps_each_chapter() {
+        assert_eq!(chapter_report(2, 2), list(&["Chapters: 2"]));
+    }
+
+    #[test]
+    fn the_report_says_how_many_chapters_the_export_drops() {
+        assert_eq!(
+            chapter_report(3, 1),
+            list(&[
+                "Chapters: 1",
+                "2 of 3 chapter(s) are not in the MP4: a chapter must start at 0 s or later, and at least 1 ms before the next chapter and before the end.",
+            ])
+        );
+    }
+
+    #[test]
+    fn the_report_says_so_when_the_export_drops_each_chapter() {
+        assert_eq!(
+            chapter_report(2, 0),
+            list(&[
+                "Chapters: 0",
+                "2 of 2 chapter(s) are not in the MP4: a chapter must start at 0 s or later, and at least 1 ms before the next chapter and before the end.",
+            ])
         );
     }
 
