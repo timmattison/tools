@@ -52,13 +52,19 @@ struct Edit {
 /// Replace each match in the events that the redaction covers.
 pub(super) fn rewrite(events: Vec<Event>, redaction: &Redaction) -> Result<Vec<Event>, String> {
     let mut edits: Vec<Vec<Edit>> = events.iter().map(|_| Vec::new()).collect();
-    let output: Vec<usize> = events
-        .iter()
-        .enumerate()
-        .filter(|(_, event)| event.event_type == EventType::Output)
-        .map(|(index, _)| index)
-        .collect();
-    edit_stream(&events, &output, redaction, &mut edits)?;
+    let mut types = vec![EventType::Output];
+    if redaction.includes_input() {
+        types.push(EventType::Input);
+    }
+    for event_type in types {
+        let stream: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| event.event_type == event_type)
+            .map(|(index, _)| index)
+            .collect();
+        edit_stream(&events, &stream, redaction, &mut edits)?;
+    }
     events
         .into_iter()
         .zip(edits)
