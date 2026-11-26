@@ -5,6 +5,8 @@
 //! that runs the real git. The fixture workspace has two tools,
 //! `wdid-fixture-one` and `wdid-fixture-two`.
 
+mod support;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -530,4 +532,59 @@ fn a_use_through_an_alias_of_the_real_zsh_counts_for_the_tool() {
         document["shell"]["aliases"].as_u64().unwrap() >= 1,
         "{document}"
     );
+}
+
+/// Makes a cargo home in which the installed `wdid` came from a checkout of
+/// the fixture workspace, through `cargo install --git`.
+fn installed_from_a_checkout() -> support::CargoHome {
+    let source = support::workspace_repository();
+    let commit = source.rev_parse("HEAD");
+    let home = support::CargoHome::new();
+    home.add_checkout(
+        &source,
+        support::CHECKOUT_DIRECTORY,
+        support::short(&commit),
+    );
+    home.write_records(&[(
+        &support::git_key(support::BINARY, support::REPOSITORY_URL, &commit),
+        &[support::BINARY],
+    )]);
+    home
+}
+
+/// Runs `wdid --no-shell --json` in `cwd`, with `home` as the cargo home.
+fn run_in(setup: &Setup, home: &support::CargoHome, cwd: &Path) -> Output {
+    setup
+        .command()
+        .env("CARGO_HOME", home.path())
+        .arg("--no-shell")
+        .arg("--json")
+        .current_dir(cwd)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn outside_each_work_tree_the_report_is_on_the_source_of_the_installed_wdid() {
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "wdid-fixture-one a")]));
+    let home = installed_from_a_checkout();
+    let cwd = gitscratch::testing::not_a_repository();
+
+    let document = json(&run_in(&setup, &home, cwd.path()));
+
+    assert_eq!(tool(&document, TOOL_ONE)["uses"], 1, "{document}");
+    assert!(tool(&document, TOOL_TWO)["added"].is_string(), "{document}");
+}
+
+#[test]
+fn in_a_work_tree_without_a_cargo_toml_the_report_is_on_the_source_of_the_installed_wdid() {
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "wdid-fixture-one a")]));
+    let home = installed_from_a_checkout();
+    let work_tree = gitscratch::testing::TestRepo::init();
+    work_tree.commit_file("README.md", "not a workspace\n", "add a readme");
+
+    let document = json(&run_in(&setup, &home, work_tree.path()));
+
+    assert_eq!(tool(&document, TOOL_ONE)["uses"], 1, "{document}");
+    assert!(tool(&document, TOOL_TWO)["added"].is_string(), "{document}");
 }
