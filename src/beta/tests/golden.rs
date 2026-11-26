@@ -227,3 +227,32 @@ fn export_video_writes_the_golden_frame() {
         );
     }
 }
+
+#[test]
+fn export_video_names_a_font_file_it_cannot_read() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin = install_fake_ffmpeg(tmp.path());
+    let missing = tmp.path().join("no-such-font.ttf");
+    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_beta"));
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let joined =
+        std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+            .expect("a path prefix has no separator");
+    let output = command
+        .args(["export", "video"])
+        .arg(recording_path())
+        .arg("-o")
+        .arg(tmp.path().join("frame.raw"))
+        .args(["--fps", "1", "--font"])
+        .arg(&missing)
+        .env("PATH", joined)
+        .output()
+        .expect("beta starts");
+    assert!(!output.status.success(), "beta must fail on a missing font");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&missing.display().to_string()),
+        "stderr must name {}, but it says:\n{stderr}",
+        missing.display()
+    );
+}
