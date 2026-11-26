@@ -83,6 +83,14 @@ impl Report {
     }
 }
 
+/// The count of the interruptions in a row after which the walk stops to do
+/// one call again.
+///
+/// A signal interrupts one call, thus a real interruption ends after one more
+/// try. Only a call that each try interrupts reaches this bound. The walk then
+/// reports the subtree of that call as incomplete, and it does not hang.
+pub const MAX_RETRIES_IN_A_ROW: u32 = 1000;
+
 /// Tells if `error` says that an entry went away, or changed its type, after
 /// the walk read its name. Such an entry is not part of the tree any more, thus
 /// its loss is not a failure.
@@ -137,6 +145,7 @@ where
         stop: AtomicBool::new(false),
         entries: AtomicU64::new(0),
         matches: AtomicU64::new(0),
+        retried: AtomicU64::new(0),
         found: Mutex::new(Findings::default()),
     };
     rayon::scope(|scope| {
@@ -166,6 +175,7 @@ struct Walker<'a, F, S> {
     stop: AtomicBool,
     entries: AtomicU64,
     matches: AtomicU64,
+    retried: AtomicU64,
     found: Mutex<Findings>,
 }
 
@@ -176,7 +186,7 @@ where
 {
     /// Opens a root, and reads it.
     fn walk_root<'s>(&'s self, scope: &rayon::Scope<'s>, root: &'s WalkRoot) {
-        let dir = match self.fs.open_dir(&root.path, Link::Follow) {
+        let dir = match self.retry(|| self.fs.open_dir(&root.path, Link::Follow)) {
             Ok(dir) => dir,
             Err(error) if error.kind() == io::ErrorKind::NotADirectory => {
                 self.match_file_root(&root.path, error);
@@ -192,7 +202,7 @@ where
             }
         };
         let device = if root.stay_on_device {
-            match self.fs.device(&dir) {
+            match self.retry(|| self.fs.device(&dir)) {
                 Ok(device) => Some(device),
                 Err(error) => {
                     self.incomplete(root.path.clone(), error);
@@ -216,7 +226,7 @@ where
         if self.stop.load(Ordering::Relaxed) {
             return;
         }
-        let dir = match self.fs.open_dir(&path, Link::NoFollow) {
+        let dir = match self.retry(|| self.fs.open_dir(&path, Link::NoFollow)) {
             Ok(dir) => dir,
             Err(error) if vanished(&error) => return,
             Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
@@ -229,7 +239,7 @@ where
             }
         };
         if let Some(device) = device {
-            match self.fs.device(&dir) {
+            match self.retry(|| self.fs.device(&dir)) {
                 Ok(found) if found == device => {}
                 Ok(_) => return,
                 Err(error) => {
@@ -255,7 +265,7 @@ where
             if self.stop.load(Ordering::Relaxed) {
                 return;
             }
-            let entry = match self.fs.read_entry(&mut dir) {
+            let entry = match self.retry(|| self.fs.read_entry(&mut dir)) {
                 Ok(Some(entry)) => entry,
                 Ok(None) => return,
                 Err(error) => {
@@ -275,14 +285,16 @@ where
             let is_directory = match entry.kind {
                 EntryKind::Directory => true,
                 EntryKind::Other => false,
-                EntryKind::Unknown => match self.fs.is_directory(&dir, &entry.name) {
-                    Ok(is_directory) => is_directory,
-                    Err(error) if vanished(&error) => false,
-                    Err(error) => {
-                        self.incomplete(child, error);
-                        continue;
+                EntryKind::Unknown => {
+                    match self.retry(|| self.fs.is_directory(&dir, &entry.name)) {
+                        Ok(is_directory) => is_directory,
+                        Err(error) if vanished(&error) => false,
+                        Err(error) => {
+                            self.incomplete(child, error);
+                            continue;
+                        }
                     }
-                },
+                }
             };
             if !is_directory || root.prune.contains(&child) {
                 continue;
@@ -318,6 +330,26 @@ where
         self.findings().denied.push(path);
     }
 
+    /// Does `call`, and does it again after each `EINTR`. An interrupted call
+    /// did nothing, thus the same call reads the same position again. After
+    /// [`MAX_RETRIES_IN_A_ROW`] interruptions in a row, it gives the `EINTR`
+    /// back, and the caller reports the subtree as incomplete.
+    fn retry<T>(&self, mut call: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+        let mut retries = 0;
+        loop {
+            match call() {
+                Err(error)
+                    if error.kind() == io::ErrorKind::Interrupted
+                        && retries < MAX_RETRIES_IN_A_ROW =>
+                {
+                    retries += 1;
+                    self.retried.fetch_add(1, Ordering::Relaxed);
+                }
+                result => return result,
+            }
+        }
+    }
+
     fn incomplete(&self, path: PathBuf, error: io::Error) {
         self.findings().incomplete.push(Incomplete { path, error });
     }
@@ -351,7 +383,7 @@ where
         Report {
             entries: self.entries.into_inner(),
             matches: self.matches.into_inner(),
-            retried_interruptions: 0,
+            retried_interruptions: self.retried.into_inner(),
             incomplete: findings.incomplete,
             denied: findings.denied,
             cloud_skipped: findings.cloud_skipped,
