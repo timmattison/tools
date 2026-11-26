@@ -101,11 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     routes
                 )
             );
-            let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
-            Some((
-                shutdown_tx,
-                sirn::spawn_monitor(Arc::clone(routes), shutdown_rx),
-            ))
+            Some(sirn::spawn_monitor(Arc::clone(routes)))
         }
         sirn::ServeMode::Directory(root) => {
             println!(
@@ -126,9 +122,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // accept thread (`Err`). Stop and join the monitor on both paths, before
     // the error leaves `main`.
     let served = sirn::serve(server, mode, WORKER_THREADS).join();
-    if let Some((shutdown_tx, monitor)) = monitor {
-        drop(shutdown_tx);
-        let _ = monitor.join();
+    if let Some(monitor) = monitor {
+        monitor.stop();
     }
     served.map_err(|e| format!("sirn stopped accepting connections on {bind}:{port}: {e}"))?;
     Ok(())
