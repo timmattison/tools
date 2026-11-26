@@ -34,13 +34,18 @@ set -euo pipefail
 # each block that reads the list. git diff finds renames by default, and
 # --name-only then prints only the new path of a move. --no-renames shows a
 # move as a deletion of the old path and an addition of the new path, so a
-# block that matches the old path sees a move out of it. The index block, the
-# msgs block, the plugin block and the ic-inline block below read this list.
+# block that matches the old path sees a move out of it. The Rust block, the
+# index block, the msgs block, the plugin block and the ic-inline block below
+# read this list.
 staged_paths_with_deletions() {
     git diff --cached --name-only --no-renames
 }
 
-if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$|(^|/)Cargo\.(toml|lock)$|^(rustfmt|rust-toolchain)\.toml$|^scripts/rust-checks\.sh$'; then
+# The Rust block reads staged_paths_with_deletions: a deletion of a Rust file,
+# a move of it to a path that is not Rust, or a link in its place leaves each
+# `mod` item that names the file without its file, and the build of the tree
+# then fails.
+if staged_paths_with_deletions | grep -qE '\.rs$|(^|/)Cargo\.(toml|lock)$|^(rustfmt|rust-toolchain)\.toml$|^scripts/rust-checks\.sh$'; then
     echo "pre-commit: running scripts/rust-checks.sh"
     ./scripts/rust-checks.sh
     rust_gate_ran=yes
