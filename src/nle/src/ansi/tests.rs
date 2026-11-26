@@ -61,8 +61,8 @@ fn a_control_sequence_is_pending_until_its_final_character() {
 #[test]
 fn the_reader_reads_each_form_of_sequence() {
     assert_eq!(
-        sequences(&["a\x1b[5 qb\x1b[?25;1049hc"]),
-        vec![csi("5", " ", 'q', ""), csi("?25;1049", "", 'h', "")]
+        sequences(&["a\x1b[5 qb\x1b[?25;2004hc"]),
+        vec![csi("5", " ", 'q', ""), csi("?25;2004", "", 'h', "")]
     );
     assert_eq!(
         sequences(&["\x1b]12;#ff0000\x07\x1b]12;red\x1b\\\u{9d}112\u{9c}"]),
