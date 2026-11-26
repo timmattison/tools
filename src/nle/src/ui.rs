@@ -39,6 +39,21 @@ const ALL_FILES_FILTER_EXTENSIONS: &[&str] = &["*"];
 /// The start of the message for a recording that does not open.
 const OPEN_FAILED_PREFIX: &str = "Failed to open recording";
 
+/// The heading of the speed panel.
+const SPEED_HEADING: &str = "Speed";
+/// The hint of the speed panel.
+const SPEED_HINT: &str = "Times are in seconds, on the timeline after the speed changes above.";
+/// The label of the field for the start of a region.
+const START_LABEL: &str = "Start (s)";
+/// The label of the field for the end of a region.
+const END_LABEL: &str = "End (s)";
+/// The label of the field for the speed.
+const SPEED_LABEL: &str = "Speed";
+/// The text of the button that applies the speed.
+const APPLY_SPEED_LABEL: &str = "Apply Speed";
+/// The label of the row for the duration after the edits.
+const EDITED_DURATION_LABEL: &str = "Edited duration";
+
 /// The title of the application window.
 const WINDOW_TITLE: &str = "NLE - Terminal Recording Editor";
 /// The width of the application window, in logical pixels.
@@ -147,7 +162,7 @@ impl Document {
 /// The root component of the application.
 #[component]
 pub(crate) fn App() -> Element {
-    let filters = use_hook(|| Arc::new(FilterRegistry::new()));
+    let filters = use_hook(|| Arc::new(crate::filters::registry()));
     let mut loaded = use_signal(|| None::<Document>);
     let mut error = use_signal(|| None::<String>);
 
@@ -172,7 +187,10 @@ pub(crate) fn App() -> Element {
             }
             PreviewPane { loaded }
             Timeline { loaded }
-            PropertiesPanel { loaded }
+            PropertiesPanel {
+                loaded,
+                on_error: move |message| error.set(Some(message)),
+            }
         }
     }
 }
@@ -259,15 +277,16 @@ fn summary(open: &Document) -> String {
     )
 }
 
-/// The metadata of the open recording.
+/// The metadata of the open recording, and the speed panel.
 #[component]
-fn PropertiesPanel(loaded: ReadSignal<Option<Document>>) -> Element {
-    let loaded = loaded.read();
+fn PropertiesPanel(loaded: Signal<Option<Document>>, on_error: EventHandler<String>) -> Element {
+    let is_open = loaded.read().is_some();
     rsx! {
         div { class: "properties-panel",
             h3 { "Properties" }
-            if let Some(open) = loaded.as_ref() {
-                {metadata_rows(&open.metadata)}
+            if is_open {
+                {metadata_rows(loaded.read().as_ref().map(|open| &open.metadata))}
+                SpeedPanel { loaded, on_error }
             } else {
                 div { class: "placeholder", "No recording loaded" }
             }
@@ -275,8 +294,75 @@ fn PropertiesPanel(loaded: ReadSignal<Option<Document>>) -> Element {
     }
 }
 
+/// The speed panel: three fields for a region and a speed, the button that
+/// applies them, and the time dilation filters of the project.
+#[component]
+fn SpeedPanel(loaded: Signal<Option<Document>>, on_error: EventHandler<String>) -> Element {
+    let mut start = use_signal(String::new);
+    let mut end = use_signal(String::new);
+    let mut speed = use_signal(String::new);
+    let edited = use_memo(move || edited_duration(&loaded.read()));
+    let _ = on_error;
+    rsx! {
+        div { class: "speed-panel",
+            h3 { {SPEED_HEADING} }
+            p { class: "speed-hint", {SPEED_HINT} }
+            label { class: "speed-field",
+                {START_LABEL}
+                input {
+                    r#type: "number",
+                    step: "any",
+                    min: "0",
+                    value: "{start}",
+                    oninput: move |event| start.set(event.value()),
+                }
+            }
+            label { class: "speed-field",
+                {END_LABEL}
+                input {
+                    r#type: "number",
+                    step: "any",
+                    min: "0",
+                    value: "{end}",
+                    oninput: move |event| end.set(event.value()),
+                }
+            }
+            label { class: "speed-field",
+                {SPEED_LABEL}
+                input {
+                    r#type: "number",
+                    step: "any",
+                    min: "0",
+                    value: "{speed}",
+                    oninput: move |event| speed.set(event.value()),
+                }
+            }
+            button { onclick: move |_| {}, {APPLY_SPEED_LABEL} }
+            div { class: "metadata-item",
+                span { class: "metadata-label", {EDITED_DURATION_LABEL} }
+                span { class: "metadata-value", "{edited}" }
+            }
+        }
+    }
+}
+
+/// The duration of the rendered project of the document as text, or the text
+/// of the error that the render gives.
+fn edited_duration(document: &Option<Document>) -> String {
+    match document {
+        None => String::new(),
+        Some(open) => match open.editor.render() {
+            Ok(recording) => format_duration(recording.duration),
+            Err(error) => error.to_string(),
+        },
+    }
+}
+
 /// The seven rows of the properties panel for one recording.
-fn metadata_rows(metadata: &RecordingMetadata) -> Element {
+fn metadata_rows(metadata: Option<&RecordingMetadata>) -> Element {
+    let Some(metadata) = metadata else {
+        return rsx! {};
+    };
     let title = if metadata.title.is_empty() {
         UNTITLED
     } else {
