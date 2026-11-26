@@ -211,6 +211,26 @@ fn bad_options_fail_the_run() {
 }
 
 #[test]
+fn a_speed_of_one_or_below_names_the_option_and_the_reason() {
+    let option = format!("\"{SPEED_OPTION}\"");
+    for speed in [1.0, 0.5] {
+        let options = FilterOptions::new()
+            .with(MODE_OPTION, ACCELERATE)
+            .with(SPEED_OPTION, speed);
+        match filters::registry().run(events(&[5.0]), &[with_options(options)]) {
+            Err(NleError::RenderError(message)) => {
+                assert!(message.contains(&option), "{speed}: {message}");
+                assert!(
+                    message.contains(&format!("Invalid acceleration: {speed}")),
+                    "{speed}: {message}"
+                );
+            }
+            other => panic!("{speed}: expected a render error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn an_unknown_mode_lists_the_known_modes() {
     let options = FilterOptions::new().with(MODE_OPTION, "rewind");
     match filters::registry().run(events(&[5.0]), &[with_options(options)]) {
