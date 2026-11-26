@@ -55,10 +55,14 @@ pub struct Span {
     pub end: Option<f64>,
 }
 
+/// The one form in which the registry keeps a filter: a function from a span
+/// to a span. It fails with a reason when the options do not parse.
+type Stage = dyn Fn(Span, &FilterOptions) -> Result<Span, String> + Send + Sync;
+
 /// The filters that a project can use, by kind.
 #[derive(Clone, Default)]
 pub struct FilterRegistry {
-    filters: BTreeMap<FilterKind, Arc<FilterFn>>,
+    filters: BTreeMap<FilterKind, Arc<Stage>>,
 }
 
 impl fmt::Debug for FilterRegistry {
@@ -88,16 +92,37 @@ impl FilterRegistry {
         kind: FilterKind,
         filter: impl Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync + 'static,
     ) {
-        self.filters.insert(kind, Arc::new(filter));
+        self.filters.insert(
+            kind,
+            Arc::new(move |span: Span, options: &FilterOptions| {
+                Ok(Span {
+                    events: filter(&span.events, options),
+                    end: None,
+                })
+            }),
+        );
     }
 
     /// Register `filter` under `kind`, with options of the type `O`.
+    ///
+    /// Before each call, the pipeline parses the `FilterOptions` of the
+    /// `AppliedFilter` as `O`. When they do not parse, the render fails with a
+    /// render error that names the kind and the reason. Thus `O` holds the
+    /// rules of the options: a missing key, a value of the wrong type, and,
+    /// with `#[serde(deny_unknown_fields)]`, a key that `O` does not know.
+    /// A filter that is already under `kind` is replaced.
     pub fn register_typed<O, F>(&mut self, kind: FilterKind, filter: F)
     where
         O: DeserializeOwned + 'static,
         F: Fn(Span, &O) -> Span + Send + Sync + 'static,
     {
-        let _ = (kind, filter);
+        self.filters.insert(
+            kind,
+            Arc::new(move |span: Span, options: &FilterOptions| {
+                let options = options.parse::<O>().map_err(|error| error.to_string())?;
+                Ok(filter(span, &options))
+            }),
+        );
     }
 
     /// Whether a filter is registered under `kind`.
@@ -107,7 +132,7 @@ impl FilterRegistry {
     }
 
     /// The filter under `kind`, or a render error that names the kind.
-    fn lookup(&self, kind: &FilterKind) -> Result<&Arc<FilterFn>, NleError> {
+    fn lookup(&self, kind: &FilterKind) -> Result<&Arc<Stage>, NleError> {
         self.filters.get(kind).ok_or_else(|| {
             NleError::RenderError(format!(
                 "no filter is registered for kind \"{}\"",
@@ -145,7 +170,19 @@ impl FilterRegistry {
             }
         }
 
-        let answer = filter(&inside, &applied.options);
+        let inside_last = last_time(&inside);
+        let span = Span {
+            events: inside,
+            end: None,
+        };
+        let answer = filter(span, &applied.options)
+            .map_err(|reason| {
+                NleError::RenderError(format!(
+                    "filter \"{}\" has invalid options: {reason}",
+                    applied.kind.as_str()
+                ))
+            })?
+            .events;
         for event in &answer {
             let time = event.time + start;
             if !(time.is_finite() && time >= 0.0) {
@@ -155,7 +192,7 @@ impl FilterRegistry {
                 )));
             }
         }
-        let shift = last_time(&answer) - last_time(&inside);
+        let shift = last_time(&answer) - inside_last;
 
         let mut result = before;
         result.extend(answer.into_iter().map(|event| Event {
