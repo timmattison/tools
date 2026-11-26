@@ -73,10 +73,12 @@ library, and do not use a canvas for the first version.
    [Dioxus crates](#dioxus-crates)). The drag of issue #150 is a set of
    pointer handlers in Rust, on top of the hit test.
 9. **Take the defaults of each interaction from Remotion Studio.** Take its
-   zoom anchor at the pointer, its trim areas of 8 px, its drag threshold of
+   zoom anchor at the pointer, its trim areas of 8 px, its trim threshold of
    4 px, its snap distance of 10 px, Escape to cancel, and its keys (see
    [Interaction design from Remotion Studio](#interaction-design-from-remotion-studio)).
-   Remotion snaps a clip only to the start of the timeline. A clip that must
+   Remotion gives the move of a clip no threshold in px: the move starts
+   after half a frame of movement. The NLE counts time in seconds, thus give
+   the move the trim threshold of 4 px. Remotion snaps a clip only to the start of the timeline. A clip that must
    join the end of another clip needs more targets: the playhead and the edges
    of the other clips.
 10. **Keep the canvas as the fallback for a later dense layer.** If a layer
@@ -247,6 +249,7 @@ In the Source column, a file name with no directory is in
 | Zoom anchor | A wheel zoom keeps the time under the pointer at the same place. If the pointer is within 8 px of the playhead, the playhead is the anchor. | `TimelinePinchZoom.tsx` |
 | Scroll in playback | When the playhead leaves the window, the view moves one window width. | `timeline-scroll-logic.ts`, `TimelinePlayCursorSyncer.tsx` |
 | Playhead | A pointer down on the timeline pauses, moves the playhead to the frame under the pointer, and captures the pointer. Near an edge of the window, the view scrolls each 100 ms. The playhead is a line of 1 px. Its `translateX` is written through a ref, outside the React render. | `TimelineDragHandler.tsx`, `timeline-scroll-logic.ts`, `TimelineSlider.tsx` |
+| Move | A move of a clip has no threshold in px. It starts when the pointer moves half a frame, because the change rounds to whole frames. A vertical move of more than 6 px starts a move to another track. | `TimelineSequenceRightEdgeDragHandle.tsx` (`useTimelineSequenceFromDrag`) |
 | Trim | Each clip edge has a hit area of 8 px. A trim starts after 4 px of movement. A drag of the left edge changes the start and the trim of the clip together, thus the right edge stays. A clip that is too narrow loses a handle, and the handles do not shrink. A tooltip shows the signed change and the frame of the edge. | `get-timeline-trim-handle-layout.ts`, `TimelineSequenceRightEdgeDragHandle.tsx`, `TimelineTrimTooltip.tsx` |
 | Snap | The snap is on by default, and `Shift+M` turns it off and on. A moved clip snaps to the start of the timeline within 10 px. No snap to the playhead or to other clips was found. | `state/editor-snapping.ts`, `TimelineSequenceRightEdgeDragHandle.tsx` |
 | Drag session | Each drag captures the pointer and listens on `window` for `pointermove`, `pointerup`, `pointercancel`, and `blur`. Escape cancels the drag. | `helpers/escape-cancelable-pointer-session.ts`, `packages/sdk/src/pointer-session.ts` |
