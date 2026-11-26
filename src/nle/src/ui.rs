@@ -328,10 +328,10 @@ fn SpeedPanel(
     let edited = use_memo(move || edited_duration(&loaded.read()));
     let rows = speed_rows(&loaded.read());
     rsx! {
-        div { class: "speed-panel",
+        div { class: "edit-panel",
             h3 { {SPEED_HEADING} }
-            p { class: "speed-hint", {SPEED_HINT} }
-            label { class: "speed-field",
+            p { class: "edit-hint", {SPEED_HINT} }
+            label { class: "edit-field",
                 {START_LABEL}
                 input {
                     r#type: "number",
@@ -341,7 +341,7 @@ fn SpeedPanel(
                     oninput: move |event| start.set(event.value()),
                 }
             }
-            label { class: "speed-field",
+            label { class: "edit-field",
                 {END_LABEL}
                 input {
                     r#type: "number",
@@ -351,7 +351,7 @@ fn SpeedPanel(
                     oninput: move |event| end.set(event.value()),
                 }
             }
-            label { class: "speed-field",
+            label { class: "edit-field",
                 {SPEED_LABEL}
                 input {
                     r#type: "number",
@@ -370,17 +370,17 @@ fn SpeedPanel(
                             filter,
                         })
                     });
-                    report(on_result, outcome);
+                    report(on_result, SPEED_FAILED_PREFIX, outcome);
                 },
                 {APPLY_SPEED_LABEL}
             }
             for (index, text) in rows {
-                div { class: "speed-row", key: "{index}",
+                div { class: "edit-row", key: "{index}",
                     span { "{text}" }
                     button {
                         onclick: move |_| {
                             let outcome = edit_document(loaded, |_| Edit::RemoveFilter { index });
-                            report(on_result, outcome);
+                            report(on_result, SPEED_FAILED_PREFIX, outcome);
                         },
                         {REMOVE_LABEL}
                     }
@@ -413,10 +413,34 @@ fn edit_document(
     })
 }
 
-/// Sends the outcome of a speed change to `on_result`: `Ok` for a change that
-/// applied, or the message of the banner for a change that did not.
-fn report(on_result: EventHandler<Result<(), String>>, outcome: Result<(), String>) {
-    on_result.call(outcome.map_err(|reason| format!("{SPEED_FAILED_PREFIX}: {reason}")));
+/// Sends the outcome of an edit to `on_result`: `Ok` for an edit that
+/// applied, or the message of the banner for an edit that did not. The message
+/// is `prefix`, a colon, and the reason.
+fn report(on_result: EventHandler<Result<(), String>>, prefix: &str, outcome: Result<(), String>) {
+    on_result.call(outcome.map_err(|reason| format!("{prefix}: {reason}")));
+}
+
+/// The text of a region for a row: the whole timeline, or the start and the
+/// end in seconds.
+fn region_text(region: &FilterRegion) -> String {
+    match region {
+        FilterRegion::All => WHOLE_TIMELINE.to_owned(),
+        // The seconds as the fields take them, so no two regions share a row text.
+        FilterRegion::Range { start, end } => format!("{} s to {} s", start.get(), end.get()),
+    }
+}
+
+/// Reads the Start and End fields as a region in seconds. The answer is the
+/// region, or the reason why the fields do not make one.
+fn region_from(start: &str, end: &str) -> Result<FilterRegion, String> {
+    let start: f64 = start.trim().parse().map_err(|_| START_NOT_A_NUMBER)?;
+    let end: f64 = end.trim().parse().map_err(|_| END_NOT_A_NUMBER)?;
+    let start = Seconds::new(start).map_err(|error| error.to_string())?;
+    let end = Seconds::new(end).map_err(|error| error.to_string())?;
+    if f64::from(end) <= f64::from(start) {
+        return Err(END_BEFORE_START.to_owned());
+    }
+    Ok(FilterRegion::Range { start, end })
 }
 
 /// One row for each time dilation filter of the project: the index of the
@@ -433,13 +457,7 @@ fn speed_rows(document: &Option<Document>) -> Vec<(usize, String)> {
         .enumerate()
         .filter_map(|(index, filter)| {
             let speed = time_dilation::speed_of(filter)?;
-            let region = match filter.region {
-                FilterRegion::All => WHOLE_TIMELINE.to_owned(),
-                // The seconds as the fields take them, so no two regions share a row text.
-                FilterRegion::Range { start, end } => {
-                    format!("{} s to {} s", start.get(), end.get())
-                }
-            };
+            let region = region_text(&filter.region);
             Some((index, format!("{region} at {}\u{d7}", speed.get())))
         })
         .collect()
@@ -449,19 +467,10 @@ fn speed_rows(document: &Option<Document>) -> Vec<(usize, String)> {
 /// region in seconds, and a speed. The answer is the filter to add, or the
 /// reason why the fields do not make one.
 fn speed_change(start: &str, end: &str, speed: &str) -> Result<AppliedFilter, String> {
-    let start: f64 = start.trim().parse().map_err(|_| START_NOT_A_NUMBER)?;
-    let end: f64 = end.trim().parse().map_err(|_| END_NOT_A_NUMBER)?;
+    let region = region_from(start, end)?;
     let speed: f64 = speed.trim().parse().map_err(|_| SPEED_NOT_A_NUMBER)?;
-    let start = Seconds::new(start).map_err(|error| error.to_string())?;
-    let end = Seconds::new(end).map_err(|error| error.to_string())?;
-    if f64::from(end) <= f64::from(start) {
-        return Err(END_BEFORE_START.to_owned());
-    }
     let speed = Speed::new(speed).map_err(|error| error.to_string())?;
-    Ok(time_dilation::applied(
-        FilterRegion::Range { start, end },
-        speed,
-    ))
+    Ok(time_dilation::applied(region, speed))
 }
 
 /// The duration of the rendered project of the document as text, or the text
