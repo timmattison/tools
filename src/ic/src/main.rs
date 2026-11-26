@@ -255,7 +255,7 @@ struct Args {
     #[clap(long, conflicts_with_all = ["stdin", "monitor", "will_display", "loop_video", "fps", "do_not_drop_frames", "memory_cleanup_frequency", "max_fps", "adaptive_fps"])]
     diff: bool,
 
-    /// How the picture of --diff shows the differences (default: boxes)
+    /// How the picture of --diff shows the differences (default: highlight)
     #[clap(long, value_enum, value_name = "MODE", requires = "diff")]
     diff_mode: Option<diff::Mode>,
 }
@@ -2240,8 +2240,8 @@ fn decode_picture(source: &[u8], name: &Path) -> Result<DynamicImage> {
 /// path does not wait for a slow decode of the first. A video or a text file
 /// is no still image, and the error names it. A file is text when its extension
 /// names no image format and its first bytes start no image. The picture comes
-/// from [`diff::compare`] in the mode of `--diff-mode`, or `boxes` when none is
-/// given.
+/// from [`diff::compare`] in the mode of `--diff-mode`, or `highlight` when none
+/// is given.
 ///
 /// With `--emit-rgba`, the run prints the picture as JSON and prints no
 /// header. Otherwise it prints a header of two lines, the two paths and the

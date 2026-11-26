@@ -24,9 +24,9 @@ pub const MAX_CANVAS_PIXELS: u64 = 1 << 27;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum Mode {
     /// The second image, with a red outline around each region that differs
-    #[default]
     Boxes,
     /// The first image, with each pixel that differs in red
+    #[default]
     Highlight,
     /// Opaque black, with each pixel that differs in red
     Mask,
