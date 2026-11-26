@@ -47,6 +47,15 @@ const BLINK_MODE: u32 = 12;
 /// The largest DECSCUSR value that a terminal knows. A terminal ignores a
 /// larger one.
 const LAST_STYLE: u16 = 6;
+/// The OSC number of the color of the cursor.
+const CURSOR_COLOR: usize = 12;
+/// The OSC number that sets the color of the cursor back to its default.
+const RESET_CURSOR_COLOR: usize = 112;
+/// The OSC numbers of the dynamic colors. A list of values after one of them
+/// sets that color and the next ones, so a list can reach `CURSOR_COLOR`.
+const DYNAMIC_COLORS: std::ops::RangeInclusive<usize> = 10..=19;
+/// The terminator of each OSC that the filter writes.
+const ST: &str = "\x1b\\";
 
 /// The cursor filter.
 ///
@@ -221,6 +230,25 @@ impl Cursor {
     }
 }
 
+/// A color of the cursor that a stream sets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CursorColor {
+    /// The default of the terminal.
+    Default,
+    /// The text of an OSC 12 value.
+    Spec(String),
+}
+
+impl CursorColor {
+    /// The OSC sequence that sets this color.
+    fn sequence(&self) -> String {
+        match self {
+            CursorColor::Default => format!("\x1b]{RESET_CURSOR_COLOR}{ST}"),
+            CursorColor::Spec(spec) => format!("\x1b]{CURSOR_COLOR};{spec}{ST}"),
+        }
+    }
+}
+
 /// The state of the cursor that a stream of output sets.
 #[derive(Debug, Clone, PartialEq)]
 struct CursorState {
@@ -229,6 +257,7 @@ struct CursorState {
     style: u16,
     /// The last set (`true`) or reset (`false`) of mode 12, when one came.
     blink_mode: Option<bool>,
+    color: CursorColor,
 }
 
 impl Default for CursorState {
@@ -238,6 +267,7 @@ impl Default for CursorState {
             visible: true,
             style: 0,
             blink_mode: None,
+            color: CursorColor::Default,
         }
     }
 }
@@ -263,6 +293,8 @@ struct Rewriter<'a> {
     /// The DECSCUSR value that the answer set last, or `None` when it is not
     /// known.
     shown_style: Option<u16>,
+    /// The color that the answer set last, or `None` when it is not known.
+    shown_color: Option<CursorColor>,
     /// The answer.
     out: Vec<Event>,
     /// Where each piece of the open sequence starts: the index of its event
@@ -281,6 +313,7 @@ impl<'a> Rewriter<'a> {
             recording: CursorState::default(),
             shown_visible: None,
             shown_style: None,
+            shown_color: None,
             out: Vec::new(),
             pieces: Vec::new(),
             last: (0, 0),
@@ -459,11 +492,15 @@ impl<'a> Rewriter<'a> {
                 }
                 Some(controls.clone())
             }
+            Sequence::Osc { text, terminator } if self.cursor.color.is_some() => {
+                self.osc_colors(text, terminator)
+            }
             // RIS, the full reset.
             Sequence::Escape('c') => {
                 self.recording = CursorState::default();
                 self.shown_visible = Some(true);
                 self.shown_style = Some(0);
+                self.shown_color = Some(CursorColor::Default);
                 None
             }
             _ => None,
@@ -500,6 +537,43 @@ impl<'a> Rewriter<'a> {
         Some(text)
     }
 
+    /// Drop the color of the cursor from an OSC `text`. Returns what is left
+    /// of the OSC, with the same `terminator`, or `None` when the OSC sets no
+    /// color of the cursor. A query (`?`) of that color stays.
+    fn osc_colors(&mut self, text: &str, terminator: &str) -> Option<String> {
+        let mut parts = text.split(';');
+        let number: usize = parts.next()?.parse().ok()?;
+        if number == RESET_CURSOR_COLOR {
+            self.recording.color = CursorColor::Default;
+            return Some(String::new());
+        }
+        if !DYNAMIC_COLORS.contains(&number) {
+            return None;
+        }
+        let values: Vec<&str> = parts.collect();
+        let index = CURSOR_COLOR.checked_sub(number)?;
+        let value = *values.get(index)?;
+        if value.is_empty() || value == "?" {
+            return None;
+        }
+        self.recording.color = CursorColor::Spec(value.to_string());
+
+        let mut rest = String::new();
+        let before = values.get(..index).unwrap_or_default();
+        if !before.is_empty() {
+            rest.push_str(&format!("\x1b]{number};{}{terminator}", before.join(";")));
+        }
+        let after = values.get(index + 1..).unwrap_or_default();
+        if !after.is_empty() {
+            rest.push_str(&format!(
+                "\x1b]{};{}{terminator}",
+                CURSOR_COLOR + 1,
+                after.join(";")
+            ));
+        }
+        Some(rest)
+    }
+
     /// The sequences that bring the answer to `target`, for each part that
     /// the filter owns. The caller puts them where no sequence is open.
     fn emissions(&mut self, target: Target) -> String {
@@ -516,6 +590,12 @@ impl<'a> Rewriter<'a> {
                 self.shown_style = Some(style);
             }
         }
+        if let Some(color) = self.wanted_color(target) {
+            if self.shown_color.as_ref() != Some(&color) {
+                text.push_str(&color.sequence());
+                self.shown_color = Some(color);
+            }
+        }
         if target == Target::Recording && self.cursor.blink.is_some() {
             if let Some(set) = self.recording.blink_mode {
                 let final_char = if set { 'h' } else { 'l' };
@@ -523,6 +603,16 @@ impl<'a> Rewriter<'a> {
             }
         }
         text
+    }
+
+    /// The color that `target` asks for, or `None` when the filter does not
+    /// own it.
+    fn wanted_color(&self, target: Target) -> Option<CursorColor> {
+        let color = self.cursor.color.as_ref()?;
+        Some(match target {
+            Target::Recording => self.recording.color.clone(),
+            Target::Wanted => CursorColor::Spec(color.clone()),
+        })
     }
 
     /// The DECSCUSR value that `target` asks for, or `None` when the filter
