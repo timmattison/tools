@@ -281,18 +281,31 @@ impl Editor {
     /// the result breaks a rule of `EditProject::validate`. A refused edit
     /// changes nothing.
     pub fn apply(&mut self, edit: Edit) -> Result<(), NleError> {
+        self.commit(edit)?;
+        self.redo.clear();
+        Ok(())
+    }
+
+    /// Apply `edit` to a copy of the project, check the copy, and only then
+    /// make it the project and put the edit on the undo history. It leaves
+    /// the redo history alone.
+    fn commit(&mut self, edit: Edit) -> Result<(), NleError> {
         let mut next = self.project.clone();
         edit.apply_to(&mut next)?;
         next.validate()?;
         let before = std::mem::replace(&mut self.project, next);
         self.undo.push(Applied { edit, before });
-        self.redo.clear();
         Ok(())
     }
 
     /// Undo the last edit. Returns `false` when there is nothing to undo.
     pub fn undo(&mut self) -> bool {
-        todo!()
+        let Some(applied) = self.undo.pop() else {
+            return false;
+        };
+        self.project = applied.before;
+        self.redo.push(applied.edit);
+        true
     }
 
     /// Redo the last undone edit. Returns `Ok(false)` when there is nothing
@@ -301,7 +314,13 @@ impl Editor {
     /// # Errors
     /// Returns the error of the edit, if it is refused now.
     pub fn redo(&mut self) -> Result<bool, NleError> {
-        todo!()
+        let Some(edit) = self.redo.last().cloned() else {
+            return Ok(false);
+        };
+        // A refused edit stays on the redo history, and nothing changes.
+        self.commit(edit)?;
+        self.redo.pop();
+        Ok(true)
     }
 
     /// Whether `undo` has an edit to undo.
