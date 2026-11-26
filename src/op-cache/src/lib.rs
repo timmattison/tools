@@ -175,11 +175,11 @@ impl fmt::Display for OpPath {
 /// [`OpPath`] names one field of an item. This names the item itself, which is
 /// what a caller holds when it wants to know *which* fields the item has.
 ///
-/// The two names are handed to `op` as separate arguments, so neither can be
-/// read as part of another. The validation still refuses a name that starts
-/// with `-`, because `op` reads such an argument as an option rather than as a
-/// name, and it refuses the shell metacharacters [`OpPath::new`] refuses, for
-/// the same defence-in-depth reason.
+/// The two names are handed to `op` as separate arguments: the vault as the
+/// value of `--vault`, and the item after `--`. Thus `op` reads neither as an
+/// option, nor as part of the other. The validation still refuses a name that
+/// starts with `-`, and the shell metacharacters that [`OpPath::new`] refuses,
+/// as defence in depth.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OpItem {
     vault: String,
@@ -222,10 +222,9 @@ impl OpItem {
 
 /// Whether `name` can go to `op` as a vault name or as an item name.
 ///
-/// A name of nothing but blank space names nothing. A name that starts with
-/// `-` is read by `op` as an option rather than as a name, which turns the
-/// name of an item into a flag of the command that reads it. The
-/// metacharacters go for the reason [`OpPath::new`] refuses them.
+/// A name of nothing but blank space names nothing. A leading `-` and the
+/// metacharacters that [`OpPath::new`] refuses go as defence in depth, for the
+/// reason that [`OpItem`] gives.
 fn names_something(name: &str) -> bool {
     !name.trim().is_empty()
         && !name.starts_with('-')
@@ -1317,9 +1316,9 @@ mod tests {
         );
     }
 
-    /// The two names go to `op` as arguments. A name that starts with `-` is
-    /// read as an option rather than as a name, and a name of nothing but
-    /// blank space names nothing at all.
+    /// A name of nothing but blank space names nothing at all. A leading `-`
+    /// and a shell metacharacter are refused as defence in depth, for the
+    /// reason that the doc of `OpItem` gives.
     #[test]
     fn a_vault_or_an_item_that_names_nothing_is_refused() {
         for (vault, name) in [
