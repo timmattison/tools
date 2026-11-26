@@ -1,6 +1,5 @@
 //! Tests for the rules of the edit project.
 
-use super::*;
 use crate::error::NleError;
 use crate::types::Seconds;
 

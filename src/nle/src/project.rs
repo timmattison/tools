@@ -1,6 +1,7 @@
 //! The rules of the edit project: its constructor, its validation, its ids, its
 //! length, and its file format.
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -141,7 +142,10 @@ impl EditProject {
                 ));
             }
             // A NaN or a negative duration fails the comparison too.
-            if !(out_point <= duration) {
+            if !matches!(
+                out_point.partial_cmp(&duration),
+                Some(Ordering::Less | Ordering::Equal)
+            ) {
                 return invalid(format!(
                     "clip {} ends at {out_point} s, after the end of its source at {duration} s",
                     clip.id.0
