@@ -512,7 +512,7 @@ mod probe_tests {
 #[cfg(test)]
 mod typed_url_tests {
     use super::*;
-    use crate::test_server::{json_response, ReceivedRequest, TestServer};
+    use crate::test_server::{json_response, redirect_to, ReceivedRequest, TestServer};
     use std::cell::RefCell;
 
     /// What a controller's integration API answers an `info` request with.
@@ -606,6 +606,37 @@ mod typed_url_tests {
             outcome.expect("the test server answers as a controller"),
             typed,
             "the URL to save must be the URL the user typed"
+        );
+    }
+
+    /// The client refuses each redirect, so a URL that reaches the controller
+    /// only through a redirect fails each later command. The probe refuses
+    /// the redirect too, and its error names the status and the place the
+    /// redirect goes, so the wizard shows the user the URL to type.
+    #[tokio::test]
+    async fn a_typed_url_that_redirects_fails_and_names_where_it_goes() {
+        let controller = TestServer::replying(&json_response(CONTROLLER_INFO)).await;
+        let location = format!("{}/proxy/network/integration/v1/info", controller.origin());
+        let redirecting = TestServer::replying(&redirect_to(&location)).await;
+
+        let outcome = validate_user_url(redirecting.origin()).await;
+
+        assert!(
+            controller.requests().is_empty(),
+            "the probe followed the redirect, which the client refuses: {:?}",
+            controller.requests()
+        );
+        let error = format!(
+            "{:#}",
+            outcome.expect_err("a URL that answers with a redirect must not validate")
+        );
+        assert!(
+            error.contains("302"),
+            "the error must name the status of the redirect, got: {error}"
+        );
+        assert!(
+            error.contains(&location),
+            "the error must name where the redirect goes, got: {error}"
         );
     }
 }
