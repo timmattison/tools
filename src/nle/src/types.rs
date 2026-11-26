@@ -19,6 +19,7 @@ pub struct Recording {
     pub env: BTreeMap<String, String>,
     pub events: Vec<Event>,
     /// The chapters in time order. A recording from `beta record` has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chapters: Vec<Chapter>,
 }
 

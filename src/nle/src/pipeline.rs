@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use crate::error::NleError;
 use crate::types::{
-    AppliedFilter, Clip, EditProject, Event, FilterKind, FilterOptions, FilterRegion, Recording,
+    AppliedFilter, Chapter, Clip, EditProject, Event, FilterKind, FilterOptions, FilterRegion,
+    Recording,
 };
 
 /// A filter: a pure function from the events of a region to new events.
@@ -38,6 +39,12 @@ use crate::types::{
 /// 8. The end of the timeline moves by the shift when it is at or after the
 ///    region start. It is never less than the time of the last event.
 ///
+/// 9. A chapter time moves with the events, by `move_chapter`. A chapter
+///    before the region stays. A chapter at or after the region end moves by
+///    the shift. A chapter inside the region keeps its place between the
+///    events around it. If the filter adds or removes events, it keeps its
+///    place in proportion to the last time of the region instead.
+///
 /// The region of a later filter is in the time that the earlier filters leave.
 /// After the last filter, `FilterRegistry::run` fails when an event time or
 /// the end of the timeline is not finite, because a shift can overflow.
@@ -60,6 +67,78 @@ impl fmt::Debug for FilterRegistry {
 /// The largest time of `events`, or 0.0 when there is none.
 fn last_time(events: &[Event]) -> f64 {
     events.iter().map(|event| event.time).fold(0.0, f64::max)
+}
+
+/// What one filter step did to the times of its region, as `move_chapter` needs it.
+struct StepTimes {
+    /// The start of the region.
+    start: f64,
+    /// The end of the region, or infinity for `FilterRegion::All`.
+    region_end: f64,
+    /// The times of the events that the filter saw, relative to `start`, in time order.
+    seen: Vec<f64>,
+    /// The times of the answer, relative to `start`, in ascending order.
+    answered: Vec<f64>,
+    /// The last time of the answer minus the last time of the events that the filter saw.
+    shift: f64,
+}
+
+/// Move the chapter time `time` through one filter step. The result is never below 0.
+///
+/// A time before the region start does not move. A time at or after the region
+/// end moves by the shift, like the events after the region.
+///
+/// Inside the region, the answer matters. If the filter kept the number of
+/// events, the chapter keeps its place between the events around it. It keeps
+/// its fraction of the gap between the event before and the event after.
+/// Before the first event, it scales from the region start. After the last
+/// event, it keeps its gap to that event.
+///
+/// If the filter added or removed events, or the region holds none, a chapter
+/// up to the last seen event moves in proportion to the last time of the
+/// answer over the last time seen. A chapter after that moves by the shift.
+fn move_chapter(time: f64, step: &StepTimes) -> f64 {
+    if time < step.start {
+        return time.max(0.0);
+    }
+    if time >= step.region_end {
+        return (time + step.shift).max(0.0);
+    }
+    let rel = time - step.start;
+    let seen = &step.seen;
+    let answered = &step.answered;
+    let mapped = if seen.len() == answered.len() && !seen.is_empty() {
+        let k = seen.partition_point(|x| *x < rel);
+        let at = |list: &[f64], index: usize| list.get(index).copied().unwrap_or(0.0);
+        if k >= seen.len() {
+            let last = seen.len() - 1;
+            at(answered, last) + (rel - at(seen, last))
+        } else if k == 0 {
+            let first = at(seen, 0);
+            if first > 0.0 {
+                at(answered, 0) * rel / first
+            } else {
+                at(answered, 0)
+            }
+        } else {
+            let (i0, i1) = (at(seen, k - 1), at(seen, k));
+            let (a0, a1) = (at(answered, k - 1), at(answered, k));
+            a0 + (rel - i0) / (i1 - i0) * (a1 - a0)
+        }
+    } else {
+        let seen_last = seen.last().copied().unwrap_or(0.0);
+        let answered_last = answered.last().copied().unwrap_or(0.0);
+        if rel <= seen_last {
+            if seen_last > 0.0 {
+                rel * answered_last / seen_last
+            } else {
+                0.0
+            }
+        } else {
+            rel + step.shift
+        }
+    };
+    (step.start + mapped).max(0.0)
 }
 
 impl FilterRegistry {
@@ -95,12 +174,14 @@ impl FilterRegistry {
         })
     }
 
-    /// One filter step: the steps on `FilterFn`.
+    /// One filter step: the steps on `FilterFn`. `chapters` holds the chapter
+    /// times, and each one moves by `move_chapter`.
     fn apply(
         &self,
         events: Vec<Event>,
         applied: &AppliedFilter,
         end: &mut f64,
+        chapters: &mut [f64],
     ) -> Result<Vec<Event>, NleError> {
         let filter = self.lookup(&applied.kind)?;
         let (start, region_end) = match &applied.region {
@@ -136,6 +217,19 @@ impl FilterRegistry {
         }
         let shift = last_time(&answer) - last_time(&inside);
 
+        let mut answered: Vec<f64> = answer.iter().map(|event| event.time).collect();
+        answered.sort_by(f64::total_cmp);
+        let step = StepTimes {
+            start,
+            region_end,
+            seen: inside.iter().map(|event| event.time).collect(),
+            answered,
+            shift,
+        };
+        for chapter in chapters.iter_mut() {
+            *chapter = move_chapter(*chapter, &step);
+        }
+
         let mut result = before;
         result.extend(answer.into_iter().map(|event| Event {
             time: event.time + start,
@@ -169,26 +263,28 @@ impl FilterRegistry {
         filters: &[AppliedFilter],
     ) -> Result<Vec<Event>, NleError> {
         let end = last_time(&events);
-        self.run_with_end(events, filters, end)
+        self.run_with_end(events, filters, end, &mut [])
             .map(|(events, _end)| events)
     }
 
     /// Run `filters` in order, and follow the end of the timeline, which
-    /// starts at `end`. Returns the events and the final end.
+    /// starts at `end`. The chapter times in `chapters` move through the
+    /// filters. Returns the events and the final end.
     ///
     /// # Errors
     /// Returns `NleError::RenderError` when a filter fails, or when an event
-    /// time or the final end is not finite.
+    /// time, a chapter time, or the final end is not finite.
     fn run_with_end(
         &self,
         events: Vec<Event>,
         filters: &[AppliedFilter],
         end: f64,
+        chapters: &mut [f64],
     ) -> Result<(Vec<Event>, f64), NleError> {
         let mut events = events;
         let mut end = end;
         for applied in filters {
-            events = self.apply(events, applied, &mut end)?;
+            events = self.apply(events, applied, &mut end, chapters)?;
         }
         // A shift or the arithmetic of a clip can still overflow to infinity.
         for event in &events {
@@ -196,6 +292,13 @@ impl FilterRegistry {
                 return Err(NleError::RenderError(format!(
                     "the render gives the time {} s, which is not finite",
                     event.time
+                )));
+            }
+        }
+        for time in chapters.iter() {
+            if !time.is_finite() {
+                return Err(NleError::RenderError(format!(
+                    "the render gives the chapter time {time} s, which is not finite"
                 )));
             }
         }
@@ -222,8 +325,12 @@ impl FilterRegistry {
     ///    first on the timeline. A tie goes to the clip that comes first in
     ///    track order, then in clip order.
     /// 5. `duration` is the end of the timeline after the filters.
-    /// 6. Each event time and the duration must be finite. Else the render
-    ///    fails with `NleError::RenderError`.
+    /// 6. Each event time, each chapter time, and the duration must be
+    ///    finite. Else the render fails with `NleError::RenderError`.
+    /// 7. The chapters are the chapters of the project, moved through the
+    ///    filters. A chapter after the duration is dropped. The others are in
+    ///    time order, and two at one time keep the order of
+    ///    `EditProject::chapters_in_order`.
     ///
     /// A project of one whole-recording clip and no filter renders a
     /// recording equal to its source.
@@ -258,7 +365,25 @@ impl FilterRegistry {
             .collect();
         // A stable sort keeps track order, then clip order, on a tie.
         events.sort_by(|a, b| a.time.total_cmp(&b.time));
-        let (events, end) = self.run_with_end(events, &project.filters, project.duration())?;
+        let markers = project.chapters_in_order();
+        let mut chapter_times: Vec<f64> = markers.iter().map(|marker| marker.time.get()).collect();
+        let (events, end) = self.run_with_end(
+            events,
+            &project.filters,
+            project.duration(),
+            &mut chapter_times,
+        )?;
+        let mut chapters: Vec<Chapter> = markers
+            .iter()
+            .zip(&chapter_times)
+            .filter(|(_, time)| **time <= end)
+            .map(|(marker, time)| Chapter {
+                time: *time,
+                label: marker.label.clone(),
+            })
+            .collect();
+        // A stable sort: two chapters at one time keep their order.
+        chapters.sort_by(|a, b| a.time.total_cmp(&b.time));
 
         let header = &first.source;
         Ok(Recording {
@@ -271,7 +396,7 @@ impl FilterRegistry {
             title: header.title.clone(),
             env: header.env.clone(),
             events,
-            chapters: Vec::new(),
+            chapters,
         })
     }
 }
