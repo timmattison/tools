@@ -418,10 +418,13 @@ fn render_page(recording: &Recording, theme: &str, compress: bool) -> Result<Str
             general_purpose::STANDARD.encode(&compressed)
         )
     } else {
-        // Escape </ to <\/ to prevent </script> injection when embedding in HTML
+        // Write each `<` as `\u003c`. A `<` occurs only inside a JSON string,
+        // where the escape gives the same text. Thus no `</script`, `<!--`, or
+        // `<script` in the data can end the script or change how the HTML
+        // tokenizer reads it.
         serde_json::to_string(recording)
             .context("Failed to serialize recording")?
-            .replace("</", r"<\/")
+            .replace('<', r"\u003c")
     };
 
     // Format duration
@@ -626,7 +629,7 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::render_page;
-    use crate::{Chapter, Recording};
+    use crate::{Chapter, Event, EventType, Recording};
     use base64::{engine::general_purpose, Engine as _};
     use std::io::Read;
     use std::path::PathBuf;
@@ -791,6 +794,27 @@ console.log(String(player.pausedAt));
         assert!(!json.to_ascii_lowercase().contains("<script"), "{json}");
         let value: serde_json::Value = serde_json::from_str(json).expect("valid json");
         assert_eq!(value["chapters"][0]["label"], LABEL_COMMENT_SCRIPT);
+    }
+
+    #[test]
+    fn event_data_cannot_end_the_script_or_put_it_into_an_escaped_state() {
+        let data = "</script><script>alert(1)</script><!--<script>";
+        let mut with_event = recording(Vec::new());
+        with_event.events.push(Event {
+            time: 0.5,
+            event_type: EventType::Output,
+            data: data.to_string(),
+        });
+        let html = page(&with_event, false);
+        let (_, after) = html
+            .split_once("const recording = ")
+            .expect("the recording data");
+        let (json, _) = after
+            .split_once(";\n")
+            .expect("the end of the recording data");
+        assert!(!json.contains('<'), "{json}");
+        let value: serde_json::Value = serde_json::from_str(json).expect("valid json");
+        assert_eq!(value["events"][0]["data"], data);
     }
 
     #[test]

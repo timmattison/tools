@@ -249,18 +249,6 @@ mod tests {
     }
 
     #[test]
-    fn test_web_export_xss_escaping() {
-        // Verify that </script> in recording data gets escaped
-        let json = serde_json::to_string(&"</script><script>alert(1)</script>").unwrap();
-        let escaped = json.replace("</", r"<\/");
-        assert!(
-            !escaped.contains("</script>"),
-            "Should escape </script> tags"
-        );
-        assert!(escaped.contains(r"<\/script>"));
-    }
-
-    #[test]
     fn test_parse_color_spec_ascii_guard() {
         let theme = TerminalTheme::auto();
         let state = TerminalState::new(10, 5, theme);
