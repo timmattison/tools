@@ -311,6 +311,23 @@ fn the_classification_follows_the_last_use() {
     );
 }
 
+/// A last use exactly `idle_days` days ago is still a use. One day more is
+/// idle.
+#[test]
+fn the_idle_limit_is_more_than_idle_days() {
+    let defs = definitions(&[("at", "a"), ("past", "b")], &[], &[], &[]);
+    let limit = u64::from(IDLE_DAYS);
+    let result = run(&[entry(limit, 0, "at"), entry(limit + 1, 0, "past")], &defs);
+    assert_eq!(
+        usage(&result, "at", Kind::Alias).classification,
+        Classification::Used
+    );
+    assert_eq!(
+        usage(&result, "past", Kind::Alias).classification,
+        Classification::Idle
+    );
+}
+
 /// The `since` date drops the earlier rows.
 #[test]
 fn since_drops_the_earlier_rows() {
