@@ -456,7 +456,7 @@ fn the_workspace_line_names_the_workspace_and_the_step_that_found_it() {
                     crate_dir: PathBuf::from("/code/日本語 tools/src/wdid"),
                 },
             },
-            "Workspace: /code/日本語 tools (the source of the installed wdid, cargo install --path /code/日本語 tools/src/wdid)",
+            "Workspace: /code/日本語 tools (the source of the installed wdid, cargo install --path '/code/日本語 tools/src/wdid')",
         ),
     ];
     for (workspace, line) in cases {
