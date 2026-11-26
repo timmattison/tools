@@ -712,6 +712,27 @@ fn a_marker_after_the_end_is_dropped_and_a_marker_at_the_end_is_kept() {
 }
 
 #[test]
+fn a_marker_whose_time_overflows_is_dropped_and_the_render_works() {
+    // The range 0..0.5 holds the event 0. It goes to 1e308, so the shift is
+    // 1e308. The event 1 and the end go to about 1e308, which is finite. The
+    // marker at f64::MAX is after the range and moves to infinity, which is
+    // after the end.
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("far"), |_, _| vec![ev(1e308)]);
+    let project = chapter_project(
+        &[0.0, 1.0],
+        1.0,
+        vec![marker(1, 0.0, "start"), marker(2, f64::MAX, "far")],
+        vec![range("far", 0.0, 0.5)],
+    );
+
+    let rendered = registry.render(&project).unwrap();
+
+    let labels: Vec<&str> = rendered.chapters.iter().map(|c| c.label.as_str()).collect();
+    assert_eq!(labels, ["start"]);
+}
+
+#[test]
 fn a_marker_on_an_event_goes_to_the_new_time_of_that_event() {
     // The events 1, 2, 4 go to 2, 4, 8.
     let project = chapter_project(
