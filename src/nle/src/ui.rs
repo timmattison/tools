@@ -147,7 +147,8 @@ impl Document {
 /// The root component of the application.
 #[component]
 pub(crate) fn App() -> Element {
-    let filters = use_hook(|| Arc::new(FilterRegistry::new()));
+    // The built-in filters of issue #154, so that a project that names one renders.
+    let filters = use_hook(|| Arc::new(crate::filters::builtin()));
     let mut loaded = use_signal(|| None::<Document>);
     let mut error = use_signal(|| None::<String>);
 
