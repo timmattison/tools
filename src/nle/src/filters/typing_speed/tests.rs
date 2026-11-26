@@ -186,3 +186,36 @@ fn the_gap_after_a_line_end_stays() {
         );
     }
 }
+
+#[test]
+fn a_jitter_changes_each_interval_inside_its_bound_and_the_same_way_each_time() {
+    let input: Vec<Event> = (0..21_u32)
+        .map(|index| key(f64::from(index) * 0.5, "x"))
+        .collect();
+    let jittery = Normalization {
+        jitter: Jitter::new(0.5).unwrap(),
+        ..typing(4.0)
+    };
+    let filter = [applied(FilterRegion::All, jittery)];
+
+    let first = times(&run(input.clone(), &filter));
+    let second = times(&run(input, &filter));
+
+    assert_eq!(first, second, "a render must give the same times each time");
+    let intervals: Vec<f64> = first.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    // A jitter of 0.5 at 4 characters per second gives intervals from
+    // 0.125 s up to, and not including, 0.375 s. The difference of two times
+    // can round, so each bound has a small tolerance.
+    for interval in &intervals {
+        assert!(
+            (0.125 - 1e-12..0.375 + 1e-12).contains(interval),
+            "interval {interval} is outside the bound: {intervals:?}"
+        );
+    }
+    let smallest = intervals.iter().copied().fold(f64::INFINITY, f64::min);
+    let largest = intervals.iter().copied().fold(0.0, f64::max);
+    assert!(
+        largest - smallest > 0.05,
+        "the intervals do not vary: {intervals:?}"
+    );
+}
