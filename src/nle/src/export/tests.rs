@@ -166,3 +166,43 @@ fn a_video_export_runs_beta_on_the_rendered_recording() {
     assert_eq!(args, expected);
     assert!(!Path::new(&input).exists(), "the work file stays: {input}");
 }
+
+#[cfg(unix)]
+#[test]
+fn a_web_export_runs_beta_with_the_theme_and_compress() {
+    let home = home_with_beta_script(COPYING_BETA);
+    let out = tempfile::tempdir().unwrap();
+    let canonical_output = out.path().canonicalize().unwrap().join("page.html");
+    let request = ExportRequest {
+        output_path: out.path().join("page.html"),
+        target: ExportTarget::Web {
+            theme: Theme::Monokai,
+            compress: true,
+        },
+    };
+
+    let result = block_on(export_recording_with(
+        recording(),
+        request,
+        |_| {},
+        finder_vars(&home),
+    ));
+
+    result.unwrap();
+    assert_eq!(Recording::load(&canonical_output).unwrap(), recording());
+    let args = written_args(&canonical_output);
+    let input = args.get(2).unwrap().clone();
+    let expected: Vec<String> = [
+        "export",
+        "web",
+        input.as_str(),
+        "--output",
+        canonical_output.to_str().unwrap(),
+        "--theme",
+        "monokai",
+        "--compress",
+    ]
+    .map(ToString::to_string)
+    .to_vec();
+    assert_eq!(args, expected);
+}
