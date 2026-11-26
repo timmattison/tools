@@ -78,7 +78,9 @@ The design starts from the code on `main` at commit `2ce7472ba`.
   file keeps both in `AppliedFilter`. The project file has no version field.
 - `src/nle` has no terminal state, no frame, and no analysis type.
   `TerminalState` exists only in `src/beta/src/export/terminal_renderer.rs`, and
-  `beta` is a binary crate with no library target. Its video export draws into
+  `beta` is a binary crate with no library target. Open issue #768 moves
+  `TerminalState` and `Cell` into a new shared crate, `src/termstate`, and
+  issue #151 waits for it. The video export of `beta` draws into
   an `RgbImage`. The preview pane (issue #151), the export of an edited
   recording (issue #158), and the chapter index (issue #164) are open.
 - The workspace has no WASM runtime. It already uses `dirs`, `notify`, `sha2`,
@@ -663,7 +665,7 @@ start at once.
 | 3 | The plugins directory in the editor | slice 2 |
 | 4 | The generated settings panel | slices 1 and 3 |
 | 5 | Analyzer plugins | slice 3 |
-| 6 | Renderer plugins | slice 3, issue #151, and issue #158 |
+| 6 | Renderer plugins | slice 3, issue #768, issue #151, and issue #158 |
 | 7 | Install from a URL | slice 3 |
 | 8 | Hot reload of development plugins | slice 3 |
 
@@ -768,9 +770,9 @@ small one.
   version goes up by one patch number.
 - The project keeps a list of applied renderers with their options. The field
   has a serde default, thus an old project file still loads.
-- The host builds `terminal-state` from the terminal emulator that issue #151
-  chooses. It gives the frame to each applied renderer, in the order of the
-  list.
+- The host builds `terminal-state` from `termstate::TerminalState`, which
+  issue #768 adds. It gives the frame to each applied renderer, in the order
+  of the list.
 - The export of issue #158 runs the renderers on each frame.
 
 If the preview of issue #151 draws in the webview with xterm.js, no RGBA frame
