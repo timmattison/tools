@@ -380,12 +380,14 @@ impl Editor {
         path: String,
         compress: Option<bool>,
     ) -> impl std::future::Future<Output = Result<(), NleError>> + Send + 'static {
-        let project = self.project.clone();
-        let filters = Arc::clone(&self.filters);
-        crate::commands::run_blocking(move || {
-            let recording = filters.render(&project)?;
-            crate::commands::save_recording_to(&path, &recording, compress)
-        })
+        let export = self.export(
+            ExportRequest {
+                output_path: PathBuf::from(path),
+                target: ExportTarget::Recording { compress },
+            },
+            |_| {},
+        );
+        async move { export.await.map(|_| ()) }
     }
 }
 
