@@ -2102,6 +2102,83 @@ mod tests {
         );
     }
 
+    /// A config file that a person wrote, with comments as in the sample of
+    /// the README, and with a key that this version of `ufa` does not know.
+    const HAND_WRITTEN_CONFIG: &str = "\
+# Controller
+url = \"https://192.168.1.1\" # the gateway in the rack
+insecure = true
+
+# Controller API key, in 1Password (recommended)
+op_path = \"op://Private/ufa/key - 192.168.1.1 port 443\"
+
+# A key that a later version of ufa reads
+later_setting = \"kept\"
+";
+
+    /// A save writes the fields that the command asked about. The comments of
+    /// the person who wrote the file, and a key that `ufa` does not know, are
+    /// not fields that the command asked about, so they stay.
+    #[test]
+    fn a_save_keeps_each_comment_and_each_key_that_ufa_does_not_know() {
+        let temp = TempConfigDir::new("keeps-comments");
+        create_directory(&temp.dir);
+        write_file(&temp.config_file(), HAND_WRITTEN_CONFIG);
+
+        Config::edit_at(&temp.config_file(), |config| {
+            config.set_site_manager("op://Private/ufa/site manager key");
+        })
+        .expect("configuring the cloud key must succeed");
+
+        let saved = fs::read_to_string(temp.config_file()).expect("the saved file must exist");
+        for line in [
+            "# Controller",
+            "url = \"https://192.168.1.1\" # the gateway in the rack",
+            "# Controller API key, in 1Password (recommended)",
+            "# A key that a later version of ufa reads",
+            "later_setting = \"kept\"",
+            "sm_op_path = \"op://Private/ufa/site manager key\"",
+        ] {
+            assert!(
+                saved.lines().any(|saved_line| saved_line == line),
+                "the save must keep the line {line:?}, got:\n{saved}"
+            );
+        }
+    }
+
+    /// A field that the edit clears leaves the file, and the field that takes
+    /// its place goes in.
+    #[test]
+    fn a_save_removes_a_field_that_the_edit_cleared() {
+        let temp = TempConfigDir::new("clears-a-field");
+        create_directory(&temp.dir);
+        write_file(&temp.config_file(), HAND_WRITTEN_CONFIG);
+
+        Config::edit_at(&temp.config_file(), |config| {
+            config.set_controller(
+                "https://192.168.1.1".to_string(),
+                &ControllerCredential::Pasted {
+                    key: Secret::from("pasted-controller-key"),
+                },
+                true,
+            );
+        })
+        .expect("configuring a pasted key must succeed");
+
+        let loaded = Config::load_from(&temp.config_file())
+            .expect("loading the config must succeed")
+            .expect("the config file must still exist");
+        assert_eq!(
+            loaded.op_path, None,
+            "the cleared reference must leave the file"
+        );
+        assert_eq!(
+            loaded.api_key.as_ref().map(Secret::expose),
+            Some("pasted-controller-key"),
+            "the pasted key must go in"
+        );
+    }
+
     /// Load the settings file beside `directory` under the environment lock,
     /// read `name` back, and take it out again.
     ///
