@@ -214,7 +214,7 @@ fn base_export_args(
 /// It fails if the format is not Video, the input file is missing, or the
 /// output file name does not end in `.mp4` or `.gif`, or the output directory
 /// does not exist.
-fn video_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
+pub(crate) fn video_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
     if !matches!(options.format, ExportFormat::Video) {
         return Err(NleError::ExportError(
             "export_video requires Video format".into(),
@@ -249,7 +249,7 @@ fn video_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
 /// It fails if the format is not Web, the input file is missing, or the
 /// output file name does not end in `.html`, or the output directory does not
 /// exist.
-fn web_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
+pub(crate) fn web_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
     if !matches!(options.format, ExportFormat::Web) {
         return Err(NleError::ExportError(
             "export_web requires Web format".into(),
@@ -351,7 +351,7 @@ fn read_error(error: std::io::Error) -> NleError {
 /// line while `beta` runs, and each frame report goes to `on_progress` at
 /// once. The stderr is read in full at the same time, so a full pipe never
 /// stops `beta`. The child is killed when the future is dropped.
-async fn run_beta(
+pub(crate) async fn run_beta(
     args: &[String],
     output_path: &str,
     var: impl Fn(&'static str) -> Option<OsString>,
@@ -426,4 +426,4 @@ pub async fn export_web(options: ExportOptions) -> Result<String, NleError> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

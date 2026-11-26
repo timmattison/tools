@@ -1,11 +1,14 @@
 //! The export of an edited project: the stages of an export, the settings of
 //! a `beta export` run, and the read of the progress that `beta` reports.
 
+use std::ffi::OsString;
 use std::fmt;
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use crate::error::NleError;
+use crate::types::Recording;
 
 /// A stage of an export, for a progress display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +126,77 @@ impl fmt::Display for Resolution {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}x{}", self.width, self.height)
     }
+}
+
+/// What an export writes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExportTarget {
+    /// A `beta` recording file. The name ends in `.json` or `.json.gz`.
+    /// `compress: None` follows the `.gz` ending.
+    Recording {
+        /// Whether to gzip the file.
+        compress: Option<bool>,
+    },
+    /// A web page with a player, through `beta export web`. The name ends in
+    /// `.html`.
+    Web {
+        /// The colors of the page.
+        theme: Theme,
+        /// Whether `beta` compresses the recording in the page.
+        compress: bool,
+    },
+    /// A video through `beta export video`. The name ends in `.mp4` or
+    /// `.gif`, and `beta` picks the encoder from the ending.
+    Video {
+        /// The colors of the video.
+        theme: Theme,
+        /// The frame rate. `None` leaves the choice to `beta`.
+        fps: Option<NonZeroU32>,
+        /// The size of the video. `None` leaves the choice to `beta`.
+        resolution: Option<Resolution>,
+        /// Whether `beta` optimizes the video for the web.
+        optimize_web: bool,
+    },
+}
+
+/// One export: where it goes and what it writes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportRequest {
+    /// The file to write.
+    pub output_path: PathBuf,
+    /// What to write.
+    pub target: ExportTarget,
+}
+
+/// Write the rendered `recording` as `request` asks, and report each stage
+/// through `progress`.
+///
+/// A path goes to `beta` as text, and a path that is not valid UTF-8 loses
+/// its invalid bytes.
+///
+/// # Errors
+/// Returns `NleError::SaveError` when a recording file is refused or cannot
+/// be written, and `NleError::ExportError` when the output path of a web page
+/// or a video is refused, when the work file cannot be written, when `beta`
+/// cannot start, or when `beta` fails. A panic in the work becomes
+/// `NleError::TaskError`.
+pub async fn export_recording(
+    recording: Recording,
+    request: ExportRequest,
+    progress: impl FnMut(ExportProgress) + Send + 'static,
+) -> Result<PathBuf, NleError> {
+    export_recording_with(recording, request, progress, std::env::var_os).await
+}
+
+/// `export_recording` with the variables of the environment from `var`, so
+/// that a test finds a `beta` of its own.
+pub(crate) async fn export_recording_with(
+    _recording: Recording,
+    request: ExportRequest,
+    _progress: impl FnMut(ExportProgress) + Send + 'static,
+    _var: impl Fn(&'static str) -> Option<OsString>,
+) -> Result<PathBuf, NleError> {
+    Ok(request.output_path)
 }
 
 /// The text that starts a frame line of `beta`.

@@ -44,7 +44,7 @@ fn canonical_out(dir: &tempfile::TempDir, name: &str) -> String {
 }
 
 /// Run `future` to its end on a multi-thread tokio runtime of its own.
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
+pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -501,7 +501,7 @@ const SUCCEEDING_BETA: &str = "#!/bin/sh\nexit 0\n";
 
 /// A `beta` that prints its arguments on stderr, then fails.
 #[cfg(unix)]
-const FAILING_BETA: &str = "#!/bin/sh\nprintf '%s\\n' \"$*\" >&2\nexit 1\n";
+pub(crate) const FAILING_BETA: &str = "#!/bin/sh\nprintf '%s\\n' \"$*\" >&2\nexit 1\n";
 
 /// A `beta` that succeeds only when its stdin is `/dev/null`.
 #[cfg(unix)]
@@ -517,7 +517,7 @@ const NULL_STDIN_BETA: &str = "#!/bin/sh\n\
 /// 26.04 refuse to run under a name other than their own. The writer of
 /// `gitscratch` stops the ETXTBSY race of a written script on Linux.
 #[cfg(unix)]
-fn home_with_beta_script(script: &str) -> tempfile::TempDir {
+pub(crate) fn home_with_beta_script(script: &str) -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join(".cargo").join("bin");
     fs::create_dir_all(&bin).unwrap();
@@ -527,7 +527,7 @@ fn home_with_beta_script(script: &str) -> tempfile::TempDir {
 
 /// The variables of a run from Finder, with `home` as the home directory.
 #[cfg(unix)]
-fn finder_vars(home: &tempfile::TempDir) -> impl Fn(&'static str) -> Option<OsString> {
+pub(crate) fn finder_vars(home: &tempfile::TempDir) -> impl Fn(&'static str) -> Option<OsString> {
     vars(&[
         (PATH_NAME, FINDER_PATH),
         (HOME_NAME, home.path().to_str().unwrap()),
