@@ -166,7 +166,8 @@ fn strip_kind_endings(mut name: &str) -> &str {
     while let Some(shorter) = KIND_ENDINGS.iter().find_map(|ending| {
         let start = name.len().checked_sub(ending.len())?;
         let tail = name.get(start..)?;
-        tail.eq_ignore_ascii_case(ending).then(|| name.get(..start))?
+        tail.eq_ignore_ascii_case(ending)
+            .then(|| name.get(..start))?
     }) {
         name = shorter;
     }

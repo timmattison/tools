@@ -19,9 +19,9 @@ use tokio::sync::oneshot;
 use crate::editor::Edit;
 use crate::error::NleError;
 use crate::export::{ExportProgress, ExportRequest, ExportTarget, Theme};
-use std::num::NonZeroU32;
-use crate::ui::export::SaveDialog;
 use crate::types::{ClipId, Seconds};
+use crate::ui::export::SaveDialog;
+use std::num::NonZeroU32;
 
 const FIXTURE_PATH: &str = "/home/user/recordings/demo.json";
 /// The number of events in the fixture.
@@ -230,13 +230,21 @@ impl Fakes {
     /// The requests of the exports that the fake got, oldest first.
     fn export_requests(&self) -> Vec<ExportRequest> {
         let script = self.script();
-        script.exports.iter().map(|call| call.request.clone()).collect()
+        script
+            .exports
+            .iter()
+            .map(|call| call.request.clone())
+            .collect()
     }
 
     /// The renders of the editors that the exports got, oldest first.
     fn export_renders(&self) -> Vec<Recording> {
         let script = self.script();
-        script.exports.iter().map(|call| call.render.clone()).collect()
+        script
+            .exports
+            .iter()
+            .map(|call| call.render.clone())
+            .collect()
     }
 
     fn picks(&self) -> usize {
@@ -781,10 +789,7 @@ async fn window_with_recording(fakes: &Fakes) -> Window {
 async fn an_export_with_the_default_settings_writes_a_recording() {
     let fakes = fakes_with_recording()
         .dialog(Answer::Ready(Some(PathBuf::from(EXPORT_PICKED))))
-        .export(
-            Vec::new(),
-            Answer::Ready(Ok(PathBuf::from(EXPORT_WRITTEN))),
-        );
+        .export(Vec::new(), Answer::Ready(Ok(PathBuf::from(EXPORT_WRITTEN))));
     let mut window = window_with_recording(&fakes).await;
     window.click(window.export_button());
     window.settle().await;
@@ -809,7 +814,9 @@ async fn an_export_with_the_default_settings_writes_a_recording() {
     assert_eq!(fakes.export_renders(), vec![fixture().recording]);
     let page = window.html();
     assert!(
-        page.contains("<span class=\"export-status\" role=\"status\">Exported to /tmp/out.json</span>"),
+        page.contains(
+            "<span class=\"export-status\" role=\"status\">Exported to /tmp/out.json</span>"
+        ),
         "{page}"
     );
     assert!(!page.contains("role=\"alert\""), "{page}");
@@ -850,7 +857,10 @@ async fn a_video_export_shows_its_progress_and_blocks_a_second_click() {
     assert!(window.export_is_disabled(), "{page}");
     window.click(button);
     window.settle().await;
-    assert_eq!((fakes.dialogs().len(), fakes.export_requests().len()), (1, 1));
+    assert_eq!(
+        (fakes.dialogs().len(), fakes.export_requests().len()),
+        (1, 1)
+    );
     finish
         .send(Ok(PathBuf::from("/tmp/out.mp4")))
         .expect("the export future waits");
@@ -875,7 +885,9 @@ async fn a_video_export_shows_its_progress_and_blocks_a_second_click() {
 
 /// The first export outcome that fails.
 fn boom() -> Answer<ExportOutcome> {
-    Answer::Ready(Err(NleError::ExportError("beta export failed: boom".into())))
+    Answer::Ready(Err(NleError::ExportError(
+        "beta export failed: boom".into(),
+    )))
 }
 
 #[tokio::test]
@@ -884,10 +896,7 @@ async fn a_failed_export_shows_the_banner_until_an_export_works() {
         .dialog(Answer::Ready(Some(PathBuf::from(EXPORT_PICKED))))
         .export(Vec::new(), boom())
         .dialog(Answer::Ready(Some(PathBuf::from(EXPORT_PICKED))))
-        .export(
-            Vec::new(),
-            Answer::Ready(Ok(PathBuf::from(EXPORT_WRITTEN))),
-        );
+        .export(Vec::new(), Answer::Ready(Ok(PathBuf::from(EXPORT_WRITTEN))));
     let mut window = window_with_recording(&fakes).await;
     let button = window.export_button();
     window.click(button);
@@ -919,9 +928,7 @@ async fn a_bad_frame_rate_shows_the_banner_and_asks_no_dialog() {
     let page = window.html();
     assert!(page.contains("role=\"alert\""), "{page}");
     assert!(
-        page.contains(
-            "Export failed: the frame rate &#34;0&#34; is not a whole number above zero"
-        ),
+        page.contains("Export failed: the frame rate &#34;0&#34; is not a whole number above zero"),
         "{page}"
     );
     assert!(fakes.dialogs().is_empty());

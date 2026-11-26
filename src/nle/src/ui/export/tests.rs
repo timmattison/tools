@@ -10,8 +10,16 @@ fn output_path_gives_the_path_the_ending_of_the_kind() {
         ("/tmp/a", ExportKind::Mp4, "/tmp/a.mp4"),
         ("/tmp/a.MP4", ExportKind::Mp4, "/tmp/a.MP4"),
         ("/tmp/a.gif", ExportKind::Mp4, "/tmp/a.mp4"),
-        ("/tmp/a.gz", ExportKind::CompressedRecording, "/tmp/a.json.gz"),
-        ("/tmp/a.json", ExportKind::CompressedRecording, "/tmp/a.json.gz"),
+        (
+            "/tmp/a.gz",
+            ExportKind::CompressedRecording,
+            "/tmp/a.json.gz",
+        ),
+        (
+            "/tmp/a.json",
+            ExportKind::CompressedRecording,
+            "/tmp/a.json.gz",
+        ),
         ("/tmp/a.json.gz", ExportKind::Recording, "/tmp/a.json"),
         ("/tmp/report.v2", ExportKind::Web, "/tmp/report.v2.html"),
         ("/tmp/日本語", ExportKind::Gif, "/tmp/日本語.gif"),
@@ -30,11 +38,23 @@ fn output_path_gives_the_path_the_ending_of_the_kind() {
 #[test]
 fn save_dialog_offers_an_edited_name_in_the_folder_of_the_source() {
     let cases = [
-        ("/home/user/recordings/demo.json", ExportKind::Mp4, "demo-edited.mp4"),
-        (r"C:\x\Demo.JSON.GZ", ExportKind::Recording, "Demo-edited.json"),
+        (
+            "/home/user/recordings/demo.json",
+            ExportKind::Mp4,
+            "demo-edited.mp4",
+        ),
+        (
+            r"C:\x\Demo.JSON.GZ",
+            ExportKind::Recording,
+            "Demo-edited.json",
+        ),
         ("/x/notes.txt", ExportKind::Web, "notes.txt-edited.html"),
         ("/x/日本語.json", ExportKind::Gif, "日本語-edited.gif"),
-        ("/x/.gz", ExportKind::CompressedRecording, "recording-edited.json.gz"),
+        (
+            "/x/.gz",
+            ExportKind::CompressedRecording,
+            "recording-edited.json.gz",
+        ),
     ];
     for (source, kind, expected) in cases {
         assert_eq!(kind.save_dialog(source).file_name, expected, "{source}");
@@ -44,7 +64,10 @@ fn save_dialog_offers_an_edited_name_in_the_folder_of_the_source() {
 #[test]
 fn save_dialog_opens_in_the_parent_folder_of_the_source() {
     let dialog = ExportKind::Gif.save_dialog("/home/user/recordings/demo.json");
-    assert_eq!(dialog.directory, Some(PathBuf::from("/home/user/recordings")));
+    assert_eq!(
+        dialog.directory,
+        Some(PathBuf::from("/home/user/recordings"))
+    );
     assert_eq!(ExportKind::Gif.save_dialog("demo.json").directory, None);
 }
 
@@ -52,7 +75,11 @@ fn save_dialog_opens_in_the_parent_folder_of_the_source() {
 fn save_dialog_filters_by_the_extension_of_the_kind() {
     let filters = [
         (ExportKind::Recording, "Beta recording", ["json"]),
-        (ExportKind::CompressedRecording, "Gzip Beta recording", ["gz"]),
+        (
+            ExportKind::CompressedRecording,
+            "Gzip Beta recording",
+            ["gz"],
+        ),
         (ExportKind::Web, "Web page", ["html"]),
         (ExportKind::Mp4, "MP4 video", ["mp4"]),
         (ExportKind::Gif, "GIF animation", ["gif"]),
@@ -68,7 +95,11 @@ fn save_dialog_filters_by_the_extension_of_the_kind() {
 fn each_kind_has_a_key_and_a_label_for_the_menu() {
     let menu = [
         (ExportKind::Recording, "json", "Beta recording (.json)"),
-        (ExportKind::CompressedRecording, "json-gz", "Beta recording, gzip (.json.gz)"),
+        (
+            ExportKind::CompressedRecording,
+            "json-gz",
+            "Beta recording, gzip (.json.gz)",
+        ),
         (ExportKind::Web, "html", "Web page (.html)"),
         (ExportKind::Mp4, "mp4", "MP4 video (.mp4)"),
         (ExportKind::Gif, "gif", "GIF animation (.gif)"),
@@ -221,10 +252,16 @@ fn the_request_holds_the_path_with_the_ending_of_the_kind() {
 fn the_progress_text_names_the_stage() {
     let cases = [
         (None, "Export started"),
-        (Some(ExportProgress::Rendering), "Step 1 of 2: render the edit"),
+        (
+            Some(ExportProgress::Rendering),
+            "Step 1 of 2: render the edit",
+        ),
         (Some(ExportProgress::Writing), "Step 2 of 2: write the file"),
         (
-            Some(ExportProgress::Frames { done: 30, total: 300 }),
+            Some(ExportProgress::Frames {
+                done: 30,
+                total: 300,
+            }),
             "Step 2 of 2: frame 30 of 300",
         ),
     ];

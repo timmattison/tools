@@ -66,6 +66,11 @@ type LocalFuture<T> = Pin<Box<dyn Future<Output = T>>>;
 /// The way that an export reports each stage to the export bar.
 type ProgressSender = tokio::sync::mpsc::UnboundedSender<ExportProgress>;
 
+/// The function that starts an export. It takes the editor, the request, and
+/// the sender of the progress.
+type ExportFn =
+    dyn Fn(&Editor, ExportRequest, ProgressSender) -> LocalFuture<ExportResult> + Send + Sync;
+
 /// The end of an export: the file that it wrote, or the reason that it failed.
 type ExportResult = Result<PathBuf, NleError>;
 
@@ -83,7 +88,7 @@ pub(crate) struct Services {
     load_recording:
         Arc<dyn Fn(PathBuf) -> LocalFuture<Result<LoadedRecording, NleError>> + Send + Sync>,
     pick_export_path: Arc<dyn Fn(SaveDialog) -> LocalFuture<Option<PathBuf>> + Send + Sync>,
-    export: Arc<dyn Fn(&Editor, ExportRequest, ProgressSender) -> LocalFuture<ExportResult> + Send + Sync>,
+    export: Arc<ExportFn>,
 }
 
 impl Services {
