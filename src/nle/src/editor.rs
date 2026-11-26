@@ -113,9 +113,90 @@ impl Edit {
                 project.timeline.remove(position);
                 Ok(())
             }
+            Self::AddClip { clip, track } => {
+                if project.clips.iter().any(|existing| existing.id == clip.id) {
+                    return Err(NleError::EditError(format!(
+                        "clip {} is already in use",
+                        clip.id.0
+                    )));
+                }
+                let position = track_position(project, *track)?;
+                let track_id = *track;
+                let track = project
+                    .timeline
+                    .get_mut(position)
+                    .ok_or_else(|| missing_track(track_id))?;
+                track.clips.push(clip.id);
+                project.clips.push(clip.clone());
+                Ok(())
+            }
+            Self::RemoveClip { id } => {
+                let position = clip_position(project, *id)?;
+                project.clips.remove(position);
+                for track in &mut project.timeline {
+                    track.clips.retain(|clip| clip != id);
+                }
+                Ok(())
+            }
+            Self::TrimClip {
+                id,
+                in_point,
+                out_point,
+            } => {
+                let position = clip_position(project, *id)?;
+                let clip = project
+                    .clips
+                    .get_mut(position)
+                    .ok_or_else(|| missing_clip(*id))?;
+                clip.in_point = *in_point;
+                clip.out_point = *out_point;
+                Ok(())
+            }
+            Self::MoveClip {
+                id,
+                track,
+                timeline_offset,
+            } => {
+                let clip_index = clip_position(project, *id)?;
+                let track_index = track_position(project, *track)?;
+                for other in &mut project.timeline {
+                    other.clips.retain(|clip| clip != id);
+                }
+                project
+                    .timeline
+                    .get_mut(track_index)
+                    .ok_or_else(|| missing_track(*track))?
+                    .clips
+                    .push(*id);
+                project
+                    .clips
+                    .get_mut(clip_index)
+                    .ok_or_else(|| missing_clip(*id))?
+                    .timeline_offset = *timeline_offset;
+                Ok(())
+            }
             _ => todo!(),
         }
     }
+}
+
+/// The edit error for a clip that does not exist.
+fn missing_clip(id: ClipId) -> NleError {
+    NleError::EditError(format!("clip {} does not exist", id.0))
+}
+
+/// The edit error for a track that does not exist.
+fn missing_track(id: TrackId) -> NleError {
+    NleError::EditError(format!("track {} does not exist", id.0))
+}
+
+/// The index of clip `id` in the clips of the project, or an edit error.
+fn clip_position(project: &EditProject, id: ClipId) -> Result<usize, NleError> {
+    project
+        .clips
+        .iter()
+        .position(|clip| clip.id == id)
+        .ok_or_else(|| missing_clip(id))
 }
 
 /// The index of track `id` in the timeline, or an edit error.
@@ -124,7 +205,7 @@ fn track_position(project: &EditProject, id: TrackId) -> Result<usize, NleError>
         .timeline
         .iter()
         .position(|track| track.id == id)
-        .ok_or_else(|| NleError::EditError(format!("track {} does not exist", id.0)))
+        .ok_or_else(|| missing_track(id))
 }
 
 /// An edit that was applied, and the project as it was before.
