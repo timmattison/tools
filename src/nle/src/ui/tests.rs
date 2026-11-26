@@ -18,7 +18,8 @@ use tokio::sync::oneshot;
 
 use crate::editor::Edit;
 use crate::error::NleError;
-use crate::export::{ExportProgress, ExportRequest, ExportTarget};
+use crate::export::{ExportProgress, ExportRequest, ExportTarget, Theme};
+use std::num::NonZeroU32;
 use crate::ui::export::SaveDialog;
 use crate::types::{ClipId, Seconds};
 
@@ -401,14 +402,18 @@ impl Window {
     /// controls of the bar come after it.
     fn kind_select(&self) -> ElementId {
         assert!(self.html().contains("export-bar"), "no export bar");
-        self.listeners["change"][0]
+        let changes = self.listeners.get("change");
+        assert!(changes.is_some(), "no kind select in {}", self.html());
+        changes.map_or_else(|| unreachable!("asserted above"), |ids| ids[0])
     }
 
     /// The FPS field. It is the first of the `input` listeners that the newest
     /// render of such listeners made, because the FPS field comes before the
     /// resolution field in a bar that shows both.
     fn fps_input(&self) -> ElementId {
-        self.newest_listeners["input"][0]
+        let inputs = self.newest_listeners.get("input");
+        assert!(inputs.is_some(), "no FPS field in {}", self.html());
+        inputs.map_or_else(|| unreachable!("asserted above"), |ids| ids[0])
     }
 
     /// Sends a change of a form control to the element, and renders.
@@ -814,4 +819,56 @@ async fn an_export_with_the_default_settings_writes_a_recording() {
 fn app_with_no_recording_has_no_export_bar() {
     let page = render_empty_app();
     assert!(!page.contains("export-bar"), "{page}");
+}
+
+#[tokio::test]
+async fn a_video_export_shows_its_progress_and_blocks_a_second_click() {
+    let (finish, pending) = Answer::later();
+    let stages = vec![
+        ExportProgress::Rendering,
+        ExportProgress::Writing,
+        ExportProgress::Frames {
+            done: 30,
+            total: 300,
+        },
+    ];
+    let fakes = fakes_with_recording()
+        .dialog(Answer::Ready(Some(PathBuf::from(EXPORT_PICKED))))
+        .export(stages, pending);
+    let mut window = window_with_recording(&fakes).await;
+    window.change(window.kind_select(), "mp4");
+    window.input(window.fps_input(), "30");
+    let button = window.export_button();
+    window.click(button);
+    window.settle().await;
+    assert_eq!(fakes.dialogs()[0].file_name, "demo-edited.mp4");
+    let page = window.html();
+    assert!(page.contains("<progress"), "{page}");
+    assert!(page.contains("value=\"30\""), "{page}");
+    assert!(page.contains("max=\"300\""), "{page}");
+    assert!(page.contains("Step 2 of 2: frame 30 of 300"), "{page}");
+    assert!(window.export_is_disabled(), "{page}");
+    window.click(button);
+    window.settle().await;
+    assert_eq!((fakes.dialogs().len(), fakes.export_requests().len()), (1, 1));
+    finish
+        .send(Ok(PathBuf::from("/tmp/out.mp4")))
+        .expect("the export future waits");
+    window.settle().await;
+    let page = window.html();
+    assert!(!page.contains("<progress"), "{page}");
+    assert!(page.contains("Exported to /tmp/out.mp4"), "{page}");
+    assert!(!window.export_is_disabled(), "{page}");
+    assert_eq!(
+        fakes.export_requests()[0],
+        ExportRequest {
+            output_path: PathBuf::from("/tmp/out.mp4"),
+            target: ExportTarget::Video {
+                theme: Theme::Auto,
+                fps: NonZeroU32::new(30),
+                resolution: None,
+                optimize_web: false,
+            },
+        }
+    );
 }
