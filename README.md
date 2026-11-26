@@ -314,6 +314,8 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
       `/plugin install ic-inline --marketplace timmattison/tools`
     - `ic --diff before.png after.png` compares two images pixel by pixel and shows one picture of the differences.
       `--diff-mode` selects red boxes around each region (the default), a red highlight on the first image, or a mask.
+      The `ic-inline` plugin shows the same picture in the transcript: `/ic diff before.png after.png` for you,
+      and the tool `show_diff` for Claude.
 - inscribe
     - Automatically generates clear and consistent git commit messages using Claude AI. Analyzes staged changes and creates
       conventional commit messages. Supports credential storage in system credential managers (Keychain on macOS, Credential
