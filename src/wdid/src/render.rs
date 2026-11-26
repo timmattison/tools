@@ -320,7 +320,7 @@ fn workspace_line(workspace: &Workspace) -> String {
         FoundBy::InstalledPath { crate_dir } => {
             format!(
                 "{FOUND_BY_INSTALLED}, cargo install --path {}",
-                crate_dir.display()
+                shellquote::shell_quote(&crate_dir.to_string_lossy())
             )
         }
     };
