@@ -29,3 +29,6 @@ termsize.workspace = true    # The one reader of the terminal size, which takes 
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -112,6 +112,7 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             
             <div class="progress-bar">
                 <div class="progress-fill" id="progress"></div>
+                <div id="chapter-markers"></div>
             </div>
             
             <div class="time-display">
@@ -197,9 +198,12 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                 this.currentTimeDisplay = document.getElementById('current-time');
                 this.speedSelect = document.getElementById('speed');
                 
+                this.renderChapterMarkers();
                 this.bindEvents();
                 this.updateDisplay();
             }
+
+            renderChapterMarkers() {}
             
             bindEvents() {
                 this.playPauseBtn.addEventListener('click', () => this.togglePlayPause());
@@ -349,22 +353,15 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
 </body>
 </html>"#;
 
-pub async fn export_web(
-    input: PathBuf,
-    output: Option<PathBuf>,
-    theme: String,
-    compress: bool,
-) -> Result<()> {
-    let recording = Recording::load(&input)?;
-
-    let output_path = output.unwrap_or_else(|| {
-        let mut path = input.clone();
-        path.set_extension("html");
-        path
-    });
-
+/// Build the HTML page of a recording.
+///
+/// # Errors
+///
+/// Returns an error when the recording data cannot be serialized or compressed,
+/// or when the template cannot be rendered.
+fn render_page(recording: &Recording, theme: &str, compress: bool) -> Result<String> {
     // Get theme colors
-    let theme_colors = match theme.as_str() {
+    let theme_colors = match theme {
         "dracula" => Theme::dracula(),
         "monokai" => Theme::monokai(),
         "solarized-dark" => Theme::solarized_dark(),
@@ -375,7 +372,7 @@ pub async fn export_web(
     // Prepare recording data
     let recording_data = if compress {
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        serde_json::to_writer(&mut encoder, &recording)
+        serde_json::to_writer(&mut encoder, recording)
             .context("Failed to compress recording data")?;
         let compressed = encoder.finish().context("Failed to finish compression")?;
         format!(
@@ -384,7 +381,7 @@ pub async fn export_web(
         )
     } else {
         // Escape </ to <\/ to prevent </script> injection when embedding in HTML
-        serde_json::to_string(&recording)
+        serde_json::to_string(recording)
             .context("Failed to serialize recording")?
             .replace("</", r"<\/")
     };
@@ -406,14 +403,33 @@ pub async fn export_web(
     let template = env.get_template("main")?;
 
     // Render HTML
-    let html = template.render(context! {
-        title => recording.title,
-        duration => recording.duration,
-        duration_formatted => duration_formatted,
-        events_count => recording.events.len(),
-        recording_data => recording_data,
-        theme => theme_colors,
-    })?;
+    template
+        .render(context! {
+            title => recording.title,
+            duration => recording.duration,
+            duration_formatted => duration_formatted,
+            events_count => recording.events.len(),
+            recording_data => recording_data,
+            theme => theme_colors,
+        })
+        .context("Failed to render the page")
+}
+
+pub async fn export_web(
+    input: PathBuf,
+    output: Option<PathBuf>,
+    theme: String,
+    compress: bool,
+) -> Result<()> {
+    let recording = Recording::load(&input)?;
+
+    let output_path = output.unwrap_or_else(|| {
+        let mut path = input.clone();
+        path.set_extension("html");
+        path
+    });
+
+    let html = render_page(&recording, &theme, compress)?;
 
     // Write output file
     let mut output_file = File::create(&output_path).context("Failed to create output file")?;
@@ -566,5 +582,219 @@ impl Theme {
             bright_cyan: String::from("#93a1a1"),
             bright_white: String::from("#fdf6e3"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_page;
+    use crate::{Chapter, Recording};
+    use base64::{engine::general_purpose, Engine as _};
+    use std::io::Read;
+    use std::path::PathBuf;
+
+    const LABEL_JAPANESE: &str = "日本語テスト";
+    const LABEL_CAFE: &str = "café 🎉";
+    const LABEL_SCRIPT_END: &str = "</script><b>x";
+    const THEME: &str = "auto";
+
+    /// The smallest fakes that the player script needs when it loads.
+    ///
+    /// Each fake element is created on first use. It stores the listeners that
+    /// the script adds, so the epilogue can fire a click.
+    const NODE_PRELUDE: &str = r#"
+function makeElement(tagName) {
+    return {
+        tagName,
+        style: {},
+        textContent: '',
+        children: [],
+        attributes: {},
+        listeners: {},
+        appendChild(child) { this.children.push(child); },
+        addEventListener(type, fn) { this.listeners[type] = fn; },
+        setAttribute(name, value) { this.attributes[name] = value; },
+    };
+}
+const elementsById = {};
+const document = {
+    getElementById(id) {
+        if (!elementsById[id]) { elementsById[id] = makeElement('div'); }
+        return elementsById[id];
+    },
+    createElement(tag) { return makeElement(tag); },
+    addEventListener() {},
+};
+const window = { addEventListener() {} };
+class Terminal {
+    loadAddon() {}
+    open() {}
+    write() {}
+    reset() {}
+    clear() {}
+}
+const FitAddon = { FitAddon: class { fit() {} } };
+const requestAnimationFrame = () => 0;
+const pako = {};
+"#;
+
+    /// Print the markers, click the second one, and print where the player stands.
+    const NODE_EPILOGUE: &str = r#"
+const markers = document.getElementById('chapter-markers').children;
+console.log(JSON.stringify(markers.map((m) => ({
+    left: m.style.left,
+    title: m.title,
+    ariaLabel: m.attributes['aria-label'],
+    type: m.type,
+    className: m.className,
+}))));
+markers[1].listeners.click();
+console.log(String(player.pausedAt));
+"#;
+
+    fn recording(chapters: Vec<Chapter>) -> Recording {
+        Recording {
+            version: 2,
+            width: 80,
+            height: 24,
+            timestamp: 0.0,
+            duration: 10.0,
+            command: String::from("sh"),
+            title: String::from("demo"),
+            env: std::collections::HashMap::new(),
+            events: Vec::new(),
+            chapters,
+        }
+    }
+
+    fn chapter(time: f64, label: &str) -> Chapter {
+        Chapter {
+            time,
+            label: label.to_string(),
+        }
+    }
+
+    fn two_chapters() -> Vec<Chapter> {
+        vec![chapter(2.5, LABEL_JAPANESE), chapter(5.0, LABEL_CAFE)]
+    }
+
+    fn page(recording: &Recording, compress: bool) -> String {
+        render_page(recording, THEME, compress).expect("the page renders")
+    }
+
+    /// Find the real `node` on the `PATH` of this test process.
+    fn node() -> PathBuf {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::split_paths(&path)
+            .map(|dir| dir.join("node"))
+            .find(|candidate| candidate.is_file())
+            .unwrap_or_else(|| panic!("these tests need Node.js on PATH"))
+    }
+
+    /// Give the text of the last `<script>` element that has no `src`.
+    fn inline_script(page: &str) -> &str {
+        let open = "<script>";
+        let start = page.rfind(open).expect("the page has an inline script") + open.len();
+        let end = page[start..]
+            .find("</script>")
+            .expect("the inline script ends");
+        &page[start..start + end]
+    }
+
+    #[test]
+    fn a_page_embeds_the_chapters_in_its_recording_data() {
+        let html = page(&recording(two_chapters()), false);
+        assert!(html.contains(r#""chapters":[{"time":"#), "no chapters key");
+        assert!(html.contains(LABEL_JAPANESE));
+        assert!(html.contains(LABEL_CAFE));
+    }
+
+    #[test]
+    fn a_compressed_page_embeds_the_chapters_too() {
+        let html = page(&recording(two_chapters()), true);
+        let start = html.find("atob('").expect("atob call") + "atob('".len();
+        let end = start + html[start..].find("')").expect("end of base64");
+        let packed = general_purpose::STANDARD
+            .decode(&html[start..end])
+            .expect("valid base64");
+        let mut json = String::new();
+        flate2::read::GzDecoder::new(packed.as_slice())
+            .read_to_string(&mut json)
+            .expect("valid gzip");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        let labels: Vec<&str> = value["chapters"]
+            .as_array()
+            .expect("chapters array")
+            .iter()
+            .filter_map(|c| c["label"].as_str())
+            .collect();
+        assert_eq!(labels, vec![LABEL_JAPANESE, LABEL_CAFE]);
+    }
+
+    #[test]
+    fn a_label_cannot_end_the_script() {
+        let html = page(&recording(vec![chapter(1.0, LABEL_SCRIPT_END)]), false);
+        assert!(!html.contains("</script><b>"), "label ended the script");
+    }
+
+    #[test]
+    fn a_recording_with_no_chapter_embeds_no_chapters_key() {
+        let html = page(&recording(Vec::new()), false);
+        assert!(!html.contains(r#""chapters""#));
+    }
+
+    #[test]
+    fn recording_json_without_chapters_loads_with_none() {
+        let json = serde_json::to_string(&recording(Vec::new())).expect("serializes");
+        assert!(!json.contains("chapters"));
+        let loaded: Recording = serde_json::from_str(&json).expect("loads");
+        assert!(loaded.chapters.is_empty());
+    }
+
+    #[test]
+    fn recording_json_with_chapters_loads_them() {
+        let json = serde_json::to_string(&recording(two_chapters())).expect("serializes");
+        let loaded: Recording = serde_json::from_str(&json).expect("loads");
+        assert_eq!(loaded.chapters.len(), 2);
+        assert_eq!(loaded.chapters[1].label, LABEL_CAFE);
+        assert!((loaded.chapters[0].time - 2.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn the_player_builds_one_marker_for_each_chapter_under_node() {
+        let html = page(
+            &recording(vec![chapter(2.5, "Setup"), chapter(5.0, "Build")]),
+            false,
+        );
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = dir.path().join("player.js");
+        let program = format!("{NODE_PRELUDE}\n{}\n{NODE_EPILOGUE}", inline_script(&html));
+        std::fs::write(&file, program).expect("write the program");
+
+        let output = childenv::fixture_command(node())
+            .arg(&file)
+            .output()
+            .expect("run node");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "node failed: {stderr}");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut lines = stdout.lines();
+        let markers: serde_json::Value =
+            serde_json::from_str(lines.next().expect("marker line")).expect("marker json");
+        let markers = markers.as_array().expect("marker array");
+        assert_eq!(markers.len(), 2);
+        let lefts: Vec<&str> = markers.iter().filter_map(|m| m["left"].as_str()).collect();
+        assert_eq!(lefts, vec!["25%", "50%"]);
+        let titles: Vec<&str> = markers.iter().filter_map(|m| m["title"].as_str()).collect();
+        assert_eq!(titles, vec!["Setup (0:02)", "Build (0:05)"]);
+        let aria: Vec<&str> = markers
+            .iter()
+            .filter_map(|m| m["ariaLabel"].as_str())
+            .collect();
+        assert_eq!(aria, titles);
+        assert!(markers.iter().all(|m| m["type"] == "button"));
+        assert!(markers.iter().all(|m| m["className"] == "chapter-marker"));
+        assert_eq!(lines.next(), Some("5"));
     }
 }

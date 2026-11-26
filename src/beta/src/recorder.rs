@@ -42,6 +42,7 @@ impl RecordingSession {
             command,
             title: format!("Terminal recording at {}", chrono::Local::now()),
             env: std::collections::HashMap::new(),
+            chapters: Vec::new(),
             events: Vec::new(),
         };
 

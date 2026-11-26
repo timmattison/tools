@@ -28,6 +28,7 @@ mod tests {
             command: "bash".to_string(),
             title: "Test recording".to_string(),
             env: std::collections::HashMap::new(),
+            chapters: Vec::new(),
             events: vec![
                 Event {
                     time: 0.0,
@@ -183,6 +184,7 @@ mod tests {
             command: "bash".to_string(),
             title: "Test".to_string(),
             env: std::collections::HashMap::new(),
+            chapters: Vec::new(),
             events: vec![Event {
                 time: 0.0,
                 event_type: EventType::Output,
@@ -217,6 +219,7 @@ mod tests {
             command: "bash".to_string(),
             title: "Compressed".to_string(),
             env: std::collections::HashMap::new(),
+            chapters: Vec::new(),
             events: vec![],
         };
 
