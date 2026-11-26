@@ -12,6 +12,22 @@ const NOTHING: &str = r"[^\s\S]";
 /// not match an address with a space around the `@`.
 const EMAIL: &str = r"[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}";
 
+/// An IP address in one of three forms.
+///
+/// It matches an IPv4 address with four numbers from 0 to 255. It matches a
+/// full IPv6 address with eight groups. It matches a compressed IPv6 address
+/// that has `::` with at least one group on each side.
+///
+/// It does not match `::1`, because `::` has no group on its left. It does not
+/// match a clock time, a MAC address, a version number, or a Rust path such as
+/// `std::fs::read`.
+const IP_ADDRESS: &str = concat!(
+    r"\b(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])",
+    r"(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}\b",
+    r"|\b(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}\b",
+    r"|\b(?:[0-9A-Fa-f]{1,4}:){1,6}(?::[0-9A-Fa-f]{1,4}){1,6}\b",
+);
+
 /// A pattern that ships with the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -55,7 +71,8 @@ impl Preset {
     pub fn pattern(self) -> &'static str {
         match self {
             Preset::Email => EMAIL,
-            Preset::IpAddress | Preset::AwsKey | Preset::Token | Preset::Hostname => NOTHING,
+            Preset::IpAddress => IP_ADDRESS,
+            Preset::AwsKey | Preset::Token | Preset::Hostname => NOTHING,
         }
     }
 }
