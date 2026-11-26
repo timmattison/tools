@@ -6,6 +6,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 
+/// The message of the error that [`Pool::join`] returns when a worker
+/// panicked and no acceptor failed.
+const WORKER_PANICKED: &str = "a worker thread of the pool panicked";
+
 /// A running pool of worker threads answering the requests of one
 /// `tiny_http::Server`.
 ///
@@ -45,6 +49,9 @@ impl Pool {
     /// `Ok`, so a hang-up never reaches the pool as an `Err`. Only an
     /// unexplained `recv()` error ends the pool — see the docs of [`Pool`]
     /// for how a real accept failure is told apart from a deliberate shutdown.
+    ///
+    /// A panic in `handler` is not swallowed. It ends its worker, and
+    /// [`Pool::join`] reports it.
     #[must_use]
     pub fn spawn<F>(server: Arc<tiny_http::Server>, workers: usize, handler: F) -> Self
     where
@@ -114,21 +121,29 @@ impl Pool {
 
     /// Blocks until every worker has exited, then reports the accept failure
     /// that ended the pool, if a real one — as opposed to a deliberate
-    /// [`Pool::shutdown`] — occurred.
+    /// [`Pool::shutdown`] — occurred, or else a worker that panicked.
     ///
     /// # Errors
     ///
-    /// Returns the `std::io::Error` a dead acceptor reported. A pool ended by
-    /// [`Pool::shutdown`] instead always returns `Ok(())` here.
+    /// Returns the `std::io::Error` a dead acceptor reported. If no acceptor
+    /// failed but a worker panicked, returns an error that says so. A pool
+    /// ended by [`Pool::shutdown`] with no worker that panicked returns
+    /// `Ok(())` here.
     pub fn join(self) -> Result<(), std::io::Error> {
+        let mut panicked = false;
         for handle in self.handles {
-            let _ = handle.join();
+            panicked |= handle.join().is_err();
         }
-        self.failure
+        let failure = self
+            .failure
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .take()
-            .map_or(Ok(()), Err)
+            .take();
+        match failure {
+            Some(e) => Err(e),
+            None if panicked => Err(std::io::Error::other(WORKER_PANICKED)),
+            None => Ok(()),
+        }
     }
 
     /// Signals a deliberate shutdown, releases every worker blocked in
@@ -143,9 +158,8 @@ impl Pool {
     ///
     /// # Errors
     ///
-    /// Always returns `Ok(())` — a deliberate shutdown never fails — but shares
-    /// [`Pool::join`]'s signature so both consuming methods compose the same
-    /// way at a call site.
+    /// Returns an error when a worker panicked, as [`Pool::join`] does. The
+    /// deliberate shutdown itself never fails.
     pub fn shutdown(self) -> Result<(), std::io::Error> {
         self.shutdown.store(true, Ordering::SeqCst);
         for _ in 0..self.handles.len() {
