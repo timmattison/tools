@@ -1,5 +1,7 @@
 //! Text formats of the values that the interface shows.
 
+use crate::types::Seconds;
+
 /// Tenths of a second in one minute.
 const TENTHS_PER_MINUTE: u64 = 600;
 /// Tenths of a second in one hour.
@@ -47,6 +49,34 @@ fn tenths_of_a_second(total_seconds: f64) -> u64 {
     )]
     let whole = tenths as u64;
     whole
+}
+
+/// The message of a time text that is empty.
+const CLOCK_EMPTY: &str = "the time is empty";
+
+/// Formats a time in seconds as `M:SS.s`, or as `H:MM:SS.s` from one hour.
+///
+/// The function rounds to tenths of a second before it splits the time, so
+/// 59.96 is `1:00.0` and never `0:60.0`. A value that is not finite, or that
+/// is below zero, formats as `0:00.0`.
+pub(crate) fn format_clock(seconds: f64) -> String {
+    let _ = (seconds, tenths_of_a_second(seconds));
+    String::new()
+}
+
+/// Reads a time that a person typed: `S`, `M:SS`, or `H:MM:SS`.
+///
+/// The text is trimmed first. The last part is seconds and can have a
+/// fraction. The hours and the minutes are ASCII digits. With a colon, the
+/// seconds are below 60 and have a digit before the point, and in `H:MM:SS`
+/// the minutes are below 60. A plain `S` is any number that a `Seconds`
+/// accepts.
+///
+/// # Errors
+/// Returns the text of the reason when the text is empty or not a time.
+pub(crate) fn parse_clock(text: &str) -> Result<Seconds, String> {
+    let _ = (text, CLOCK_EMPTY);
+    Err(String::new())
 }
 
 /// Returns the part of `path` after the last `/` or `\`.
@@ -118,6 +148,95 @@ mod tests {
     #[test]
     fn format_duration_does_not_panic_on_a_huge_value() {
         assert!(!format_duration(1e300).is_empty());
+    }
+
+    #[test]
+    fn format_clock_splits_minutes_and_hours() {
+        let cases = [
+            (0.0, "0:00.0"),
+            (5.0, "0:05.0"),
+            (83.54, "1:23.5"),
+            (59.96, "1:00.0"),
+            (3599.96, "1:00:00.0"),
+            (3723.4, "1:02:03.4"),
+        ];
+        for (seconds, expected) in cases {
+            assert_eq!(format_clock(seconds), expected, "{seconds} seconds");
+        }
+    }
+
+    #[test]
+    fn format_clock_refuses_values_outside_the_range() {
+        for seconds in [f64::NAN, -1.0, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(format_clock(seconds), "0:00.0", "{seconds}");
+        }
+    }
+
+    #[test]
+    fn parse_clock_reads_seconds_minutes_and_hours() {
+        let cases = [
+            ("83.5", 83.5),
+            (" 1:23.5 ", 83.5),
+            ("1:02:03.5", 3723.5),
+            ("0:05", 5.0),
+            ("90:00", 5400.0),
+            ("1e2", 100.0),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(
+                parse_clock(text).map(Seconds::get),
+                Ok(expected),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_clock_names_an_empty_text() {
+        for text in ["", "   "] {
+            assert_eq!(
+                parse_clock(text).map(Seconds::get),
+                Err("the time is empty".to_owned()),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_clock_refuses_a_text_that_is_not_a_time() {
+        let texts = [
+            "-1",
+            "inf",
+            "NaN",
+            "1:60",
+            "1:2x",
+            "1:-5",
+            "1::5",
+            "1:02:60",
+            "1:60:00",
+            "a:bc",
+            ":5",
+            "5:",
+            "1:.5",
+            "日本:05",
+        ];
+        for text in texts {
+            assert_eq!(
+                parse_clock(text).map(Seconds::get),
+                Err(format!(
+                    "the time \"{text}\" is not in seconds, M:SS, or H:MM:SS"
+                )),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_clock_trims_the_text_in_its_message() {
+        assert_eq!(
+            parse_clock("  日本  ").map(Seconds::get),
+            Err("the time \"日本\" is not in seconds, M:SS, or H:MM:SS".to_owned())
+        );
     }
 
     #[test]
