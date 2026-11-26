@@ -207,3 +207,56 @@ fn an_empty_region_still_calls_the_filter_with_an_empty_slice() {
     assert!(calls[0].is_empty());
     assert_eq!(times(&out), vec![0.5, 3.5]);
 }
+
+// Group 5: the checks on the answer of a filter.
+
+fn registry_answering(time: f64) -> FilterRegistry {
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("bad"), move |events, _| {
+        events.iter().map(|e| Event { time, ..e.clone() }).collect()
+    });
+    registry
+}
+
+fn assert_render_error_names(result: Result<Vec<Event>, NleError>, name: &str) {
+    match result {
+        Err(NleError::RenderError(message)) => assert!(message.contains(name), "{message}"),
+        other => panic!("expected a RenderError, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_filter_that_answers_nan_or_infinity_fails_and_names_the_kind() {
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let registry = registry_answering(bad);
+
+        let result = registry.run(events(&[1.0, 2.0]), &[all("bad")]);
+
+        assert_render_error_names(result, "bad");
+    }
+}
+
+#[test]
+fn a_filter_that_answers_a_time_below_zero_on_the_timeline_fails() {
+    let registry = registry_answering(-0.5);
+    assert_render_error_names(registry.run(events(&[1.0]), &[all("bad")]), "bad");
+
+    // Relative -1.5 on a range that starts at 1.0 is -0.5 on the timeline.
+    let registry = registry_answering(-1.5);
+    assert_render_error_names(
+        registry.run(events(&[1.0]), &[range("bad", 1.0, 2.0)]),
+        "bad",
+    );
+}
+
+#[test]
+fn a_relative_time_below_zero_is_fine_when_the_timeline_time_is_not() {
+    // Relative -0.5 on a range that starts at 1.0 is 0.5 on the timeline.
+    let registry = registry_answering(-0.5);
+
+    let out = registry
+        .run(events(&[1.0]), &[range("bad", 1.0, 2.0)])
+        .unwrap();
+
+    assert_eq!(times(&out), vec![0.5]);
+}
