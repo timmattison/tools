@@ -572,9 +572,11 @@ folders.
 A URL installs a plugin. It does not run one from the network.
 
 1. The URL names a `plugin.json` on `https`. The editor refuses every other
-   scheme.
+   scheme, also as the target of a redirect.
 2. The editor downloads the manifest and the component that `entry` names,
-   relative to the URL.
+   relative to the URL. It reads at most 64 KiB of the manifest and at most
+   64 MiB of the component. At a limit, it stops the read and refuses the
+   install, thus a body with no end does not fill the memory.
 3. The editor shows the name, the version, the type, the description, the
    options, the size, the SHA-256 of the component, and the source URL.
 4. If the user accepts, the editor writes the folder into the plugins
@@ -797,8 +799,8 @@ it.
 - The editor installs a plugin by the five steps of
   [load from a URL](#load-from-a-url).
 - A test serves a plugin from a local `https` server with a test certificate.
-  It covers the refusal of the user, a wrong scheme, and an `entry` that
-  leaves the folder.
+  It covers the refusal of the user, a wrong scheme, a redirect to `http`, a
+  body over each size limit, and an `entry` that leaves the folder.
 
 ### Slice 8: Hot reload of development plugins
 
