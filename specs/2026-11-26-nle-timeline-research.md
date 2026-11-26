@@ -78,9 +78,9 @@ library, and do not use a canvas for the first version.
    [Interaction design from Remotion Studio](#interaction-design-from-remotion-studio)).
    Remotion gives the move of a clip no threshold in px: the move starts
    after half a frame of movement. The NLE counts time in seconds, thus give
-   the move the trim threshold of 4 px. Remotion snaps a clip only to the start of the timeline. A clip that must
-   join the end of another clip needs more targets: the playhead and the edges
-   of the other clips.
+   the move the trim threshold of 4 px. Remotion snaps a clip only to the
+   start of the timeline. A clip that must join the end of another clip needs
+   more targets: the playhead and the edges of the other clips.
 10. **Keep the canvas as the fallback for a later dense layer.** If a layer
     needs more than SVG can hold, for example thumbnails of the terminal,
     draw that layer on a `<canvas>` in the `canvas-eval` way. Rust bins the
