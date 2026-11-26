@@ -132,3 +132,50 @@ fn two_filters_chain_in_order() {
     assert_eq!(times(&add_then_double), vec![4.0, 6.0]);
     assert_eq!(times(&double_then_add), vec![3.0, 5.0]);
 }
+
+// Group 3 and 4: a range.
+
+use std::sync::{Arc as TestArc, Mutex};
+
+/// Registers `double` and a spy that records the events it gets and then
+/// answers with `answer(events)`.
+fn spy_registry(
+    answer: fn(&[Event]) -> Vec<Event>,
+) -> (FilterRegistry, TestArc<Mutex<Vec<Vec<Event>>>>) {
+    let seen = TestArc::new(Mutex::new(Vec::new()));
+    let captured = TestArc::clone(&seen);
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("spy"), move |events, _| {
+        captured.lock().unwrap().push(events.to_vec());
+        answer(events)
+    });
+    (registry, seen)
+}
+
+#[test]
+fn a_range_filter_sees_the_events_inside_relative_to_the_region_start() {
+    let (registry, seen) = spy_registry(|events| {
+        events
+            .iter()
+            .map(|e| Event {
+                time: e.time * 2.0,
+                ..e.clone()
+            })
+            .collect()
+    });
+    let input = events(&[0.5, 1.0, 1.5, 2.5, 3.5]);
+
+    let out = registry
+        .run(input.clone(), &[range("spy", 1.0, 2.0)])
+        .unwrap();
+
+    let calls = seen.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(times(&calls[0]), vec![0.0, 0.5]);
+    assert_eq!(times(&out), vec![0.5, 1.0, 2.0, 3.0, 4.0]);
+    // The data and the type pass through.
+    assert_eq!(out[0], input[0]);
+    assert_eq!(out[1].data, input[1].data);
+    assert_eq!(out[1].event_type, input[1].event_type);
+    assert_eq!(out[4].data, input[4].data);
+}
