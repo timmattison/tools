@@ -420,16 +420,20 @@ fn a_checkout_at_a_different_commit_is_an_error_that_names_repo_and_the_reason()
 }
 
 /// git does not look above the checkout. A checkout directory without a
-/// repository is thus not a checkout, also inside another work tree.
+/// repository is thus not a checkout, also inside another work tree. The
+/// cargo home is a real directory in that work tree, not a symlink: git starts
+/// from the physical directory, and a symlink thus hides the work tree.
 #[test]
 fn a_checkout_directory_without_a_repository_is_an_error_that_names_repo_and_the_reason() {
-    let home = home_with_record(&git_key(BINARY, REPOSITORY_URL, OTHER_COMMIT));
-    let checkouts = home.path().join("git").join("checkouts");
-    std::fs::create_dir_all(checkouts.join(CHECKOUT_DIRECTORY).join(short(OTHER_COMMIT))).unwrap();
     let outer = TestRepo::init();
     outer.commit_file("README.md", "outer\n", "add a readme");
     let cargo_home = outer.path().join("cargo-home");
-    std::os::unix::fs::symlink(home.path(), &cargo_home).unwrap();
+    let checkouts = cargo_home.join("git").join("checkouts");
+    std::fs::create_dir_all(checkouts.join(CHECKOUT_DIRECTORY).join(short(OTHER_COMMIT))).unwrap();
+    support::write_records(
+        &cargo_home,
+        &[(&git_key(BINARY, REPOSITORY_URL, OTHER_COMMIT), &[BINARY])],
+    );
     let inside = InstallLocation {
         cargo_home: Some(cargo_home.as_os_str()),
         ..InstallLocation::default()
