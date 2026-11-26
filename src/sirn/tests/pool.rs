@@ -92,9 +92,14 @@ fn a_deliberate_shutdown_ends_every_worker_cleanly() {
     );
 }
 
-/// A worker that panics stops the pool, but the accept thread still runs.
+/// A pool whose workers all panicked stops, but the accept thread still runs.
 /// Thus the message that `sirn` prints must be true for that cause too: it
 /// must not say that `sirn` stopped accepting connections.
+///
+/// `httpfile::Pool::join` waits for every worker. In a pool of more than
+/// one worker, one panic ends only that worker, and the others keep serving.
+/// This test builds a pool of one worker, thus its one panic ends every
+/// worker of the pool.
 #[test]
 fn the_stop_message_is_true_when_a_worker_panicked() {
     let server = bind();
@@ -109,7 +114,8 @@ fn the_stop_message_is_true_when_a_worker_panicked() {
 
     let result = within_timeout(move || sirn::wait_until_stopped(pool, "127.0.0.1", 1234));
 
-    let message = result.expect_err("a worker that panicked must stop the pool with an error");
+    let message =
+        result.expect_err("the one worker panicked, thus the pool must stop with an error");
     assert!(
         message.starts_with("sirn stopped serving on 127.0.0.1:1234: "),
         "the message must name the address and no single cause, got {message:?}"
