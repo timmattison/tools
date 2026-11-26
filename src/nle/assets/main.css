@@ -143,6 +143,13 @@ h3 {
   margin-bottom: 8px;
 }
 
+.edit-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
 .edit-field {
   display: flex;
   flex-direction: column;
