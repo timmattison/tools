@@ -23,7 +23,10 @@
 # the version being committed. This is a deliberate trade-off: index-only
 # checking (stash --keep-index dances) is fragile, and the workspace-wide cargo
 # commands cannot operate on a virtual index anyway.
-set -euo pipefail
+#
+# Husky starts this file with `sh -e`, and the sh of Debian and Ubuntu is
+# dash. Dash refuses `set -o pipefail`, so the hook does not set it.
+set -eu
 
 # shellcheck source=scripts/without-git-environment.sh
 . "$(dirname "$0")/../scripts/without-git-environment.sh"
@@ -47,11 +50,12 @@ staged_paths="$(staged_paths_with_deletions)"
 
 # Succeed when a line of the list matches the extended regular expression $1.
 #
-# grep -q stops at its first match. A block must not send the list through a
-# pipe into it: in a large list, the writer of the pipe then still has paths
-# to write, it gets SIGPIPE, `set -o pipefail` makes the pipeline false, and
-# the block runs no gate and says nothing. A commit that stages some thousand
-# paths and Cargo.lock ran no Rust gate in this way.
+# grep -q stops at its first match, so in a large list the writer of a pipe
+# into it still has paths to write, and it gets SIGPIPE. Under
+# `set -o pipefail`, the pipeline is then false, and the block runs no gate
+# and says nothing: a commit that staged some thousand paths and Cargo.lock
+# ran no Rust gate in this way. Dash has no pipefail, but bash has it, so a
+# block must not send the list through a pipe into grep.
 #
 # A here-document is not a pipeline. The status of the command is the status
 # of grep, and a writer that the shell starts for a long document is not part

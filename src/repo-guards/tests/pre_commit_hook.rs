@@ -1530,9 +1530,9 @@ fn stage_with_large_filler(dir: &Path, staged: &[&str]) {
 
 /// A commit that stages a tool index among some thousand other paths must run
 /// the tool-index guard. `README.md` sorts before the filler, so `grep -q`
-/// finds it in the first read and stops. If the trigger reads the list from a
-/// pipe, `git diff` then gets SIGPIPE, `pipefail` makes the pipe false, and
-/// the hook runs no guard and exits 0.
+/// finds it in the first read and stops. If the hook sets `pipefail` and the
+/// trigger reads the list from a pipe, `git diff` then gets SIGPIPE, the pipe
+/// is false, and the hook runs no guard and exits 0.
 #[test]
 fn tool_index_in_a_large_commit_runs_the_index_guard() {
     let dir = unique_fixture_dir();
@@ -1555,8 +1555,8 @@ fn tool_index_in_a_large_commit_runs_the_index_guard() {
 /// A commit that stages `Cargo.lock` among some thousand other paths must run
 /// the Rust gate, with no `GIT_` variable. A large commit that changes the lock
 /// file is the commit most likely to break the build, and `Cargo.lock` sorts
-/// before the filler, so a trigger that reads the list from a pipe into
-/// `grep -q` runs no gate for it.
+/// before the filler, so under `pipefail` a trigger that reads the list from a
+/// pipe into `grep -q` runs no gate for it.
 #[test]
 fn cargo_lock_in_a_large_commit_runs_the_rust_gate() {
     let dir = unique_fixture_dir();
@@ -1579,8 +1579,8 @@ fn cargo_lock_in_a_large_commit_runs_the_rust_gate() {
 
 /// A commit that stages a file of the msgs frontend among some thousand other
 /// paths must run the type check and the tests of msgs. The path sorts before
-/// the filler, so a trigger that reads the list from a pipe into `grep -q`
-/// runs no check for it.
+/// the filler, so under `pipefail` a trigger that reads the list from a pipe
+/// into `grep -q` runs no check for it.
 #[test]
 fn msgs_file_in_a_large_commit_runs_the_msgs_checks() {
     let staged = MSGS_FILES[0];
@@ -1592,8 +1592,8 @@ fn msgs_file_in_a_large_commit_runs_the_msgs_checks() {
 
 /// A commit that stages a file of a plugin among some thousand other paths
 /// must run the checks of the claude CLI. The path sorts before the filler, so
-/// a trigger that reads the list from a pipe into `grep -q` runs no check for
-/// it.
+/// under `pipefail` a trigger that reads the list from a pipe into `grep -q`
+/// runs no check for it.
 #[test]
 fn plugin_file_in_a_large_commit_runs_the_plugin_checks() {
     let dir = unique_fixture_dir();
@@ -1614,8 +1614,8 @@ fn plugin_file_in_a_large_commit_runs_the_plugin_checks() {
 
 /// A commit that stages a file of `plugins/ic-inline` among some thousand other
 /// paths must run the test target of `ic` that reads the plugin. The path
-/// sorts before the filler, so a trigger that reads the list from a pipe into
-/// `grep -q` runs no test for it.
+/// sorts before the filler, so under `pipefail` a trigger that reads the list
+/// from a pipe into `grep -q` runs no test for it.
 #[test]
 fn ic_inline_file_in_a_large_commit_runs_the_emit_rgba_tests() {
     let staged = IC_INLINE_FILES[0];
