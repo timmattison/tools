@@ -7,6 +7,14 @@
 //! three, so every static-file server in this workspace shares one
 //! content-type table and one traversal guard. A fix to either reaches every
 //! caller instead of having to be repeated per crate.
+//!
+//! The fourth shared piece is the worker pool. It ends the duplicated
+//! `recv()` loop, which treated a dead accept thread like a deliberate
+//! shutdown, so one worker exited and the others blocked forever. `sirn` and
+//! `localnext` both run their requests on it.
+
+mod pool;
+pub use pool::Pool;
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -318,8 +326,10 @@ fn parse_range(header: &str, len: u64) -> RangeOutcome {
 /// # Errors
 ///
 /// Returns an error when reading the file's metadata fails, when seeking
-/// within it fails, or when writing the HTTP response itself fails (e.g. the
-/// client disconnected mid-response).
+/// within it fails, or when reading the file or writing the HTTP response
+/// fails part way through. A client that disconnects is not an error:
+/// `tiny_http` 0.12's `Request::respond` turns `BrokenPipe`,
+/// `ConnectionReset`, `ConnectionAborted` and `ConnectionRefused` into `Ok`.
 ///
 /// # Panics
 ///

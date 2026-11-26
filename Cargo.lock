@@ -976,6 +976,7 @@ dependencies = [
  "clap",
  "crossterm",
  "flate2",
+ "gitscratch",
  "image",
  "imageproc",
  "minijinja",
@@ -983,10 +984,11 @@ dependencies = [
  "serde",
  "serde_json",
  "signal-hook 0.3.18",
+ "tempfile",
  "termsize",
+ "termstate",
  "tokio",
  "tokio-stream",
- "vte",
 ]
 
 [[package]]
@@ -11906,6 +11908,14 @@ dependencies = [
  "crossterm",
  "libc",
  "terminal_size",
+]
+
+[[package]]
+name = "termstate"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "vte",
 ]
 
 [[package]]

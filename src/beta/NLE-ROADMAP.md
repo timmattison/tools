@@ -118,4 +118,4 @@ These filters need deeper terminal state analysis or more complex heuristics.
    - `src/main.rs` lines 85-113: `Recording`, `Event`, `EventType` structs (the types in `src/nle/src/types.rs` must mirror these exactly)
    - `src/export/web.rs`: `TerminalPlayer` JavaScript class (prototype for #151)
    - `src/export/video.rs`: Frame-to-FFmpeg pipeline (#160 already exists)
-   - `src/export/terminal_renderer.rs`: VT100 emulator (reference for #152's state analysis)
+   - `src/termstate/src/lib.rs` (the `termstate` crate): VT100 emulator (reference for #152's state analysis)

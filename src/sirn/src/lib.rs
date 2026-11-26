@@ -10,7 +10,7 @@
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -19,7 +19,7 @@ use std::time::Duration;
 // `localnext`. Re-exported here so `sirn::content_type_for`,
 // `sirn::resolve_under_root`, and `sirn::PathResolution` keep working for
 // every existing caller.
-pub use httpfile::{content_type_for, resolve_under_root, PathResolution};
+pub use httpfile::{content_type_for, resolve_under_root, PathResolution, Pool};
 
 /// HTML-escapes `s` for safe insertion into element text or a double-quoted
 /// attribute value. Escapes `&`, `<`, `>`, `"`, and `'`.
@@ -333,65 +333,84 @@ pub enum ServeMode {
 }
 
 /// Serves requests on `server` in the given `mode` using a fixed pool of
-/// `workers` threads.
+/// `workers` threads, and returns the [`Pool`] that owns them.
 ///
-/// Each worker loops on `server.recv()`; the pool shuts down when the server is
-/// unblocked (`server.unblock()` once per worker), at which point `recv()` errors
-/// and the workers exit. Returns the worker handles so the caller can join them.
-/// At least one worker is always spawned even if `workers` is `0`.
+/// [`Pool::join`] reports a dead accept thread as an `Err`, and
+/// [`Pool::shutdown`] ends the pool on purpose. At least one worker is always
+/// spawned, even when `workers` is `0`.
 #[must_use]
-pub fn serve(
-    server: Arc<tiny_http::Server>,
-    mode: ServeMode,
-    workers: usize,
-) -> Vec<JoinHandle<()>> {
-    (0..workers.max(1))
-        .map(|_| {
-            let server = Arc::clone(&server);
-            let mode = mode.clone();
-            std::thread::spawn(move || {
-                // `recv()` errors when the server is unblocked, ending the loop.
-                while let Ok(request) = server.recv() {
-                    // A request or mid-response IO error (e.g. a client
-                    // disconnecting) is swallowed so a single bad request can
-                    // never panic a worker and poison the pool.
-                    let _ = respond(&mode, request);
-                }
-            })
-        })
-        .collect()
+pub fn serve(server: Arc<tiny_http::Server>, mode: ServeMode, workers: usize) -> Pool {
+    Pool::spawn(server, workers, move |request| respond(&mode, request))
+}
+
+/// Blocks until every worker of `pool` stops, and gives the message that
+/// `sirn` prints when the pool stops with an error.
+///
+/// `bind` and `port` are the address that the server listens on. The message
+/// names that address, then the error of [`Pool::join`].
+///
+/// # Errors
+///
+/// Returns the message when [`Pool::join`] returns an error: a dead accept
+/// thread, or a worker that panicked.
+pub fn wait_until_stopped(pool: Pool, bind: &str, port: u16) -> Result<(), String> {
+    pool.join()
+        .map_err(|e| format!("sirn stopped serving on {bind}:{port}: {e}"))
 }
 
 /// How often the availability monitor restats the served files.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The running files-mode availability monitor: its thread and the signal that
+/// stops it.
+///
+/// Dropping a `Monitor` stops the thread and waits for it. This happens on
+/// every path: a normal return, an early `?`, or a panic that unwinds. The
+/// caller cannot forget the teardown. The wait is short, because the thread
+/// stops at once when the signal arrives (at most it finishes the current
+/// poll). A panic in the thread is ignored.
+pub struct Monitor {
+    shutdown: Option<std::sync::mpsc::Sender<()>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for Monitor {
+    fn drop(&mut self) {
+        drop(self.shutdown.take());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
 
 /// Spawns the files-mode availability monitor on its own thread.
 ///
 /// Polls every served file once per [`POLL_INTERVAL`] and prints a line for each
 /// availability transition (`Ready to serve <name>` / `Warning!  File <name> not
 /// found...`), mirroring the original Java tool. The thread exits promptly when
-/// `shutdown` is signalled — either an explicit `()` is sent or the sender is
-/// dropped — so it never delays process teardown by up to a full poll interval.
-/// Returns the join handle so the caller can wait for a clean shutdown.
+/// the returned [`Monitor`] is dropped, and the drop waits for the thread, so
+/// the thread never delays process teardown by up to a full poll interval.
 #[must_use]
-pub fn spawn_monitor(
-    routes: Arc<BTreeMap<String, PathBuf>>,
-    shutdown: Receiver<()>,
-) -> JoinHandle<()> {
-    std::thread::spawn(move || {
+pub fn spawn_monitor(routes: Arc<BTreeMap<String, PathBuf>>) -> Monitor {
+    let (shutdown, receiver) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
         let mut monitor = AvailabilityMonitor::new(&routes);
         loop {
             for transition in monitor.poll() {
                 println!("{}", transition.message());
             }
-            match shutdown.recv_timeout(POLL_INTERVAL) {
+            match receiver.recv_timeout(POLL_INTERVAL) {
                 // Explicit shutdown, or the sender was dropped: stop polling.
                 Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
                 // Timed out without a signal: poll again.
                 Err(RecvTimeoutError::Timeout) => {}
             }
         }
-    })
+    });
+    Monitor {
+        shutdown: Some(shutdown),
+        handle: Some(handle),
+    }
 }
 
 /// Dispatches one request to the handler for the active [`ServeMode`].
