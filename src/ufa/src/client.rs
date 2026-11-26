@@ -481,6 +481,32 @@ mod tests {
         );
     }
 
+    /// `ufa` reads only the `.env` file beside the config file. Thus the TLS
+    /// advice must name that place. A user who obeys an advice with no place
+    /// puts the setting into a `.env` that `ufa` never reads.
+    #[tokio::test]
+    async fn the_tls_advice_names_the_env_file_that_ufa_reads() {
+        let (port, host) = plain_http_host().await;
+        let client = UnifiClient::new(&format!("https://127.0.0.1:{port}"), "an-api-key", false)
+            .expect("a test key must build a client");
+
+        let error = client
+            .get::<serde_json::Value>("info")
+            .await
+            .expect_err("a host that answers in plain HTTP cannot complete a TLS handshake");
+        host.abort();
+        let advice = format!("{error:#}");
+
+        assert!(
+            advice.contains(".env file beside the config file"),
+            "a user who obeys the advice puts the setting into a .env that ufa never reads, got: {advice}"
+        );
+        assert!(
+            advice.contains("ufa config path"),
+            "a user cannot find the config file without the command that prints it, got: {advice}"
+        );
+    }
+
     /// The ordinary connection failures must stay ordinary.
     #[test]
     fn a_refused_connection_is_not_a_tls_failure() {
