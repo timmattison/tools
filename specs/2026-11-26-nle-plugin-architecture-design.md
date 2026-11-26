@@ -12,7 +12,7 @@ code.
 
 **A rule in this document is a decision.** If the code of a slice disagrees
 with a rule, the code or this document has an error. The slice corrects one of
-the two. The WIT of the filter world is the contract of slice 2. The WIT
+the two. The WIT of the two filter worlds is the contract of slice 2. The WIT
 sketches of the analyzer world and the renderer world show the direction, and
 their slices make them final.
 
@@ -22,9 +22,11 @@ their slices make them final.
    host pins the newest LTS line of wasmtime. [The runtime](#the-runtime) gives
    the comparison.
 2. **The ABI is one WIT package, `nle:plugin`**, with one world for each plugin
-   type: `filter-plugin`, `analyzer-plugin`, and `renderer-plugin`. Each world
-   exports a versioned interface, thus the host reads the API version of a
-   plugin from the plugin itself.
+   type: `filter-plugin`, `span-filter-plugin`, `analyzer-plugin`, and
+   `renderer-plugin`. The two filter worlds match the two forms of a filter in
+   `src/nle`: the event form `FilterFn` and the span form `SpanFilterFn`. Each
+   world exports a versioned interface, thus the host reads the API version of
+   a plugin from the plugin itself.
 3. **One plugin is one folder, one manifest, one component, and one function.**
 4. **Each call gets a new instance.** No state survives from one call to the
    next, and the same input always gives the same output.
@@ -42,8 +44,8 @@ their slices make them final.
    from the network.
 10. **Hot reload applies only to development folders** that the user names
     with a flag.
-11. **The API version stays below 1.0.0** until each of the filter, analyzer,
-    and renderer worlds ships. Below 1.0.0, the version obeys the convention
+11. **The API version stays below 1.0.0** until each of the four worlds
+    ships. Below 1.0.0, the version obeys the convention
     of cargo: an addition increments the patch number, and a break increments
     the minor number. The semver promise comes at
     [the 1.0.0 gate](#the-100-gate).
@@ -147,11 +149,13 @@ All of the contract is one WIT package, `nle:plugin`. It holds these parts:
 | --- | --- | --- |
 | `types` | interface | The event, the options, and the shared records |
 | `log` | interface | One function that writes a line to the plugin log of the editor |
-| `filter` | interface | The `apply` function of a filter |
+| `filter` | interface | The `apply` function of a filter of the event form |
+| `span-filter` | interface | The `span` record, and the `apply` function of a filter of the span form |
 | `analyzer` | interface | The `analyze` function of an analyzer |
 | `canvas` | interface | The `frame` resource that a renderer draws on |
 | `renderer` | interface | The `render` function of a renderer |
 | `filter-plugin` | world | Imports `log`, exports `filter` |
+| `span-filter-plugin` | world | Imports `log`, exports `span-filter` |
 | `analyzer-plugin` | world | Imports `log`, exports `analyzer` |
 | `renderer-plugin` | world | Imports `log` and `canvas`, exports `renderer` |
 
@@ -166,8 +170,8 @@ crate reads the same files. There is one copy.
 
 `wasm-tools` 1.263.0 parses all of the WIT blocks of this document as one
 package. A dummy component of each world, from `wasm-tools component embed
---dummy`, exports `nle:plugin/filter@0.1.0`, `nle:plugin/analyzer@0.1.0`, or
-`nle:plugin/renderer@0.1.0`.
+--dummy`, exports `nle:plugin/filter@0.1.0`, `nle:plugin/span-filter@0.1.0`,
+`nle:plugin/analyzer@0.1.0`, or `nle:plugin/renderer@0.1.0`.
 
 ### The shared types
 
@@ -212,9 +216,13 @@ interface log {
 The host gives every option that the manifest declares, with its default when
 the project sets no value. Thus a plugin never needs a default of its own.
 
-### The filter world
+### The filter worlds
 
-This WIT is the contract of slice 2.
+This WIT is the contract of slice 2. A filter has one of the two forms of
+`src/nle/src/pipeline.rs`, and each form has its own world. The `type` of the
+manifest picks the form.
+
+The event form is for a filter that changes the events of its region:
 
 ```wit
 interface filter {
@@ -235,10 +243,44 @@ world filter-plugin {
 }
 ```
 
+The span form is for a filter that changes the length of its region, for
+example a change of speed (issue #153), a pause insertion (issue #154), or an
+idle time compression (issue #167). The event form cannot change the length
+of a region that holds no event.
+
+```wit
+interface span-filter {
+    use types.{event, option-entry};
+
+    /// A region of the timeline.
+    record span {
+        /// The events of the region, with times relative to its start.
+        events: list<event>,
+        /// The length of the region in seconds.
+        length: f64,
+    }
+
+    /// The span filter. It obeys the steps on `SpanFilterFn` in
+    /// `src/nle/src/pipeline.rs`: it gets the events and the length of its
+    /// region, and it answers new events and a new length. The pipeline
+    /// moves the events after the region by the change in the length.
+    ///
+    /// An `err` answer fails the render with the message.
+    apply: func(region: span, options: list<option-entry>) -> result<span, string>;
+}
+
+world span-filter-plugin {
+    import log;
+    export span-filter;
+}
+```
+
 The host wraps the component in a closure, and it registers that closure in
-`FilterRegistry` like a built-in filter. Thus the pipeline and the editor do
-not know that a filter is a plugin. The region split, the time checks, the
-shift, and the sort stay in the pipeline.
+`FilterRegistry` like a built-in filter: a `filter` plugin through
+`FilterRegistry::register`, and a `span-filter` plugin through
+`FilterRegistry::register_span`. Thus the pipeline and the editor do not know
+that a filter is a plugin. The region split, the time checks, the shift, and
+the sort stay in the pipeline.
 
 ### The analyzer world
 
@@ -396,7 +438,7 @@ is off by default.
 - **One `InstancePre` for each plugin.** The host compiles and links a plugin
   once, when it loads. A call makes a new `Store` and a new instance from the
   `InstancePre`, and drops both when the call ends. The closure that wraps a
-  plugin is thus `Send + Sync`, which `FilterFn` asks for.
+  plugin is thus `Send + Sync`, which `FilterFn` and `SpanFilterFn` ask for.
 - **An empty WASI context.** Some guest toolchains import WASI even when the
   plugin uses none of it. The host links WASI 0.2 with a `WasiCtxBuilder`
   context of `wasmtime-wasi` that has no preopened directory, no environment,
@@ -447,7 +489,7 @@ Each plugin folder holds `plugin.json`. The example of the issue is valid:
 | --- | --- | --- |
 | `name` | yes | 1 to 64 characters of `a-z`, `0-9`, and `-`. It starts with a letter. It is unique among the loaded plugins. |
 | `version` | yes | A semver version of the plugin itself. The editor shows it, and the errors name it. |
-| `type` | yes | `filter`, `analyzer`, or `renderer`. The component must export the interface of this type. |
+| `type` | yes | `filter`, `span-filter`, `analyzer`, or `renderer`. The component must export the interface of this type. |
 | `description` | yes | One line of text for the plugin list. |
 | `entry` | yes | A relative path to the component, inside the plugin folder. An absolute path, a `..` part, and a symbolic link that leaves the folder are refused. |
 | `options` | no | The options. An absent field is no options. |
@@ -484,7 +526,8 @@ host makes the typed `list<option-entry>` from it:
 
 ### The filter kind in a project
 
-A filter plugin registers under the kind `plugin:<name>`. A project that uses
+A filter plugin of either form registers under the kind `plugin:<name>`. A
+project that uses
 it keeps that kind in `AppliedFilter`. When the plugin is absent, the render
 fails with the existing error of `FilterRegistry`, which names the kind. The
 project does not keep the version of the plugin. A plugin is like a font in a
@@ -552,12 +595,13 @@ not finish.
 The issue closes with six open questions. Each one gets a recommendation.
 
 1. **Built-in filters as plugins: no.** The built-in filters stay native
-   `FilterFn` closures. The editor thus builds and runs with no WASM toolchain,
-   a built-in filter costs no instantiation, and a debugger steps through it.
-   The API gets its exercise from the other direction. The conformance test of
-   slice 2 runs an example plugin. When the first built-in filter ships, an
-   example plugin implements the same filter. A test then asserts that the
-   plugin and the native filter give equal answers on one fixture.
+   closures of the event form or the span form. The editor thus builds and
+   runs with no WASM toolchain, a built-in filter costs no instantiation, and
+   a debugger steps through it. The API gets its exercise from the other
+   direction. The conformance test of slice 2 runs an example plugin of each
+   form. The example span filter implements time dilation, the first built-in
+   filter (issue #153). A test asserts that the plugin and the native filter
+   give equal answers on one fixture.
 2. **Versioning: the WIT package version is the API version.** The host reads
    it from the export names of the component, thus the manifest has no `api`
    field that can disagree with the component. Before 1.0.0, an addition
@@ -655,21 +699,24 @@ A new library crate, `src/nle-plugins`, with no WASM runtime yet.
 
 ### Slice 2: The WASM filter host
 
-- The WIT package `nle:plugin@0.1.0` holds `types`, `log`, `filter`, and
-  `filter-plugin`.
+- The WIT package `nle:plugin@0.1.0` holds `types`, `log`, `filter`,
+  `filter-plugin`, `span-filter`, and `span-filter-plugin`.
 - The engine, the instances, the WASI context, the limits, and the cache obey
   [the host](#the-host).
-- A function loads one plugin folder, and it answers a `FilterFn` or a load
-  error.
-- An example plugin in Rust, built for `wasm32-wasip2`, runs in a conformance
-  test. The test asserts these results:
+- A function loads one plugin folder, and it answers a `FilterFn`, a
+  `SpanFilterFn`, or a load error.
+- Two example plugins in Rust, built for `wasm32-wasip2`, run in a conformance
+  test: one of each form. The span filter implements time dilation. The test
+  asserts these results:
+  - The span filter and the native time dilation filter give equal answers on
+    one fixture.
   - Two calls with the same input give the same answer.
   - A file open and a socket connect fail.
   - The clock gives the fixed time.
   - A trap, an endless loop, and a memory bomb each fail with an error that
     names the cause.
 - An author guide tells a plugin author how to build, test, and install a
-  filter plugin in Rust.
+  filter plugin of each form in Rust.
 
 The slice adds the `wasm32-wasip2` target to `rust-toolchain.toml`. The test
 builds the example plugin into a fixed directory under `target/`, and the lock
@@ -685,7 +732,8 @@ each default feature of wasmtime that the host does not use.
 
 - The editor loads each folder of [the plugins directory](#the-plugins-directory)
   when it starts.
-- It registers each filter plugin under `plugin:<name>`.
+- It registers each filter plugin under `plugin:<name>`, through
+  `FilterRegistry::register` or `FilterRegistry::register_span` by its `type`.
 - It shows each folder that failed to load, with the reason.
 - Two folders with the same `name` both fail, and the error names both.
 
@@ -748,7 +796,7 @@ it.
 ### The 1.0.0 gate
 
 The API goes to `1.0.0` when slices 2, 5, and 6 are on `main` and the example
-plugins exercise all three worlds. From then, the host links the current major
+plugins exercise all four worlds. From then, the host links the current major
 version and the major version before it. This gate is a decision for Tim, not a
 slice.
 
