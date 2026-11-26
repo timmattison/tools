@@ -961,13 +961,10 @@ mod tests {
             None,
             "a site with no devices has no table to draw"
         );
-        assert!(
-            report
-                .notes()
-                .iter()
-                .any(|note| note.contains("No devices")),
-            "the note must say the site holds no devices, got {:?}",
-            report.notes()
+        assert_eq!(
+            report.notes(),
+            ["No devices found."],
+            "the note must be the note of `devices list --all` on an empty site"
         );
     }
 }
@@ -1014,13 +1011,10 @@ mod action_tests {
             Some(serde_json::json!([])),
             "a site with no devices must answer with an empty array, got:\n{document}"
         );
-        assert!(
-            report
-                .notes()
-                .iter()
-                .any(|note| note.contains("No devices")),
-            "the note must say the site holds no devices, got {:?}",
-            report.notes()
+        assert_eq!(
+            report.notes(),
+            ["No devices found."],
+            "the note must be the note of `devices list --all` on an empty site"
         );
     }
 
