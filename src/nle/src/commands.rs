@@ -82,7 +82,7 @@ fn has_ending(name: &str, endings: &[&str]) -> bool {
     matching_ending(name, endings).is_some()
 }
 
-/// The most symbolic links that `follow_links` follows before it gives up.
+/// The longest chain of symbolic links that `follow_links` accepts.
 const MAX_LINKS: usize = 40;
 
 /// Follow the chain of symbolic links that starts at `path`. Return the end of
