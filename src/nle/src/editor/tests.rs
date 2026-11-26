@@ -1,6 +1,7 @@
 //! Tests for the edit operations and the editor.
 
 use super::*;
+use crate::export::{ExportProgress, ExportRequest, ExportTarget};
 use crate::types::{EventType, FilterKind, FilterOptions, FilterRegion, TimelineTrack};
 
 fn secs(value: f64) -> Seconds {
@@ -664,4 +665,51 @@ async fn save_recording_refuses_a_txt_name() {
 
     assert!(matches!(result, Err(NleError::SaveError(_))), "{result:?}");
     assert!(!file.exists());
+}
+
+// Tests of `Editor::export`.
+
+fn recording_request(file: &std::path::Path) -> ExportRequest {
+    ExportRequest {
+        output_path: file.to_path_buf(),
+        target: ExportTarget::Recording {
+            compress: Some(false),
+        },
+    }
+}
+
+#[tokio::test]
+async fn export_reports_rendering_first_and_writes_the_rendered_recording() {
+    let editor = trimmed_editor();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("out.json");
+    let reported = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let collected = Arc::clone(&reported);
+
+    let result = editor
+        .export(recording_request(&file), move |progress| {
+            collected.lock().unwrap().push(progress);
+        })
+        .await;
+
+    assert_eq!(
+        *reported.lock().unwrap(),
+        [ExportProgress::Rendering, ExportProgress::Writing]
+    );
+    assert_eq!(result.unwrap(), file);
+    assert_eq!(Recording::load(&file).unwrap(), editor.render().unwrap());
+}
+
+#[tokio::test]
+async fn the_export_future_does_not_borrow_the_editor() {
+    let editor = trimmed_editor();
+    let expected = editor.render().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("out.json");
+
+    let future = editor.export(recording_request(&file), |_| {});
+    drop(editor);
+    future.await.unwrap();
+
+    assert_eq!(Recording::load(&file).unwrap(), expected);
 }
