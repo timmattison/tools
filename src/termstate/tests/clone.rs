@@ -49,5 +49,5 @@ fn a_clone_taken_inside_an_escape_sequence_finishes_it() {
     assert_eq!(copy.get_grid(), original.get_grid());
     let cell = &original.get_grid()[0][1];
     assert_eq!(cell.ch, 'B');
-    assert_eq!(cell.fg_color, TerminalTheme::auto().colors[1]);
+    assert_eq!(cell.fg_color, TerminalTheme::auto().red);
 }
