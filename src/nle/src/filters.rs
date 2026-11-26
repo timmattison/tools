@@ -8,7 +8,9 @@ use crate::pipeline::FilterRegistry;
 /// kind.
 #[must_use]
 pub fn builtin() -> FilterRegistry {
-    FilterRegistry::new()
+    let mut registry = FilterRegistry::new();
+    cursor::register(&mut registry);
+    registry
 }
 
 #[cfg(test)]
