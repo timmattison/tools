@@ -415,6 +415,106 @@ fn video_export_args_gives_beta_the_canonical_output_path() {
     assert_eq!(args[at + 1], expected);
 }
 
+#[cfg(unix)]
+#[test]
+fn save_recording_to_writes_through_a_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("rec.json");
+    fs::write(&target, b"old").unwrap();
+    let link = dir.path().join("latest.json");
+    std::os::unix::fs::symlink("rec.json", &link).unwrap();
+    save_recording_to(&link.to_string_lossy(), &Recording::test_fixture(), None).unwrap();
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link was replaced"
+    );
+    assert_eq!(fs::read_link(&link).unwrap(), Path::new("rec.json"));
+    assert!(
+        fs::read(&target).unwrap().starts_with(b"{"),
+        "the target was not written"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn save_recording_to_refuses_a_link_to_a_file_without_a_recording_ending() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("notes.txt");
+    fs::write(&target, b"keep").unwrap();
+    let link = dir.path().join("latest.json");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let err =
+        save_recording_to(&link.to_string_lossy(), &Recording::test_fixture(), None).unwrap_err();
+    assert!(matches!(err, NleError::SaveError(_)), "got {err}");
+    assert!(err.to_string().contains("must end in"), "got {err}");
+    assert_eq!(fs::read(&target).unwrap(), b"keep");
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link was replaced"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn save_recording_to_refuses_a_loop_of_symlinks() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("a.json");
+    let second = dir.path().join("b.json");
+    std::os::unix::fs::symlink("b.json", &first).unwrap();
+    std::os::unix::fs::symlink("a.json", &second).unwrap();
+    let err =
+        save_recording_to(&first.to_string_lossy(), &Recording::test_fixture(), None).unwrap_err();
+    assert!(matches!(err, NleError::SaveError(_)), "got {err}");
+    assert!(err.to_string().contains("symbolic links"), "got {err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn video_export_args_gives_beta_the_target_of_a_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("a.json");
+    write_fixture(&input, false);
+    let link = dir.path().join("out.mp4");
+    std::os::unix::fs::symlink(dir.path().join("real.mp4"), &link).unwrap();
+    let args = video_export_args(&options(
+        &input,
+        &link.to_string_lossy(),
+        ExportFormat::Video,
+    ))
+    .unwrap();
+    let expected = dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("real.mp4")
+        .to_string_lossy()
+        .to_string();
+    let at = args.iter().position(|a| a == "--output").unwrap();
+    assert_eq!(args[at + 1], expected);
+}
+
+#[cfg(unix)]
+#[test]
+fn web_export_args_refuses_a_link_to_a_file_without_a_web_ending() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("a.json");
+    write_fixture(&input, false);
+    let target = dir.path().join("notes.txt");
+    fs::write(&target, b"keep").unwrap();
+    let link = dir.path().join("page.html");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let err =
+        web_export_args(&options(&input, &link.to_string_lossy(), ExportFormat::Web)).unwrap_err();
+    assert!(matches!(err, NleError::ExportError(_)), "got {err}");
+    assert!(err.to_string().contains("must end in"), "got {err}");
+}
+
 #[test]
 fn run_blocking_runs_the_work_on_another_thread() {
     let caller = std::thread::current().id();
