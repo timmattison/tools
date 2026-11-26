@@ -44,7 +44,7 @@ fn text_with_multibyte_characters_around_a_sequence_is_text() {
     let all = steps(&["日本語 café\x1b[1m🎉\r\n"]);
 
     let text: Vec<bool> = all.iter().map(|step| *step == Step::Text).collect();
-    let mut expected = vec![true; 9];
+    let mut expected = vec![true; 8];
     expected.extend([false; 4]);
     expected.extend([true; 3]);
     assert_eq!(text, expected, "{all:?}");
