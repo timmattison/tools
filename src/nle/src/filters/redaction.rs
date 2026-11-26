@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+mod stream;
+
 use crate::error::NleError;
 use crate::pipeline::{FilterRegistry, Span};
 use crate::types::{AppliedFilter, FilterKind, FilterOptions, FilterRegion};
@@ -178,8 +180,11 @@ fn missing(key: &str) -> String {
 
 /// Replace the text that the options name.
 fn redact(span: Span, options: &FilterOptions) -> Result<Span, String> {
-    let _redaction = read_options(options)?;
-    Ok(span)
+    let redaction = read_options(options)?;
+    Ok(Span {
+        events: stream::rewrite(span.events, &redaction)?,
+        length: span.length,
+    })
 }
 
 #[cfg(test)]
