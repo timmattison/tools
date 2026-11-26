@@ -282,6 +282,25 @@ fn pause_insertion_on_a_range_takes_the_point_from_the_start_of_the_range() {
 }
 
 #[test]
+fn pause_insertion_on_a_range_moves_what_is_after_the_range_also_when_no_event_of_the_range_moves()
+{
+    // The point 2 in the range from 3 is 5 on the timeline, after the event at
+    // 4, which is the last event of the range. The event at 10 and the end of
+    // the timeline at 10 are after the range, and each moves later by 1.
+    let filter = || range(PAUSE_INSERTION, 3.0, 8.0, insertion(2.0, 1.0));
+    let rendered = render(outputs(&[0.0, 4.0, 10.0]), 10.0, filter());
+
+    assert_eq!(times(&rendered.events), vec![0.0, 4.0, 11.0]);
+    assert_eq!(rendered.duration, 11.0);
+
+    // With no event after the range, the end of the timeline still moves.
+    let rendered = render(outputs(&[0.0, 4.0]), 10.0, filter());
+
+    assert_eq!(times(&rendered.events), vec![0.0, 4.0]);
+    assert_eq!(rendered.duration, 11.0);
+}
+
+#[test]
 fn pause_insertion_refuses_invalid_options() {
     let cases = [
         (FilterOptions::new().with("duration", 1.0), "at"),
