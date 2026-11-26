@@ -5,6 +5,11 @@
 //! two runs of one test at the same time do not share a tree. The tree is
 //! removed when it drops, also when a test fails.
 
+#![allow(
+    dead_code,
+    reason = "each test binary includes this module and uses a different part of it"
+)]
+
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
