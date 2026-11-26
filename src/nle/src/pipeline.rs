@@ -98,11 +98,12 @@ impl FilterRegistry {
         events: Vec<Event>,
         filters: &[AppliedFilter],
     ) -> Result<Vec<Event>, NleError> {
-        let Some(applied) = filters.first() else {
-            return Ok(events);
-        };
-        let filter = self.lookup(&applied.kind)?;
-        Ok(filter(&events, &applied.options))
+        let mut events = events;
+        for applied in filters {
+            let filter = self.lookup(&applied.kind)?;
+            events = filter(&events, &applied.options);
+        }
+        Ok(events)
     }
 
     /// Flatten `project` into one recording.
