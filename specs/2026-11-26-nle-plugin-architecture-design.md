@@ -460,19 +460,35 @@ is off by default.
   and `allow_ip_name_lookup(false)`, because the documentation of wasmtime 51
   does not agree with itself about the socket defaults. The wall clock and the
   monotonic clock always give the same fixed time. The random sources give a
-  fixed sequence. Standard output and standard error go to the plugin log. The contract needs no async function, thus it
-  does not depend on WASI 0.3. When a guest toolchain imports WASI 0.3, the
-  host links an empty context for it too.
+  fixed sequence. The contract needs no async function, thus it does not
+  depend on WASI 0.3. When a guest toolchain imports WASI 0.3, the host links
+  an empty context for it too.
+- **No host function waits.** Fuel and an epoch deadline act only in WASM
+  code, thus neither one stops a call that waits inside a host function. The
+  clock functions of `wasmtime-wasi` wait on a real Tokio timer:
+  `subscribe-duration` and `subscribe-instant` of WASI 0.2, and `wait-for` and
+  `wait-until` of WASI 0.3. A duration that overflows waits forever. Thus,
+  with these functions, a plugin that calls `std::thread::sleep` holds the
+  render thread forever. After the host links WASI, it defines each of these
+  clock functions again, with `Linker::allow_shadowing` on for those
+  definitions only. Each new function returns at once: a pollable that it
+  gives is ready at once, because the clock of a plugin does not move.
+  Standard input is closed. Standard output and standard error go to one
+  `MemoryOutputPipe` with the 64 KiB limit of the log. A full pipe closes and
+  does not wait. After the call, the host copies the pipe to the plugin log.
 - **Limits.** A `StoreLimits` bounds the memory of each instance. Fuel bounds
   the work of each call. Fuel counts the WASM instructions of the call, and
   that count does not depend on the speed or the load of the machine. Thus a
   call that passes the fuel limit fails on each machine, at the preview and at
-  the export. An epoch deadline is only a backstop for a call that stalls and
-  uses no fuel, for example in a host function. Its bound is many times the
-  time that the fuel limit takes on a slow machine. Only the backstop depends
-  on the machine. A thread of the host increments the epoch. Slice 2 sets the
-  three defaults, and the settings of the editor can
-  change them.
+  the export. Fuel does not count the work of a host function. An epoch
+  deadline is only a backstop for a call that spends its time in host
+  functions that return, for example a loop that asks `get-random-bytes` for
+  its limit of 64 MiB at each step. The epoch check runs in WASM code, thus
+  the deadline stops such a call when a host function returns. Its bound is
+  many times the time that the fuel limit takes on a slow machine. Only the
+  backstop depends on the machine. A thread of the host increments the epoch.
+  Slice 2 sets the three defaults, and the settings of the editor can change
+  them.
 - **A cache of compiled code.** A compile with Cranelift costs time at each
   start of the editor. The host turns on the compilation cache of wasmtime
   (the `cache` feature of the crate), with its directory under
@@ -618,7 +634,7 @@ editor writes there, and that flow loads the plugin that it installs.
 | --- | --- |
 | A plugin reads or writes a file, or uses the network | The world imports no such interface, and the WASI context gives no directory and no socket. |
 | A plugin reads the environment, for example a token | The WASI context gives no environment variable. |
-| A plugin runs forever | The fuel limit stops the call. The epoch deadline stops a call that stalls and uses no fuel. |
+| A plugin runs forever | The fuel limit stops the call. No host function waits, because each clock function of the WASI context returns at once. The epoch deadline stops a call that spends its time in host functions that return. |
 | A plugin takes all of the memory | `StoreLimits` stops the growth. |
 | A plugin escapes through a defect of the runtime | The host pins an LTS line of wasmtime, which gets security fixes for 24 months. A known advisory against wasmtime must stop the checks, thus slice 2 waits for issue #740, which puts `cargo audit` in the one list of `scripts/rust-checks.sh`, at pre-push and in CI. |
 | A renderer writes outside its frame | The frame resource is the only target, and each method clips to the frame. |
@@ -736,6 +752,10 @@ A new library crate, `src/nle-plugins`, with no WASM runtime yet.
   - Two calls with the same input give the same answer.
   - A file open and a socket connect fail.
   - The clock gives the fixed time.
+  - A sleep of one hour through `std::thread::sleep`, and a wait through
+    `subscribe-instant` for one hour after the fixed time, each answer in
+    less than 60 seconds. A thread of the test bounds each call, thus a wait
+    on the real clock fails the test and does not hang it.
   - A trap, an endless loop, and a memory bomb each fail with an error that
     names the cause. The endless loop fails at the fuel limit, not at the
     deadline.
