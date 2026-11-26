@@ -73,6 +73,13 @@ const SPEED_NOT_A_NUMBER: &str = "the speed is not a number";
 /// The reason for an end that is not above the start.
 const END_BEFORE_START: &str = "the end must come after the start";
 
+/// The reason for a first line count that is not a whole number.
+const FIRST_LINES_NOT_A_COUNT: &str = "the first lines are not a whole number of 0 or more";
+/// The reason for a last line count that is not a whole number.
+const LAST_LINES_NOT_A_COUNT: &str = "the last lines are not a whole number of 0 or more";
+/// The row text of a fast-forward that skips to the end of its region.
+const SKIP_TO_END_TEXT: &str = "skip to end";
+
 /// The title of the application window.
 const WINDOW_TITLE: &str = "NLE - Terminal Recording Editor";
 /// The width of the application window, in logical pixels.
@@ -510,16 +517,62 @@ fn fast_forward_change(
     button: FastForwardButton,
     fields: &FastForwardFields,
 ) -> Result<AppliedFilter, String> {
-    let _ = (button, fields);
-    Err(String::new())
+    let region = region_from(fields.start, fields.end)?;
+    let mode = match button {
+        FastForwardButton::SkipToEnd => Mode::SkipToEnd,
+        FastForwardButton::Accelerate => {
+            let speed: f64 = fields
+                .speed
+                .trim()
+                .parse()
+                .map_err(|_| SPEED_NOT_A_NUMBER)?;
+            Mode::Accelerate(Acceleration::new(speed).map_err(|error| error.to_string())?)
+        }
+        FastForwardButton::Summarize => Mode::Summary {
+            head: fields
+                .first
+                .trim()
+                .parse()
+                .map_err(|_| FIRST_LINES_NOT_A_COUNT)?,
+            tail: fields
+                .last
+                .trim()
+                .parse()
+                .map_err(|_| LAST_LINES_NOT_A_COUNT)?,
+        },
+    };
+    Ok(fast_forward::applied(region, mode))
+}
+
+/// The text of a fast-forward mode for a row.
+fn mode_text(mode: Mode) -> String {
+    match mode {
+        Mode::SkipToEnd => SKIP_TO_END_TEXT.to_owned(),
+        Mode::Accelerate(acceleration) => format!("accelerate at {}\u{d7}", acceleration.get()),
+        Mode::Summary { head, tail } => {
+            format!("summary of the first {head} and the last {tail} lines")
+        }
+    }
 }
 
 /// One row for each fast-forward filter of the project: the index of the
 /// filter in the project, and the text of its row. Filters of other kinds
 /// have no row, but they keep their place in the index.
 fn fast_forward_rows(document: &Option<Document>) -> Vec<(usize, String)> {
-    let _ = document;
-    Vec::new()
+    let Some(open) = document else {
+        return Vec::new();
+    };
+    open.editor
+        .project()
+        .filters
+        .iter()
+        .enumerate()
+        .filter_map(|(index, filter)| {
+            let mode = fast_forward::mode_of(filter)?;
+            let region = region_text(&filter.region);
+            Some((index, format!("{region}: {}", mode_text(mode))))
+        })
+        .collect()
 }
 
 /// The duration of the rendered project of the document as text, or the text
