@@ -14,10 +14,10 @@ use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use ff::fs::{FileSystem, Link, RawEntry};
+use ff::fs::{EntryKind, FileSystem, Link, RawEntry};
 
 /// The call that a rule sees.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Call {
     /// `open_dir`, with the path of the directory.
     Open,
@@ -104,5 +104,32 @@ where
             return Err(error);
         }
         self.inner.is_directory(&dir.inner, name)
+    }
+}
+
+/// A file system whose directory entries give no type, as on some network
+/// file systems. The walk must then ask for the type of each entry.
+pub struct UnknownTypes<F>(pub F);
+
+impl<F: FileSystem> FileSystem for UnknownTypes<F> {
+    type Dir = F::Dir;
+
+    fn open_dir(&self, path: &Path, link: Link) -> io::Result<Self::Dir> {
+        self.0.open_dir(path, link)
+    }
+
+    fn device(&self, dir: &Self::Dir) -> io::Result<u64> {
+        self.0.device(dir)
+    }
+
+    fn read_entry(&self, dir: &mut Self::Dir) -> io::Result<Option<RawEntry>> {
+        Ok(self.0.read_entry(dir)?.map(|entry| RawEntry {
+            kind: EntryKind::Unknown,
+            ..entry
+        }))
+    }
+
+    fn is_directory(&self, dir: &Self::Dir, name: &OsStr) -> io::Result<bool> {
+        self.0.is_directory(dir, name)
     }
 }

@@ -10,7 +10,7 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use faulty::{errno, Call, Faulty};
+use faulty::{errno, Call, Faulty, UnknownTypes};
 use ff::fs::RealFs;
 use ff::pattern::{Case, Matcher};
 use ff::walk::{walk, Options, WalkRoot};
@@ -184,33 +184,6 @@ fn an_entry_whose_type_cannot_be_read_is_incomplete() {
 
     assert_eq!(report.incomplete.len(), 1, "{report:?}");
     assert_eq!(report.incomplete[0].path, tree.root().join("dir"));
-}
-
-/// A file system whose directory entries give no type, as on some network
-/// file systems. The walk must then ask for the type of each entry.
-struct UnknownTypes<F>(F);
-
-impl<F: ff::fs::FileSystem> ff::fs::FileSystem for UnknownTypes<F> {
-    type Dir = F::Dir;
-
-    fn open_dir(&self, path: &Path, link: ff::fs::Link) -> io::Result<Self::Dir> {
-        self.0.open_dir(path, link)
-    }
-
-    fn device(&self, dir: &Self::Dir) -> io::Result<u64> {
-        self.0.device(dir)
-    }
-
-    fn read_entry(&self, dir: &mut Self::Dir) -> io::Result<Option<ff::fs::RawEntry>> {
-        Ok(self.0.read_entry(dir)?.map(|entry| ff::fs::RawEntry {
-            kind: ff::fs::EntryKind::Unknown,
-            ..entry
-        }))
-    }
-
-    fn is_directory(&self, dir: &Self::Dir, name: &std::ffi::OsStr) -> io::Result<bool> {
-        self.0.is_directory(dir, name)
-    }
 }
 
 #[test]
