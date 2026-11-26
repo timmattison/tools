@@ -184,8 +184,34 @@ impl FilterRegistry {
     /// Returns `NleError::RenderError` for an empty project, and the errors of
     /// `FilterRegistry::run`.
     pub fn render(&self, project: &EditProject) -> Result<Recording, NleError> {
-        let _ = project;
-        todo!("render")
+        let Some(first) = project.clips.first() else {
+            return Err(NleError::RenderError(
+                "the project has no clip to render".to_string(),
+            ));
+        };
+
+        let mut events = Vec::new();
+        for track in &project.timeline {
+            for id in &track.clips {
+                if let Some(clip) = project.clips.iter().find(|clip| clip.id == *id) {
+                    events.extend(clip.timeline_events());
+                }
+            }
+        }
+        let events = self.run(events, &project.filters)?;
+
+        let header = &first.source;
+        Ok(Recording {
+            version: header.version,
+            width: header.width,
+            height: header.height,
+            timestamp: header.timestamp,
+            duration: project.duration(),
+            command: header.command.clone(),
+            title: header.title.clone(),
+            env: header.env.clone(),
+            events,
+        })
     }
 }
 
