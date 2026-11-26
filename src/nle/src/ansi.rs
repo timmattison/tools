@@ -10,7 +10,8 @@ pub(crate) enum Sequence {
     /// A control sequence: `ESC [` or the 8-bit CSI, the parameter
     /// characters, the intermediate characters, and a final character.
     Csi {
-        /// The parameter characters (`0` to `?`), for example `?25`.
+        /// The parameter characters (`0` to `;`), after at most one private
+        /// marker (`<` to `?`) at the start, for example `?25`.
         params: String,
         /// The intermediate characters (space to `/`), for example the space
         /// of `CSI 5 SP q`.
@@ -46,11 +47,13 @@ pub(crate) enum Step {
     /// The character completes a sequence that no filter rewrites. The
     /// sequence stays as it is.
     Ignored,
-    /// The character (CAN or SUB) stops the open sequence. The sequence stays
-    /// as it is, and the character is text.
+    /// The character (CAN, SUB, or a C1 control that starts no sequence)
+    /// stops the open sequence. The sequence stays as it is, and the
+    /// character is text.
     Aborted,
-    /// The character (ESC) stops the open sequence and starts a new one. The
-    /// old sequence stays as it is.
+    /// The character (ESC, or a C1 control that starts a sequence: CSI, OSC,
+    /// DCS, SOS, PM, or APC) stops the open sequence and starts a new one.
+    /// The old sequence stays as it is.
     Restarted,
     /// The ESC before this character ends the open OSC or string, because
     /// the character is not the backslash of an ST. The old sequence stays as
@@ -112,7 +115,9 @@ enum State {
 ///
 /// It obeys the parser of a VT500 terminal for the forms that it knows: an
 /// ESC anywhere stops the open sequence, CAN and SUB stop it, and a C0
-/// control inside a control sequence does not stop it. An OSC ends at BEL,
+/// control inside a control sequence does not stop it. A C1 control inside a
+/// sequence obeys the anywhere transitions of the VT500 parser. A private
+/// marker (`<` to `?`) comes only first in the parameters. An OSC ends at BEL,
 /// at `ESC \`, or at the 8-bit ST. A DCS, SOS, PM, or APC string ends at
 /// `ESC \` or at the 8-bit ST.
 #[derive(Debug, Default)]
@@ -154,6 +159,7 @@ impl Scanner {
                 CAN | SUB => (State::Ground, Step::Aborted),
                 ' '..='/' => (State::EscapeIntermediate, Step::Pending),
                 '0'..='~' => (State::Ground, Step::Ignored),
+                '\u{80}'..='\u{9f}' => Self::anywhere(c),
                 c if is_control(c) => (State::EscapeIntermediate, Step::Pending),
                 _ => (State::Ground, Step::Ignored),
             },
@@ -164,7 +170,18 @@ impl Scanner {
             } => match c {
                 ESC => (State::Escape, Step::Restarted),
                 CAN | SUB => (State::Ground, Step::Aborted),
-                '0'..='?' if intermediates.is_empty() => {
+                '0'..=';' if intermediates.is_empty() => {
+                    params.push(c);
+                    (
+                        State::Csi {
+                            params,
+                            intermediates,
+                            controls,
+                        },
+                        Step::Pending,
+                    )
+                }
+                '<'..='?' if intermediates.is_empty() && params.is_empty() => {
                     params.push(c);
                     (
                         State::Csi {
@@ -195,6 +212,7 @@ impl Scanner {
                         controls,
                     }),
                 ),
+                '\u{80}'..='\u{9f}' => Self::anywhere(c),
                 c if is_control(c) => {
                     controls.push(c);
                     (
@@ -206,14 +224,15 @@ impl Scanner {
                         Step::Pending,
                     )
                 }
-                // A parameter after an intermediate, or a character that is
-                // not ASCII.
+                // A parameter after an intermediate, a private marker after a
+                // parameter, or a character that is not ASCII.
                 _ => (State::CsiIgnore, Step::Pending),
             },
             State::CsiIgnore => match c {
                 ESC => (State::Escape, Step::Restarted),
                 CAN | SUB => (State::Ground, Step::Aborted),
                 '@'..='~' => (State::Ground, Step::Ignored),
+                '\u{80}'..='\u{9f}' => Self::anywhere(c),
                 _ => (State::CsiIgnore, Step::Pending),
             },
             State::Osc { mut text } => match c {
@@ -226,6 +245,7 @@ impl Scanner {
                 ),
                 ESC => (State::OscEscape { text }, Step::Pending),
                 CAN | SUB => (State::Ground, Step::Aborted),
+                '\u{80}'..='\u{9f}' => Self::anywhere(c),
                 _ => {
                     text.push(c);
                     (State::Osc { text }, Step::Pending)
@@ -245,6 +265,7 @@ impl Scanner {
                 C1_ST => (State::Ground, Step::Ignored),
                 ESC => (State::StringEscape, Step::Pending),
                 CAN | SUB => (State::Ground, Step::Aborted),
+                '\u{80}'..='\u{9f}' => Self::anywhere(c),
                 _ => (State::String, Step::Pending),
             },
             State::StringEscape => match c {
@@ -264,8 +285,20 @@ impl Scanner {
             CAN | SUB => (State::Ground, Step::Aborted),
             ' '..='/' => (State::EscapeIntermediate, Step::Pending),
             '0'..='~' => (State::Ground, Step::Done(Sequence::Escape(c))),
+            '\u{80}'..='\u{9f}' => Self::anywhere(c),
             c if is_control(c) => (State::Escape, Step::Pending),
             _ => (State::Ground, Step::Ignored),
+        }
+    }
+
+    /// The step of a C1 control, U+0080 to U+009F, inside an open sequence,
+    /// by the anywhere transitions of the VT500 parser.
+    fn anywhere(c: char) -> (State, Step) {
+        match c {
+            C1_CSI => (State::csi(), Step::Restarted),
+            C1_OSC => (State::osc(), Step::Restarted),
+            C1_DCS | C1_SOS | C1_PM | C1_APC => (State::String, Step::Restarted),
+            _ => (State::Ground, Step::Aborted),
         }
     }
 

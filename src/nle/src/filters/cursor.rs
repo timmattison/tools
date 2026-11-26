@@ -330,6 +330,9 @@ struct Rewriter<'a> {
     pieces: Vec<(usize, usize)>,
     /// Where the last character went, as a piece.
     last: (usize, usize),
+    /// True when the start of the open sequence ended an earlier sequence of
+    /// the stream, through a restart or a break of an OSC or a string.
+    ends_open: bool,
 }
 
 impl<'a> Rewriter<'a> {
@@ -350,6 +353,7 @@ impl<'a> Rewriter<'a> {
             out: Vec::new(),
             pieces: Vec::new(),
             last: (0, 0),
+            ends_open: false,
         }
     }
 
@@ -436,25 +440,30 @@ impl<'a> Rewriter<'a> {
                 self.mark(index);
                 self.push(index, c);
                 self.finish(&sequence, index);
+                self.ends_open = false;
                 self.sync(index);
             }
             Step::Ignored => {
                 self.push(index, c);
+                self.ends_open = false;
                 self.pieces.clear();
                 self.sync(index);
             }
             Step::Aborted => {
+                self.ends_open = false;
                 self.pieces.clear();
                 self.push(index, c);
                 self.sync(index);
             }
             Step::Restarted => {
+                self.ends_open = true;
                 self.pieces.clear();
                 self.mark(index);
                 self.push(index, c);
             }
             Step::EscapeBreak(inner) => {
                 // The ESC before `c` starts the new sequence.
+                self.ends_open = true;
                 self.pieces.clear();
                 self.pieces.push(self.last);
                 self.take(*inner, c, index);
@@ -489,9 +498,19 @@ impl<'a> Rewriter<'a> {
     fn finish(&mut self, sequence: &Sequence, index: usize) {
         let pieces = std::mem::take(&mut self.pieces);
         if let Some(replacement) = self.rewrite(sequence) {
-            for (piece, offset) in pieces {
+            for &(piece, offset) in &pieces {
                 if let Some(data) = self.data(piece) {
                     data.truncate(offset);
+                }
+            }
+            // The start of the dropped sequence ended an earlier one. An ST
+            // where that start was ends an open OSC or string, and the
+            // rest of the stream stays outside it.
+            if self.ends_open {
+                if let Some(&(first, _)) = pieces.first() {
+                    if let Some(data) = self.data(first) {
+                        data.push_str(ST);
+                    }
                 }
             }
             if let Some(data) = self.data(index) {
