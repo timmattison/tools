@@ -14,10 +14,11 @@ use std::sync::Arc;
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 
-use crate::editor::Editor;
+use crate::editor::{Edit, Editor};
 use crate::error::NleError;
+use crate::filters::time_dilation::{self, Speed};
 use crate::pipeline::FilterRegistry;
-use crate::types::EditProject;
+use crate::types::{AppliedFilter, EditProject, FilterRegion, Seconds};
 
 use crate::format::{file_name, format_duration, format_recorded};
 use crate::types::{LoadedRecording, RecordingMetadata};
@@ -53,6 +54,21 @@ const SPEED_LABEL: &str = "Speed";
 const APPLY_SPEED_LABEL: &str = "Apply Speed";
 /// The label of the row for the duration after the edits.
 const EDITED_DURATION_LABEL: &str = "Edited duration";
+
+/// The text of the button that removes a speed change.
+const REMOVE_LABEL: &str = "Remove";
+/// The text for a speed change that covers the whole timeline.
+const WHOLE_TIMELINE: &str = "the whole timeline";
+/// The start of the message for a speed change that does not apply.
+const SPEED_FAILED_PREFIX: &str = "Failed to change the speed";
+/// The reason for a start that is not a number.
+const START_NOT_A_NUMBER: &str = "the start is not a number";
+/// The reason for an end that is not a number.
+const END_NOT_A_NUMBER: &str = "the end is not a number";
+/// The reason for a speed that is not a number.
+const SPEED_NOT_A_NUMBER: &str = "the speed is not a number";
+/// The reason for an end that is not above the start.
+const END_BEFORE_START: &str = "the end must come after the start";
 
 /// The title of the application window.
 const WINDOW_TITLE: &str = "NLE - Terminal Recording Editor";
@@ -280,12 +296,12 @@ fn summary(open: &Document) -> String {
 /// The metadata of the open recording, and the speed panel.
 #[component]
 fn PropertiesPanel(loaded: Signal<Option<Document>>, on_error: EventHandler<String>) -> Element {
-    let is_open = loaded.read().is_some();
+    let metadata = loaded.read().as_ref().map(|open| open.metadata.clone());
     rsx! {
         div { class: "properties-panel",
             h3 { "Properties" }
-            if is_open {
-                {metadata_rows(loaded.read().as_ref().map(|open| &open.metadata))}
+            if let Some(metadata) = metadata {
+                {metadata_rows(&metadata)}
                 SpeedPanel { loaded, on_error }
             } else {
                 div { class: "placeholder", "No recording loaded" }
@@ -302,7 +318,7 @@ fn SpeedPanel(loaded: Signal<Option<Document>>, on_error: EventHandler<String>) 
     let mut end = use_signal(String::new);
     let mut speed = use_signal(String::new);
     let edited = use_memo(move || edited_duration(&loaded.read()));
-    let _ = on_error;
+    let rows = speed_rows(&loaded.read());
     rsx! {
         div { class: "speed-panel",
             h3 { {SPEED_HEADING} }
@@ -337,13 +353,97 @@ fn SpeedPanel(loaded: Signal<Option<Document>>, on_error: EventHandler<String>) 
                     oninput: move |event| speed.set(event.value()),
                 }
             }
-            button { onclick: move |_| {}, {APPLY_SPEED_LABEL} }
+            button {
+                onclick: move |_| {
+                    let change = speed_change(&start.read(), &end.read(), &speed.read());
+                    match change {
+                        Ok(filter) => {
+                            // One write borrow holds the whole edit. No read borrow lives across it.
+                            let outcome = loaded.with_mut(|document| {
+                                document.as_mut().map(|open| {
+                                    let index = open.editor.project().filters.len();
+                                    open.editor.apply(Edit::AddFilter { index, filter })
+                                })
+                            });
+                            if let Some(Err(failure)) = outcome {
+                                on_error.call(format!("{SPEED_FAILED_PREFIX}: {failure}"));
+                            }
+                        }
+                        Err(reason) => on_error.call(format!("{SPEED_FAILED_PREFIX}: {reason}")),
+                    }
+                },
+                {APPLY_SPEED_LABEL}
+            }
+            for (index, text) in rows {
+                div { class: "speed-row", key: "{index}",
+                    span { "{text}" }
+                    button {
+                        onclick: move |_| {
+                            let outcome = loaded.with_mut(|document| {
+                                document
+                                    .as_mut()
+                                    .map(|open| open.editor.apply(Edit::RemoveFilter { index }))
+                            });
+                            if let Some(Err(failure)) = outcome {
+                                on_error.call(format!("{SPEED_FAILED_PREFIX}: {failure}"));
+                            }
+                        },
+                        {REMOVE_LABEL}
+                    }
+                }
+            }
             div { class: "metadata-item",
                 span { class: "metadata-label", {EDITED_DURATION_LABEL} }
                 span { class: "metadata-value", "{edited}" }
             }
         }
     }
+}
+
+/// One row for each time dilation filter of the project: the index of the
+/// filter in the project, and the text of its row. Filters of other kinds
+/// have no row, but they keep their place in the index.
+fn speed_rows(document: &Option<Document>) -> Vec<(usize, String)> {
+    let Some(open) = document else {
+        return Vec::new();
+    };
+    open.editor
+        .project()
+        .filters
+        .iter()
+        .enumerate()
+        .filter_map(|(index, filter)| {
+            let speed = time_dilation::speed_of(filter)?;
+            let region = match filter.region {
+                FilterRegion::All => WHOLE_TIMELINE.to_owned(),
+                FilterRegion::Range { start, end } => format!(
+                    "{} to {}",
+                    format_duration(start.into()),
+                    format_duration(end.into())
+                ),
+            };
+            Some((index, format!("{region} at {}\u{d7}", speed.get())))
+        })
+        .collect()
+}
+
+/// Reads the three fields of the speed panel: the start and the end of a
+/// region in seconds, and a speed. The answer is the filter to add, or the
+/// reason why the fields do not make one.
+fn speed_change(start: &str, end: &str, speed: &str) -> Result<AppliedFilter, String> {
+    let start: f64 = start.trim().parse().map_err(|_| START_NOT_A_NUMBER)?;
+    let end: f64 = end.trim().parse().map_err(|_| END_NOT_A_NUMBER)?;
+    let speed: f64 = speed.trim().parse().map_err(|_| SPEED_NOT_A_NUMBER)?;
+    let start = Seconds::new(start).map_err(|error| error.to_string())?;
+    let end = Seconds::new(end).map_err(|error| error.to_string())?;
+    if f64::from(end) <= f64::from(start) {
+        return Err(END_BEFORE_START.to_owned());
+    }
+    let speed = Speed::new(speed).map_err(|error| error.to_string())?;
+    Ok(time_dilation::applied(
+        FilterRegion::Range { start, end },
+        speed,
+    ))
 }
 
 /// The duration of the rendered project of the document as text, or the text
@@ -359,10 +459,7 @@ fn edited_duration(document: &Option<Document>) -> String {
 }
 
 /// The seven rows of the properties panel for one recording.
-fn metadata_rows(metadata: Option<&RecordingMetadata>) -> Element {
-    let Some(metadata) = metadata else {
-        return rsx! {};
-    };
+fn metadata_rows(metadata: &RecordingMetadata) -> Element {
     let title = if metadata.title.is_empty() {
         UNTITLED
     } else {
