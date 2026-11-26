@@ -201,8 +201,10 @@ fn a_directory_that_vanishes_during_the_walk_is_not_a_failure() {
     let expected = vec![tree.file("stays/120.mp4")];
     tree.file("goes/120.mp4");
     tree.file("turns-into-a-file/120.mp4");
+    tree.file("loops/120.mp4");
     let goes = tree.root().join("goes");
     let turns = tree.root().join("turns-into-a-file");
+    let loops = tree.root().join("loops");
     let faulty = Faulty::new(RealFs, |call, path: &Path| {
         if call != Call::Open {
             return None;
@@ -211,6 +213,8 @@ fn a_directory_that_vanishes_during_the_walk_is_not_a_failure() {
             Some(errno(libc::ENOENT))
         } else if path == turns {
             Some(errno(libc::ENOTDIR))
+        } else if path == loops {
+            Some(errno(libc::ELOOP))
         } else {
             None
         }
@@ -228,6 +232,64 @@ fn a_directory_that_vanishes_during_the_walk_is_not_a_failure() {
     assert_eq!(found.sorted(), expected);
     assert!(report.is_complete(), "{report:?}");
     assert!(report.denied.is_empty(), "{report:?}");
+}
+
+#[test]
+fn an_entry_that_vanishes_before_its_type_is_read_is_not_a_failure() {
+    let tree = Tree::new("errors-vanished-type");
+    let expected = vec![tree.file("stays/120.mp4")];
+    tree.file("goes/120.mp4");
+    tree.file("loops/120.mp4");
+    let goes = tree.root().join("goes");
+    let loops = tree.root().join("loops");
+    let faulty = UnknownTypes(Faulty::new(RealFs, |call, path: &Path| {
+        if call != Call::IsDirectory {
+            None
+        } else if path == goes {
+            Some(errno(libc::ENOENT))
+        } else if path == loops {
+            Some(errno(libc::ELOOP))
+        } else {
+            None
+        }
+    }));
+
+    let found = Found::default();
+    let report = walk(
+        &faulty,
+        &[WalkRoot::new(tree.root())],
+        Options::default(),
+        &glob("120.mp4"),
+        found.sink(),
+    );
+
+    assert_eq!(found.sorted(), expected);
+    assert!(report.is_complete(), "{report:?}");
+    assert!(report.denied.is_empty(), "{report:?}");
+}
+
+#[test]
+fn a_directory_that_the_system_refuses_with_eperm_is_denied() {
+    let tree = Tree::new("errors-eperm");
+    let expected = vec![tree.file("open/120.mp4")];
+    tree.file("sip/120.mp4");
+    let sip = tree.root().join("sip");
+    let faulty = Faulty::new(RealFs, |call, path: &Path| {
+        (call == Call::Open && path == sip).then(|| errno(libc::EPERM))
+    });
+
+    let found = Found::default();
+    let report = walk(
+        &faulty,
+        &[WalkRoot::new(tree.root())],
+        Options::default(),
+        &glob("120.mp4"),
+        found.sink(),
+    );
+
+    assert_eq!(found.sorted(), expected);
+    assert_eq!(report.denied, vec![sip]);
+    assert!(report.is_complete(), "{report:?}");
 }
 
 #[test]
