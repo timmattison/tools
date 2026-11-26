@@ -33,7 +33,7 @@ claude --plugin-dir ~/code/tools/plugins/ic-inline
 
 ```
 /ic diff before.png after.png
-/ic diff --mode highlight before.png after.png
+/ic diff --mode boxes before.png after.png
 /ic diff --mode mask "~/shots/before change.png" ~/shots/after.png
 ```
 
