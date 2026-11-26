@@ -13,7 +13,8 @@
 //! - `burst_gap`: for `smart` only, in seconds, above zero. The default is
 //!   `DEFAULT_BURST_GAP`.
 //! - `shape`: `block`, `underline`, or `bar`, through DECSCUSR
-//!   (`CSI Ps SP q`). The blink of the recording stays.
+//!   (`CSI Ps SP q`). The blink of the recording stays, from DECSCUSR or from
+//!   mode 12.
 //! - `blink`: `true` or `false`, through DECSCUSR. The shape of the recording
 //!   stays. The filter also drops mode 12, which starts and stops the blink.
 //! - `color`: `#rrggbb`, through OSC 12. The filter drops OSC 12, OSC 112,
@@ -71,7 +72,8 @@ const ST: &str = "\x1b\\";
 /// is rewritten in the event where it completes. Each other byte stays in
 /// its event. At the end of a region that is not open, it sets the state of
 /// the recording back: the state that the last sequence of the region gave,
-/// or else the default of a terminal.
+/// or else the default of a terminal. The restore writes the DECSCUSR of the
+/// recording, then the mode 12 that came after it.
 ///
 /// The filter sees only its region. A sequence that the start of the region
 /// splits is not seen, and the state of the recording before the region is
@@ -261,13 +263,23 @@ struct CursorState {
     visible: bool,
     /// The last DECSCUSR value.
     style: u16,
-    /// The last set (`true`) or reset (`false`) of mode 12, when one came.
+    /// The last set (`true`) or reset (`false`) of mode 12 that came after the
+    /// last DECSCUSR, when one came. In most terminals the last of the two
+    /// sets the blink, thus a DECSCUSR clears it.
     blink_mode: Option<bool>,
     color: CursorColor,
     /// The visibility that the last XTSAVE of mode 25 saved, when one came.
     saved_visible: Option<bool>,
-    /// The mode 12 that the last XTSAVE of mode 12 saved, when one came.
-    saved_blink_mode: Option<Option<bool>>,
+    /// The blink that the last XTSAVE of mode 12 saved, when one came.
+    saved_blink: Option<bool>,
+}
+
+impl CursorState {
+    /// The blink that the recording shows: `blink_mode`, else the blink of
+    /// the last DECSCUSR.
+    fn blink(&self) -> bool {
+        self.blink_mode.unwrap_or_else(|| style_parts(self.style).1)
+    }
 }
 
 impl Default for CursorState {
@@ -279,7 +291,7 @@ impl Default for CursorState {
             blink_mode: None,
             color: CursorColor::Default,
             saved_visible: None,
-            saved_blink_mode: None,
+            saved_blink: None,
         }
     }
 }
@@ -534,6 +546,7 @@ impl<'a> Rewriter<'a> {
                     .filter(|style| *style <= LAST_STYLE)
                 {
                     self.recording.style = style;
+                    self.recording.blink_mode = None;
                 }
                 Some(controls.clone())
             }
@@ -573,17 +586,29 @@ impl<'a> Rewriter<'a> {
                     }
                     dropped = true;
                 }
-                Ok(BLINK_MODE) if self.cursor.blink.is_some() => {
-                    match final_char {
-                        's' => recording.saved_blink_mode = Some(recording.blink_mode),
-                        'r' => {
-                            if let Some(saved) = recording.saved_blink_mode {
-                                recording.blink_mode = saved;
-                            }
+                Ok(BLINK_MODE) if self.cursor.owns_style() => {
+                    let change = match final_char {
+                        's' => {
+                            recording.saved_blink = Some(recording.blink());
+                            None
                         }
-                        _ => recording.blink_mode = Some(set),
+                        'r' => recording.saved_blink,
+                        _ => Some(set),
+                    };
+                    if let Some(blink) = change {
+                        recording.blink_mode = Some(blink);
                     }
-                    dropped = true;
+                    if self.cursor.blink.is_some() {
+                        dropped = true;
+                    } else {
+                        kept.push(mode);
+                        // The passed mode sets the blink that the answer shows.
+                        if let Some(blink) = change {
+                            self.shown_style = self
+                                .shown_style
+                                .map(|style| style_value(style_parts(style).0, blink));
+                        }
+                    }
                 }
                 _ => kept.push(mode),
             }
@@ -657,7 +682,7 @@ impl<'a> Rewriter<'a> {
                 self.shown_color = Some(color);
             }
         }
-        if target == Target::Recording && self.cursor.blink.is_some() {
+        if target == Target::Recording && self.cursor.owns_style() {
             if let Some(set) = self.recording.blink_mode {
                 let final_char = if set { 'h' } else { 'l' };
                 text.push_str(&format!("\x1b[?{BLINK_MODE}{final_char}"));
@@ -685,10 +710,10 @@ impl<'a> Rewriter<'a> {
         match target {
             Target::Recording => Some(self.recording.style),
             Target::Wanted => {
-                let (shape, blink) = style_parts(self.recording.style);
+                let shape = style_parts(self.recording.style).0;
                 Some(style_value(
                     self.cursor.shape.unwrap_or(shape),
-                    self.cursor.blink.unwrap_or(blink),
+                    self.cursor.blink.unwrap_or(self.recording.blink()),
                 ))
             }
         }
