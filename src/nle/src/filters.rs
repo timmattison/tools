@@ -25,8 +25,8 @@ pub const PAUSE_REMOVAL: &str = "pause-removal";
 /// the region. Each event at or after `at` moves later by `duration`, so a
 /// pause at the time of a key comes before that key. The end of the timeline
 /// moves later too when it is at or after `at`, also when no event moves.
-/// The normal region is `All`. In a range, the events after the range move by
-/// the shift, thus they move only when an event of the range moves.
+/// The normal region is `All`. In a range, each event after the range moves
+/// later by `duration`, also when no event of the range moves.
 pub const PAUSE_INSERTION: &str = "pause-insertion";
 
 /// The kind of the filter that cuts the silence at the start and at the end.
@@ -40,7 +40,7 @@ pub const PAUSE_INSERTION: &str = "pause-insertion";
 /// each event after it moves back to it, and the end of the timeline comes
 /// back to it. A region with no input event keeps its start, and a region
 /// with no output event keeps its end. On a range, the events after the range
-/// move by the shift, as for each filter.
+/// move by the shift of step 6 on `FilterFn`.
 pub const AUTO_TRIM: &str = "auto-trim";
 
 /// A registry that holds each built-in filter under its kind.
@@ -117,7 +117,11 @@ fn remove_pauses(span: Span, options: &PauseRemoval) -> Span {
         event.time = new;
         previous = Some((old, new));
     }
-    Span { events, end: None }
+    Span {
+        events,
+        end: None,
+        shift: None,
+    }
 }
 
 /// The options of pause insertion.
@@ -133,7 +137,9 @@ struct PauseInsertion {
 /// Each event at or after the point moves later by the duration. When the
 /// filter sees the end of the timeline, and that end is at or after the
 /// point, the answer sets the end later by the duration. Else the end stays,
-/// or it moves by the shift when the filter does not see it.
+/// or it moves by the shift when the filter does not see it. The answer sets
+/// the shift to the duration, so each event after the region moves later by
+/// it, also when no event of the region moves.
 fn insert_pause(span: Span, options: &PauseInsertion) -> Span {
     let (at, duration) = (options.at.get(), options.duration.get());
     let later = |time: f64| if time >= at { time + duration } else { time };
@@ -147,6 +153,7 @@ fn insert_pause(span: Span, options: &PauseInsertion) -> Span {
             })
             .collect(),
         end: span.end.map(later),
+        shift: Some(duration),
     }
 }
 
@@ -182,6 +189,7 @@ fn trim_silence(span: Span, options: &AutoTrim) -> Span {
     let Span {
         mut events,
         mut end,
+        shift: _,
     } = span;
     if options.leading {
         if let Some(first_input) = times_of(&events, &EventType::Input).min_by(f64::total_cmp) {
@@ -199,7 +207,11 @@ fn trim_silence(span: Span, options: &AutoTrim) -> Span {
             end = end.map(|_| last_output);
         }
     }
-    Span { events, end }
+    Span {
+        events,
+        end,
+        shift: None,
+    }
 }
 
 #[cfg(test)]

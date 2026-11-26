@@ -45,12 +45,13 @@ use crate::types::{
 /// the end of the timeline is not finite, because a shift can overflow.
 ///
 /// A filter of `FilterRegistry::register_typed` gets these steps too, with
-/// three more: its options are parsed first, and it sees and can set the end
-/// of the timeline (see `Span`).
+/// more: its options are parsed first, it sees and can set the end of the
+/// timeline, and it can set the shift (see `Span`).
 pub type FilterFn = dyn Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync;
 
-/// The events of a region and the end of the timeline, as a filter of
-/// `FilterRegistry::register_typed` sees them and answers them.
+/// The events of a region, the end of the timeline, and the shift of the
+/// events after the region, as a filter of `FilterRegistry::register_typed`
+/// sees them and answers them.
 ///
 /// The steps on `FilterFn` apply to `events`. These steps apply to `end`:
 ///
@@ -65,9 +66,19 @@ pub type FilterFn = dyn Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync
 ///    error that names the kind.
 /// 4. The end is never less than the time of the last event.
 ///
+/// These steps apply to `shift`:
+///
+/// 1. The filter sees `None`.
+/// 2. An answer of `None` leaves the shift of step 6 on `FilterFn`.
+/// 3. An answer of `Some(shift)` is the shift. The events after the region
+///    move by it, also when no event of the region moves, and so does the end
+///    by step 8 on `FilterFn`.
+///
 /// Thus a filter that cuts the time after its last event answers that time
 /// as the end. A plain filter cannot do this, because step 8 on `FilterFn`
-/// keeps the gap between the last event and the end.
+/// keeps the gap between the last event and the end. And a filter that adds
+/// time to its region answers that time as the shift, so the events after the
+/// region move also when no event of the region moves.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Span {
     /// The events, with times relative to the region start.
@@ -75,6 +86,8 @@ pub struct Span {
     /// The end of the timeline, relative to the region start, by the steps
     /// above.
     pub end: Option<f64>,
+    /// The shift of the events after the region, by the steps above.
+    pub shift: Option<f64>,
 }
 
 /// The one form in which the registry keeps a filter: a function from a span
@@ -120,6 +133,7 @@ impl FilterRegistry {
                 Ok(Span {
                     events: filter(&span.events, options),
                     end: None,
+                    shift: None,
                 })
             }),
         );
@@ -198,10 +212,12 @@ impl FilterRegistry {
         let span = Span {
             events: inside,
             end: end_inside.then_some(*end - start),
+            shift: None,
         };
         let Span {
             events: answer,
             end: answered_end,
+            shift: answered_shift,
         } = filter(span, &applied.options).map_err(|reason| {
             NleError::RenderError(format!("filter \"{name}\" has invalid options: {reason}"))
         })?;
@@ -230,7 +246,7 @@ impl FilterRegistry {
                 Some(time)
             }
         };
-        let shift = last_time(&answer) - inside_last;
+        let shift = answered_shift.unwrap_or_else(|| last_time(&answer) - inside_last);
 
         let mut result = before;
         result.extend(answer.into_iter().map(|event| Event {

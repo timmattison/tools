@@ -384,6 +384,7 @@ fn shift_by(span: Span, options: &ShiftBy) -> Span {
             })
             .collect(),
         end: None,
+        shift: None,
     }
 }
 
@@ -688,6 +689,7 @@ fn end_registry(end: Option<f64>) -> FilterRegistry {
     registry.register_typed(kind("set-end"), move |span: Span, _: &NoOptions| Span {
         events: span.events,
         end,
+        shift: None,
     });
     registry
 }
@@ -706,6 +708,7 @@ fn a_typed_filter_sees_the_end_only_when_the_end_is_inside_its_region() {
         Span {
             events: span.events,
             end: None,
+            shift: None,
         }
     });
 
