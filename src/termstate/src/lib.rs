@@ -276,7 +276,7 @@ impl TerminalTheme {
 }
 
 /// One character cell of the screen grid, with its colors and attributes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
     /// The character of the cell.
     pub ch: char,
@@ -291,6 +291,13 @@ pub struct Cell {
     pub italic: bool,
     /// Whether the character is underlined.
     pub underline: bool,
+}
+
+// The red stub: a clone that holds a blank screen. The next commit makes it real.
+impl Clone for TerminalState {
+    fn clone(&self) -> Self {
+        Self::new(self.width, self.height, self.theme.clone())
+    }
 }
 
 impl Default for Cell {
