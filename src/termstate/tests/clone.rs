@@ -36,3 +36,18 @@ fn feeding_a_clone_leaves_the_original_unchanged() {
     assert_eq!(original.get_cursor_position(), cursor_before);
     assert_ne!(copy.get_grid(), &grid_before);
 }
+
+#[test]
+fn a_clone_taken_inside_an_escape_sequence_finishes_it() {
+    let mut original = terminal();
+    original.process_output("A\x1b[3").unwrap();
+    let mut copy = original.clone();
+
+    original.process_output("1mB").unwrap();
+    copy.process_output("1mB").unwrap();
+
+    assert_eq!(copy.get_grid(), original.get_grid());
+    let cell = &original.get_grid()[0][1];
+    assert_eq!(cell.ch, 'B');
+    assert_eq!(cell.fg_color, TerminalTheme::auto().colors[1]);
+}
