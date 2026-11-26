@@ -1549,3 +1549,25 @@ fn plugin_file_in_a_large_commit_runs_the_plugin_checks() {
         "{FIXTURE_PLUGIN_FILE} in a large commit must run each check of the plugin block: {output}"
     );
 }
+
+/// A commit that stages a file of `plugins/ic-inline` among some thousand other
+/// paths must run the test target of `ic` that reads the plugin. The path
+/// sorts before the filler, so a trigger that reads the list from a pipe into
+/// `grep -q` runs no test for it.
+#[test]
+fn ic_inline_file_in_a_large_commit_runs_the_emit_rgba_tests() {
+    let staged = IC_INLINE_FILES[0];
+    let dir = unique_fixture_dir();
+    write_files(&dir, &[staged]);
+    stage_with_large_filler(&dir, &[staged]);
+
+    let (HookRun { passed, output }, calls) = run_hook_with_fake_cargo_and_claude(&dir);
+    cleanup(&dir);
+
+    assert!(passed, "the hook must pass with a fake cargo: {output}");
+    assert_eq!(
+        calls.arguments,
+        [IC_INLINE_CARGO_CALL],
+        "{staged} in a large commit must run the emit-rgba tests of ic: {output}"
+    );
+}
