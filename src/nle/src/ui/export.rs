@@ -305,15 +305,19 @@ const COMPRESS_LABEL: &str = "Compress";
 /// Export button. A click on Export asks for a file, exports the open project
 /// there, and shows the progress and then the written file. `on_result` gets
 /// the end of each export.
+///
+/// The Export button is disabled while `busy` is true. Thus no export starts
+/// during a dialog, a load, or another export.
 #[component]
 pub(super) fn ExportBar(
     loaded: ReadSignal<Option<Document>>,
+    /// True from a click on Open Recording or Export until its dialog and its
+    /// work end. Both buttons are disabled while it is true.
+    mut busy: Signal<bool>,
     on_result: EventHandler<Result<(), String>>,
 ) -> Element {
     let services = use_context::<Services>();
     let mut settings = use_signal(ExportSettings::default);
-    // True from the click until the dialog and the export end.
-    let mut busy = use_signal(|| false);
     // True while the export runs, and the newest stage that it reported.
     let exporting = use_signal(|| false);
     let progress = use_signal(|| None::<ExportProgress>);
@@ -406,7 +410,7 @@ pub(super) fn ExportBar(
             button {
                 disabled: busy(),
                 onclick: move |_| {
-                    // A click that arrives during a dialog or an export starts nothing.
+                    // A click that arrives during a dialog, a load, or an export starts nothing.
                     if busy() {
                         return;
                     }

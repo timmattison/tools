@@ -6268,6 +6268,10 @@ The save dialog offers `<name>-edited` with the ending of the format, in the
 folder of the recording. If the file name that you type has a different
 ending, the editor replaces it with the ending of the format.
 
+Open Recording and Export are disabled while a dialog, a load, or an export
+runs. Thus a new recording cannot open during an export, and an export cannot
+start during an open.
+
 For a web page or a video, the editor writes the rendered recording to a
 temporary file and runs `beta export` on it. The editor deletes the temporary
 file when `beta` stops. During a video export, the bar shows the frame count

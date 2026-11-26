@@ -6,6 +6,9 @@
 //! export bar of the `export` module. The open document lives in the state of
 //! `App`: the `Editor` of its project, and the metadata of the recording file
 //! that it came from.
+//!
+//! `App` also owns one `busy` signal. It is true from a click on Open Recording
+//! or Export until its dialog and its work end, and it disables both buttons.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -213,11 +216,14 @@ pub(crate) fn App() -> Element {
     let filters = use_hook(|| Arc::new(FilterRegistry::new()));
     let mut loaded = use_signal(|| None::<Document>);
     let mut error = use_signal(|| None::<String>);
+    // True from a click on Open Recording or Export until its dialog and its work end.
+    let busy = use_signal(|| false);
 
     rsx! {
         style { {STYLE} }
         div { class: "app-layout",
             MenuBar {
+                busy,
                 on_loaded: move |recording| match Document::open(recording, filters.clone()) {
                     Ok(document) => {
                         loaded.set(Some(document));
@@ -228,6 +234,7 @@ pub(crate) fn App() -> Element {
                 on_error: move |message| error.set(Some(message)),
                 export::ExportBar {
                     loaded,
+                    busy,
                     on_result: move |result: Result<(), String>| error.set(result.err()),
                 }
             }
@@ -245,25 +252,29 @@ pub(crate) fn App() -> Element {
 }
 
 /// The menu bar with the Open Recording button. `children` follow the button.
+///
+/// The button is disabled while `busy` is true. Thus no load starts during a
+/// dialog, a load, or an export.
 #[component]
 fn MenuBar(
+    /// True from a click on Open Recording or Export until its dialog and its
+    /// work end. Both buttons are disabled while it is true.
+    mut busy: Signal<bool>,
     on_loaded: EventHandler<LoadedRecording>,
     on_error: EventHandler<String>,
     children: Element,
 ) -> Element {
     let services = use_context::<Services>();
-    // True from the click until the dialog and the load end.
-    let mut opening = use_signal(|| false);
     rsx! {
         div { class: "menu-bar",
             button {
-                disabled: opening(),
+                disabled: busy(),
                 onclick: move |_| {
-                    // A click that arrives during a dialog or a load starts nothing.
-                    if opening() {
+                    // A click that arrives during a dialog, a load, or an export starts nothing.
+                    if busy() {
                         return;
                     }
-                    opening.set(true);
+                    busy.set(true);
                     let services = services.clone();
                     spawn(async move {
                         if let Some(path) = services.pick_recording().await {
@@ -272,7 +283,7 @@ fn MenuBar(
                                 Err(error) => on_error.call(format!("{OPEN_FAILED_PREFIX}: {error}")),
                             }
                         }
-                        opening.set(false);
+                        busy.set(false);
                     });
                 },
                 "Open Recording"
