@@ -179,3 +179,31 @@ fn a_range_filter_sees_the_events_inside_relative_to_the_region_start() {
     assert_eq!(out[1].event_type, input[1].event_type);
     assert_eq!(out[4].data, input[4].data);
 }
+
+#[test]
+fn a_filter_that_returns_nothing_moves_the_later_events_left() {
+    let (registry, _seen) = spy_registry(|_| Vec::new());
+
+    let out = registry
+        .run(
+            events(&[0.5, 1.0, 1.5, 2.5, 3.5]),
+            &[range("spy", 1.0, 2.0)],
+        )
+        .unwrap();
+
+    assert_eq!(times(&out), vec![0.5, 2.0, 3.0]);
+}
+
+#[test]
+fn an_empty_region_still_calls_the_filter_with_an_empty_slice() {
+    let (registry, seen) = spy_registry(|events| events.to_vec());
+
+    let out = registry
+        .run(events(&[0.5, 3.5]), &[range("spy", 1.0, 2.0)])
+        .unwrap();
+
+    let calls = seen.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].is_empty());
+    assert_eq!(times(&out), vec![0.5, 3.5]);
+}
