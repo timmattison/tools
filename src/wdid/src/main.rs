@@ -14,6 +14,7 @@ use wdid::history::{self, HistoryError};
 use wdid::render;
 use wdid::shell::{self, Definitions, Resolver, ShellError, ShellKind};
 use wdid::tally::{tally, Window};
+use wdid::workspace::{self, WorkspaceError};
 
 /// The one-line description that `--help` shows.
 const ABOUT: &str = "What do I do: count which tools of this workspace the atuin history uses";
@@ -55,7 +56,8 @@ const EXIT_ERROR: u8 = 1;
 #[command(version = version_string!(), about = ABOUT)]
 struct Cli {
     /// The cargo workspace to report on. Without this flag, wdid uses the git
-    /// work tree of the current directory.
+    /// work tree of the current directory when it holds a Cargo.toml, else the
+    /// workspace that the installed wdid came from.
     #[arg(long, value_name = "PATH")]
     repo: Option<PathBuf>,
 
@@ -99,7 +101,11 @@ enum Error {
     /// The system does not give the current directory.
     #[error("cannot read the current directory: {0}")]
     CurrentDirectory(#[source] std::io::Error),
-    /// The workspace or its catalog cannot be read.
+    /// The workspace cannot be found: `--repo` is not a cargo workspace, git
+    /// does not start, or no step gives a workspace.
+    #[error(transparent)]
+    Workspace(#[from] WorkspaceError),
+    /// The catalog of the workspace cannot be read.
     #[error(transparent)]
     Catalog(#[from] CatalogError),
     /// The history cannot be read.
@@ -124,18 +130,19 @@ fn run(cli: &Cli) -> Result<String, Error> {
     let today = chrono::Utc::now().date_naive();
     let cwd = std::env::current_dir().map_err(Error::CurrentDirectory)?;
     let programs = Programs::default();
-    let root = catalog::workspace_root(cli.repo.as_deref(), &cwd, &programs)?;
     let search_path = std::env::var_os(PATH_VARIABLE);
     let home = std::env::var_os(HOME_VARIABLE).map(PathBuf::from);
     let install_root = std::env::var_os(INSTALL_ROOT_VARIABLE);
     let cargo_home = std::env::var_os(CARGO_HOME_VARIABLE);
-    let cargo_bin = catalog::cargo_bin(&catalog::InstallLocation {
+    let location = catalog::InstallLocation {
         install_root: install_root.as_deref(),
         cargo_home: cargo_home.as_deref(),
         home: home.as_deref(),
-    });
+    };
+    let workspace = workspace::find(cli.repo.as_deref(), &cwd, &programs, &location, TOOL)?;
+    let cargo_bin = catalog::cargo_bin(&location);
     let catalog = catalog::read(
-        &root,
+        &workspace.root,
         &programs,
         search_path.as_deref().map(OsStr::new),
         cargo_bin.as_deref(),
@@ -155,7 +162,7 @@ fn run(cli: &Cli) -> Result<String, Error> {
     };
     let tally = tally(&entries, &definitions, &resolver, &catalog, &window);
     Ok(if cli.json {
-        render::json(&tally, &window)
+        render::json(&tally, &window, &workspace)
     } else if cli.unparsed {
         render::unparsed(&tally)
     } else {
@@ -163,7 +170,7 @@ fn run(cli: &Cli) -> Result<String, Error> {
             std::env::var(WIDTH_VARIABLE).ok().as_deref(),
             termsize::controlling_columns(),
         );
-        render::text(&tally, &window, width)
+        render::text(&tally, &window, &workspace, width)
     })
 }
 

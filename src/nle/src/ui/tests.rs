@@ -15,7 +15,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tokio::sync::oneshot;
 
+use crate::editor::Edit;
 use crate::error::NleError;
+use crate::types::{ClipId, Seconds};
 
 const FIXTURE_PATH: &str = "/home/user/recordings/demo.json";
 /// The number of events in the fixture.
@@ -69,21 +71,41 @@ fn metadata_row(label: &str, value: &str, hover: Option<&str>) -> String {
     )
 }
 
+/// What `panels_root` builds its document from: a recording, and the edits
+/// that the editor of the document applied.
+#[derive(Clone)]
+struct PanelsInput {
+    recording: LoadedRecording,
+    edits: Vec<Edit>,
+}
+
 /// Renders `root` to text. The recording goes into the root context.
 fn render_panels(recording: LoadedRecording) -> String {
-    let mut dom = VirtualDom::new(panels_root).with_root_context(recording);
+    render_edited_panels(recording, Vec::new())
+}
+
+/// Renders the panels of a document whose editor applied `edits`.
+fn render_edited_panels(recording: LoadedRecording, edits: Vec<Edit>) -> String {
+    let mut dom = VirtualDom::new(panels_root).with_root_context(PanelsInput { recording, edits });
     dom.rebuild_in_place();
     dioxus_ssr::render(&dom)
 }
 
-/// A test root that shows the three panels of a recording from the context.
+/// A test root that shows the three panels of a document from the context.
 fn panels_root() -> Element {
-    let recording = use_context::<LoadedRecording>();
-    let loaded = use_signal(|| Some(recording));
+    let input = use_context::<PanelsInput>();
+    let loaded = use_signal(|| {
+        let mut document = Document::open(input.recording, Arc::new(crate::filters::registry()))
+            .expect("a document");
+        for edit in input.edits {
+            document.editor.apply(edit).expect("an edit that applies");
+        }
+        Some(document)
+    });
     rsx! {
         PreviewPane { loaded }
         Timeline { loaded }
-        PropertiesPanel { loaded }
+        PropertiesPanel { loaded, on_result: |_| {} }
     }
 }
 
@@ -206,6 +228,10 @@ struct Window {
     newest: Vec<ElementId>,
     /// The click listeners of the first render.
     first_render: Vec<ElementId>,
+    /// The id of each element that got an input listener, in creation order.
+    inputs: Vec<ElementId>,
+    /// The Apply Speed button, when a test noted it.
+    apply: Option<ElementId>,
 }
 
 impl Window {
@@ -222,6 +248,8 @@ impl Window {
             clicks: Vec::new(),
             newest: Vec::new(),
             first_render: Vec::new(),
+            inputs: Vec::new(),
+            apply: None,
         };
         window.note_listeners(&edits);
         window.first_render = window.clicks.clone();
@@ -241,6 +269,11 @@ impl Window {
             self.clicks.extend(&created);
             self.newest = created;
         }
+        self.inputs
+            .extend(edits.iter().filter_map(|edit| match edit {
+                Mutation::NewEventListener { name, id } if name == "input" => Some(*id),
+                _ => None,
+            }));
     }
 
     /// Renders what is dirty.
@@ -273,6 +306,45 @@ impl Window {
         let event = dioxus::prelude::Event::new(data as Rc<dyn Any>, true);
         self.dom.runtime().handle_event("click", event, id);
         self.render();
+    }
+
+    /// Sends the text to the input element, as if the user typed it, and renders.
+    fn type_into(&mut self, id: ElementId, text: &str) {
+        let form = dioxus::html::SerializedFormData::new(text.to_string(), Vec::new());
+        let data = Rc::new(PlatformEventData::new(Box::new(form)));
+        let event = dioxus::prelude::Event::new(data as Rc<dyn Any>, true);
+        self.dom.runtime().handle_event("input", event, id);
+        self.render();
+    }
+
+    /// The Start, End, and Speed fields, in this order.
+    fn speed_fields(&self) -> [ElementId; 3] {
+        let fields: [ElementId; 3] = self
+            .inputs
+            .clone()
+            .try_into()
+            .unwrap_or_else(|ids: Vec<ElementId>| panic!("the page has the inputs {ids:?}"));
+        fields
+    }
+
+    /// The Apply Speed button. `open_recording` noted it.
+    fn apply_button(&self) -> ElementId {
+        self.apply.expect("a window with an open recording")
+    }
+
+    /// The Remove button of the row that the newest render added.
+    fn remove_button(&self) -> ElementId {
+        assert_eq!(self.newest.len(), 1, "the render made {:?}", self.newest);
+        self.newest[0]
+    }
+
+    /// Fills the three fields and clicks Apply Speed.
+    fn apply_speed(&mut self, start: &str, end: &str, speed: &str) {
+        let [start_field, end_field, speed_field] = self.speed_fields();
+        self.type_into(start_field, start);
+        self.type_into(end_field, end);
+        self.type_into(speed_field, speed);
+        self.click(self.apply_button());
     }
 
     /// Runs the tasks of the app until they have no more work, and renders
@@ -395,6 +467,17 @@ fn timeline_rounds_the_duration_to_tenths() {
             "{expected} missing in {page}"
         );
     }
+}
+
+#[test]
+fn timeline_reads_the_project_of_the_editor() {
+    let trim = Edit::TrimClip {
+        id: ClipId(1),
+        in_point: Seconds::new(1.0).expect("a time"),
+        out_point: Seconds::new(2.0).expect("a time"),
+    };
+    let page = render_edited_panels(fixture(), vec![trim]);
+    assert!(page.contains("10 events | 0m 1.0s"), "{page}");
 }
 
 #[test]
@@ -529,6 +612,24 @@ async fn a_failed_load_keeps_the_open_recording() {
 }
 
 #[tokio::test]
+async fn a_recording_that_cannot_become_a_project_shows_the_banner() {
+    let mut loaded = fixture();
+    loaded.recording.duration = -1.0;
+    let fakes = Fakes::new().pick(picked()).load(Answer::Ready(Ok(loaded)));
+    let mut window = Window::open(&fakes);
+    window.click(window.open_button());
+    window.settle().await;
+    let page = window.html();
+    assert!(
+        page.contains(
+            "Failed to open recording: Invalid time: -1 (a time must be finite and not below zero)"
+        ),
+        "{page}"
+    );
+    assert_eq!(page.matches("No recording loaded").count(), 2, "{page}");
+}
+
+#[tokio::test]
 async fn a_load_after_an_error_removes_the_banner() {
     let fakes = Fakes::new()
         .pick(picked())
@@ -548,4 +649,277 @@ async fn a_load_after_an_error_removes_the_banner() {
     let page = window.html();
     assert!(!page.contains("role=\"alert\""), "{page}");
     assert!(page.contains("Demo Recording"), "{page}");
+}
+
+/// The row text of a speed change as the page shows it.
+fn speed_row(region: &str, speed: &str) -> String {
+    format!("<span>{region} at {speed}\u{d7}</span>")
+}
+
+/// The row of the page that shows the duration after the edits.
+fn edited_row(text: &str) -> String {
+    metadata_row("Edited duration", text, None)
+}
+
+/// Opens the fixture recording through the fakes, and notes the Apply Speed
+/// button.
+async fn open_recording() -> Window {
+    let fakes = Fakes::new()
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())));
+    let mut window = Window::open(&fakes);
+    window.click(window.open_button());
+    window.settle().await;
+    assert_eq!(window.newest.len(), 1, "{:?}", window.newest);
+    window.apply = Some(window.newest[0]);
+    window
+}
+
+#[tokio::test]
+async fn the_speed_panel_shows_its_fields_and_the_edited_duration() {
+    let window = open_recording().await;
+    let page = window.html();
+    for text in [
+        "Speed",
+        "Times are in seconds, on the timeline after the speed changes above.",
+        "Start (s)",
+        "End (s)",
+        "Apply Speed",
+    ] {
+        assert!(page.contains(text), "{text} missing in {page}");
+    }
+    assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
+    assert_eq!(window.speed_fields().len(), 3);
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn applying_a_speed_adds_a_row_and_shortens_the_recording() {
+    let mut window = open_recording().await;
+    window.apply_speed("10", "20", "2");
+    let page = window.html();
+    assert!(page.contains(&speed_row("10 s to 20 s", "2")), "{page}");
+    assert!(page.contains(&edited_row("1m 0.3s")), "{page}");
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn removing_a_speed_row_restores_the_duration() {
+    let mut window = open_recording().await;
+    window.apply_speed("10", "20", "2");
+    assert!(window.html().contains(" at 2\u{d7}"), "{}", window.html());
+    window.click(window.remove_button());
+    let page = window.html();
+    assert!(!page.contains(" at 2\u{d7}"), "{page}");
+    assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
+}
+
+#[tokio::test]
+async fn two_regions_keep_their_own_speeds() {
+    let mut window = open_recording().await;
+    window.apply_speed("10", "20", "2");
+    window.apply_speed("30", "40", "0.5");
+    let page = window.html();
+    let first = page
+        .find(&speed_row("10 s to 20 s", "2"))
+        .unwrap_or_else(|| panic!("no first row in {page}"));
+    let second = page
+        .find(&speed_row("30 s to 40 s", "0.5"))
+        .unwrap_or_else(|| panic!("no second row in {page}"));
+    assert!(first < second, "{page}");
+    assert!(page.contains(&edited_row("1m 10.3s")), "{page}");
+}
+
+#[tokio::test]
+async fn a_row_shows_the_times_of_its_region_as_typed() {
+    let mut window = open_recording().await;
+    window.apply_speed("0.01", "0.04", "2");
+    window.apply_speed("1.04", "2.04", "2");
+    let page = window.html();
+    assert!(page.contains(&speed_row("0.01 s to 0.04 s", "2")), "{page}");
+    assert!(page.contains(&speed_row("1.04 s to 2.04 s", "2")), "{page}");
+}
+
+#[tokio::test]
+async fn a_bad_speed_change_shows_the_reason_and_adds_no_row() {
+    let cases = [
+        (("abc", "20", "2"), "the start is not a number"),
+        (("10", "xyz", "2"), "the end is not a number"),
+        (("10", "20", ""), "the speed is not a number"),
+        (("10", "5", "2"), "the end must come after the start"),
+        (("10", "10", "2"), "the end must come after the start"),
+        (("10", "20", "0"), "Invalid speed: 0"),
+        (("-1", "20", "2"), "Invalid time: -1"),
+    ];
+    for ((start, end, speed), reason) in cases {
+        let mut window = open_recording().await;
+        window.apply_speed(start, end, speed);
+        let page = window.html();
+        let banner = format!("Failed to change the speed: {reason}");
+        assert!(page.contains(&banner), "{banner} missing in {page}");
+        assert!(!page.contains(" at "), "{page}");
+        assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
+    }
+}
+
+#[tokio::test]
+async fn a_failed_speed_change_keeps_the_fields_and_a_later_one_works() {
+    let mut window = open_recording().await;
+    window.apply_speed("10", "5", "2");
+    assert!(window.html().contains("role=\"alert\""));
+    let [_, end_field, _] = window.speed_fields();
+    window.type_into(end_field, "20");
+    window.click(window.apply_button());
+    let page = window.html();
+    assert!(page.contains(&speed_row("10 s to 20 s", "2")), "{page}");
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn a_remove_after_a_failed_speed_change_removes_the_banner() {
+    let mut window = open_recording().await;
+    window.apply_speed("10", "20", "2");
+    let remove = window.remove_button();
+    window.apply_speed("10", "5", "2");
+    assert!(
+        window.html().contains("role=\"alert\""),
+        "{}",
+        window.html()
+    );
+    window.click(remove);
+    let page = window.html();
+    assert!(!page.contains(" at 2\u{d7}"), "{page}");
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn a_speed_change_after_which_the_render_fails_is_refused() {
+    let mut window = open_recording().await;
+    window.apply_speed("0", "10", "1e-320");
+    let page = window.html();
+    assert!(page.contains("Failed to change the speed: "), "{page}");
+    assert!(page.contains("answered the length inf s"), "{page}");
+    assert!(!page.contains(" at "), "{page}");
+    assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
+}
+
+#[tokio::test]
+async fn a_remove_after_which_the_render_fails_is_refused() {
+    let mut window = open_recording().await;
+    window.apply_speed("0", "100", "1e300");
+    let first_remove = window.remove_button();
+    window.apply_speed("0", "10", "1e-308");
+    let page = window.html();
+    assert!(!page.contains("role=\"alert\""), "{page}");
+    window.click(first_remove);
+    let page = window.html();
+    assert!(page.contains("role=\"alert\""), "{page}");
+    assert!(page.contains("answered the length inf s"), "{page}");
+    assert!(
+        page.contains(&speed_row("0 s to 100 s", &1e300_f64.to_string())),
+        "{page}"
+    );
+    assert!(
+        page.contains(&speed_row("0 s to 10 s", &1e-308_f64.to_string())),
+        "{page}"
+    );
+}
+
+#[test]
+fn a_whole_timeline_filter_shows_a_row_and_the_edited_duration() {
+    use crate::filters::time_dilation::{self, Speed};
+    use crate::types::FilterRegion;
+    let filter = time_dilation::applied(FilterRegion::All, Speed::new(2.0).expect("a speed"));
+    let page = render_edited_panels(fixture(), vec![Edit::AddFilter { index: 0, filter }]);
+    assert!(
+        page.contains(&speed_row("the whole timeline", "2")),
+        "{page}"
+    );
+    let expected = crate::format::format_duration(65.3 / 2.0);
+    assert!(page.contains(&edited_row(&expected)), "{page}");
+}
+
+// The renders that an edit and its edited duration cost.
+
+/// The kind of the filter of `counting_filters`.
+const COUNTED_KIND: &str = "counted";
+
+/// A registry with one filter that keeps each event, and the count of the
+/// renders that ran that filter.
+fn counting_filters() -> (Arc<FilterRegistry>, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let renders = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&renders);
+    let mut registry = FilterRegistry::new();
+    registry.register(
+        crate::types::FilterKind::new(COUNTED_KIND),
+        move |events, _| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            events.to_vec()
+        },
+    );
+    (Arc::new(registry), renders)
+}
+
+#[test]
+fn an_edit_that_renders_and_its_edited_duration_cost_one_render() {
+    let (filters, renders) = counting_filters();
+    let mut document = Document::open(fixture(), filters).expect("a document");
+    let filter = AppliedFilter {
+        kind: crate::types::FilterKind::new(COUNTED_KIND),
+        region: FilterRegion::All,
+        options: crate::types::FilterOptions::new(),
+    };
+
+    document
+        .editor
+        .apply_renderable(Edit::AddFilter { index: 0, filter })
+        .expect("an edit that renders");
+    let edited = edited_duration(&Some(document));
+
+    assert_eq!(edited, "1m 5.3s");
+    assert_eq!(renders.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// The document of the fixture, with the filters of the app.
+fn app_document() -> Document {
+    Document::open(fixture(), Arc::new(crate::filters::registry())).expect("a document")
+}
+
+/// An edit that doubles the speed of the whole timeline.
+fn double_speed() -> Edit {
+    let filter = time_dilation::applied(FilterRegion::All, Speed::new(2.0).expect("a speed"));
+    Edit::AddFilter { index: 0, filter }
+}
+
+#[test]
+fn an_undo_after_a_speed_change_shows_the_duration_before_it() {
+    let mut document = app_document();
+    document
+        .editor
+        .apply_renderable(double_speed())
+        .expect("an edit that renders");
+
+    assert!(document.editor.undo());
+
+    assert_eq!(edited_duration(&Some(document)), "1m 5.3s");
+}
+
+#[test]
+fn an_edit_after_a_speed_change_shows_the_duration_after_it() {
+    let mut document = app_document();
+    document
+        .editor
+        .apply_renderable(double_speed())
+        .expect("an edit that renders");
+
+    document
+        .editor
+        .apply(double_speed())
+        .expect("an edit that applies");
+
+    assert_eq!(
+        edited_duration(&Some(document)),
+        format_duration(65.3 / 4.0)
+    );
 }
