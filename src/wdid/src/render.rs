@@ -9,6 +9,7 @@ use serde::Serialize;
 use crate::catalog::PathState;
 use crate::tally::{Classification, Summary, Tally, ToolUsage, Window};
 use crate::tool::ToolName;
+use crate::workspace::{FoundBy, Workspace};
 
 /// The name of each column of the table, in order.
 const COLUMNS: [&str; 9] = [
@@ -298,13 +299,46 @@ fn summary_lines(summary: &Summary, window: &Window) -> String {
     format!("{history}\n{shell}")
 }
 
-/// Gives the text report. `width` is the table width. `None` sets no limit.
+/// The text of step 1 in the workspace line, in the parentheses after the
+/// root.
+const FOUND_BY_REPO_FLAG: &str = "--repo";
+
+/// The text of step 2 in the workspace line.
+const FOUND_BY_WORK_TREE: &str = "the git work tree of the current directory";
+
+/// What starts the text of step 3 in the workspace line.
+const FOUND_BY_INSTALLED: &str = "the source of the installed wdid";
+
+/// Gives the line that names the workspace and the step that found it.
+fn workspace_line(workspace: &Workspace) -> String {
+    let found_by = match &workspace.found_by {
+        FoundBy::RepoFlag => FOUND_BY_REPO_FLAG.to_string(),
+        FoundBy::WorkTree => FOUND_BY_WORK_TREE.to_string(),
+        FoundBy::InstalledGit { commit, .. } => {
+            format!("{FOUND_BY_INSTALLED}, commit {}", commit.short())
+        }
+        FoundBy::InstalledPath { crate_dir } => {
+            format!(
+                "{FOUND_BY_INSTALLED}, cargo install --path {}",
+                shellquote::shell_quote(&crate_dir.to_string_lossy())
+            )
+        }
+    };
+    format!("Workspace: {} ({found_by})", workspace.root.display())
+}
+
+/// Gives the text report. `workspace` is the workspace of the report. `width`
+/// is the table width. `None` sets no limit.
 #[must_use]
-pub fn text(tally: &Tally, window: &Window, width: Option<u16>) -> String {
+pub fn text(tally: &Tally, window: &Window, workspace: &Workspace, width: Option<u16>) -> String {
     [
         table(tally, width),
         group_lines(tally, window),
-        summary_lines(&tally.summary, window),
+        format!(
+            "{}\n{}",
+            summary_lines(&tally.summary, window),
+            workspace_line(workspace)
+        ),
     ]
     .join(BETWEEN_BLOCKS)
         + "\n"
@@ -369,6 +403,44 @@ struct ToolDocument<'a> {
     classification: Classification,
 }
 
+/// The step that found the workspace, in the JSON document, with the facts of
+/// the record for step 3.
+#[derive(Serialize)]
+#[serde(tag = "found_by", rename_all = "snake_case")]
+enum FoundByDocument<'a> {
+    RepoFlag,
+    WorkTree,
+    InstalledGit { url: &'a str, commit: &'a str },
+    InstalledPath { crate_dir: String },
+}
+
+/// The `workspace` block of the JSON document.
+#[derive(Serialize)]
+struct WorkspaceDocument<'a> {
+    root: String,
+    #[serde(flatten)]
+    found_by: FoundByDocument<'a>,
+}
+
+/// Gives the JSON form of the workspace.
+fn workspace_document(workspace: &Workspace) -> WorkspaceDocument<'_> {
+    let found_by = match &workspace.found_by {
+        FoundBy::RepoFlag => FoundByDocument::RepoFlag,
+        FoundBy::WorkTree => FoundByDocument::WorkTree,
+        FoundBy::InstalledGit { url, commit } => FoundByDocument::InstalledGit {
+            url,
+            commit: commit.as_str(),
+        },
+        FoundBy::InstalledPath { crate_dir } => FoundByDocument::InstalledPath {
+            crate_dir: crate_dir.to_string_lossy().into_owned(),
+        },
+    };
+    WorkspaceDocument {
+        root: workspace.root.to_string_lossy().into_owned(),
+        found_by,
+    }
+}
+
 /// The whole JSON document.
 #[derive(Serialize)]
 struct Document<'a> {
@@ -382,6 +454,7 @@ struct Document<'a> {
     never_used_old: Vec<&'a ToolName>,
     never_used_new: Vec<&'a ToolName>,
     idle: Vec<&'a ToolName>,
+    workspace: WorkspaceDocument<'a>,
 }
 
 /// Gives the JSON form of the state of the PATH.
@@ -423,16 +496,18 @@ fn names_of<'a>(tools: &[&'a ToolUsage]) -> Vec<&'a ToolName> {
 }
 
 /// Gives the JSON document, pretty-printed, with a final newline.
+/// `workspace` is the workspace of the report.
 ///
-/// The crate directory is a text with `/` separators. The three lists at the
-/// end follow the order of the text report.
+/// The crate directory is a text with `/` separators. The three lists after
+/// the tools follow the order of the text report. The `workspace` block at the
+/// end names the root of the workspace and the step that found it.
 ///
 /// # Panics
 ///
 /// Never in practice. The document holds only numbers, dates, and text, and
 /// `serde_json` serializes each of them without an error.
 #[must_use]
-pub fn json(tally: &Tally, window: &Window) -> String {
+pub fn json(tally: &Tally, window: &Window, workspace: &Workspace) -> String {
     let summary = &tally.summary;
     let document = Document {
         today: window.today,
@@ -463,6 +538,7 @@ pub fn json(tally: &Tally, window: &Window) -> String {
         never_used_old: names_of(&tools_with(tally, Classification::NeverUsedOld)),
         never_used_new: names_of(&tools_with(tally, Classification::NeverUsedNew)),
         idle: names_of(&idle_tools(tally)),
+        workspace: workspace_document(workspace),
     };
     let mut text = serde_json::to_string_pretty(&document)
         .expect("a document of numbers, dates, and text always serializes");

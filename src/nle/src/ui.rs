@@ -18,11 +18,12 @@ use std::sync::Arc;
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 
-use crate::editor::Editor;
+use crate::editor::{Edit, Editor};
 use crate::error::NleError;
 use crate::export::{ExportProgress, ExportRequest};
+use crate::filters::time_dilation::{self, Speed};
 use crate::pipeline::FilterRegistry;
-use crate::types::EditProject;
+use crate::types::{AppliedFilter, EditProject, FilterRegion, Seconds};
 
 use crate::format::{file_name, format_duration, format_recorded};
 use crate::types::{LoadedRecording, RecordingMetadata};
@@ -44,6 +45,36 @@ const ALL_FILES_FILTER_NAME: &str = "All Files";
 const ALL_FILES_FILTER_EXTENSIONS: &[&str] = &["*"];
 /// The start of the message for a recording that does not open.
 const OPEN_FAILED_PREFIX: &str = "Failed to open recording";
+
+/// The heading of the speed panel.
+const SPEED_HEADING: &str = "Speed";
+/// The hint of the speed panel.
+const SPEED_HINT: &str = "Times are in seconds, on the timeline after the speed changes above.";
+/// The label of the field for the start of a region.
+const START_LABEL: &str = "Start (s)";
+/// The label of the field for the end of a region.
+const END_LABEL: &str = "End (s)";
+/// The label of the field for the speed.
+const SPEED_LABEL: &str = "Speed";
+/// The text of the button that applies the speed.
+const APPLY_SPEED_LABEL: &str = "Apply Speed";
+/// The label of the row for the duration after the edits.
+const EDITED_DURATION_LABEL: &str = "Edited duration";
+
+/// The text of the button that removes a speed change.
+const REMOVE_LABEL: &str = "Remove";
+/// The text for a speed change that covers the whole timeline.
+const WHOLE_TIMELINE: &str = "the whole timeline";
+/// The start of the message for a speed change that does not apply.
+const SPEED_FAILED_PREFIX: &str = "Failed to change the speed";
+/// The reason for a start that is not a number.
+const START_NOT_A_NUMBER: &str = "the start is not a number";
+/// The reason for an end that is not a number.
+const END_NOT_A_NUMBER: &str = "the end is not a number";
+/// The reason for a speed that is not a number.
+const SPEED_NOT_A_NUMBER: &str = "the speed is not a number";
+/// The reason for an end that is not above the start.
+const END_BEFORE_START: &str = "the end must come after the start";
 
 /// The title of the application window.
 const WINDOW_TITLE: &str = "NLE - Terminal Recording Editor";
@@ -213,7 +244,7 @@ impl Document {
 /// The root component of the application.
 #[component]
 pub(crate) fn App() -> Element {
-    let filters = use_hook(|| Arc::new(FilterRegistry::new()));
+    let filters = use_hook(|| Arc::new(crate::filters::registry()));
     let mut loaded = use_signal(|| None::<Document>);
     let mut error = use_signal(|| None::<String>);
     // True from a click on Open Recording or Export until its dialog and its work end.
@@ -246,7 +277,10 @@ pub(crate) fn App() -> Element {
             }
             PreviewPane { loaded }
             Timeline { loaded }
-            PropertiesPanel { loaded }
+            PropertiesPanel {
+                loaded,
+                on_result: move |result: Result<(), String>| error.set(result.err()),
+            }
         }
     }
 }
@@ -342,19 +376,186 @@ fn summary(open: &Document) -> String {
     )
 }
 
-/// The metadata of the open recording.
+/// The metadata of the open recording, and the speed panel. `on_result` gets
+/// the outcome of each speed change: `Ok`, or the message of the banner.
 #[component]
-fn PropertiesPanel(loaded: ReadSignal<Option<Document>>) -> Element {
-    let loaded = loaded.read();
+fn PropertiesPanel(
+    loaded: Signal<Option<Document>>,
+    on_result: EventHandler<Result<(), String>>,
+) -> Element {
+    let metadata = loaded.read().as_ref().map(|open| open.metadata.clone());
     rsx! {
         div { class: "properties-panel",
             h3 { "Properties" }
-            if let Some(open) = loaded.as_ref() {
-                {metadata_rows(&open.metadata)}
+            if let Some(metadata) = metadata {
+                {metadata_rows(&metadata)}
+                SpeedPanel { loaded, on_result }
             } else {
                 div { class: "placeholder", "No recording loaded" }
             }
         }
+    }
+}
+
+/// The speed panel: three fields for a region and a speed, the button that
+/// applies them, and the time dilation filters of the project. `on_result`
+/// gets the outcome of each Apply Speed and each Remove.
+#[component]
+fn SpeedPanel(
+    loaded: Signal<Option<Document>>,
+    on_result: EventHandler<Result<(), String>>,
+) -> Element {
+    let mut start = use_signal(String::new);
+    let mut end = use_signal(String::new);
+    let mut speed = use_signal(String::new);
+    let edited = use_memo(move || edited_duration(&loaded.read()));
+    let rows = speed_rows(&loaded.read());
+    rsx! {
+        div { class: "speed-panel",
+            h3 { {SPEED_HEADING} }
+            p { class: "speed-hint", {SPEED_HINT} }
+            label { class: "speed-field",
+                {START_LABEL}
+                input {
+                    r#type: "number",
+                    step: "any",
+                    min: "0",
+                    value: "{start}",
+                    oninput: move |event| start.set(event.value()),
+                }
+            }
+            label { class: "speed-field",
+                {END_LABEL}
+                input {
+                    r#type: "number",
+                    step: "any",
+                    min: "0",
+                    value: "{end}",
+                    oninput: move |event| end.set(event.value()),
+                }
+            }
+            label { class: "speed-field",
+                {SPEED_LABEL}
+                input {
+                    r#type: "number",
+                    step: "any",
+                    min: "0",
+                    value: "{speed}",
+                    oninput: move |event| speed.set(event.value()),
+                }
+            }
+            button {
+                onclick: move |_| {
+                    let change = speed_change(&start.read(), &end.read(), &speed.read());
+                    let outcome = change.and_then(|filter| {
+                        edit_document(loaded, |project| Edit::AddFilter {
+                            index: project.filters.len(),
+                            filter,
+                        })
+                    });
+                    report(on_result, outcome);
+                },
+                {APPLY_SPEED_LABEL}
+            }
+            for (index, text) in rows {
+                div { class: "speed-row", key: "{index}",
+                    span { "{text}" }
+                    button {
+                        onclick: move |_| {
+                            let outcome = edit_document(loaded, |_| Edit::RemoveFilter { index });
+                            report(on_result, outcome);
+                        },
+                        {REMOVE_LABEL}
+                    }
+                }
+            }
+            div { class: "metadata-item",
+                span { class: "metadata-label", {EDITED_DURATION_LABEL} }
+                span { class: "metadata-value", "{edited}" }
+            }
+        }
+    }
+}
+
+/// Applies the edit that `make` builds from the project to the editor of the
+/// open document. The answer is the text of the error of a refused edit. An
+/// edit after which the project does not render is refused too. With no open
+/// document, nothing changes and the answer is `Ok`.
+fn edit_document(
+    mut loaded: Signal<Option<Document>>,
+    make: impl FnOnce(&EditProject) -> Edit,
+) -> Result<(), String> {
+    // One write borrow holds the whole edit. No read borrow lives across it.
+    loaded.with_mut(|document| {
+        document.as_mut().map_or(Ok(()), |open| {
+            let edit = make(open.editor.project());
+            open.editor
+                .apply_renderable(edit)
+                .map_err(|failure| failure.to_string())
+        })
+    })
+}
+
+/// Sends the outcome of a speed change to `on_result`: `Ok` for a change that
+/// applied, or the message of the banner for a change that did not.
+fn report(on_result: EventHandler<Result<(), String>>, outcome: Result<(), String>) {
+    on_result.call(outcome.map_err(|reason| format!("{SPEED_FAILED_PREFIX}: {reason}")));
+}
+
+/// One row for each time dilation filter of the project: the index of the
+/// filter in the project, and the text of its row. Filters of other kinds
+/// have no row, but they keep their place in the index.
+fn speed_rows(document: &Option<Document>) -> Vec<(usize, String)> {
+    let Some(open) = document else {
+        return Vec::new();
+    };
+    open.editor
+        .project()
+        .filters
+        .iter()
+        .enumerate()
+        .filter_map(|(index, filter)| {
+            let speed = time_dilation::speed_of(filter)?;
+            let region = match filter.region {
+                FilterRegion::All => WHOLE_TIMELINE.to_owned(),
+                // The seconds as the fields take them, so no two regions share a row text.
+                FilterRegion::Range { start, end } => {
+                    format!("{} s to {} s", start.get(), end.get())
+                }
+            };
+            Some((index, format!("{region} at {}\u{d7}", speed.get())))
+        })
+        .collect()
+}
+
+/// Reads the three fields of the speed panel: the start and the end of a
+/// region in seconds, and a speed. The answer is the filter to add, or the
+/// reason why the fields do not make one.
+fn speed_change(start: &str, end: &str, speed: &str) -> Result<AppliedFilter, String> {
+    let start: f64 = start.trim().parse().map_err(|_| START_NOT_A_NUMBER)?;
+    let end: f64 = end.trim().parse().map_err(|_| END_NOT_A_NUMBER)?;
+    let speed: f64 = speed.trim().parse().map_err(|_| SPEED_NOT_A_NUMBER)?;
+    let start = Seconds::new(start).map_err(|error| error.to_string())?;
+    let end = Seconds::new(end).map_err(|error| error.to_string())?;
+    if f64::from(end) <= f64::from(start) {
+        return Err(END_BEFORE_START.to_owned());
+    }
+    let speed = Speed::new(speed).map_err(|error| error.to_string())?;
+    Ok(time_dilation::applied(
+        FilterRegion::Range { start, end },
+        speed,
+    ))
+}
+
+/// The duration of the rendered project of the document as text, or the text
+/// of the error that the render gives.
+fn edited_duration(document: &Option<Document>) -> String {
+    match document {
+        None => String::new(),
+        Some(open) => match open.editor.rendered_duration() {
+            Ok(duration) => format_duration(duration),
+            Err(error) => error.to_string(),
+        },
     }
 }
 

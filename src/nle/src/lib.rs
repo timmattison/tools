@@ -2,6 +2,7 @@ pub mod commands;
 pub mod editor;
 pub mod error;
 pub mod export;
+pub mod filters;
 mod format;
 mod json_file;
 pub mod pipeline;
