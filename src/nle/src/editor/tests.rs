@@ -531,3 +531,32 @@ fn a_refused_edit_changes_neither_the_project_nor_the_history() {
         Some(TrackId(8))
     );
 }
+
+// Group 8: render.
+
+#[test]
+fn render_equals_the_registry_render_of_an_edited_project() {
+    let mut editor = editor();
+    editor
+        .apply(Edit::TrimClip {
+            id: ClipId(1),
+            in_point: secs(0.0),
+            out_point: secs(3.0),
+        })
+        .unwrap();
+    editor
+        .apply(Edit::AddFilter {
+            index: 0,
+            filter: filter("double"),
+        })
+        .unwrap();
+
+    let rendered = editor.render().unwrap();
+
+    assert_eq!(
+        rendered,
+        registry().render(editor.project()).unwrap()
+    );
+    // The filter doubled the time of the event at 1.5.
+    assert!(rendered.events.iter().any(|e| e.time == 3.0));
+}
