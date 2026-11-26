@@ -27,7 +27,7 @@ Parent issue: [#148](https://github.com/timmattison/tools/issues/148)
 | #170 | Scaffold the desktop app | Sets up the dev tooling, the app shell with its layout regions, and the Rust functions that load and save recordings and run the existing exporters. #170 built the scaffold on Tauri 2 and React. |
 | #761 | Move the scaffold to Dioxus | Dioxus 0.7 with the desktop (webview) renderer, in one Rust crate. The components call the Rust code directly, thus no IPC layer and no generated TypeScript types exist. `dx serve` runs the app, and `dx bundle` builds it. |
 | #149 | Core editing engine | Done. The project model (clips, tracks, filters), the filter pipeline and its registry, the render step that flattens a project into one recording, the edit operations with undo and redo, and project save/load. The types are in `src/nle/src/types.rs`. The app keeps the `Editor` in its Dioxus state. |
-| #159 | Research timeline UI components | Research task. Can run in parallel with #170. Informs #150. |
+| #159 | Research timeline UI components | Done. The findings, the frame times of a prototype, and the recommendation are in [specs/2026-11-26-nle-timeline-research.md](../../specs/2026-11-26-nle-timeline-research.md). No Dioxus crate or JavaScript library fits, thus #150 builds a custom timeline. |
 
 ### Phase 1: Quick Wins (3-5 days, all parallel)
 
@@ -61,7 +61,7 @@ The big UI push. This is the most complex part of the project.
 
 | Issue | Description | Notes |
 |-------|-------------|-------|
-| #150 | Timeline UI component | Informed by #159 research. Horizontal scrolling, zoom, clip dragging, playhead, selection ranges. Likely canvas-based for performance. |
+| #150 | Timeline UI component | Informed by #159 research ([specs/2026-11-26-nle-timeline-research.md](../../specs/2026-11-26-nle-timeline-research.md)). Horizontal scrolling, zoom, clip dragging, playhead, selection ranges. RSX elements with virtualization in tiles, and one SVG path for the event density of each tile. A canvas is the fallback for a later dense layer. |
 | #157 | Multi-clip splicing | Start with hard cuts (clear screen between clips). Transitions later. Terminal size differences between clips need handling. |
 
 ### Phase 4: Advanced Filters (1-2 weeks, parallel)
