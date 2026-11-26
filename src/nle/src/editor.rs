@@ -100,6 +100,7 @@ impl Editor {
     /// # Errors
     /// Returns the `NleError::InvalidProject` of `EditProject::validate`.
     pub fn new(project: EditProject, filters: Arc<FilterRegistry>) -> Result<Self, NleError> {
+        project.validate()?;
         Ok(Self {
             project,
             undo: Vec::new(),
