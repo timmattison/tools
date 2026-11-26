@@ -276,6 +276,25 @@ fn a_filter_that_answers_a_time_below_zero_on_the_timeline_fails() {
 }
 
 #[test]
+fn two_shifts_that_add_up_to_infinity_fail_the_run() {
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("far"), |_, _| vec![ev(f64::MAX)]);
+
+    // The first filter moves 1.0 to about f64::MAX. The second sees nothing
+    // in its range, answers f64::MAX again, and its shift moves the later
+    // events to infinity.
+    let result = registry.run(
+        events(&[0.0, 1.0]),
+        &[range("far", 0.0, 0.5), range("far", 0.0, 0.5)],
+    );
+
+    assert!(
+        matches!(result, Err(NleError::RenderError(_))),
+        "{result:?}"
+    );
+}
+
+#[test]
 fn a_relative_time_below_zero_is_fine_when_the_timeline_time_is_not() {
     // Relative -0.5 on a range that starts at 1.0 is 0.5 on the timeline.
     let registry = registry_answering(-0.5);
@@ -528,6 +547,41 @@ fn render_refuses_a_project_that_breaks_a_rule() {
 
     assert!(
         matches!(result, Err(NleError::InvalidProject(_))),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn render_of_a_clip_whose_events_overflow_the_timeline_fails() {
+    // The event at 1e308 goes to 2e308, which is infinity.
+    let project = EditProject {
+        clips: vec![clip_of(1, source("big", &[0.0, 1e308], 1e308), 1e308)],
+        timeline: vec![track_of(1, 1)],
+        filters: Vec::new(),
+    };
+
+    let result = FilterRegistry::new().render(&project);
+
+    assert!(
+        matches!(result, Err(NleError::RenderError(_))),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn render_of_a_clip_whose_end_overflows_the_timeline_fails() {
+    // The one event goes to 1e308, which is finite, but the duration of the
+    // project is infinity.
+    let project = EditProject {
+        clips: vec![clip_of(1, source("end", &[0.0], 1e308), 1e308)],
+        timeline: vec![track_of(1, 1)],
+        filters: Vec::new(),
+    };
+
+    let result = FilterRegistry::new().render(&project);
+
+    assert!(
+        matches!(result, Err(NleError::RenderError(_))),
         "{result:?}"
     );
 }
