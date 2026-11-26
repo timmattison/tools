@@ -197,6 +197,27 @@ fn a_c1_control_that_starts_a_sequence_restarts_an_open_one() {
 }
 
 #[test]
+fn a_c1_control_that_starts_a_string_restarts_an_open_sequence() {
+    // DCS, SOS, PM and APC. The text of the string holds a sequence that the
+    // reader must not read, and the string ends at its ST.
+    for open in ["\x1b", "\x1b(", "\x1b[1", "\x1b[ 5", "\x1b]0;t", "\x1bPq"] {
+        for start in ['\u{90}', '\u{98}', '\u{9e}', '\u{9f}'] {
+            let all = steps(&[&format!("{open}{start}[?25h\u{9c}x")]);
+
+            let at = open.chars().count();
+            assert_eq!(all[at], Step::Restarted, "{open:?} {start:?}");
+            assert_eq!(
+                all[at + 1..at + 6],
+                vec![Step::Pending; 5][..],
+                "{open:?} {start:?}"
+            );
+            assert_eq!(all[at + 6], Step::Ignored, "{open:?} {start:?}");
+            assert_eq!(all[at + 7], Step::Text, "{open:?} {start:?}");
+        }
+    }
+}
+
+#[test]
 fn a_c1_control_that_starts_no_sequence_stops_an_open_one() {
     let mut cases = Vec::new();
     for open in ["\x1b", "\x1b(", "\x1b[1", "\x1b[ 5"] {
