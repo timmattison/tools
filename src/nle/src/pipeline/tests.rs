@@ -788,3 +788,42 @@ fn a_typed_filter_that_answers_an_end_that_is_not_finite_or_is_below_zero_fails(
         .unwrap();
     assert_eq!(rendered.duration, 8.0);
 }
+
+// Tests of the shift in a typed filter.
+
+/// A typed filter under the kind "set-shift" that keeps its events and
+/// answers `shift`.
+fn shift_registry(shift: f64) -> FilterRegistry {
+    let mut registry = FilterRegistry::new();
+    registry.register_typed(kind("set-shift"), move |span: Span, _: &NoOptions| Span {
+        events: span.events,
+        end: None,
+        shift: Some(shift),
+    });
+    registry
+}
+
+#[test]
+fn a_typed_filter_that_answers_a_shift_that_is_not_finite_or_moves_an_event_below_zero_fails() {
+    // The project has events at 0 and 8, and it ends at 10. The range from 0
+    // to 1 holds the event at 0, so the event at 8 is after the range.
+    let filters = || vec![range("set-shift", 0.0, 1.0)];
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -9.0] {
+        let result = shift_registry(bad).render(&one_clip_project(filters()));
+
+        assert_render_names(result, "\"set-shift\"");
+    }
+
+    // With no event after the range, the end of the timeline moves by the
+    // shift, so a shift that is not finite still fails.
+    let result =
+        shift_registry(f64::NAN).render(&one_clip_project(vec![range("set-shift", 8.5, 9.0)]));
+    assert_render_names(result, "\"set-shift\"");
+
+    // -8 moves the event at 8 to 0, which is fine, and the end at 10 to 2.
+    let rendered = shift_registry(-8.0)
+        .render(&one_clip_project(filters()))
+        .unwrap();
+    assert_eq!(times(&rendered.events), vec![0.0, 0.0]);
+    assert_eq!(rendered.duration, 2.0);
+}
