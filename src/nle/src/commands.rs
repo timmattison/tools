@@ -168,8 +168,8 @@ fn resolve_output_path(
 /// Save `recording` to `path`. It refuses a file name that does not end in
 /// `.json` or `.json.gz` in any case, and a parent directory that does not
 /// exist. If `path` is a symbolic link, it writes the file at the end of the
-/// link and keeps the link. That file must have such a name too. An absent `compress` falls back to the `.gz` suffix of the file
-/// name, in any case.
+/// link and keeps the link. That file must have such a name too. An absent
+/// `compress` falls back to the `.gz` suffix of the file name, in any case.
 pub(crate) fn save_recording_to(
     path: &str,
     recording: &Recording,
