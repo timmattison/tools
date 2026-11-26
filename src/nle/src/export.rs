@@ -7,8 +7,9 @@ use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use crate::commands::{run_beta, run_blocking, video_export_args, web_export_args};
 use crate::error::NleError;
-use crate::types::Recording;
+use crate::types::{ExportFormat, ExportOptions, Recording};
 
 /// A stage of an export, for a progress display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,15 +189,68 @@ pub async fn export_recording(
     export_recording_with(recording, request, progress, std::env::var_os).await
 }
 
+/// The name of the work file that holds the rendered recording for `beta`.
+const WORK_FILE_NAME: &str = "render.json";
+
 /// `export_recording` with the variables of the environment from `var`, so
 /// that a test finds a `beta` of its own.
 pub(crate) async fn export_recording_with(
-    _recording: Recording,
+    recording: Recording,
     request: ExportRequest,
-    _progress: impl FnMut(ExportProgress) + Send + 'static,
-    _var: impl Fn(&'static str) -> Option<OsString>,
+    mut progress: impl FnMut(ExportProgress) + Send + 'static,
+    var: impl Fn(&'static str) -> Option<OsString>,
 ) -> Result<PathBuf, NleError> {
+    let Some(mut options) = beta_options(&request) else {
+        return Ok(request.output_path);
+    };
+    let work_dir = run_blocking(|| {
+        tempfile::tempdir()
+            .map_err(|e| NleError::ExportError(format!("Failed to make a work directory: {e}")))
+    })
+    .await?;
+    let input = work_dir.path().join(WORK_FILE_NAME);
+    let work_file = input.clone();
+    run_blocking(move || {
+        recording.save(&work_file, false).map_err(|e| {
+            NleError::ExportError(format!("Failed to write the work file for beta: {e}"))
+        })
+    })
+    .await?;
+    options.input_path = input.to_string_lossy().into_owned();
+    let args = match options.format {
+        ExportFormat::Video => video_export_args(&options)?,
+        ExportFormat::Web => web_export_args(&options)?,
+    };
+
+    progress(ExportProgress::Writing);
+    run_beta(&args, &options.output_path, var, &mut progress).await?;
+    // The work directory goes away here, and also when `?` returns early.
+    drop(work_dir);
     Ok(request.output_path)
+}
+
+/// The options of a `beta export` run for `request`, with an empty input
+/// path, or `None` when the target is not a run of `beta`.
+fn beta_options(request: &ExportRequest) -> Option<ExportOptions> {
+    let ExportTarget::Video {
+        theme,
+        fps,
+        resolution,
+        optimize_web,
+    } = &request.target
+    else {
+        return None;
+    };
+    Some(ExportOptions {
+        input_path: String::new(),
+        output_path: request.output_path.to_string_lossy().into_owned(),
+        format: ExportFormat::Video,
+        theme: Some(theme.as_str().to_string()),
+        compress: None,
+        fps: fps.map(NonZeroU32::get),
+        resolution: resolution.map(|size| size.to_string()),
+        optimize_web: Some(*optimize_web),
+    })
 }
 
 /// The text that starts a frame line of `beta`.
