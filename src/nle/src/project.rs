@@ -151,7 +151,19 @@ impl Clip {
     /// clips that a cut splits at one time do not both hold an event at that
     /// time. An event at time `t` goes to `t - in_point + timeline_offset`.
     pub fn timeline_events(&self) -> impl Iterator<Item = Event> + '_ {
-        std::iter::empty()
+        let (in_point, out_point) = (self.in_point.get(), self.out_point.get());
+        let to_the_end = out_point >= self.source.duration;
+        self.source
+            .events
+            .iter()
+            .filter(move |event| {
+                event.time >= in_point
+                    && (event.time < out_point || (to_the_end && event.time == out_point))
+            })
+            .map(move |event| Event {
+                time: event.time - in_point + self.timeline_offset.get(),
+                ..event.clone()
+            })
     }
 }
 
