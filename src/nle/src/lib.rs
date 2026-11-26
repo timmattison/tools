@@ -1,6 +1,10 @@
 pub mod commands;
+pub mod editor;
 pub mod error;
 mod format;
+mod json_file;
+pub mod pipeline;
+mod project;
 pub mod types;
 mod ui;
 

@@ -23,6 +23,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `diskhog` | Live terminal UI of per-process disk I/O on macOS (IOPS with sudo). |
 | `drun` | Docker run on the least busy host — runs a container on the Docker context with the most free memory and CPU, then finds it again with `ps`, `status`, `logs`, `wait`, `exec`, `cp`, and `rm`. `drun buildx create` puts a builder there too, and other commands go to the local docker. |
 | `faulte` | Fault rate — ranks every process of a Mac by the page faults it makes per second, with the swap traffic of the sample and one total line for the Claude Code sessions. `faulte check` says in seconds if the system time is high, and if memory churn or process churn occurs at the same time. `faulte kill` shows the old idle Claude Code sessions and stops them after a question. `faulte tui` is a live view with a history. macOS only. |
+| `ff` | Finds files by name across a whole machine, as `find / -iname` does, but does an interrupted system call again instead of abandoning the walk. Walks the data volume of macOS one time through the firmlink map, skips the File Provider directories unless `--include-cloud`, and ends with a summary of each subtree it could not read (exit 1 when there is one). |
 | `freeport` | Finds a free TCP port on localhost, cross-platform. |
 | `gitdiggin` | Recursively searches git repos for commits containing a string (messages and diffs). |
 | `gitnuke` | Removes a git worktree and deletes its branch; `--force` is required for worktrees with submodules checked out (which `git worktree remove` refuses outright) or uncommitted changes. It asks before it deletes a branch that no recent commit names, `--yes` skips the question, and without a terminal it refuses with exit code 10. |
@@ -48,7 +49,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `localnext` | Serves a statically exported Next.js app from its `out` directory, on a port derived from the project and the git branch. |
 | `msgs` | A macOS desktop app to browse, search, and export iMessage conversations. It reads `chat.db` read-only. |
 | `ng` | Navel-Gaze — watches JS/TS files and re-runs `pnpm lint` (or `--typecheck`) on change. |
-| `nle` | Non-Linear Editor — a Dioxus desktop editor for `beta` terminal recordings. The scaffold opens a recording and shows its metadata. Run it with `src/nle/scripts/dev.ts` (`dx serve`), and build it with `dx bundle --desktop`. |
+| `nle` | Non-Linear Editor — a Dioxus desktop editor for `beta` terminal recordings. It opens a recording into an edit project of clips, tracks, and filters, with undo and redo, and shows its metadata. Run it with `src/nle/scripts/dev.ts` (`dx serve`), and build it with `dx bundle --desktop`. |
 | `nodenuke` | Removes `node_modules` directories and lock files throughout a repo. |
 | `nodeup` | Updates npm/pnpm/yarn packages across all `package.json` directories. |
 | `nwt` | New Worktree — creates a git worktree with a random Docker-style name, links the child repositories of a container into it, and can leave a heavy tracked directory out of it. |
@@ -86,7 +87,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `update-aws-credentials` | Writes AWS SSO clipboard credentials into your AWS config file. |
 | `uuidplz` | Prints a random v4 UUID, or a repeatable v5 UUID seeded from a string, a file's contents, or stdin. |
 | `vpn-tunnel` | Generates Docker-based gluetun + ProtonVPN + WireGuard tunnels with helper scripts. |
-| `wdid` | What do I do — counts which tools of this workspace the atuin history uses, through aliases, functions, pipes and wrappers, and lists the tools never used and the tools idle for a long time. |
+| `wdid` | What do I do — counts which tools of this workspace the atuin history uses, through aliases, functions, pipes and wrappers, and lists the tools never used and the tools idle for a long time. It reports on `--repo`, else the cargo workspace of the current git work tree, else the checkout that the installed `wdid` came from, so it runs in any directory. |
 | `whyslow` | Why slow — one 1 s sample names the likely cause when a Mac is slow: which resource is short, and the groups of processes (Claude Code, compilers by worktree, Spotlight, each other name) that use it. macOS only. |
 | `wifiqr` | Generates WiFi QR codes (with optional logo) for automatic device connection. |
 | `wl` | Shows which process is listening on a given port, and says so when it cannot see the owner. |

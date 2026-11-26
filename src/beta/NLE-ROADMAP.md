@@ -26,7 +26,7 @@ Parent issue: [#148](https://github.com/timmattison/tools/issues/148)
 |-------|-------------|-------|
 | #170 | Scaffold the desktop app | Sets up the dev tooling, the app shell with its layout regions, and the Rust functions that load and save recordings and run the existing exporters. #170 built the scaffold on Tauri 2 and React. |
 | #761 | Move the scaffold to Dioxus | Dioxus 0.7 with the desktop (webview) renderer, in one Rust crate. The components call the Rust code directly, thus no IPC layer and no generated TypeScript types exist. `dx serve` runs the app, and `dx bundle` builds it. |
-| #149 | Core editing engine (minimal) | Filter pipe combinator, project save/load. Uses the Rust types in `src/nle/src/types.rs`, and keeps its state in the Dioxus state of the app. Skip undo/redo for now. |
+| #149 | Core editing engine | Done. The project model (clips, tracks, filters), the filter pipeline and its registry, the render step that flattens a project into one recording, the edit operations with undo and redo, and project save/load. The types are in `src/nle/src/types.rs`. The app keeps the `Editor` in its Dioxus state. |
 | #159 | Research timeline UI components | Research task. Can run in parallel with #170. Informs #150. |
 
 ### Phase 1: Quick Wins (3-5 days, all parallel)
@@ -62,7 +62,6 @@ The big UI push. This is the most complex part of the project.
 | Issue | Description | Notes |
 |-------|-------------|-------|
 | #150 | Timeline UI component | Informed by #159 research. Horizontal scrolling, zoom, clip dragging, playhead, selection ranges. Likely canvas-based for performance. |
-| #149 | Core engine (extended) | Add undo/redo, complete multi-track timeline model. |
 | #157 | Multi-clip splicing | Start with hard cuts (clear screen between clips). Transitions later. Terminal size differences between clips need handling. |
 
 ### Phase 4: Advanced Filters (1-2 weeks, parallel)
@@ -113,7 +112,7 @@ These filters need deeper terminal state analysis or more complex heuristics.
 
 1. **Dioxus app**: One Rust crate, with the desktop (webview) renderer of Dioxus 0.7. The components call the Rust code directly, thus no IPC layer and no second copy of the types exist. The state of the app is Dioxus state (signals), which is Rust, thus the one source of truth is in Rust by construction. On 2026-11-25, Tim chose Dioxus in place of Tauri (issue #761).
 
-2. **Filter interface**: `(events: Event[], options: FilterOptions) => Event[]` is the core API. Some filters (#166 color scheme, #168 cursor) operate at the ANSI escape sequence level within `event.data` rather than at the timestamp level — same signature, different transformation target.
+2. **Filter interface**: `Fn(&[Event], &FilterOptions) -> Vec<Event>` is the core API (`FilterFn` in `src/nle/src/pipeline.rs`). A filter gets the events of its region, with times relative to the start of the region. The pipeline moves the events after the region by the change in the time of the last event of the region. Some filters (#166 color scheme, #168 cursor) operate at the ANSI escape sequence level within `event.data` rather than at the timestamp level — same signature, different transformation target.
 
 3. **Existing code to reuse**:
    - `src/main.rs` lines 85-113: `Recording`, `Event`, `EventType` structs (the types in `src/nle/src/types.rs` must mirror these exactly)

@@ -21,6 +21,18 @@ pub enum NleError {
 
     #[error("Background task failed: {0}")]
     TaskError(String),
+
+    #[error("Invalid time: {0} (a time must be finite and not below zero)")]
+    InvalidTime(f64),
+
+    #[error("Invalid project: {0}")]
+    InvalidProject(String),
+
+    #[error("Edit refused: {0}")]
+    EditError(String),
+
+    #[error("Render failed: {0}")]
+    RenderError(String),
 }
 
 // An error serializes as its message, so JSON output shows the same text as the Display form.

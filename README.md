@@ -4760,7 +4760,7 @@ A session started under a different account is found automatically: when the id 
 crap 57570685-2d64-4431-8ab6-c021a12fa1af --user alice
 ```
 
-The name resolves as a sibling of your home (`<home>/../<name>` — `/Users/alice` on macOS, `/home/alice` on Linux). Because a transcript that belongs to another user can never be found by a `claude --resume` you run yourself, `crap` copies it into your own tree and resumes it as a `--fork-session` (a fresh id) at its original recorded directory — the foreign transcript is only ever read, and every write lands under your home. The transient copy is removed once Claude writes the forked transcript, the same way `--here` cleans up its import (a symlink for a same-user source, a copy for a cross-user one). Because the fork only reads the original, `--user` is safe even while that session is still live in the other user's account. A `--user` naming your own account is a same-user hit and simply resumes in place.
+The name resolves as a sibling of your home (`<home>/../<name>` — `/Users/alice` on macOS, `/home/alice` on Linux). Because a transcript that belongs to another user can never be found by a `claude --resume` you run yourself, `crap` copies it into your own tree and resumes it as a `--fork-session` (a fresh id) at its original recorded directory — the foreign transcript is only ever read, and every write lands under your home. The transient copy is removed once Claude writes the forked transcript, the same way `--here` cleans up its import (a symlink for a same-user source, a copy for a cross-user one). Because the fork only reads the original, `--user` is safe even while that session is still live in the other user's account. A `--user` naming your own account is a same-user hit and simply resumes in place. That includes another name for your own home: a different case on a case-insensitive filesystem (`--user Tim` for `/Users/tim` on the macOS default, or for `/home/tim` on an ext4 casefold, CIFS or ntfs3 home on Linux), or a symlinked alias. `crap` compares the trees themselves (the device and the inode of each), not the names or the resolved paths.
 
 Most of the time you don't need the flag at all. With no `--user`, `crap <id>` searches **your own** tree first — byte-for-byte the same fast path as always — and only if the id isn't there does it automatically fall back to scanning every sibling home that has run Claude, resuming the first readable match exactly as `--user` would (copy into your own tree, fork at the original directory). The fallback is **self-first**, so an id that happens to exist in two accounts always resolves to *your* copy, never the foreign one. Reach for `--user <name>` only when you want to force a specific account — it skips your own tree entirely, which is also how you disambiguate on purpose.
 
@@ -4973,7 +4973,7 @@ If you installed the shell function before `--forks` existed, run `crap --shell-
 - `-f, --force`: Resume even if the session appears to be running in another process
 - `--here`: Resume the session in the current directory (as a forked, new-id session) instead of its original one; also accepts a cross-user source (combined with `--user`), which is copied into your own tree rather than symlinked
 - `--expand`: Resume a fork of the session with each compaction undone, so `/rewind` in the fork lists the prompts from before each compaction. With `--here`, the fork runs in the current directory. Without it, the fork runs in the original directory. It works with `--user`, it ignores `--force`, and it prints the size of the history on stderr. See [Resume with the full history](#resume-with-the-full-history---expand)
-- `--user <name>`: Resume another user's session from a specific account — **not required** for a cross-user resume, since the no-flag path already falls back on its own; reach for it when you want to force one account in particular. `<name>` is resolved as a sibling of your home (`<home>/../<name>` — `/Users/<name>` on macOS, `/home/<name>` on Linux), and only that user's `~/.claude/projects` tree is searched (your own is skipped, so `--user` also disambiguates an id on purpose). The foreign transcript is copied into your own tree and resumed as a fork (fresh id) at its original directory — or in the current directory instead when combined with `--here` — the original is only ever read. Naming your own account is a same-user hit and resumes in place
+- `--user <name>`: Resume another user's session from a specific account — **not required** for a cross-user resume, since the no-flag path already falls back on its own; reach for it when you want to force one account in particular. `<name>` is resolved as a sibling of your home (`<home>/../<name>` — `/Users/<name>` on macOS, `/home/<name>` on Linux), and only that user's `~/.claude/projects` tree is searched (your own is skipped, so `--user` also disambiguates an id on purpose). The foreign transcript is copied into your own tree and resumed as a fork (fresh id) at its original directory — or in the current directory instead when combined with `--here` — the original is only ever read. Naming your own account is a same-user hit and resumes in place, also by another name for the same home (a different case on a case-insensitive filesystem, or a symlinked alias)
 - `--status`: Print the session's conversational state (`waiting-for-user`, `busy`, `awaiting-assistant`, or `empty`; or `<status> (live, pid <pid>)` when open elsewhere) and exit, without resuming. With no id, lists every session for the current directory with its state and start/last times
 - `--json`: With `--status`, emit JSON instead of text (one object for an id, an array for the directory listing)
 - `--forks`: Show what the fork log knows about the session — each fork of it, with `saved` or `not saved`, and the chain of sessions it was forked from — and exit, without resuming
@@ -5593,11 +5593,12 @@ wdid --json
 wdid --since 2026-01-01
 wdid --unparsed
 wdid --repo ~/code/tools --no-shell
+cd ~ && wdid   # the workspace that the installed wdid came from
 ```
 
 ### Options
 
-- `--repo <PATH>`: The cargo workspace to report on. Without it, `wdid` uses the git work tree that holds the current directory. The workspace must have a `Cargo.toml`.
+- `--repo <PATH>`: The cargo workspace to report on. The workspace must have a `Cargo.toml`. Without this option, `wdid` uses the git work tree of the current directory when that work tree has a `Cargo.toml`, else the workspace that the installed `wdid` came from. See [The workspace](#the-workspace).
 - `--since <YYYY-MM-DD>`: Count only the rows from this date on. A row on this date counts. The report says how many rows it left out.
 - `--json`: Print the whole report as one JSON document. It conflicts with `--unparsed`.
 - `--unparsed`: Print the commands that `wdid` could not parse, one line for each (`<rows>`, a tab, the command), the functions that it could not parse, and the alias lines that it could not parse, one line for each. Print no report. In the `--json` document, `shell.unparsed_aliases` is a list of those alias lines.
@@ -5608,6 +5609,39 @@ wdid --repo ~/code/tools --no-shell
 - `-h`, `--help`: Print the usage.
 
 The table fits `COLUMNS` when that variable is set, else the width of the terminal. An error prints `wdid: <reason>` on standard error and exits 1. A usage error exits 2.
+
+### The workspace
+
+`wdid` finds the cargo workspace to report on in this order:
+
+1. `--repo <path>`. If the path is not a cargo workspace, `wdid` stops with an error.
+2. The git work tree of the current directory, when its top has a `Cargo.toml`. In a worktree of a different cargo workspace, `wdid` reports on that workspace.
+3. The workspace that the installed `wdid` came from. Thus `wdid` runs in any directory, for example `~`.
+4. An error. It says why step 2 failed, it gives the reason that step 3 failed, and it names `--repo`.
+
+For step 3, `wdid` reads the record of its own install in `.crates2.json`. `cargo install` keeps that file in its install root: `$CARGO_INSTALL_ROOT`, else `$CARGO_HOME`, else `~/.cargo`.
+
+- A `git+` record comes from `cargo install --git`. It names the repository and the full commit: `wdid 0.1.0 (git+https://github.com/timmattison/tools#12baa4168146b6018d38dbe4f8cace7ed5b4081b)`. cargo keeps a checkout of that commit in `$CARGO_HOME/git/checkouts/<repository name>-<hash>/<short commit>`. The hash is internal to cargo, thus `wdid` looks in each directory under `checkouts` whose name starts with the repository name and `-`. It uses a checkout only when `git rev-parse HEAD` in that checkout gives the full commit of the record. The checkout holds the full history, thus the added dates of the tools are correct.
+- A `path+file` record comes from `cargo install --path`. It names the crate directory. `wdid` uses the cargo workspace that holds that directory, as `cargo locate-project --workspace` gives it.
+
+Step 3 fails when there is no record, when the record names another source (for example the registry), when no checkout of the commit exists, when the checkout is at a different commit, or when the crate directory of a `path+file` record no longer exists. `cargo cache --autoclean` removes the checkouts. To get the checkout back, install `wdid` again. Or name the workspace with `--repo`.
+
+The report names the workspace and the step that found it. The text report ends with a line such as this one:
+
+```text
+Workspace: /Users/me/.cargo/git/checkouts/tools-dda63c64534664e9/12baa41 (the source of the installed wdid, commit 12baa41)
+```
+
+The `--json` document ends with a `workspace` block. `found_by` is `repo_flag`, `work_tree`, `installed_git`, or `installed_path`. An `installed_git` block also holds `url` and `commit`. An `installed_path` block also holds `crate_dir`.
+
+```json
+"workspace": {
+  "root": "/Users/me/.cargo/git/checkouts/tools-dda63c64534664e9/12baa41",
+  "found_by": "installed_git",
+  "url": "https://github.com/timmattison/tools",
+  "commit": "12baa4168146b6018d38dbe4f8cace7ed5b4081b"
+}
+```
 
 ### The three groups
 
@@ -5661,7 +5695,7 @@ History: 347,212 rows. 4,385 not counted (exit 127). 13 did not parse (wdid --un
 Shell: 276 aliases, 1,267 functions (24 did not parse).
 ```
 
-The excerpt leaves out rows of the table and entries of the groups. `si` is a shell function that runs `nwt -b <branch>`, so each `si` is a use of `nwt`.
+The excerpt leaves out rows of the table and entries of the groups. The run was before `wdid` named its workspace, thus it has no `Workspace:` line. `si` is a shell function that runs `nwt -b <branch>`, so each `si` is a use of `nwt`.
 
 ### Install
 
@@ -6221,17 +6255,35 @@ cargo tauri build --no-bundle   # the binary is target/release/msgs
 
 ## nle (non-linear editor)
 
-A desktop application for the terminal recordings that `beta` writes. This
-version is the scaffold: it opens a `.json` or `.json.gz` recording and shows
-its metadata. The timeline (issue #150) and the preview pane (issue #151) are
-placeholders.
+A desktop application for the terminal recordings that `beta` writes. It opens
+a `.json` or `.json.gz` recording, makes an edit project of it, and shows its
+metadata. The timeline (issue #150) and the preview pane (issue #151) are
+placeholders, thus the window cannot edit yet.
 
 The application is one Rust crate on Dioxus 0.7, with the desktop (webview)
-renderer. Its components call the Rust code directly, and the open recording is
-Dioxus state, thus no IPC layer and no frontend package exist. The crate also
-has functions that save a recording, list the recordings in a directory, and
-export a recording through the `beta` CLI as a video or a web player. The
-window does not call them yet.
+renderer. Its components call the Rust code directly, and the open project is
+Dioxus state, thus no IPC layer and no frontend package exist.
+
+The editing engine of the crate has four parts:
+
+- **Edit project** (`EditProject`): clips of source recordings, placed on the
+  tracks of the timeline, and the filters that apply to the result. An edit
+  never changes a source recording. A project saves to JSON, plain or gzip, and
+  loads back. A save writes each source recording once, also when several clips
+  cut it.
+- **Filter pipeline** (`FilterRegistry`): a filter is a pure function
+  `Fn(&[Event], &FilterOptions) -> Vec<Event>`, registered by kind. The filters
+  of a project run in order, each on the whole timeline or on a range of it.
+  No filter ships yet. Issues #152 to #168 add them.
+- **Render**: the registry flattens a project into one `beta` recording.
+- **Edits and history** (`Editor`): each change of a project is an `Edit`. The
+  editor refuses an edit that breaks a rule of the project, and it keeps an
+  undo and redo history.
+
+The crate also has functions that save the rendered recording
+(`Editor::save_recording`), list the recordings in a directory, and export a
+recording through the `beta` CLI as a video or a web player. The window does
+not call them yet.
 
 The export functions run `beta` with the PATH of the app, then
 `$CARGO_HOME/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.
@@ -6251,3 +6303,123 @@ The script asks `portplz` for a free port. Then it starts
 To build the desktop application, run `dx bundle --desktop` from `src/nle`.
 On macOS, the app (`Nle.app`) and a disk image go to
 `target/dx/nle/bundle/macos/macos/`.
+
+## ff (find files)
+
+`ff` finds files by name across a whole machine. It answers the question that
+`find / -iname` answers, and it does not lose the scan.
+
+BSD `find` ends the complete walk when a system call under `fts_read` returns
+`EINTR`:
+
+```
+find / -iname "120.mp4" | tee other-locations.txt
+find: fts_read: Interrupted system call
+```
+
+Each path that `find` did not print yet is lost, and the interruption arrives
+at a time that nobody can predict. `ff` reads each directory with its own
+calls. When a call returns `EINTR`, `ff` does the same call again at the same
+position, and the walk continues.
+
+### Usage
+
+```bash
+ff 120.mp4                 # each mounted volume that holds user files
+ff '*.mp4' ~/Movies /Volumes/External
+ff -e '^IMG_\d{4}\.HEIC$' ~/Pictures
+ff -0 '*.log' /var/log | xargs -0 ls -l
+```
+
+- `<pattern>` is a glob that must match the whole file name. It ignores case.
+  A glob that holds a `/` is refused, because a file name holds no `/`.
+- `[paths...]` are the directories to search. With no path, `ff` searches the
+  whole machine (macOS only). On a different platform, name each path.
+- `-s`, `--case-sensitive` matches the case of each letter.
+- `-e`, `--regex` takes a regular expression in place of a glob. It matches
+  anywhere in the name. Use `^` and `$` to match the whole name.
+- `-x`, `--one-file-system` stops at each mount point.
+- `--include-cloud` also searches the File Provider directories.
+- `--show-skipped` names each subtree that `ff` could not read, and each
+  directory and volume that it skipped.
+- `-0`, `--print0` ends each match with a NUL, for `xargs -0`.
+
+`ff` prints each match when it finds it. It does not hold the results to the
+end. It does not follow a symbolic link below a path, but it follows a path
+that you name. It matches the name of each path that you name too, as `find`
+does.
+
+### The summary and the exit status
+
+At the end, `ff` writes a summary to standard error:
+
+```
+ff: matches: 2
+ff: entries read: 7561234 in 81.4 s
+ff: volumes searched: 5, skipped: 13
+ff: incomplete subtrees: 0
+ff: denied directories: 412 (System Integrity Protection and the privacy settings refuse some directories)
+ff: cloud directories skipped: 4 (--include-cloud searches them)
+ff: --show-skipped names each one
+```
+
+A search that returns fewer results than the truth, and says nothing, is worse
+than a search that fails. Thus `ff` counts each subtree that it could not read
+completely, and the summary always gives that count.
+
+- **Exit status 0**: `ff` read each subtree to its end.
+- **Exit status 1**: `ff` could not read one or more subtrees. `--show-skipped`
+  names each one, with its error.
+- **Exit status 2**: `ff` could not start, for example because of a bad
+  pattern, or it could not write a match.
+
+A directory below a path that the system refuses (`EACCES` or `EPERM`) is not
+incomplete. System Integrity Protection and the privacy settings of macOS
+refuse some directories on each Mac, thus `ff` counts them and does not change
+the exit status. But a path that you name and that the system refuses is
+incomplete, because `ff` read nothing there. A directory that goes away during
+the walk is not a failure either.
+
+A reader that stops early, for example `head`, stops the walk. `ff` then exits
+0 and writes no summary.
+
+### A search of the whole machine (macOS)
+
+With no path, `ff` gets the volumes from the mount table, and it walks each
+volume that holds user files one time. Each walk stays on the device of its
+volume, and it does not enter another mount point.
+
+- **The data volume, one time.** `/System/Volumes/Data` has the same device id
+  as `/`, thus a device check does not stop a walk of `/` there. A plain walk
+  of `/` reads the home directories two times: through `/Users`, and through
+  `/System/Volumes/Data/Users`. `ff` reads `/usr/share/firmlinks` at each run.
+  It walks each firmlinked directory through its firmlink (`/Users`), and the
+  rest of the data volume directly. The directories of the data volume that
+  have no firmlink, for example `/System/Volumes/Data/mnt`, stay in the walk.
+- **Skipped volumes.** `devfs`, each `autofs` map (for example
+  `/System/Volumes/Data/home`), the read-only simulator images under
+  `/Library/Developer/CoreSimulator`, the system volumes
+  `/System/Volumes/{VM,Preboot,Update,xarts,iSCPreboot,Hardware}`, and each
+  volume inside one of these. `--show-skipped` names each one with its reason.
+- **The File Provider directories.** Each directory in
+  `~/Library/CloudStorage` (Google Drive, Proton Drive, Dropbox, and others)
+  and `~/Library/Mobile Documents` (iCloud Drive) answers `readdir` over the
+  network. `ff` skips them unless you give `--include-cloud`, and the summary
+  gives their count. A path that you name is searched also when it is such a
+  directory. This rule applies to a search of named paths too. `ff` decides
+  this rule on the real path, thus `ff x .` in `~/Library` skips them too.
+
+`ff` does not use Spotlight. `mdfind` returns nothing when indexing is off on
+a volume, and it says nothing about that.
+
+### How the retry works
+
+`std::fs::read_dir` cannot do this job: after a read error, its stream ends,
+thus a caller cannot read the same position again. `walkdir` and `ignore` read
+through it. `ff` reads with `open`, `fdopendir`, `readdir`, `fstat`, and
+`fstatat` through `libc`. An interrupted call did nothing, thus the same call
+reads the same position again. The walk counts each retry, and the summary
+gives the count. One call that is interrupted 1000 times in a row makes its
+subtree incomplete, thus a stream of signals cannot make `ff` hang.
+
+To install: `cargo install --git https://github.com/timmattison/tools ff`

@@ -3423,7 +3423,7 @@ dependencies = [
  "crypto-bigint",
  "crypto-common 0.2.2",
  "digest 0.11.3",
- "ff",
+ "ff 0.14.0",
  "group",
  "hybrid-array",
  "pem-rfc7468",
@@ -3694,6 +3694,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
+]
+
+[[package]]
+name = "ff"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "buildinfo",
+ "childenv",
+ "clap",
+ "globset",
+ "libc",
+ "rayon",
+ "regex",
+ "tempfile",
 ]
 
 [[package]]
@@ -5454,7 +5469,7 @@ version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7fd1a1c7a5206c5b7a3f5a0d7ccd3ff85d0c8f5133d62a02680255b0004af5f4"
 dependencies = [
- "ff",
+ "ff 0.14.0",
  "rand_core 0.10.1",
  "subtle",
 ]
@@ -9055,7 +9070,7 @@ checksum = "c555a6e4eb7d4e158fcb028c835c3b8642206ddc279b5c6b202ef9a8bdb592f4"
 dependencies = [
  "crypto-bigint",
  "crypto-common 0.2.2",
- "ff",
+ "ff 0.14.0",
  "rand_core 0.10.1",
  "subtle",
  "zeroize",
@@ -13273,6 +13288,7 @@ dependencies = [
  "tempfile",
  "termsize",
  "thiserror 2.0.21",
+ "url",
  "wait-timeout",
 ]
 
@@ -14183,7 +14199,7 @@ version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "795ca18b3fdb5e62bf982199278341ddcf7ebf7d32e25e212ad05d496e95f6fa"
 dependencies = [
- "ff",
+ "ff 0.14.0",
  "group",
  "hybrid-array",
  "primefield",
