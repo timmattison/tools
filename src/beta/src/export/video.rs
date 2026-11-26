@@ -237,19 +237,19 @@ fn generate_and_encode_video(
     )]
     let total_frames = (recording.duration * f64::from(fps)).ceil() as usize;
 
-    // Start FFmpeg process first
-    let mut ffmpeg_process = spawn_ffmpeg(output_path, width, height, fps, optimize_web)?;
-    let mut stdin = ffmpeg_process
-        .stdin
-        .take()
-        .context("Failed to get FFmpeg stdin")?;
-
-    // Load font manager once for all frames
+    // Load the fonts before FFmpeg starts: a font error then leaves no FFmpeg
+    // child, and `-y` does not truncate the file at the output path.
     let mut font_manager = FontManager::new(font)?;
     println!(
         "Loaded {} fonts for better Unicode coverage",
         font_manager.fonts.len()
     );
+
+    let mut ffmpeg_process = spawn_ffmpeg(output_path, width, height, fps, optimize_web)?;
+    let mut stdin = ffmpeg_process
+        .stdin
+        .take()
+        .context("Failed to get FFmpeg stdin")?;
 
     let mut terminal_state =
         TerminalState::new(recording.width as usize, recording.height as usize, theme);
