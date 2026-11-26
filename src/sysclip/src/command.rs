@@ -231,15 +231,14 @@ mod tests {
 #[cfg(all(test, unix))]
 mod run_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use gitscratch::testing::executable::write_executable;
 
     const TEXT: &str = "日本語 café 🎉\n";
 
     /// Writes an executable script in `dir` and gives its path.
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
-        std::fs::write(&path, body).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable(&path, body).unwrap();
         path
     }
 

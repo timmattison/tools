@@ -5867,7 +5867,7 @@ mod run_tests {
     use super::*;
     use crate::testrepo::{git, git_output, git_stdout, init_repo_with_upstream};
     #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
+    use gitscratch::testing::executable::write_executable;
 
     /// A clone with a `feature` branch holding one commit, ready to push.
     ///
@@ -5914,11 +5914,6 @@ mod run_tests {
         .success()
     }
 
-    /// `rwxr-xr-x` — git has to be able to execute the hook it finds, and a
-    /// file written by `std::fs::write` is not executable.
-    #[cfg(unix)]
-    const HOOK_EXECUTABLE_MODE: u32 = 0o755;
-
     /// Install `body` as the repository's pre-push hook.
     ///
     /// Every test here that needs a hook installs it through this one helper,
@@ -5929,16 +5924,16 @@ mod run_tests {
     /// would pass or fail on a machine's configuration.
     ///
     /// Unix-only for the execute bit, which is what makes git run the hook at
-    /// all.
+    /// all. [`write_executable`] sets that bit, and it holds no write
+    /// descriptor for the hook in this process. On Linux, a hook that this
+    /// process held open for writing gives `ETXTBSY` when git runs it.
     #[cfg(unix)]
     fn write_hook(workdir: &Path, body: &str) {
         git(workdir, &["config", "core.hooksPath", ".git/hooks"]);
         let hook = workdir.join(".git").join("hooks").join("pre-push");
         std::fs::create_dir_all(hook.parent().expect("the hook has a parent"))
             .expect("create the hooks directory");
-        std::fs::write(&hook, format!("#!/bin/sh\n{body}\n")).expect("write the pre-push hook");
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(HOOK_EXECUTABLE_MODE))
-            .expect("make the hook executable");
+        write_executable(&hook, format!("#!/bin/sh\n{body}\n")).expect("write the pre-push hook");
     }
 
     /// The push a confirmation on `feature` would carry, built through
@@ -6159,7 +6154,6 @@ mod run_tests {
     #[cfg(unix)]
     mod terminal_tests {
         use super::*;
-        use std::os::unix::fs::PermissionsExt;
 
         /// What the fake ssh below writes when it *could* open the controlling
         /// terminal — the failure this test exists to catch.
@@ -6217,7 +6211,9 @@ mod run_tests {
             // The subshell is deliberate: a failed `exec` redirection exits the
             // shell it runs in, so the probe has to be a shell of its own for the
             // `else` branch to be reachable.
-            std::fs::write(
+            // `write_executable`, because git runs the fake ssh. On Linux, a
+            // script that this process held open for writing gives `ETXTBSY`.
+            write_executable(
                 &fake_ssh,
                 format!(
                     "#!/bin/sh\n\
@@ -6231,11 +6227,6 @@ mod run_tests {
                 ),
             )
             .expect("write the fake ssh");
-            std::fs::set_permissions(
-                &fake_ssh,
-                std::fs::Permissions::from_mode(FAKE_SSH_EXECUTABLE_MODE),
-            )
-            .expect("make the fake ssh executable");
 
             // `core.sshCommand` rather than `GIT_SSH_COMMAND`: the environment is
             // process-global and this binary runs many git commands concurrently,
@@ -6271,10 +6262,6 @@ mod run_tests {
              so ssh can prompt over gsw's frame and steal its keystrokes",
             );
         }
-
-        /// `rwxr-xr-x` — git has to be able to execute the fake ssh it is pointed
-        /// at, and a file written by `std::fs::write` is not executable.
-        const FAKE_SSH_EXECUTABLE_MODE: u32 = 0o755;
     }
 
     /// The commit `refs/heads/<branch>` points at in the repository at `dir`,
