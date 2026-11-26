@@ -42,8 +42,10 @@ const OPEN_FAILED_PREFIX: &str = "Failed to open recording";
 
 /// The heading of the speed panel.
 const SPEED_HEADING: &str = "Speed";
-/// The hint of the speed panel.
-const SPEED_HINT: &str = "Times are in seconds, on the timeline after the speed changes above.";
+/// The hint under the heading of each editing panel. A new filter goes to the
+/// end of the list of the project, and the pipeline runs the list in order,
+/// so this rule holds for both panels.
+const EDIT_TIMES_HINT: &str = "Times are in seconds, on the timeline after the speed changes and fast-forwards that you applied before.";
 /// The label of the field for the start of a region.
 const START_LABEL: &str = "Start (s)";
 /// The label of the field for the end of a region.
@@ -293,20 +295,27 @@ fn summary(open: &Document) -> String {
     )
 }
 
-/// The metadata of the open recording, and the speed panel. `on_result` gets
-/// the outcome of each speed change: `Ok`, or the message of the banner.
+/// The metadata of the open recording, the speed panel, and the duration after
+/// all edits. `on_result` gets the outcome of each edit: `Ok`, or the message
+/// of the banner.
 #[component]
 fn PropertiesPanel(
     loaded: Signal<Option<Document>>,
     on_result: EventHandler<Result<(), String>>,
 ) -> Element {
     let metadata = loaded.read().as_ref().map(|open| open.metadata.clone());
+    // A hook runs on each render, before any condition.
+    let edited = use_memo(move || edited_duration(&loaded.read()));
     rsx! {
         div { class: "properties-panel",
             h3 { "Properties" }
             if let Some(metadata) = metadata {
                 {metadata_rows(&metadata)}
                 SpeedPanel { loaded, on_result }
+                div { class: "metadata-item",
+                    span { class: "metadata-label", {EDITED_DURATION_LABEL} }
+                    span { class: "metadata-value", "{edited}" }
+                }
             } else {
                 div { class: "placeholder", "No recording loaded" }
             }
@@ -325,12 +334,11 @@ fn SpeedPanel(
     let mut start = use_signal(String::new);
     let mut end = use_signal(String::new);
     let mut speed = use_signal(String::new);
-    let edited = use_memo(move || edited_duration(&loaded.read()));
     let rows = speed_rows(&loaded.read());
     rsx! {
         div { class: "edit-panel",
             h3 { {SPEED_HEADING} }
-            p { class: "edit-hint", {SPEED_HINT} }
+            p { class: "edit-hint", {EDIT_TIMES_HINT} }
             label { class: "edit-field",
                 {START_LABEL}
                 input {
@@ -385,10 +393,6 @@ fn SpeedPanel(
                         {REMOVE_LABEL}
                     }
                 }
-            }
-            div { class: "metadata-item",
-                span { class: "metadata-label", {EDITED_DURATION_LABEL} }
-                span { class: "metadata-value", "{edited}" }
             }
         }
     }
