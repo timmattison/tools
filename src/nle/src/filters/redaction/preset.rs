@@ -2,10 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A pattern that matches nothing. It is a stand-in for a pattern that is not
-/// written yet.
-const NOTHING: &str = r"[^\s\S]";
-
 /// An email address: a local part, `@`, and a domain with a dot.
 ///
 /// It does not match `user@localhost`, because the domain has no dot. It does
@@ -68,6 +64,22 @@ const TOKEN: &str = concat!(
     r"|(?i:bearer)\s+(?P<redact>[A-Za-z0-9._~+/-]+=*)",
 );
 
+/// A hostname with at least two labels.
+///
+/// The last label must be in a fixed list: `com`, `net`, `org`, `io`, `dev`,
+/// `cloud`, `edu`, `gov`, `mil`, `info`, `biz`, `us`, `uk`, `ca`, `de`, `fr`,
+/// `jp`, `au`, `local`, `internal`, `lan`, `localdomain`, `corp`, and `arpa`.
+/// The list has no case.
+///
+/// It does not match a name with one label, such as `localhost`. It does not
+/// match a file name such as `main.rs` or `notes.txt`, because its last label
+/// is not in the list.
+const HOSTNAME: &str = concat!(
+    r"\b(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+",
+    r"(?i:com|net|org|io|dev|cloud|edu|gov|mil|info|biz|us|uk|ca|de|fr|jp|au",
+    r"|local|internal|lan|localdomain|corp|arpa)\b",
+);
+
 /// A pattern that ships with the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -114,7 +126,7 @@ impl Preset {
             Preset::IpAddress => IP_ADDRESS,
             Preset::AwsKey => AWS_KEY,
             Preset::Token => TOKEN,
-            Preset::Hostname => NOTHING,
+            Preset::Hostname => HOSTNAME,
         }
     }
 }

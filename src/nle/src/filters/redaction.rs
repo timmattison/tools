@@ -56,6 +56,30 @@
 //!
 //! A replacement text with a control character is not valid, because it
 //! would change the state of the terminal.
+//!
+//! # Presets
+//!
+//! A `Find::Preset` finds text with a pattern that ships with the app. Each
+//! preset has limits.
+//!
+//! - `Email`: an address needs a dot in its domain. Thus `user@localhost` is
+//!   not an address.
+//! - `IpAddress`: an IPv4 address, a full IPv6 address with eight groups, or a
+//!   compressed IPv6 address that has a group on each side of `::`. Thus `::1`
+//!   is not found. A clock time, a MAC address, and a version number are not
+//!   found.
+//! - `AwsKey`: an access key ID, or the value of a secret access key or a
+//!   session token. The filter finds a secret value only next to its key name.
+//!   It replaces only the value.
+//! - `Token`: a token in a known format, such as a GitHub, GitLab, Slack,
+//!   Stripe, Google, or npm token, an `sk-` key, or a JSON web token. The
+//!   filter also finds the token after `Bearer`, and it replaces only that
+//!   token.
+//! - `Hostname`: a name with two labels or more. The last label must be `com`,
+//!   `net`, `org`, `io`, `dev`, `cloud`, `edu`, `gov`, `mil`, `info`, `biz`,
+//!   `us`, `uk`, `ca`, `de`, `fr`, `jp`, `au`, `local`, `internal`, `lan`,
+//!   `localdomain`, `corp`, or `arpa`. Thus `main.rs` and `localhost` are not
+//!   found.
 
 use serde::{Deserialize, Serialize};
 

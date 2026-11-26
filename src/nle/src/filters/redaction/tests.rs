@@ -667,18 +667,8 @@ fn the_aws_preset_masks_an_access_key_id() {
 
 #[test]
 fn the_aws_preset_masks_only_the_value_of_a_secret_key() {
-    assert_value_masked(
-        Preset::AwsKey,
-        "aws_secret_access_key = ",
-        AWS_SECRET,
-        "",
-    );
-    assert_value_masked(
-        Preset::AwsKey,
-        "\"SecretAccessKey\": \"",
-        AWS_SECRET,
-        "\"",
-    );
+    assert_value_masked(Preset::AwsKey, "aws_secret_access_key = ", AWS_SECRET, "");
+    assert_value_masked(Preset::AwsKey, "\"SecretAccessKey\": \"", AWS_SECRET, "\"");
     assert_value_masked(
         Preset::AwsKey,
         "AWS_SESSION_TOKEN=",
@@ -713,12 +703,7 @@ fn the_token_preset_masks_known_token_formats() {
 
 #[test]
 fn the_token_preset_masks_only_the_token_after_bearer() {
-    assert_value_masked(
-        Preset::Token,
-        "Authorization: Bearer ",
-        "abc.def-ghi",
-        "",
-    );
+    assert_value_masked(Preset::Token, "Authorization: Bearer ", "abc.def-ghi", "");
 }
 
 #[test]
