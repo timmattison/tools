@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
 use crate::format::format_recorded;
-use crate::types::{Event, EventType, Recording, RecordingMetadata};
+use crate::types::{Chapter, Event, EventType, Recording, RecordingMetadata};
 use dioxus_core::{ElementId, Mutation};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -663,6 +663,48 @@ async fn a_failed_chapter_action_shows_the_banner_and_a_good_one_removes_it() {
     assert!(!page.contains("role=\"alert\""), "{page}");
     assert!(
         page.contains("<span class=\"chapter-label\">Intro</span>"),
+        "{page}"
+    );
+}
+
+#[tokio::test]
+async fn a_second_recording_starts_the_chapter_panel_with_no_edit_and_no_search() {
+    let mut second = fixture();
+    second.recording.title = "Second Recording".into();
+    second.metadata.title = "Second Recording".into();
+    second.recording.chapters = vec![Chapter {
+        time: 1.0,
+        label: "Setup".into(),
+    }];
+    let fakes = Fakes::new()
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())))
+        .pick(picked())
+        .load(Answer::Ready(Ok(second)));
+    let mut window = Window::open(&fakes);
+    window.click(window.open_button());
+    window.settle().await;
+    // The render of the load created the Add Chapter button first.
+    let add = window.newest[0];
+    let (time, label, search) = (window.inputs[0], window.inputs[1], window.inputs[2]);
+    window.type_into(time, "5");
+    window.type_into(label, "Intro");
+    window.click(add);
+    // The render of the new row created its Edit button first.
+    let edit = window.newest[0];
+    window.click(edit);
+    window.type_into(search, "intro");
+    assert!(window.html().contains(">Save Chapter<"), "{}", window.html());
+
+    window.click(window.open_button());
+    window.settle().await;
+
+    let page = window.html();
+    assert!(page.contains("Second Recording"), "{page}");
+    assert!(page.contains(">Add Chapter<"), "{page}");
+    assert!(!page.contains(">Save Chapter<"), "{page}");
+    assert!(
+        page.contains("<span class=\"chapter-label\">Setup</span>"),
         "{page}"
     );
 }
