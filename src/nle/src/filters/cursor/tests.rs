@@ -473,3 +473,116 @@ fn a_reset_of_the_terminal_gets_the_shape_again() {
         ]
     );
 }
+
+// Tests of the color.
+
+/// The OSC 12 sequence that the filter writes for `color`.
+fn set_color(color: &str) -> String {
+    format!("\x1b]12;{color}\x1b\\")
+}
+
+const RESET_COLOR: &str = "\x1b]112\x1b\\";
+
+#[test]
+fn a_color_sets_osc_12_and_drops_each_color_of_the_recording() {
+    let events = vec![
+        out(0.0, "a\x1b]12;#ff0000\x07b"),
+        out(1.0, "\x1b]112\x1b\\c"),
+        out(2.0, "\u{9d}12;red\u{9c}d"),
+    ];
+
+    let got = run(events, json!({ "color": "#00FF00" }), FilterRegion::All).unwrap();
+
+    assert_eq!(
+        got,
+        vec![
+            out(0.0, &set_color("#00FF00")),
+            out(0.0, "ab"),
+            out(1.0, "c"),
+            out(2.0, "d"),
+        ]
+    );
+}
+
+#[test]
+fn a_color_keeps_each_query_and_each_other_osc() {
+    let events = vec![out(
+        0.0,
+        "\x1b]12;?\x07\x1b]10;?;?;?\x07\x1b]0;title\x07\x1b]4;1;#ff0000\x07\x1b]10;#111111\x1b\\",
+    )];
+
+    let got = run(
+        events.clone(),
+        json!({ "color": "#00ff00" }),
+        FilterRegion::All,
+    )
+    .unwrap();
+
+    assert_eq!(
+        got,
+        vec![out(0.0, &set_color("#00ff00")), events[0].clone()]
+    );
+}
+
+#[test]
+fn a_color_drops_the_cursor_slot_of_a_list_of_dynamic_colors() {
+    // OSC 10 with four values sets the colors 10, 11, 12, and 13.
+    let events = vec![out(
+        0.0,
+        "\x1b]10;#111111;#222222;#333333;#444444\x07\x1b]11;#222222;#333333\x1b\\\x1b]12;#333333;#444444\x07",
+    )];
+
+    let got = run(events, json!({ "color": "#00ff00" }), FilterRegion::All).unwrap();
+
+    assert_eq!(
+        got,
+        vec![
+            out(0.0, &set_color("#00ff00")),
+            out(
+                0.0,
+                "\x1b]10;#111111;#222222\x07\x1b]13;#444444\x07\x1b]11;#222222\x1b\\\x1b]13;#444444\x07",
+            ),
+        ]
+    );
+}
+
+#[test]
+fn the_color_of_the_recording_comes_back_at_the_end_of_a_range() {
+    let green = json!({ "color": "#00ff00" });
+    let cases = [
+        ("\x1b]12;#ff0000\x07b", set_color("#ff0000")),
+        ("\x1b]10;#111111;#222222;#ff0000\x07b", set_color("#ff0000")),
+        ("\x1b]12;#ff0000\x07\x1b]112\x07b", RESET_COLOR.to_string()),
+        ("b", RESET_COLOR.to_string()),
+    ];
+    for (data, restore) in cases {
+        let got = run(
+            vec![out(1.0, data), out(3.0, "d")],
+            green.clone(),
+            range(0.5, 2.0),
+        )
+        .unwrap();
+
+        assert_eq!(got[0], out(0.5, &set_color("#00ff00")), "{data:?}");
+        assert_eq!(got[2], out(2.0, &restore), "{data:?}");
+        assert_eq!(got[3], out(3.0, "d"), "{data:?}");
+    }
+}
+
+#[test]
+fn a_reset_of_the_terminal_gets_the_color_again() {
+    let got = run(
+        vec![out(1.0, "\x1bcb")],
+        json!({ "color": "#00ff00" }),
+        FilterRegion::All,
+    )
+    .unwrap();
+
+    assert_eq!(
+        got,
+        vec![
+            out(0.0, &set_color("#00ff00")),
+            out(1.0, &format!("\x1bc{}b", set_color("#00ff00"))),
+        ]
+    );
+}
