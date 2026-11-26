@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use crate::plan::SkippedMount;
+use crate::plan::{SkipReason, SkippedMount};
 use crate::walk::Report;
 
 /// The volumes of a search of the whole machine.
@@ -32,7 +32,88 @@ impl Summary<'_> {
     /// The lines of the summary, each without its line end.
     #[must_use]
     pub fn lines(&self) -> Vec<String> {
-        Vec::new()
+        let report = self.report;
+        let mut lines = Vec::new();
+        if self.show_skipped {
+            for skipped in self.volumes.map_or(&[][..], |volumes| volumes.skipped) {
+                lines.push(format!(
+                    "ff: volume skipped: {} ({})",
+                    skipped.mount_point.display(),
+                    describe(&skipped.reason)
+                ));
+            }
+            for incomplete in &report.incomplete {
+                lines.push(format!(
+                    "ff: incomplete: {}: {}",
+                    incomplete.path.display(),
+                    incomplete.error
+                ));
+            }
+            for denied in &report.denied {
+                lines.push(format!("ff: denied: {}", denied.display()));
+            }
+            for cloud in &report.cloud_skipped {
+                lines.push(format!("ff: cloud: {}", cloud.display()));
+            }
+        }
+
+        lines.push(format!("ff: matches: {}", report.matches));
+        lines.push(format!(
+            "ff: entries read: {} in {:.1} s",
+            report.entries,
+            self.elapsed.as_secs_f64()
+        ));
+        if let Some(volumes) = self.volumes {
+            lines.push(format!(
+                "ff: volumes searched: {}, skipped: {}",
+                volumes.searched,
+                volumes.skipped.len()
+            ));
+        }
+        lines.push(format!(
+            "ff: incomplete subtrees: {}",
+            report.incomplete.len()
+        ));
+        if !report.denied.is_empty() {
+            lines.push(format!(
+                "ff: denied directories: {} (System Integrity Protection and the privacy settings refuse some directories)",
+                report.denied.len()
+            ));
+        }
+        if !report.cloud_skipped.is_empty() {
+            lines.push(format!(
+                "ff: cloud directories skipped: {} (--include-cloud searches them)",
+                report.cloud_skipped.len()
+            ));
+        }
+        if report.retried_interruptions > 0 {
+            lines.push(format!(
+                "ff: interrupted calls retried: {}",
+                report.retried_interruptions
+            ));
+        }
+
+        let something_to_name = !report.incomplete.is_empty()
+            || !report.denied.is_empty()
+            || !report.cloud_skipped.is_empty()
+            || self
+                .volumes
+                .is_some_and(|volumes| !volumes.skipped.is_empty());
+        if something_to_name && !self.show_skipped {
+            lines.push("ff: --show-skipped names each one".to_owned());
+        }
+        lines
+    }
+}
+
+/// Tells in a few words why the plan skipped a volume.
+fn describe(reason: &SkipReason) -> String {
+    match reason {
+        SkipReason::DeviceFiles => "device files".to_owned(),
+        SkipReason::Automounter => "automounter map".to_owned(),
+        SkipReason::SimulatorImage => "simulator image".to_owned(),
+        SkipReason::SystemVolume => "system volume".to_owned(),
+        SkipReason::InsideSkipped(outer) => format!("inside {}", outer.display()),
     }
 }
 
