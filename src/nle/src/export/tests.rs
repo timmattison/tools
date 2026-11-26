@@ -206,3 +206,77 @@ fn a_web_export_runs_beta_with_the_theme_and_compress() {
     .to_vec();
     assert_eq!(args, expected);
 }
+
+#[test]
+fn a_recording_export_writes_the_file_and_reports_writing() {
+    let out = tempfile::tempdir().unwrap();
+    let output = out.path().join("out.json.gz");
+    let request = ExportRequest {
+        output_path: output.clone(),
+        target: ExportTarget::Recording { compress: None },
+    };
+    let reported = Reported::default();
+
+    let result = block_on(export_recording_with(
+        recording(),
+        request,
+        collector(&reported),
+        |_| None,
+    ));
+
+    assert_eq!(*reported.lock().unwrap(), [ExportProgress::Writing]);
+    assert_eq!(result.unwrap(), output);
+    assert!(std::fs::read(&output).unwrap().starts_with(&[0x1f, 0x8b]));
+    assert_eq!(Recording::load(&output).unwrap(), recording());
+}
+
+#[test]
+fn a_recording_export_keeps_the_save_error_of_a_refused_name() {
+    let out = tempfile::tempdir().unwrap();
+    let request = ExportRequest {
+        output_path: out.path().join("out.txt"),
+        target: ExportTarget::Recording { compress: None },
+    };
+
+    let result = block_on(export_recording_with(
+        recording(),
+        request,
+        |_| {},
+        |_| None,
+    ));
+
+    assert!(matches!(result, Err(NleError::SaveError(_))), "{result:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_beta_gives_an_export_error_and_removes_the_work_file() {
+    let home = home_with_beta_script(FAILING_BETA);
+    let out = tempfile::tempdir().unwrap();
+    let request = ExportRequest {
+        output_path: out.path().join("out.mp4"),
+        target: ExportTarget::Video {
+            theme: Theme::Auto,
+            fps: None,
+            resolution: None,
+            optimize_web: false,
+        },
+    };
+
+    let result = block_on(export_recording_with(
+        recording(),
+        request,
+        |_| {},
+        finder_vars(&home),
+    ));
+
+    let Err(NleError::ExportError(text)) = result else {
+        panic!("expected an ExportError, got {result:?}");
+    };
+    // FAILING_BETA prints its arguments, and the third one is the work file.
+    let input = text
+        .split_whitespace()
+        .find(|word| word.ends_with(WORK_FILE_NAME))
+        .unwrap_or_else(|| panic!("no work file in {text}"));
+    assert!(!Path::new(input).exists(), "the work file stays: {input}");
+}
