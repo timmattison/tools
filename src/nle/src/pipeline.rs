@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
+use serde::de::DeserializeOwned;
+
 use crate::error::NleError;
 use crate::types::{
     AppliedFilter, Clip, EditProject, Event, FilterKind, FilterOptions, FilterRegion, Recording,
@@ -43,6 +45,16 @@ use crate::types::{
 /// the end of the timeline is not finite, because a shift can overflow.
 pub type FilterFn = dyn Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync;
 
+/// The events of a region and the end of the timeline, as a filter of
+/// `FilterRegistry::register_typed` sees them and answers them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Span {
+    /// The events, with times relative to the region start.
+    pub events: Vec<Event>,
+    /// The end of the timeline, relative to the region start.
+    pub end: Option<f64>,
+}
+
 /// The filters that a project can use, by kind.
 #[derive(Clone, Default)]
 pub struct FilterRegistry {
@@ -77,6 +89,15 @@ impl FilterRegistry {
         filter: impl Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync + 'static,
     ) {
         self.filters.insert(kind, Arc::new(filter));
+    }
+
+    /// Register `filter` under `kind`, with options of the type `O`.
+    pub fn register_typed<O, F>(&mut self, kind: FilterKind, filter: F)
+    where
+        O: DeserializeOwned + 'static,
+        F: Fn(Span, &O) -> Span + Send + Sync + 'static,
+    {
+        let _ = (kind, filter);
     }
 
     /// Whether a filter is registered under `kind`.

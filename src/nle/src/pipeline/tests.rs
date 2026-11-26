@@ -363,6 +363,80 @@ fn events_at_one_time_keep_the_order_the_filter_gave() {
     assert_eq!(data, vec!["first", "second", "third", "late"]);
 }
 
+// Tests of a filter with typed options.
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShiftBy {
+    seconds: f64,
+}
+
+/// Moves each event later by `options.seconds`, and leaves the end to the
+/// shift.
+fn shift_by(span: Span, options: &ShiftBy) -> Span {
+    Span {
+        events: span
+            .events
+            .into_iter()
+            .map(|e| Event {
+                time: e.time + options.seconds,
+                ..e
+            })
+            .collect(),
+        end: None,
+    }
+}
+
+fn typed_registry() -> FilterRegistry {
+    let mut registry = FilterRegistry::new();
+    registry.register_typed(kind("shift"), shift_by);
+    registry
+}
+
+fn all_with(name: &str, options: FilterOptions) -> AppliedFilter {
+    AppliedFilter {
+        kind: kind(name),
+        region: FilterRegion::All,
+        options,
+    }
+}
+
+#[test]
+fn a_typed_filter_gets_its_options_parsed() {
+    let out = typed_registry()
+        .run(
+            events(&[1.0, 2.0]),
+            &[all_with("shift", FilterOptions::new().with("seconds", 0.5))],
+        )
+        .unwrap();
+
+    assert_eq!(times(&out), vec![1.5, 2.5]);
+}
+
+#[test]
+fn a_typed_filter_with_invalid_options_fails_and_names_the_kind_and_the_reason() {
+    let cases = [
+        (FilterOptions::new(), "seconds"),
+        (FilterOptions::new().with("seconds", "soon"), "invalid type"),
+        (
+            FilterOptions::new().with("seconds", 0.5).with("extra", 1),
+            "extra",
+        ),
+    ];
+    for (options, reason) in cases {
+        let result = typed_registry().run(events(&[1.0]), &[all_with("shift", options)]);
+
+        match result {
+            Err(NleError::RenderError(message)) => {
+                assert!(message.contains("\"shift\""), "{message}");
+                assert!(message.contains("invalid options"), "{message}");
+                assert!(message.contains(reason), "{reason}: {message}");
+            }
+            other => panic!("expected a RenderError, got {other:?}"),
+        }
+    }
+}
+
 // Tests of the render of one clip.
 
 use std::collections::BTreeMap;
