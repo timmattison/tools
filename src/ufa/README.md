@@ -165,7 +165,9 @@ It looks for a controller in this order:
    page is not mistaken for a controller.
 3. **A URL you type**, validated the same way. The probe goes to the `info` endpoint under any path
    prefix in the URL, as for a controller behind a reverse proxy, and setup saves the URL exactly as
-   you typed it. A name stays a name, so a certificate that is valid for that name stays valid.
+   you typed it. A name stays a name, so a certificate that is valid for that name stays valid. A
+   URL that answers with a redirect fails, because each later command refuses a redirect. Setup
+   names where the redirect goes, so you can type that URL instead.
 
 For a controller from the network or a typed URL, setup asks you to paste its key. It then asks
 whether to skip TLS verification, tests the connection, and finally offers to store a Site Manager

@@ -251,25 +251,40 @@ fn probe_url(controller: &Url) -> Result<Url> {
 ///
 /// # Errors
 ///
-/// Returns an error if the host cannot be reached.
+/// Returns an error if the host cannot be reached, or if it answers with a
+/// redirect. The client of each later command refuses a redirect, so a
+/// controller that the probe reaches only through one is of no use. The error
+/// names the status and the `Location` of the redirect.
 async fn probe(url: Url) -> Result<ProbeVerdict> {
     // Controllers ship a self-signed certificate out of the box, so discovery
     // -- which runs before any trust decision has been made -- cannot insist
     // on a valid one.
     #[expect(
         clippy::disallowed_methods,
-        reason = "a probe carries no API key, so it needs no client that guards one, and it follows a redirect on purpose: the host behind one is still a controller"
+        reason = "a probe carries no API key, so it needs no header map of build_client, and it states the redirect policy of build_client itself"
     )]
     let client = crate::http::with_ufa_transport(reqwest::Client::builder())
         .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(PROBE_TIMEOUT)
         .build()?;
 
-    let response = client.get(url).send().await?;
-    let status = response.status().as_u16();
+    let response = client.get(url.clone()).send().await?;
+    let status = response.status();
+    if status.is_redirection() {
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("no Location");
+        anyhow::bail!(
+            "{url} answered {status} and sends the client to {location}. \
+             ufa does not follow a redirect, so give the URL of the controller itself"
+        );
+    }
     let body = response.text().await.unwrap_or_default();
 
-    Ok(judge_probe(status, &body))
+    Ok(judge_probe(status.as_u16(), &body))
 }
 
 /// Resolve `host` to an address, falling back to the name itself.
