@@ -278,6 +278,19 @@ const DEFAULT_CARGO_HOME: &str = ".cargo";
 /// The directory, in the cargo home, where cargo looks for a subcommand.
 const CARGO_HOME_BIN: &str = "bin";
 
+/// The shell that Husky starts each hook with. `.husky/_/h` runs
+/// `sh -e "$s" "$@"`, and it ignores the shebang of the hook. A test that
+/// starts the hook with bash thus proves nothing about a machine whose `sh` is
+/// dash, which is the `sh` of Debian and Ubuntu.
+const HUSKY_SHELL: &str = "sh";
+
+/// The flag that Husky gives [`HUSKY_SHELL`]: stop at the first command that
+/// fails.
+const HUSKY_SHELL_FLAG: &str = "-e";
+
+/// The dash that macOS installs, and that Debian and Ubuntu start as `sh`.
+const DASH: &str = "/bin/dash";
+
 /// The cargo home of a hook run, as an absolute path. It obeys the rule of
 /// cargo: a `CARGO_HOME` that is set and not empty, else `.cargo` in the home
 /// directory. Gives back `None` when neither one is known.
@@ -289,9 +302,16 @@ fn cargo_home() -> Option<PathBuf> {
         .and_then(|home| std::path::absolute(home).ok())
 }
 
-/// Run the real hook once with `dir` as CWD, shedding the inherited `GIT_`
-/// family so the hook operates on the fixture repo rather than this test's
-/// repo. It sets `CARGO_TARGET_DIR` to `dir/target`, so the cargo in the fixture
+/// Run the real hook once with `dir` as CWD, as Husky starts it:
+/// `sh -e <hook>`. See [`run_hook_in_shell`].
+fn run_hook_configured(dir: &Path, configure: impl FnOnce(&mut Command)) -> HookRun {
+    run_hook_in_shell(HUSKY_SHELL, dir, configure)
+}
+
+/// Run the real hook once with `dir` as CWD, as `shell -e <hook>`, shedding
+/// the inherited `GIT_` family so the hook operates on the fixture repo rather
+/// than this test's repo. It sets `CARGO_TARGET_DIR` to `dir/target`, so the
+/// cargo in the fixture
 /// never waits for the build-directory lock of the outer `cargo test` run.
 ///
 /// It puts a stub `cargo-machete` that exits 0 first on PATH. The check script
@@ -308,8 +328,8 @@ fn cargo_home() -> Option<PathBuf> {
 /// `configure` changes the command after that setup and before it starts, so a
 /// `PATH` that `configure` sets wins. Gives back the exit status and the printed
 /// output of that one run.
-fn run_hook_configured(dir: &Path, configure: impl FnOnce(&mut Command)) -> HookRun {
-    let mut command = childenv::fixture_command("bash");
+fn run_hook_in_shell(shell: &str, dir: &Path, configure: impl FnOnce(&mut Command)) -> HookRun {
+    let mut command = childenv::fixture_command(shell);
     let stub_dir = dir.join(MACHETE_STUB_DIR);
     fs::create_dir_all(&stub_dir).expect("failed to create the stub directory");
     write_executable(stub_dir.join(MACHETE_BINARY_NAME), MACHETE_STUB_SCRIPT)
@@ -329,10 +349,11 @@ fn run_hook_configured(dir: &Path, configure: impl FnOnce(&mut Command)) -> Hook
     configure(&mut command);
 
     let completed = command
+        .arg(HUSKY_SHELL_FLAG)
         .arg(hook_path())
         .current_dir(dir)
         .output()
-        .expect("failed to spawn pre-commit hook");
+        .unwrap_or_else(|e| panic!("failed to spawn the pre-commit hook with {shell}: {e}"));
     HookRun {
         passed: completed.status.success(),
         output: format!(
@@ -711,6 +732,41 @@ fn tool_index_block_runs_cargo_without_git_variables() {
     assert_clean_recording(&calls, &["test"], "tool-index block");
 }
 
+/// Under dash, the `sh` of Debian and Ubuntu, the hook must run as Husky
+/// starts it, `sh -e <hook>`: a staged tool index runs the tool-index guard
+/// through `without_git_environment`, with no `GIT_` variable. Dash refuses
+/// each option that POSIX sh does not have. A hook that sets one stops before
+/// any block runs, and Husky then fails each commit on such a machine.
+#[test]
+fn hook_runs_its_blocks_under_dash() {
+    assert!(
+        Path::new(DASH).is_file(),
+        "{DASH} is missing; this test needs the sh of Debian and Ubuntu"
+    );
+    let dir = unique_fixture_dir();
+    fs::write(dir.join("README.md"), "# fixture\n").expect("write README.md");
+    git_init_and_stage(&dir, &["README.md"]);
+    let cargo = install_fake_cargo(&dir);
+
+    let HookRun { passed, output } = run_hook_in_shell(DASH, &dir, |command| {
+        plant_fake_and_git_variables(command, &cargo);
+    });
+    let calls = read_recording(&cargo);
+    cleanup(&dir);
+
+    assert!(passed, "the hook must pass under {DASH} -e: {output}");
+    assert_eq!(
+        calls.arguments,
+        [INDEX_GUARD_CARGO_CALL],
+        "README.md must run the tool-index guard under {DASH}: {output}"
+    );
+    assert!(
+        calls.git_lines.is_empty(),
+        "a cargo command saw GIT_ variables under {DASH}: {:?}",
+        calls.git_lines
+    );
+}
+
 /// `test.sh` must run `cargo test` with no `GIT_` variable.
 #[test]
 fn test_sh_runs_cargo_without_git_variables() {
@@ -841,9 +897,9 @@ fn directory_of_links(dir: &Path, programs: &[&str]) -> PathBuf {
 /// and name the fix. A gate that skips the checks would report a plugin that it
 /// never read as clean.
 ///
-/// `PATH` holds only the programs that the hook and the script run before the
-/// check for the CLI, so a claude CLI that is installed on this machine cannot
-/// be found.
+/// `PATH` holds only the shell that starts the hook, and the programs that the
+/// hook and the script run before the check for the CLI, so a claude CLI that
+/// is installed on this machine cannot be found.
 /// Proven able to fail by mutation: with `exit 0` in place of the `exit 1` of
 /// the check, the hook passes and this test fails.
 #[test]
@@ -851,7 +907,7 @@ fn plugin_block_without_claude_fails_the_commit() {
     let dir = unique_fixture_dir();
     write_fixture_plugin(&dir);
     git_init_and_stage(&dir, &[FIXTURE_PLUGIN_FILE]);
-    let bin_dir = directory_of_links(&dir, &["bash", "dirname", "git", "grep"]);
+    let bin_dir = directory_of_links(&dir, &[HUSKY_SHELL, "bash", "dirname", "git", "grep"]);
 
     let HookRun { passed, output } = run_hook_configured(&dir, |command| {
         command.env("PATH", &bin_dir);
