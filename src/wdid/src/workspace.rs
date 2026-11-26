@@ -10,6 +10,8 @@
 //!    record of a `cargo install --git` names the repository and the full
 //!    commit, and cargo keeps a checkout of that commit in
 //!    `<cargo home>/git/checkouts/<repository name>-<hash>/<short commit>`.
+//!    The record of a `cargo install --path` names the crate directory, and
+//!    the workspace is the cargo workspace that holds that directory.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -29,6 +31,23 @@ const RECORDS_FILE: &str = ".crates2.json";
 
 /// What starts the source of a record of `cargo install --git`.
 const GIT_SOURCE_PREFIX: &str = "git+";
+
+/// What starts the source of a record of `cargo install --path`, before the
+/// file URL.
+const PATH_SOURCE_PREFIX: &str = "path+";
+
+/// The scheme of the URL in a `path+` source.
+const FILE_SCHEME: &str = "file";
+
+/// The arguments of `cargo locate-project`, before the manifest path. The
+/// command gives the manifest of the workspace that holds the manifest.
+const LOCATE_ARGUMENTS: [&str; 5] = [
+    "locate-project",
+    "--workspace",
+    "--message-format",
+    "plain",
+    "--manifest-path",
+];
 
 /// What starts the source in the key of a record, after the name and the
 /// version of the package.
@@ -204,6 +223,20 @@ pub enum SourceError {
         /// The standard error of git, trimmed.
         stderr: String,
     },
+    /// The crate directory of a `path+file` record does not exist.
+    #[error("the crate directory {crate_dir} of the record does not exist", crate_dir = .crate_dir.display())]
+    NoCrateDirectory {
+        /// The crate directory of the record.
+        crate_dir: PathBuf,
+    },
+    /// cargo finds no workspace that holds the crate directory.
+    #[error("cargo locate-project finds no workspace for {crate_dir} ({stderr})", crate_dir = .crate_dir.display())]
+    NoPathWorkspace {
+        /// The crate directory of the record.
+        crate_dir: PathBuf,
+        /// The standard error of cargo, trimmed.
+        stderr: String,
+    },
     /// The checkout has no `Cargo.toml` at its top.
     #[error("the checkout {checkout} has no Cargo.toml", checkout = .checkout.display())]
     CheckoutWithoutManifest {
@@ -263,6 +296,14 @@ fn installed_source(
     let records = install_root.join(RECORDS_FILE);
     let key = record_key(&records, binary)?;
     let source = source_of(&key).ok_or_else(|| SourceError::OtherSource { key: key.clone() })?;
+    if let Some(file_url) = source.strip_prefix(PATH_SOURCE_PREFIX) {
+        let crate_dir =
+            file_path(file_url).ok_or_else(|| SourceError::OtherSource { key: key.clone() })?;
+        return Ok(Workspace {
+            root: path_workspace(programs, &crate_dir)?,
+            found_by: FoundBy::InstalledPath { crate_dir },
+        });
+    }
     let Some(git) = source.strip_prefix(GIT_SOURCE_PREFIX) else {
         return Err(SourceError::OtherSource { key });
     };
@@ -322,6 +363,42 @@ fn record_key(path: &Path, binary: &str) -> Result<String, SourceError> {
 /// `<package> <version> (<source>)`.
 fn source_of(key: &str) -> Option<&str> {
     key.split_once(SOURCE_START)?.1.strip_suffix(SOURCE_END)
+}
+
+/// Gives the path of a `file:` URL, with each percent escape read back.
+fn file_path(file_url: &str) -> Option<PathBuf> {
+    url::Url::parse(file_url)
+        .ok()
+        .filter(|url| url.scheme() == FILE_SCHEME)?
+        .to_file_path()
+        .ok()
+}
+
+/// Gives the root of the cargo workspace that holds `crate_dir`, as
+/// `cargo locate-project --workspace` gives it.
+fn path_workspace(programs: &Programs, crate_dir: &Path) -> Result<PathBuf, SourceError> {
+    if !crate_dir.is_dir() {
+        return Err(SourceError::NoCrateDirectory {
+            crate_dir: crate_dir.to_path_buf(),
+        });
+    }
+    let mut command = childenv::command(&programs.cargo);
+    command
+        .args(LOCATE_ARGUMENTS)
+        .arg(crate_dir.join(catalog::MANIFEST))
+        .stdin(Stdio::null());
+    let output = catalog::run(&mut command, &programs.cargo)?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let manifest = Path::new(stdout.trim_end_matches(['\n', '\r']));
+    match manifest.parent() {
+        Some(root) if output.status.success() && !root.as_os_str().is_empty() => {
+            Ok(root.to_path_buf())
+        }
+        _ => Err(SourceError::NoPathWorkspace {
+            crate_dir: crate_dir.to_path_buf(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        }),
+    }
 }
 
 /// Gives the name that cargo gives the repository of `url`: the last part of
