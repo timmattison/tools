@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use crate::error::NleError;
 use crate::pipeline::FilterRegistry;
-use crate::types::{AppliedFilter, Clip, ClipId, EditProject, Recording, Seconds, TrackId};
+use crate::types::{
+    AppliedFilter, Clip, ClipId, EditProject, Recording, Seconds, TimelineTrack, TrackId,
+};
 
 /// One edit of a project.
 ///
@@ -77,6 +79,54 @@ pub enum Edit {
     },
 }
 
+impl Edit {
+    /// Apply this edit to `project`. It may leave `project` half changed when
+    /// it fails, so the caller gives it a copy. It does not validate the
+    /// result.
+    fn apply_to(&self, project: &mut EditProject) -> Result<(), NleError> {
+        match self {
+            Self::AddTrack { id } => {
+                if project.timeline.iter().any(|track| track.id == *id) {
+                    return Err(NleError::EditError(format!(
+                        "track {} is already in use",
+                        id.0
+                    )));
+                }
+                project.timeline.push(TimelineTrack {
+                    id: *id,
+                    clips: Vec::new(),
+                });
+                Ok(())
+            }
+            Self::RemoveTrack { id } => {
+                let position = track_position(project, *id)?;
+                if project
+                    .timeline
+                    .get(position)
+                    .is_some_and(|track| !track.clips.is_empty())
+                {
+                    return Err(NleError::EditError(format!(
+                        "track {} holds a clip",
+                        id.0
+                    )));
+                }
+                project.timeline.remove(position);
+                Ok(())
+            }
+            _ => todo!(),
+        }
+    }
+}
+
+/// The index of track `id` in the timeline, or an edit error.
+fn track_position(project: &EditProject, id: TrackId) -> Result<usize, NleError> {
+    project
+        .timeline
+        .iter()
+        .position(|track| track.id == id)
+        .ok_or_else(|| NleError::EditError(format!("track {} does not exist", id.0)))
+}
+
 /// An edit that was applied, and the project as it was before.
 #[derive(Debug)]
 struct Applied {
@@ -124,8 +174,13 @@ impl Editor {
     /// the result breaks a rule of `EditProject::validate`. A refused edit
     /// changes nothing.
     pub fn apply(&mut self, edit: Edit) -> Result<(), NleError> {
-        let _ = edit;
-        todo!()
+        let mut next = self.project.clone();
+        edit.apply_to(&mut next)?;
+        next.validate()?;
+        let before = std::mem::replace(&mut self.project, next);
+        self.undo.push(Applied { edit, before });
+        self.redo.clear();
+        Ok(())
     }
 
     /// Undo the last edit. Returns `false` when there is nothing to undo.
