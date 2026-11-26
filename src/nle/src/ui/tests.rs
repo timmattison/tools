@@ -334,7 +334,12 @@ impl Window {
     /// The `N` fields that start at `first` in the list of input listeners.
     /// The page must hold exactly `first + N` of them.
     fn input_fields<const N: usize>(&self, first: usize) -> [ElementId; N] {
-        assert_eq!(self.inputs.len(), 8, "the page has the inputs {:?}", self.inputs);
+        assert_eq!(
+            self.inputs.len(),
+            8,
+            "the page has the inputs {:?}",
+            self.inputs
+        );
         self.inputs[first..first + N]
             .try_into()
             .expect("a slice of the right length")
@@ -355,7 +360,10 @@ impl Window {
         events: &str,
     ) {
         let fields = self.redaction_fields();
-        for (field, text) in fields.into_iter().zip([find, pattern, replace, replacement, events]) {
+        for (field, text) in fields
+            .into_iter()
+            .zip([find, pattern, replace, replacement, events])
+        {
             self.type_into(field, text);
         }
         self.click(self.redact_button());
@@ -982,4 +990,17 @@ fn an_edit_after_a_speed_change_shows_the_duration_after_it() {
         edited_duration(&Some(document)),
         format_duration(65.3 / 4.0)
     );
+}
+
+// The redaction panel.
+
+#[tokio::test]
+async fn applying_a_text_redaction_adds_a_row_and_keeps_the_duration() {
+    let mut window = open_recording().await;
+    window.apply_redaction("text", "hunter2", "asterisks", "", "output");
+    let page = window.html();
+    let row = redaction_row("text \u{201c}hunter2\u{201d} \u{2192} asterisks (output)");
+    assert!(page.contains(&row), "{row} missing in {page}");
+    assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
+    assert!(!page.contains("role=\"alert\""), "{page}");
 }
