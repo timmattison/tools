@@ -355,7 +355,7 @@ pub fn serve(server: Arc<tiny_http::Server>, mode: ServeMode, workers: usize) ->
 /// thread, or a worker that panicked.
 pub fn wait_until_stopped(pool: Pool, bind: &str, port: u16) -> Result<(), String> {
     pool.join()
-        .map_err(|e| format!("sirn stopped accepting connections on {bind}:{port}: {e}"))
+        .map_err(|e| format!("sirn stopped serving on {bind}:{port}: {e}"))
 }
 
 /// How often the availability monitor restats the served files.
