@@ -175,9 +175,35 @@ impl Edit {
                     .timeline_offset = *timeline_offset;
                 Ok(())
             }
-            _ => todo!(),
+            Self::AddFilter { index, filter } => {
+                if *index > project.filters.len() {
+                    return Err(missing_filter(*index));
+                }
+                project.filters.insert(*index, filter.clone());
+                Ok(())
+            }
+            Self::RemoveFilter { index } => {
+                if *index >= project.filters.len() {
+                    return Err(missing_filter(*index));
+                }
+                project.filters.remove(*index);
+                Ok(())
+            }
+            Self::ReplaceFilter { index, filter } => {
+                let slot = project
+                    .filters
+                    .get_mut(*index)
+                    .ok_or_else(|| missing_filter(*index))?;
+                *slot = filter.clone();
+                Ok(())
+            }
         }
     }
+}
+
+/// The edit error for a filter index that is out of range.
+fn missing_filter(index: usize) -> NleError {
+    NleError::EditError(format!("filter index {index} is out of range"))
 }
 
 /// The edit error for a clip that does not exist.
