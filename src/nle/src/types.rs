@@ -130,6 +130,23 @@ pub struct ClipId(pub u64);
 #[serde(transparent)]
 pub struct TrackId(pub u64);
 
+/// The identifier of a chapter marker. It is unique within one project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ChapterId(pub u64);
+
+/// A chapter marker: a labeled time on the timeline of a project.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChapterMarker {
+    /// The identifier of the marker.
+    pub id: ChapterId,
+    /// The time on the timeline, before the filters: the time that the clips
+    /// of the project have. It can be after the end of the timeline.
+    pub time: Seconds,
+    /// The name of the chapter. It holds a character that is not white space.
+    pub label: String,
+}
+
 /// A clip: a range of one source recording, placed on the timeline.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Clip {
@@ -227,6 +244,8 @@ pub struct EditProject {
     pub clips: Vec<Clip>,
     pub timeline: Vec<TimelineTrack>,
     pub filters: Vec<AppliedFilter>,
+    /// The chapter markers, in the order that they were added.
+    pub chapters: Vec<ChapterMarker>,
 }
 
 impl Recording {

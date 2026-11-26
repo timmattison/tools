@@ -441,6 +441,7 @@ fn two_clip_project() -> EditProject {
         clips: vec![clip_of(1, late, 2.0), clip_of(2, early, 0.0)],
         timeline: vec![track_of(1, 1), track_of(2, 2)],
         filters: Vec::new(),
+        chapters: Vec::new(),
     }
 }
 
@@ -573,6 +574,7 @@ fn render_of_a_clip_whose_events_overflow_the_timeline_fails() {
         clips: vec![clip_of(1, source("big", &[0.0, 1e308], 1e308), 1e308)],
         timeline: vec![track_of(1, 1)],
         filters: Vec::new(),
+        chapters: Vec::new(),
     };
 
     let result = FilterRegistry::new().render(&project);
@@ -591,6 +593,7 @@ fn render_of_a_clip_whose_end_overflows_the_timeline_fails() {
         clips: vec![clip_of(1, source("end", &[0.0], 1e308), 1e308)],
         timeline: vec![track_of(1, 1)],
         filters: Vec::new(),
+        chapters: Vec::new(),
     };
 
     let result = FilterRegistry::new().render(&project);

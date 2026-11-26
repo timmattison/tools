@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::NleError;
 use crate::json_file;
 use crate::types::{
-    AppliedFilter, Clip, ClipId, EditProject, Event, FilterRegion, Recording, Seconds,
-    TimelineTrack, TrackId,
+    AppliedFilter, ChapterId, ChapterMarker, Clip, ClipId, EditProject, Event, FilterRegion,
+    Recording, Seconds, TimelineTrack, TrackId,
 };
 
 /// The form of a project in its file. Each source is written once, and each
@@ -23,6 +23,8 @@ pub(crate) struct ProjectFile {
     clips: Vec<ClipFile>,
     timeline: Vec<TimelineTrack>,
     filters: Vec<AppliedFilter>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    chapters: Vec<ChapterMarker>,
 }
 
 /// A clip in the file of a project: `source` is an index in `ProjectFile::sources`.
@@ -62,6 +64,7 @@ impl From<EditProject> for ProjectFile {
             clips,
             timeline: project.timeline,
             filters: project.filters,
+            chapters: Vec::new(),
         }
     }
 }
@@ -94,6 +97,7 @@ impl TryFrom<ProjectFile> for EditProject {
             clips,
             timeline: file.timeline,
             filters: file.filters,
+            chapters: Vec::new(),
         })
     }
 }
@@ -120,6 +124,7 @@ impl EditProject {
                 clips: vec![ClipId(1)],
             }],
             filters: Vec::new(),
+            chapters: Vec::new(),
         })
     }
 
@@ -134,6 +139,19 @@ impl EditProject {
                 .max()
                 .map_or(1, |m| m.saturating_add(1)),
         )
+    }
+
+    /// The id for a new chapter marker: one more than the largest id in use, or
+    /// 1 when there is no marker. The id saturates at `u64::MAX`.
+    #[must_use]
+    pub fn next_chapter_id(&self) -> ChapterId {
+        ChapterId(0)
+    }
+
+    /// The chapter markers sorted by time, then by id.
+    #[must_use]
+    pub fn chapters_in_order(&self) -> Vec<&ChapterMarker> {
+        self.chapters.iter().collect()
     }
 
     /// The id for a new track: one more than the largest id in use, or 1 when

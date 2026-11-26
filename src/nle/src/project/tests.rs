@@ -33,6 +33,7 @@ use crate::types::{
     AppliedFilter, Clip, ClipId, EditProject, Event, EventType, FilterKind, FilterOptions,
     FilterRegion, Recording, TimelineTrack, TrackId,
 };
+use crate::types::{ChapterId, ChapterMarker};
 use std::sync::Arc;
 
 #[test]
@@ -95,6 +96,7 @@ fn valid_project() -> EditProject {
         ],
         timeline: vec![track(1, &[1, 2]), track(2, &[3])],
         filters: Vec::new(),
+        chapters: Vec::new(),
     }
 }
 
@@ -299,6 +301,7 @@ fn two_clip_project() -> EditProject {
         clips: vec![first, second],
         timeline: vec![track(1, &[1]), track(2, &[2])],
         filters: Vec::new(),
+        chapters: Vec::new(),
     }
 }
 
@@ -403,6 +406,131 @@ fn load_refuses_a_file_with_a_negative_in_point() {
     let mut value = serde_json::to_value(valid_project()).unwrap();
     value["clips"][0]["in_point"] = serde_json::json!(-1.0);
     std::fs::write(&path, value.to_string()).unwrap();
+
+    assert!(matches!(
+        EditProject::load(&path),
+        Err(NleError::InvalidFormat(_))
+    ));
+}
+
+// Tests of the chapter markers.
+
+fn chapter(id: u64, time: f64, label: &str) -> ChapterMarker {
+    ChapterMarker {
+        id: ChapterId(id),
+        time: Seconds::new(time).unwrap(),
+        label: label.to_string(),
+    }
+}
+
+#[test]
+fn validate_refuses_two_chapters_with_one_id() {
+    let mut project = valid_project();
+    project.chapters = vec![chapter(7, 1.0, "one"), chapter(7, 2.0, "two")];
+
+    let result = project.validate();
+
+    match result {
+        Err(NleError::InvalidProject(message)) => {
+            assert!(message.contains('7'), "{message}");
+            assert!(message.contains("chapter"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn validate_refuses_a_chapter_with_a_blank_label() {
+    for label in ["", "  \t"] {
+        let mut project = valid_project();
+        project.chapters = vec![chapter(1, 1.0, label)];
+        assert_invalid(&project, &format!("the label {label:?}"));
+    }
+}
+
+#[test]
+fn validate_accepts_a_chapter_after_the_end_of_the_timeline() {
+    let mut project = valid_project();
+    project.chapters = vec![chapter(1, project.duration() + 100.0, "late")];
+
+    project.validate().unwrap();
+}
+
+#[test]
+fn next_chapter_id_is_one_with_no_chapter_and_one_more_than_the_largest_otherwise() {
+    let mut project = valid_project();
+    assert_eq!(project.next_chapter_id(), ChapterId(1));
+
+    project.chapters = vec![
+        chapter(3, 0.0, "a"),
+        chapter(9, 1.0, "b"),
+        chapter(4, 2.0, "c"),
+    ];
+    assert_eq!(project.next_chapter_id(), ChapterId(10));
+}
+
+#[test]
+fn next_chapter_id_saturates_at_the_largest_id() {
+    let mut project = valid_project();
+    project.chapters = vec![chapter(u64::MAX, 0.0, "a")];
+
+    assert_eq!(project.next_chapter_id(), ChapterId(u64::MAX));
+}
+
+#[test]
+fn chapters_in_order_sorts_by_time_and_then_by_id() {
+    let mut project = valid_project();
+    project.chapters = vec![
+        chapter(5, 3.0, "late"),
+        chapter(4, 1.0, "tie b"),
+        chapter(2, 1.0, "tie a"),
+        chapter(9, 0.5, "first"),
+    ];
+
+    let ids: Vec<u64> = project.chapters_in_order().iter().map(|c| c.id.0).collect();
+
+    assert_eq!(ids, [9, 2, 4, 5]);
+}
+
+#[test]
+fn chapters_survive_a_save_and_a_load_with_multibyte_labels() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chapters.json");
+    let mut project = two_clip_project();
+    project.chapters = vec![
+        chapter(1, 0.5, "日本語テスト"),
+        chapter(2, 1.5, "café 🎉"),
+        chapter(3, 9.0, "plain"),
+    ];
+
+    project.save(&path, false).unwrap();
+
+    assert_eq!(EditProject::load(&path).unwrap(), project);
+}
+
+#[test]
+fn a_project_with_no_chapter_saves_no_chapters_key_and_loads_with_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("plain.json");
+    let project = two_clip_project();
+
+    project.save(&path, false).unwrap();
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("\"chapters\""), "{text}");
+    assert!(EditProject::load(&path).unwrap().chapters.is_empty());
+}
+
+#[test]
+fn load_refuses_a_chapter_with_a_negative_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("negative-chapter.json");
+    let mut project = two_clip_project();
+    project.chapters = vec![chapter(1, 123.25, "x")];
+    project.save(&path, false).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("123.25"), "{text}");
+    std::fs::write(&path, text.replace("123.25", "-123.25")).unwrap();
 
     assert!(matches!(
         EditProject::load(&path),

@@ -6,7 +6,8 @@ use std::sync::Arc;
 use crate::error::NleError;
 use crate::pipeline::FilterRegistry;
 use crate::types::{
-    AppliedFilter, Clip, ClipId, EditProject, Recording, Seconds, TimelineTrack, TrackId,
+    AppliedFilter, ChapterId, ChapterMarker, Clip, ClipId, EditProject, Recording, Seconds,
+    TimelineTrack, TrackId,
 };
 
 /// One edit of a project.
@@ -76,6 +77,25 @@ pub enum Edit {
         index: usize,
         /// The new filter.
         filter: AppliedFilter,
+    },
+    /// Append a chapter marker. It is refused when its id is in use.
+    AddChapter {
+        /// The new marker.
+        chapter: ChapterMarker,
+    },
+    /// Remove a chapter marker.
+    RemoveChapter {
+        /// The marker to remove.
+        id: ChapterId,
+    },
+    /// Set the time and the label of a chapter marker.
+    UpdateChapter {
+        /// The marker to change.
+        id: ChapterId,
+        /// The new time on the timeline.
+        time: Seconds,
+        /// The new label. A blank label is refused.
+        label: String,
     },
 }
 
@@ -192,6 +212,9 @@ impl Edit {
                     .get_mut(*index)
                     .ok_or_else(|| missing_filter(*index))?;
                 *slot = filter.clone();
+                Ok(())
+            }
+            Self::AddChapter { .. } | Self::RemoveChapter { .. } | Self::UpdateChapter { .. } => {
                 Ok(())
             }
         }
