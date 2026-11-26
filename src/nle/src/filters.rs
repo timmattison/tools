@@ -1,5 +1,6 @@
 //! The filters that ship with the app.
 
+pub mod fast_forward;
 pub mod time_dilation;
 
 use crate::pipeline::FilterRegistry;
