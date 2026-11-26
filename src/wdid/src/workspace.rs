@@ -12,6 +12,8 @@
 //!    `<cargo home>/git/checkouts/<repository name>-<hash>/<short commit>`.
 //!    The record of a `cargo install --path` names the crate directory, and
 //!    the workspace is the cargo workspace that holds that directory.
+//! 4. An error. It says why step 2 failed, it gives the reason that step 3
+//!    failed, and it names `--repo`.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -148,9 +150,37 @@ pub struct Workspace {
 /// The reasons that [`find`] gives no workspace.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkspaceError {
-    /// A step failed in a way that stops the search.
+    /// A step failed in a way that stops the search: `--repo` is not a
+    /// workspace, or git does not start.
     #[error(transparent)]
     Catalog(#[from] CatalogError),
+    /// Step 2 and step 3 found no workspace.
+    #[error("{miss}, and the installed {binary} gives no workspace: {reason}. Run {binary} in a cargo workspace, or name one with --repo <path>")]
+    NotFound {
+        /// Why step 2 found no workspace.
+        miss: WorkTreeMiss,
+        /// The name of the installed binary.
+        binary: String,
+        /// Why step 3 found no workspace. The box keeps the error small.
+        reason: Box<SourceError>,
+    },
+}
+
+/// The reasons that step 2 finds no workspace.
+#[derive(Debug, thiserror::Error)]
+pub enum WorkTreeMiss {
+    /// The current directory is in no git work tree.
+    #[error("{dir} is not in a git work tree", dir = .dir.display())]
+    NotAWorkTree {
+        /// The current directory.
+        dir: PathBuf,
+    },
+    /// The git work tree of the current directory has no `Cargo.toml`.
+    #[error("the git work tree {dir} has no Cargo.toml", dir = .dir.display())]
+    NoManifest {
+        /// The top of the git work tree.
+        dir: PathBuf,
+    },
 }
 
 /// The reasons that step 3 finds no workspace.
@@ -256,10 +286,9 @@ pub enum SourceError {
 /// the workspace of step 3.
 ///
 /// # Errors
-/// Gives the error of `--repo` when `repo` is given and it is not a cargo
-/// workspace. Gives [`CatalogError::NotAWorkTree`] and
-/// [`CatalogError::NotAWorkspace`] when no step finds a workspace, and
-/// [`CatalogError::Spawn`] when git does not start.
+/// Gives [`WorkspaceError::Catalog`] when `repo` is given and it is not a
+/// cargo workspace, and when git does not start for step 2. Gives
+/// [`WorkspaceError::NotFound`] when step 2 and step 3 find no workspace.
 pub fn find(
     repo: Option<&Path>,
     cwd: &Path,
@@ -274,16 +303,22 @@ pub fn find(
             found_by: FoundBy::RepoFlag,
         });
     }
-    match catalog::workspace_root(None, cwd, programs) {
-        Ok(root) => Ok(Workspace {
-            root,
-            found_by: FoundBy::WorkTree,
-        }),
-        Err(miss @ (CatalogError::NotAWorkTree { .. } | CatalogError::NotAWorkspace { .. })) => {
-            installed_source(programs, location, binary).map_err(|_| miss.into())
+    let miss = match catalog::workspace_root(None, cwd, programs) {
+        Ok(root) => {
+            return Ok(Workspace {
+                root,
+                found_by: FoundBy::WorkTree,
+            })
         }
-        Err(error) => Err(error.into()),
-    }
+        Err(CatalogError::NotAWorkTree { dir }) => WorkTreeMiss::NotAWorkTree { dir },
+        Err(CatalogError::NotAWorkspace { dir }) => WorkTreeMiss::NoManifest { dir },
+        Err(error) => return Err(error.into()),
+    };
+    installed_source(programs, location, binary).map_err(|reason| WorkspaceError::NotFound {
+        miss,
+        binary: binary.to_string(),
+        reason: Box::new(reason),
+    })
 }
 
 /// Step 3: gives the workspace that the installed `binary` came from.
