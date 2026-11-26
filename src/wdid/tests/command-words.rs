@@ -1158,7 +1158,10 @@ fn a_global_alias_in_a_global_value_is_a_use_through_the_outer_one() {
 fn a_suffix_alias_is_a_use_named_by_its_marker() {
     let mut aliases = Aliases::new();
     aliases.insert_suffix("md", "glow");
-    assert_eq!(uses("README.md", &aliases), sorted(vec![used("*.md", None)]));
+    assert_eq!(
+        uses("README.md", &aliases),
+        sorted(vec![used("*.md", None)])
+    );
 }
 
 /// The trailing-blank rule expands the next word, and the person typed it.
