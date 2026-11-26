@@ -27,5 +27,9 @@ vte = "0.15.0"               # VT100/ANSI terminal emulator
 signal-hook.workspace = true # Signal handling for graceful termination
 termsize.workspace = true    # The one reader of the terminal size, which takes a zero as no answer
 
+[dev-dependencies]
+# The tests give each run its own temporary directory, so parallel runs never collide.
+tempfile.workspace = true
+
 [lints]
 workspace = true
