@@ -7,6 +7,7 @@ use wdid::catalog::{PathState, Tool};
 use wdid::render::{json, table_width, text, unparsed};
 use wdid::tally::{Classification, Summary, Tally, ToolUsage, Unparsed, Window};
 use wdid::tool::ToolName;
+use wdid::workspace::{FoundBy, Workspace};
 
 /// Makes a date.
 fn date(year: i32, month: u32, day: u32) -> NaiveDate {
@@ -20,6 +21,15 @@ fn window() -> Window {
         since: None,
         new_days: 90,
         idle_days: 180,
+    }
+}
+
+/// Makes the workspace of every test that does not test the workspace: the
+/// git work tree of the current directory.
+fn workspace() -> Workspace {
+    Workspace {
+        root: PathBuf::from("/repo"),
+        found_by: FoundBy::WorkTree,
     }
 }
 
@@ -163,7 +173,7 @@ fn table_of(report: &str) -> &str {
 /// date, and a note for each state of the PATH.
 #[test]
 fn the_table_shows_one_row_for_each_tool() {
-    let report = text(&fixture(), &window(), Some(200));
+    let report = text(&fixture(), &window(), &workspace(), Some(200));
 
     assert_eq!(table_of(&report), TABLE_200);
 }
@@ -200,7 +210,7 @@ fn assert_whole_values(table: &str) {
 /// stays whole, and no line is longer than the width.
 #[test]
 fn a_narrow_table_wraps_only_the_text_columns() {
-    let report = text(&fixture(), &window(), Some(120));
+    let report = text(&fixture(), &window(), &workspace(), Some(120));
     let table = table_of(&report);
 
     assert!(table.lines().count() > 8, "the text cells wrap:\n{table}");
@@ -217,7 +227,7 @@ fn a_narrow_table_wraps_only_the_text_columns() {
 /// table that is wider than the width. Each value stays whole.
 #[test]
 fn a_table_too_narrow_for_its_dates_keeps_each_date_whole() {
-    let report = text(&fixture(), &window(), Some(60));
+    let report = text(&fixture(), &window(), &workspace(), Some(60));
     assert_whole_values(table_of(&report));
 }
 
@@ -226,7 +236,7 @@ fn a_table_too_narrow_for_its_dates_keeps_each_date_whole() {
 /// the header `Through an alias or a function` filled 30 lines.
 #[test]
 fn a_text_column_keeps_a_width_that_a_person_can_read() {
-    let report = text(&fixture(), &window(), Some(60));
+    let report = text(&fixture(), &window(), &workspace(), Some(60));
     let table = table_of(&report);
     for value in ["wtm 3,061, wt 3,029", "not installed", "Through an alias"] {
         assert!(
@@ -277,7 +287,7 @@ Shell: 5 aliases, 4 functions (1 did not parse).
 /// line, the two summary lines, and a final newline.
 #[test]
 fn the_report_holds_the_table_the_groups_and_the_summary() {
-    let report = text(&fixture(), &window(), Some(200));
+    let report = text(&fixture(), &window(), &workspace(), Some(200));
 
     assert_eq!(report, format!("{TABLE_200}\n\n{TAIL}"));
 }
@@ -314,7 +324,7 @@ fn idle(name: &str, typed: u64, last_use: NaiveDate) -> ToolUsage {
 
 /// Gives the three group lines of `tally`.
 fn group_lines(tally: &Tally) -> Vec<String> {
-    let report = text(tally, &window(), None);
+    let report = text(tally, &window(), &workspace(), None);
     let groups = report.split("\n\n").nth(1).unwrap_or_default();
     groups.lines().map(str::to_string).collect()
 }
@@ -369,7 +379,7 @@ fn the_group_lines_name_the_limits_of_the_window() {
         ..window()
     };
 
-    let report = text(&fixture(), &window, None);
+    let report = text(&fixture(), &window, &workspace(), None);
 
     assert!(report.contains("Never used, old (added 30 or more days ago):\n  goup\n"));
     assert!(report.contains("Never used, new (added less than 30 days ago):\n  faulte"));
@@ -403,7 +413,7 @@ fn summary_lines(summary: Summary) -> Vec<String> {
         tools: vec![never_used("a", None, Classification::NeverUsedOld)],
         summary,
     };
-    let report = text(&tally, &window(), None);
+    let report = text(&tally, &window(), &workspace(), None);
     let lines = report.split("\n\n").nth(2).unwrap_or_default();
     lines.lines().map(str::to_string).collect()
 }
@@ -423,7 +433,7 @@ fn the_history_line_names_the_rows_before_the_since_date() {
         ..fixture()
     };
 
-    let report = text(&tally, &window, None);
+    let report = text(&tally, &window, &workspace(), None);
 
     assert!(report.contains(
         "History: 1,234 rows, 1,040 before 2026-01-01. 12 not counted (exit 127). 3 did not parse (wdid --unparsed prints them).\n"
@@ -488,8 +498,8 @@ fn the_history_line_says_one_row() {
         ..fixture()
     };
 
-    let plain = text(&one_row, &window(), None);
-    let since = text(&one_row_one_before, &window_since, None);
+    let plain = text(&one_row, &window(), &workspace(), None);
+    let since = text(&one_row_one_before, &window_since, &workspace(), None);
 
     assert!(plain.contains("History: 1 row. 12 not counted"));
     assert!(since.contains("History: 1 row, 1 before 2026-01-01. 12 not counted"));
@@ -523,7 +533,7 @@ fn the_group_headings_say_one_day() {
         ..window()
     };
 
-    let report = text(&fixture(), &window, None);
+    let report = text(&fixture(), &window, &workspace(), None);
 
     assert!(report.contains("Never used, old (added 1 or more days ago):"));
     assert!(report.contains("Never used, new (added less than 1 day ago):"));
@@ -533,7 +543,7 @@ fn the_group_headings_say_one_day() {
 /// Parses the JSON of `tally`. The test fails when the text is not one pretty
 /// JSON document with a final newline.
 fn document(tally: &Tally, window: &Window) -> serde_json::Value {
-    let raw = json(tally, window);
+    let raw = json(tally, window, &workspace());
     assert!(raw.ends_with("}\n"), "no final newline: {raw:?}");
     assert!(raw.contains("\n  \"today\""), "not pretty-printed: {raw:?}");
     serde_json::from_str(&raw).expect("the report is JSON")

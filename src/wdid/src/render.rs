@@ -9,6 +9,7 @@ use serde::Serialize;
 use crate::catalog::PathState;
 use crate::tally::{Classification, Summary, Tally, ToolUsage, Window};
 use crate::tool::ToolName;
+use crate::workspace::Workspace;
 
 /// The name of each column of the table, in order.
 const COLUMNS: [&str; 9] = [
@@ -298,9 +299,10 @@ fn summary_lines(summary: &Summary, window: &Window) -> String {
     format!("{history}\n{shell}")
 }
 
-/// Gives the text report. `width` is the table width. `None` sets no limit.
+/// Gives the text report. `workspace` is the workspace of the report. `width`
+/// is the table width. `None` sets no limit.
 #[must_use]
-pub fn text(tally: &Tally, window: &Window, width: Option<u16>) -> String {
+pub fn text(tally: &Tally, window: &Window, _workspace: &Workspace, width: Option<u16>) -> String {
     [
         table(tally, width),
         group_lines(tally, window),
@@ -423,6 +425,7 @@ fn names_of<'a>(tools: &[&'a ToolUsage]) -> Vec<&'a ToolName> {
 }
 
 /// Gives the JSON document, pretty-printed, with a final newline.
+/// `workspace` is the workspace of the report.
 ///
 /// The crate directory is a text with `/` separators. The three lists at the
 /// end follow the order of the text report.
@@ -432,7 +435,7 @@ fn names_of<'a>(tools: &[&'a ToolUsage]) -> Vec<&'a ToolName> {
 /// Never in practice. The document holds only numbers, dates, and text, and
 /// `serde_json` serializes each of them without an error.
 #[must_use]
-pub fn json(tally: &Tally, window: &Window) -> String {
+pub fn json(tally: &Tally, window: &Window, _workspace: &Workspace) -> String {
     let summary = &tally.summary;
     let document = Document {
         today: window.today,

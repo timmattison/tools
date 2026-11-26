@@ -16,6 +16,8 @@
 //! - [`shell`] gets the aliases and the functions of the interactive shell.
 //! - [`tally`] counts the uses of each tool.
 //! - [`tool`] holds the names of the tools of the workspace.
+//! - [`workspace`] finds the workspace to report on, and the step that found
+//!   it.
 
 pub mod catalog;
 pub mod command_words;
@@ -25,3 +27,4 @@ pub mod rules;
 pub mod shell;
 pub mod tally;
 pub mod tool;
+pub mod workspace;

@@ -6,8 +6,8 @@
 //! program runs first for each installed name.
 //!
 //! The functions [`binaries`], [`installed_binaries`], [`added_dates`],
-//! [`path_state`], and [`cargo_bin`] are pure. [`workspace_root`] and [`read`]
-//! start processes.
+//! [`path_state`], [`cargo_bin`], [`install_root`], and [`cargo_home`] are
+//! pure. [`workspace_root`] and [`read`] start processes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -499,25 +499,43 @@ pub struct InstallLocation<'a> {
 /// Gives the cargo bin directory, which is the directory where `cargo install`
 /// puts binaries.
 ///
-/// The order is the order of cargo. An `install_root` that is set gives
-/// `<install_root>/bin`. Else a `cargo_home` that is set gives
-/// `<cargo_home>/bin`. Else `home` gives `<home>/.cargo/bin`. Else the result
-/// is `None`.
+/// The directory is `bin` in the [`install_root`]. Thus the order is the order
+/// of cargo. An `install_root` that is set gives `<install_root>/bin`. Else a
+/// `cargo_home` that is set gives `<cargo_home>/bin`. Else `home` gives
+/// `<home>/.cargo/bin`. Else the result is `None`.
 ///
 /// This function does not read `install.root` from the cargo config file. It
 /// does not know the `--root` flag of a past install.
 #[must_use]
 pub fn cargo_bin(location: &InstallLocation<'_>) -> Option<PathBuf> {
-    match (
-        non_empty(location.install_root),
-        non_empty(location.cargo_home),
-    ) {
-        (Some(install_root), _) => Some(Path::new(install_root).join(BIN_DIRECTORY)),
-        (None, Some(cargo_home)) => Some(Path::new(cargo_home).join(BIN_DIRECTORY)),
-        (None, None) => location
-            .home
-            .map(|home| home.join(CARGO_DIRECTORY).join(BIN_DIRECTORY)),
-    }
+    install_root(location).map(|root| root.join(BIN_DIRECTORY))
+}
+
+/// Gives the install root of `cargo install`: the directory that holds the
+/// `bin` directory and the records of the installs.
+///
+/// An `install_root` that is set wins. Else the result is the
+/// [`cargo_home`]. This function does not read `install.root` from the cargo
+/// config file.
+#[must_use]
+pub fn install_root(location: &InstallLocation<'_>) -> Option<PathBuf> {
+    non_empty(location.install_root)
+        .map(PathBuf::from)
+        .or_else(|| cargo_home(location))
+}
+
+/// Gives the cargo home directory: the directory that holds the git checkouts
+/// of cargo.
+///
+/// A `cargo_home` that is set wins. Else `home` gives `<home>/.cargo`. Else
+/// the result is `None`. `install_root` has no effect here, because cargo
+/// keeps its checkouts in the cargo home also when it installs to another
+/// root.
+#[must_use]
+pub fn cargo_home(location: &InstallLocation<'_>) -> Option<PathBuf> {
+    non_empty(location.cargo_home)
+        .map(PathBuf::from)
+        .or_else(|| location.home.map(|home| home.join(CARGO_DIRECTORY)))
 }
 
 /// Gives the value when it is set and not empty.
