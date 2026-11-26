@@ -6,6 +6,12 @@ use serde::{Deserialize, Serialize};
 /// written yet.
 const NOTHING: &str = r"[^\s\S]";
 
+/// An email address: a local part, `@`, and a domain with a dot.
+///
+/// It does not match `user@localhost`, because the domain has no dot. It does
+/// not match an address with a space around the `@`.
+const EMAIL: &str = r"[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}";
+
 /// A pattern that ships with the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -47,6 +53,9 @@ impl Preset {
     /// The regular expression of the preset.
     #[must_use]
     pub fn pattern(self) -> &'static str {
-        NOTHING
+        match self {
+            Preset::Email => EMAIL,
+            Preset::IpAddress | Preset::AwsKey | Preset::Token | Preset::Hostname => NOTHING,
+        }
     }
 }

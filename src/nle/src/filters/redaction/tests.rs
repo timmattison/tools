@@ -564,3 +564,61 @@ fn the_email_preset_masks_an_email_address() {
         "mail *************** now"
     );
 }
+
+#[test]
+fn the_email_preset_keeps_text_that_is_not_an_email_address() {
+    assert_unchanged(Preset::Email, "user@localhost");
+    assert_unchanged(Preset::Email, "a @ b.com");
+}
+
+#[test]
+fn the_email_preset_keeps_multi_byte_text_around_a_match() {
+    assert_eq!(
+        mask_with(Preset::Email, "メール: tim@example.com 🎉"),
+        "メール: *************** 🎉"
+    );
+}
+
+#[test]
+fn the_presets_are_listed_in_menu_order_with_their_labels() {
+    assert_eq!(
+        Preset::ALL,
+        [
+            Preset::Email,
+            Preset::IpAddress,
+            Preset::AwsKey,
+            Preset::Token,
+            Preset::Hostname
+        ]
+    );
+    let labels: Vec<&str> = Preset::ALL.iter().map(|p| p.label()).collect();
+    assert_eq!(
+        labels,
+        vec![
+            "Email addresses",
+            "IP addresses",
+            "AWS keys",
+            "Tokens",
+            "Hostnames"
+        ]
+    );
+}
+
+#[test]
+fn each_preset_makes_a_redaction() {
+    for preset in Preset::ALL {
+        let made = Redaction::new(Find::Preset(preset), Replacement::Asterisks, false);
+        assert!(made.is_ok(), "{preset:?}");
+    }
+}
+
+#[test]
+fn a_preset_find_is_written_as_kind_and_value() {
+    let json = serde_json::to_value(Find::Preset(Preset::IpAddress)).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"kind": "preset", "value": "ip-address"})
+    );
+    let back: Find = serde_json::from_value(json).unwrap();
+    assert_eq!(back, Find::Preset(Preset::IpAddress));
+}
