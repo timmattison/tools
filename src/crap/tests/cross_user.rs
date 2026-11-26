@@ -163,6 +163,24 @@ fn assert_owner_only_guidance(stderr: &str) {
     );
 }
 
+/// Makes the upper-case form of `name` a second name for the home
+/// `root/<name>`, and returns that form.
+///
+/// On a case-insensitive filesystem (the macOS default) the upper-case form
+/// names the same directory already, so the function adds nothing. On a
+/// case-sensitive filesystem it adds a symlink of that name, so each test that
+/// calls it gets the same aliasing on each filesystem.
+#[cfg(unix)]
+fn case_variant_of(root: &Path, name: &str) -> String {
+    let variant = name.to_uppercase();
+    assert_ne!(variant, name, "the variant must differ from {name:?}");
+    let alias = root.join(&variant);
+    if fs::symlink_metadata(&alias).is_err() {
+        std::os::unix::fs::symlink(root.join(name), &alias).unwrap();
+    }
+    variant
+}
+
 /// Runs the real `crap` binary with `HOME` set to `root/home` and the given
 /// arguments, from a fresh working directory under `root`.
 fn run_crap(root: &Path, args: &[&str]) -> Output {
@@ -278,6 +296,38 @@ fn user_flag_self_resumes_in_place() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn user_flag_case_variant_of_self_resumes_in_place() {
+    let tmp = unique_root("self-case");
+    let root = tmp.path();
+    // `--user HOME` names the current account `home` by another spelling. The
+    // tree is the same, so this is a same-user hit: resume in place, no copy,
+    // no fork (issue #314).
+    let self_cwd = root.join("self-cwd");
+    fs::create_dir_all(&self_cwd).unwrap();
+    let home_projects = root.join("home/.claude/projects");
+    plant_session(&home_projects, "-proj", SELF_ID, &self_cwd);
+    let variant = case_variant_of(root, "home");
+
+    let out = run_crap(root, &[SELF_ID, "--user", &variant]);
+    assert!(
+        out.status.success(),
+        "exit {:?}, stderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    // Default resume shape: `<id>\n<dir>`, no sentinel, no fork.
+    assert_eq!(lines.first().copied(), Some(SELF_ID), "stdout: {stdout}");
+    assert_eq!(lines.get(1).copied(), Some(self_cwd.to_str().unwrap()));
+    assert!(
+        !stdout.contains(FORK_AT_SENTINEL),
+        "--user {variant} names our own tree, so the hit must not fork: {stdout}"
+    );
+}
+
 #[test]
 fn here_user_cross_user_copies_into_current_tree() {
     let tmp = unique_root("here-cross");
@@ -384,6 +434,50 @@ fn here_user_same_user_still_symlinks() {
     assert!(
         fs::symlink_metadata(link).unwrap().file_type().is_symlink(),
         "same-user --here must symlink, got a non-symlink at {}",
+        link.display()
+    );
+    assert_eq!(
+        fs::read_to_string(link).unwrap(),
+        fs::read_to_string(
+            home_projects
+                .join("-elsewhere")
+                .join(format!("{FOREIGN_ID}.jsonl"))
+        )
+        .unwrap(),
+        "the symlink must resolve to the original transcript"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn here_user_case_variant_of_self_still_symlinks() {
+    let tmp = unique_root("here-self-case");
+    let root = tmp.path();
+    // `--user HOME` names the current account `home` by another spelling, so
+    // `--here` is a same-user hit and must SYMLINK, not copy (issue #314). The
+    // session is in a project folder that is not the one of the working
+    // directory, so an import is actually created.
+    let home_projects = root.join("home/.claude/projects");
+    let shared = root.join("shared-cwd");
+    fs::create_dir_all(&shared).unwrap();
+    plant_session(&home_projects, "-elsewhere", FOREIGN_ID, &shared);
+    let variant = case_variant_of(root, "home");
+
+    let out = run_crap(root, &["--here", FOREIGN_ID, "--user", &variant]);
+    assert!(
+        out.status.success(),
+        "exit {:?}, stderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.first().copied(), Some(HERE_SENTINEL));
+    let link = Path::new(lines.get(3).copied().expect("a link field"));
+    assert!(
+        fs::symlink_metadata(link).unwrap().file_type().is_symlink(),
+        "--here --user {variant} names our own tree, so it must symlink, got a \
+         non-symlink at {}",
         link.display()
     );
     assert_eq!(

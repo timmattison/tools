@@ -15,7 +15,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tokio::sync::oneshot;
 
+use crate::editor::Edit;
 use crate::error::NleError;
+use crate::types::{ClipId, Seconds};
 
 const FIXTURE_PATH: &str = "/home/user/recordings/demo.json";
 /// The number of events in the fixture.
@@ -69,17 +71,37 @@ fn metadata_row(label: &str, value: &str, hover: Option<&str>) -> String {
     )
 }
 
+/// What `panels_root` builds its document from: a recording, and the edits
+/// that the editor of the document applied.
+#[derive(Clone)]
+struct PanelsInput {
+    recording: LoadedRecording,
+    edits: Vec<Edit>,
+}
+
 /// Renders `root` to text. The recording goes into the root context.
 fn render_panels(recording: LoadedRecording) -> String {
-    let mut dom = VirtualDom::new(panels_root).with_root_context(recording);
+    render_edited_panels(recording, Vec::new())
+}
+
+/// Renders the panels of a document whose editor applied `edits`.
+fn render_edited_panels(recording: LoadedRecording, edits: Vec<Edit>) -> String {
+    let mut dom = VirtualDom::new(panels_root).with_root_context(PanelsInput { recording, edits });
     dom.rebuild_in_place();
     dioxus_ssr::render(&dom)
 }
 
-/// A test root that shows the three panels of a recording from the context.
+/// A test root that shows the three panels of a document from the context.
 fn panels_root() -> Element {
-    let recording = use_context::<LoadedRecording>();
-    let loaded = use_signal(|| Some(recording));
+    let input = use_context::<PanelsInput>();
+    let loaded = use_signal(|| {
+        let mut document =
+            Document::open(input.recording, Arc::new(FilterRegistry::new())).expect("a document");
+        for edit in input.edits {
+            document.editor.apply(edit).expect("an edit that applies");
+        }
+        Some(document)
+    });
     rsx! {
         PreviewPane { loaded }
         Timeline { loaded }
@@ -398,6 +420,17 @@ fn timeline_rounds_the_duration_to_tenths() {
 }
 
 #[test]
+fn timeline_reads_the_project_of_the_editor() {
+    let trim = Edit::TrimClip {
+        id: ClipId(1),
+        in_point: Seconds::new(1.0).expect("a time"),
+        out_point: Seconds::new(2.0).expect("a time"),
+    };
+    let page = render_edited_panels(fixture(), vec![trim]);
+    assert!(page.contains("10 events | 0m 1.0s"), "{page}");
+}
+
+#[test]
 fn preview_shows_the_size_of_the_recording() {
     let page = render_panels(fixture());
     assert!(page.contains("coming in #151"), "{page}");
@@ -526,6 +559,24 @@ async fn a_failed_load_keeps_the_open_recording() {
     assert!(page.contains(NOT_FOUND_BANNER), "{page}");
     assert!(page.contains("Demo Recording"), "{page}");
     assert!(page.contains("42 events | 1m 5.3s"), "{page}");
+}
+
+#[tokio::test]
+async fn a_recording_that_cannot_become_a_project_shows_the_banner() {
+    let mut loaded = fixture();
+    loaded.recording.duration = -1.0;
+    let fakes = Fakes::new().pick(picked()).load(Answer::Ready(Ok(loaded)));
+    let mut window = Window::open(&fakes);
+    window.click(window.open_button());
+    window.settle().await;
+    let page = window.html();
+    assert!(
+        page.contains(
+            "Failed to open recording: Invalid time: -1 (a time must be finite and not below zero)"
+        ),
+        "{page}"
+    );
+    assert_eq!(page.matches("No recording loaded").count(), 2, "{page}");
 }
 
 #[tokio::test]

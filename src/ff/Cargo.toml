@@ -1,0 +1,21 @@
+[package]
+name = "ff"
+version = "0.1.0"
+edition.workspace = true
+description = "Finds files by name across a whole machine, and retries an interrupted system call instead of abandoning the walk"
+
+[dependencies]
+anyhow.workspace = true
+buildinfo.workspace = true
+clap.workspace = true
+globset.workspace = true
+libc.workspace = true
+rayon.workspace = true
+regex.workspace = true
+
+[dev-dependencies]
+childenv.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
