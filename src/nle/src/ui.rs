@@ -405,7 +405,9 @@ fn edit_document(
     loaded.with_mut(|document| {
         document.as_mut().map_or(Ok(()), |open| {
             let edit = make(open.editor.project());
-            open.editor.apply(edit).map_err(|failure| failure.to_string())
+            open.editor
+                .apply(edit)
+                .map_err(|failure| failure.to_string())
         })
     })
 }
@@ -432,11 +434,10 @@ fn speed_rows(document: &Option<Document>) -> Vec<(usize, String)> {
             let speed = time_dilation::speed_of(filter)?;
             let region = match filter.region {
                 FilterRegion::All => WHOLE_TIMELINE.to_owned(),
-                FilterRegion::Range { start, end } => format!(
-                    "{} to {}",
-                    format_duration(start.into()),
-                    format_duration(end.into())
-                ),
+                // The seconds as the fields take them, so no two regions share a row text.
+                FilterRegion::Range { start, end } => {
+                    format!("{} s to {} s", start.get(), end.get())
+                }
             };
             Some((index, format!("{region} at {}\u{d7}", speed.get())))
         })

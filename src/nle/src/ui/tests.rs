@@ -698,10 +698,7 @@ async fn applying_a_speed_adds_a_row_and_shortens_the_recording() {
     let mut window = open_recording().await;
     window.apply_speed("10", "20", "2");
     let page = window.html();
-    assert!(
-        page.contains(&speed_row("0m 10.0s to 0m 20.0s", "2")),
-        "{page}"
-    );
+    assert!(page.contains(&speed_row("10 s to 20 s", "2")), "{page}");
     assert!(page.contains(&edited_row("1m 0.3s")), "{page}");
     assert!(!page.contains("role=\"alert\""), "{page}");
 }
@@ -724,10 +721,10 @@ async fn two_regions_keep_their_own_speeds() {
     window.apply_speed("30", "40", "0.5");
     let page = window.html();
     let first = page
-        .find(&speed_row("0m 10.0s to 0m 20.0s", "2"))
+        .find(&speed_row("10 s to 20 s", "2"))
         .unwrap_or_else(|| panic!("no first row in {page}"));
     let second = page
-        .find(&speed_row("0m 30.0s to 0m 40.0s", "0.5"))
+        .find(&speed_row("30 s to 40 s", "0.5"))
         .unwrap_or_else(|| panic!("no second row in {page}"));
     assert!(first < second, "{page}");
     assert!(page.contains(&edited_row("1m 10.3s")), "{page}");
@@ -774,10 +771,7 @@ async fn a_failed_speed_change_keeps_the_fields_and_a_later_one_works() {
     window.type_into(end_field, "20");
     window.click(window.apply_button());
     let page = window.html();
-    assert!(
-        page.contains(&speed_row("0m 10.0s to 0m 20.0s", "2")),
-        "{page}"
-    );
+    assert!(page.contains(&speed_row("10 s to 20 s", "2")), "{page}");
     assert!(!page.contains("role=\"alert\""), "{page}");
 }
 
@@ -787,7 +781,11 @@ async fn a_remove_after_a_failed_speed_change_removes_the_banner() {
     window.apply_speed("10", "20", "2");
     let remove = window.remove_button();
     window.apply_speed("10", "5", "2");
-    assert!(window.html().contains("role=\"alert\""), "{}", window.html());
+    assert!(
+        window.html().contains("role=\"alert\""),
+        "{}",
+        window.html()
+    );
     window.click(remove);
     let page = window.html();
     assert!(!page.contains(" at 2\u{d7}"), "{page}");
