@@ -8,7 +8,7 @@ use crate::types::{ExportFormat, ExportOptions, LoadedRecording, Recording, Reco
 /// caller runs on (dioxus-desktop starts a multi-thread tokio runtime), so that
 /// the work does not hold a worker of that runtime.
 /// A panic in the work becomes `NleError::TaskError`.
-async fn run_blocking<T, F>(work: F) -> Result<T, NleError>
+pub(crate) async fn run_blocking<T, F>(work: F) -> Result<T, NleError>
 where
     F: FnOnce() -> Result<T, NleError> + Send + 'static,
     T: Send + 'static,
@@ -132,7 +132,7 @@ pub async fn save_recording(
 /// `.json` or `.json.gz` in any case, and a parent directory that does not
 /// exist. An absent `compress` falls back to the `.gz` suffix of the file
 /// name, in any case.
-fn save_recording_to(
+pub(crate) fn save_recording_to(
     path: &str,
     recording: &Recording,
     compress: Option<bool>,

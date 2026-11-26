@@ -355,8 +355,12 @@ impl Editor {
         path: String,
         compress: Option<bool>,
     ) -> impl std::future::Future<Output = Result<(), NleError>> + Send + 'static {
-        let _ = (path, compress);
-        async { todo!() }
+        let project = self.project.clone();
+        let filters = Arc::clone(&self.filters);
+        crate::commands::run_blocking(move || {
+            let recording = filters.render(&project)?;
+            crate::commands::save_recording_to(&path, &recording, compress)
+        })
     }
 }
 
