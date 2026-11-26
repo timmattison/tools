@@ -112,7 +112,10 @@ fn from_recording_refuses_a_chapter_time_below_zero() {
 
     let result = EditProject::from_recording(Arc::new(source));
 
-    assert!(matches!(result, Err(NleError::InvalidTime(_))), "{result:?}");
+    assert!(
+        matches!(result, Err(NleError::InvalidTime(_))),
+        "{result:?}"
+    );
 }
 
 fn clip(id: u64, in_point: f64, out_point: f64, offset: f64) -> Clip {

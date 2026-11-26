@@ -694,7 +694,11 @@ async fn a_second_recording_starts_the_chapter_panel_with_no_edit_and_no_search(
     let edit = window.newest[0];
     window.click(edit);
     window.type_into(search, "intro");
-    assert!(window.html().contains(">Save Chapter<"), "{}", window.html());
+    assert!(
+        window.html().contains(">Save Chapter<"),
+        "{}",
+        window.html()
+    );
 
     window.click(window.open_button());
     window.settle().await;

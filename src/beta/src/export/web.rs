@@ -792,7 +792,9 @@ console.log(String(player.pausedAt));
         let (_, data) = html
             .split_once("const recording = ")
             .expect("the recording data");
-        let (json, _) = data.split_once(";\n").expect("the end of the recording data");
+        let (json, _) = data
+            .split_once(";\n")
+            .expect("the end of the recording data");
         assert!(!json.contains("<!--"), "{json}");
         assert!(!json.to_ascii_lowercase().contains("<script"), "{json}");
         let value: serde_json::Value = serde_json::from_str(json).expect("valid json");
@@ -871,8 +873,10 @@ console.log(String(player.pausedAt));
 
     #[test]
     fn the_player_builds_one_marker_for_each_chapter_under_node() {
-        let (markers, paused_at) =
-            run_player(&recording(vec![chapter(2.5, "Setup"), chapter(5.0, "Build")]));
+        let (markers, paused_at) = run_player(&recording(vec![
+            chapter(2.5, "Setup"),
+            chapter(5.0, "Build"),
+        ]));
         assert_eq!(markers.len(), 2);
         let lefts: Vec<&str> = markers.iter().filter_map(|m| m["left"].as_str()).collect();
         assert_eq!(lefts, vec!["25%", "50%"]);
