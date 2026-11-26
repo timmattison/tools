@@ -81,7 +81,7 @@ const EDITED_DURATION_LABEL: &str = "Edited duration";
 const FAST_FORWARD_FAILED_PREFIX: &str = "Failed to fast-forward";
 /// The text of the button that removes a speed change or a fast-forward.
 const REMOVE_LABEL: &str = "Remove";
-/// The text for a speed change that covers the whole timeline.
+/// The region text of a row whose filter covers the whole timeline.
 const WHOLE_TIMELINE: &str = "the whole timeline";
 /// The start of the message for a speed change that does not apply.
 const SPEED_FAILED_PREFIX: &str = "Failed to change the speed";
@@ -325,8 +325,8 @@ fn summary(open: &Document) -> String {
 }
 
 /// The metadata of the open recording, the speed panel, the fast-forward panel,
-/// and the duration after all edits. `on_result` gets the outcome of each edit: `Ok`, or the message
-/// of the banner.
+/// and the duration after all edits. `on_result` gets the outcome of each
+/// edit: `Ok`, or the message of the banner.
 #[component]
 fn PropertiesPanel(
     loaded: Signal<Option<Document>>,

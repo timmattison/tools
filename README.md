@@ -6267,9 +6267,33 @@ at half speed. Each later event moves by the change in the length of the
 region, also when the region holds no event, for example a silent build step.
 Each region gets a row with a **Remove** button, and different regions can have
 different speeds. The times of a new region are on the timeline after the
-speed changes above it. The panel shows the duration of the edited recording.
-The panel refuses a change after which the recording does not render, and it
-shows the reason in the banner.
+speed changes and fast-forwards that you applied before it.
+
+The fast-forward panel under the speed panel compresses a region that holds a
+long burst of command output, for example a build, an install, or a test run.
+Type the start and the end of the region in seconds, then click one of three
+buttons:
+
+- **Skip to End** jumps straight to the final state of the region. Each event
+  of the region moves to the start of the region, and the region gets no
+  length.
+- **Accelerate** plays the region at the speed in **Speed (Accelerate)**, which
+  is 20 at first. The speed must be above 1. To slow a region, use the speed
+  panel.
+- **Summarize** keeps the first and the last lines of the output of the region
+  (**First lines** and **Last lines**, 3 each at first), with a `...` line in
+  place of the lines between them. The time of the dropped lines goes away. A
+  summary also drops each terminal change that the dropped lines hold, for
+  example a color or a cursor movement. Thus it suits line-oriented output,
+  such as a build log, and not a full-screen application.
+
+A button reads only the fields that its mode uses. Each fast-forward gets a row
+with a **Remove** button. The panel does not find a burst of output itself, so
+you give the region by its times.
+
+Under the two panels, the properties panel shows the duration of the edited
+recording. Each panel refuses a change after which the recording does not
+render, and it shows the reason in the banner.
 
 The application is one Rust crate on Dioxus 0.7, with the desktop (webview)
 renderer. Its components call the Rust code directly, and the open project is
@@ -6290,8 +6314,9 @@ The editing engine of the crate has four parts:
   span filter (`register_span`) also gets the length of its region and answers
   a new length, and the later events move by the change in the length.
   `filters::registry()` holds the filters that ship: time dilation
-  (`time-dilation`, issue #153) is a span filter. Issues #152 to #168 add the
-  others.
+  (`time-dilation`, issue #153) and output fast-forward
+  (`fast-forward`, issue #162). Both are span filters. Issues #152 to #168 add
+  the others.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
