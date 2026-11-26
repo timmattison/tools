@@ -399,7 +399,7 @@ fn a_blink_makes_each_shape_of_the_recording_steady_or_blinking() {
 
 #[test]
 fn a_shape_and_a_blink_together_ignore_the_shape_of_the_recording() {
-    let events = vec![out(0.0, "\x1b[6 qa\x1b[9 qb")];
+    let events = vec![out(0.0, "\x1b[6 qa\x1b[9 qb\x1b[70000 qc")];
 
     let got = run(
         events,
@@ -408,7 +408,7 @@ fn a_shape_and_a_blink_together_ignore_the_shape_of_the_recording() {
     )
     .unwrap();
 
-    assert_eq!(got, vec![out(0.0, "\x1b[3 q"), out(0.0, "ab")]);
+    assert_eq!(got, vec![out(0.0, "\x1b[3 q"), out(0.0, "abc")]);
 }
 
 #[test]

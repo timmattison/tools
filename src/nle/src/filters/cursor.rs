@@ -41,6 +41,12 @@ const SHOW: &str = "\x1b[?25h";
 const HIDE: &str = "\x1b[?25l";
 /// The DEC private mode of DECTCEM, the visibility of the cursor.
 const DECTCEM: u32 = 25;
+/// The DEC private mode that starts (`h`) and stops (`l`) the blink of the
+/// cursor.
+const BLINK_MODE: u32 = 12;
+/// The largest DECSCUSR value that a terminal knows. A terminal ignores a
+/// larger one.
+const LAST_STYLE: u16 = 6;
 
 /// The cursor filter.
 ///
@@ -61,7 +67,7 @@ fn filter(
     options: &FilterOptions,
 ) -> Result<Vec<Event>, String> {
     let cursor = Cursor::parse(options)?;
-    if cursor.show == Show::Honor {
+    if cursor.owns_nothing() {
         return Ok(events.to_vec());
     }
     Ok(Rewriter::new(&cursor).run(events, region))
@@ -85,6 +91,30 @@ enum Shape {
     Block,
     Underline,
     Bar,
+}
+
+/// The shape and the blink of a DECSCUSR value (`CSI Ps SP q`). By the
+/// VT520 manual, 0 and 1 are a blinking block, 2 a steady block, 3 and 4 an
+/// underline, 5 and 6 a bar. An odd value blinks.
+fn style_parts(style: u16) -> (Shape, bool) {
+    match style {
+        0 | 1 => (Shape::Block, true),
+        2 => (Shape::Block, false),
+        3 => (Shape::Underline, true),
+        4 => (Shape::Underline, false),
+        5 => (Shape::Bar, true),
+        _ => (Shape::Bar, false),
+    }
+}
+
+/// The DECSCUSR value of `shape` with `blink`.
+fn style_value(shape: Shape, blink: bool) -> u16 {
+    let steady = u16::from(!blink);
+    match shape {
+        Shape::Block => 1 + steady,
+        Shape::Underline => 3 + steady,
+        Shape::Bar => 5 + steady,
+    }
 }
 
 /// A color of the cursor: `#` and six hexadecimal digits.
@@ -173,6 +203,16 @@ impl TryFrom<CursorFile> for Cursor {
 }
 
 impl Cursor {
+    /// True when the options set no part of the cursor.
+    fn owns_nothing(&self) -> bool {
+        self.show == Show::Honor && !self.owns_style() && self.color.is_none()
+    }
+
+    /// True when the options set the shape or the blink, thus DECSCUSR.
+    fn owns_style(&self) -> bool {
+        self.shape.is_some() || self.blink.is_some()
+    }
+
     /// Read and check the options of the filter.
     fn parse(options: &FilterOptions) -> Result<Self, String> {
         let value = serde_json::to_value(options).map_err(|error| error.to_string())?;
@@ -185,12 +225,20 @@ impl Cursor {
 #[derive(Debug, Clone, PartialEq)]
 struct CursorState {
     visible: bool,
+    /// The last DECSCUSR value.
+    style: u16,
+    /// The last set (`true`) or reset (`false`) of mode 12, when one came.
+    blink_mode: Option<bool>,
 }
 
 impl Default for CursorState {
     /// The state of a terminal after a reset.
     fn default() -> Self {
-        Self { visible: true }
+        Self {
+            visible: true,
+            style: 0,
+            blink_mode: None,
+        }
     }
 }
 
@@ -212,6 +260,9 @@ struct Rewriter<'a> {
     /// The visibility that the answer set last, or `None` when it is not
     /// known.
     shown_visible: Option<bool>,
+    /// The DECSCUSR value that the answer set last, or `None` when it is not
+    /// known.
+    shown_style: Option<u16>,
     /// The answer.
     out: Vec<Event>,
     /// Where each piece of the open sequence starts: the index of its event
@@ -229,6 +280,7 @@ impl<'a> Rewriter<'a> {
             scanner: Scanner::new(),
             recording: CursorState::default(),
             shown_visible: None,
+            shown_style: None,
             out: Vec::new(),
             pieces: Vec::new(),
             last: (0, 0),
@@ -384,10 +436,34 @@ impl<'a> Rewriter<'a> {
                 self.shown_visible = Some(true);
                 None
             }
+            // DECSCUSR.
+            Sequence::Csi {
+                params,
+                intermediates,
+                final_char: 'q',
+                controls,
+            } if intermediates == " " && self.cursor.owns_style() => {
+                // A terminal reads the first parameter. A value that it does
+                // not know changes nothing, but the filter drops it too.
+                let first = params.split(';').next().unwrap_or_default();
+                let value: u64 = if first.is_empty() {
+                    0
+                } else {
+                    first.parse().ok()?
+                };
+                if let Some(style) = u16::try_from(value)
+                    .ok()
+                    .filter(|style| *style <= LAST_STYLE)
+                {
+                    self.recording.style = style;
+                }
+                Some(controls.clone())
+            }
             // RIS, the full reset.
             Sequence::Escape('c') => {
                 self.recording = CursorState::default();
                 self.shown_visible = Some(true);
+                self.shown_style = Some(0);
                 None
             }
             _ => None,
@@ -402,11 +478,16 @@ impl<'a> Rewriter<'a> {
         let mut kept = Vec::new();
         let mut dropped = false;
         for mode in modes.split(';') {
-            if mode.parse() == Ok(DECTCEM) {
-                self.recording.visible = set;
-                dropped = true;
-            } else {
-                kept.push(mode);
+            match mode.parse() {
+                Ok(DECTCEM) if self.cursor.show != Show::Honor => {
+                    self.recording.visible = set;
+                    dropped = true;
+                }
+                Ok(BLINK_MODE) if self.cursor.blink.is_some() => {
+                    self.recording.blink_mode = Some(set);
+                    dropped = true;
+                }
+                _ => kept.push(mode),
             }
         }
         if !dropped {
@@ -429,7 +510,37 @@ impl<'a> Rewriter<'a> {
                 self.shown_visible = Some(visible);
             }
         }
+        if let Some(style) = self.wanted_style(target) {
+            if self.shown_style != Some(style) {
+                text.push_str(&format!("\x1b[{style} q"));
+                self.shown_style = Some(style);
+            }
+        }
+        if target == Target::Recording && self.cursor.blink.is_some() {
+            if let Some(set) = self.recording.blink_mode {
+                let final_char = if set { 'h' } else { 'l' };
+                text.push_str(&format!("\x1b[?{BLINK_MODE}{final_char}"));
+            }
+        }
         text
+    }
+
+    /// The DECSCUSR value that `target` asks for, or `None` when the filter
+    /// does not own it.
+    fn wanted_style(&self, target: Target) -> Option<u16> {
+        if !self.cursor.owns_style() {
+            return None;
+        }
+        match target {
+            Target::Recording => Some(self.recording.style),
+            Target::Wanted => {
+                let (shape, blink) = style_parts(self.recording.style);
+                Some(style_value(
+                    self.cursor.shape.unwrap_or(shape),
+                    self.cursor.blink.unwrap_or(blink),
+                ))
+            }
+        }
     }
 
     /// The visibility that `target` asks for, or `None` when the filter does
