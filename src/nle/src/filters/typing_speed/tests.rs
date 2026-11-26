@@ -63,8 +63,7 @@ fn each_key_of_a_burst_comes_at_the_target_rate() {
     let got = run(input, &[applied(FilterRegion::All, typing(4.0))]);
 
     assert_eq!(times(&got), vec![1.0, 1.25, 1.5, 1.75]);
-    let data: Vec<&str> = got.iter().map(|event| event.data.as_str()).collect();
-    assert_eq!(data, vec!["a", "é", "🎉", "日本"]);
+    assert_eq!(data(&got), vec!["a", "é", "🎉", "日本"]);
     assert!(got.iter().all(|event| event.event_type == EventType::Input));
 }
 
@@ -106,4 +105,34 @@ fn a_render_moves_the_duration_by_the_change_of_the_last_key() {
 
     assert_eq!(times(&rendered.events), vec![1.0, 1.25, 4.25]);
     assert_eq!(rendered.duration, 9.25);
+}
+
+fn data(events: &[Event]) -> Vec<&str> {
+    events.iter().map(|event| event.data.as_str()).collect()
+}
+
+#[test]
+fn an_output_between_two_keys_shrinks_with_their_gap() {
+    let input = vec![
+        key(0.0, "a"),
+        out(0.25, "first"),
+        out(0.5, "second"),
+        key(1.0, "b"),
+    ];
+
+    let got = run(input, &[applied(FilterRegion::All, typing(4.0))]);
+
+    // The gap of 1 s becomes 0.25 s, so each delay after "a" is a quarter.
+    assert_eq!(times(&got), vec![0.0, 0.0625, 0.125, 0.25]);
+    assert_eq!(data(&got), vec!["a", "first", "second", "b"]);
+}
+
+#[test]
+fn an_output_between_two_keys_keeps_its_delay_when_their_gap_grows() {
+    let input = vec![key(0.0, "a"), out(0.0625, "a"), key(0.125, "b")];
+
+    let got = run(input, &[applied(FilterRegion::All, typing(4.0))]);
+
+    // The echo of "a" comes 0.0625 s after it, as in the recording.
+    assert_eq!(times(&got), vec![0.0, 0.0625, 0.25]);
 }
