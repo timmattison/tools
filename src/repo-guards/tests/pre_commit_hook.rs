@@ -1489,3 +1489,28 @@ fn tool_index_in_a_large_commit_runs_the_index_guard() {
         "README.md in a large commit must run the tool-index guard: {output}"
     );
 }
+
+/// A commit that stages `Cargo.lock` among some thousand other paths must run
+/// the Rust gate, with no `GIT_` variable. A large commit that changes the lock
+/// file is the commit most likely to break the build, and `Cargo.lock` sorts
+/// before the filler, so a trigger that reads the list from a pipe into
+/// `grep -q` runs no gate for it.
+#[test]
+fn cargo_lock_in_a_large_commit_runs_the_rust_gate() {
+    let dir = unique_fixture_dir();
+    write_toolchain_and_check_script(&dir);
+    write_files(&dir, &["Cargo.lock"]);
+    stage_with_large_filler(&dir, &["Cargo.lock"]);
+    let cargo = install_fake_cargo(&dir);
+
+    let HookRun { passed, output } = run_hook_with_planted_git_variables(&dir, &cargo);
+    let calls = read_recording(&cargo);
+    cleanup(&dir);
+
+    assert!(passed, "the hook must pass with a fake cargo: {output}");
+    assert_clean_recording(
+        &calls,
+        &["fmt", "clippy", "test"],
+        "Cargo.lock in a large commit",
+    );
+}
