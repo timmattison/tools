@@ -125,6 +125,28 @@ fn a_deliberate_shutdown_ends_every_worker_and_reports_no_error() {
     );
 }
 
+/// A handler that panics ends its worker, and the shutdown reports the panic.
+/// The response goes out before the panic, so the client sees no failure, and
+/// the result of the shutdown is the only place where the panic can show.
+#[test]
+fn a_worker_that_panics_makes_the_shutdown_report_an_error() {
+    let server = bind();
+    let addr = server.server_addr().to_ip().expect("ip addr");
+    let pool = httpfile::Pool::spawn(server, WORKERS, |request| {
+        request.respond(tiny_http::Response::empty(200))?;
+        panic!("deliberate panic of the test handler, after the response");
+    });
+
+    assert_eq!(get_status(addr), 200, "the response did not go out");
+
+    let result = within_timeout(move || pool.shutdown());
+
+    assert!(
+        result.is_err(),
+        "a worker that panicked must make shutdown() return Err, got Ok(())"
+    );
+}
+
 /// A pool of zero workers still spawns one, and that worker answers.
 #[test]
 fn zero_workers_still_spawns_one() {
