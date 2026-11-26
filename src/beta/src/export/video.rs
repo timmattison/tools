@@ -828,6 +828,45 @@ mod tests {
         assert_eq!(one.map(|metadata| metadata.count), Some(1));
     }
 
+    /// The lines of an FFMETADATA text, as FFmpeg reads them.
+    ///
+    /// A line ends at a `\n` or at a `\r`. A backslash makes the next character
+    /// part of the line, also a `\n` or a `\r`. Each line keeps its backslashes.
+    fn ffmetadata_lines(text: &str) -> Vec<String> {
+        let mut lines = Vec::new();
+        let mut line = String::new();
+        let mut chars = text.chars();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '\\' => {
+                    line.push(ch);
+                    if let Some(next) = chars.next() {
+                        line.push(next);
+                    }
+                }
+                '\n' | '\r' => lines.push(std::mem::take(&mut line)),
+                _ => line.push(ch),
+            }
+        }
+        if !line.is_empty() {
+            lines.push(line);
+        }
+        lines
+    }
+
+    #[test]
+    fn a_line_break_in_a_label_cannot_start_a_chapter_block() {
+        for label in ["a\r[CHAPTER]", "b\n[CHAPTER]", "c\r\n[CHAPTER]"] {
+            let metadata = chapter_metadata(&[chapter(1.0, label)], 10.0).expect("one chapter");
+            let lines = ffmetadata_lines(&metadata.text);
+            let blocks = lines
+                .iter()
+                .filter(|line| line.starts_with("[CHAPTER]"))
+                .count();
+            assert_eq!(blocks, 1, "label {label:?} gives the lines {lines:?}");
+        }
+    }
+
     #[test]
     fn no_chapter_gives_none() {
         assert_eq!(chapter_metadata(&[], 10.0), None);
