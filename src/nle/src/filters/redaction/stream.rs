@@ -8,7 +8,9 @@
 
 use std::ops::Range;
 
-use crate::filters::redaction::{REDACT_GROUP, Redaction, Replacement};
+use unicode_width::UnicodeWidthStr;
+
+use crate::filters::redaction::{ASTERISK, BLOCK, REDACT_GROUP, Redaction, Replacement};
 use crate::types::{Event, EventType};
 
 /// The error text for a range that is not a character boundary. It cannot
@@ -296,8 +298,32 @@ fn replacement_for(replacement: &Replacement, number: usize, data: &str) -> Stri
     match replacement {
         Replacement::Text(text) if number == 0 => text.clone(),
         Replacement::Text(_) => String::new(),
-        Replacement::Asterisks | Replacement::Blocks => data.to_string(),
+        Replacement::Asterisks => mask(data, ASTERISK),
+        Replacement::Blocks => mask(data, BLOCK),
     }
+}
+
+/// Replace each run of characters that are not control characters with
+/// `mark`, one for each terminal column. Control characters stay.
+fn mask(data: &str, mark: char) -> String {
+    let mut out = String::with_capacity(data.len());
+    let mut run = String::new();
+    for character in data.chars() {
+        if character.is_control() {
+            push_mask(&mut out, &run, mark);
+            run.clear();
+            out.push(character);
+        } else {
+            run.push(character);
+        }
+    }
+    push_mask(&mut out, &run, mark);
+    out
+}
+
+/// Add one `mark` to `out` for each terminal column of `run`.
+fn push_mask(out: &mut String, run: &str, mark: char) {
+    out.extend(std::iter::repeat_n(mark, UnicodeWidthStr::width(run)));
 }
 
 /// Build the data of one event again from its edits.
