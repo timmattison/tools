@@ -65,13 +65,19 @@ impl EditProject {
     /// the project has no clip.
     #[must_use]
     pub fn duration(&self) -> f64 {
-        0.0
+        self.clips
+            .iter()
+            .map(|clip| clip.timeline_offset.get() + (clip.out_point.get() - clip.in_point.get()))
+            .fold(0.0, f64::max)
     }
 
     /// The number of events that the clips of the project hold.
     #[must_use]
     pub fn event_count(&self) -> usize {
-        0
+        self.clips
+            .iter()
+            .map(|clip| clip.timeline_events().count())
+            .sum()
     }
 
     /// Check the rules of a project.
