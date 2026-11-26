@@ -1,5 +1,6 @@
 //! `wdid` — "what do i do": counts which tools of this workspace the atuin
-//! history uses.
+//! history uses. `wdid defs` reports on each alias and each function of the
+//! interactive shell.
 
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
@@ -8,8 +9,9 @@ use std::process::ExitCode;
 
 use buildinfo::version_string;
 use chrono::NaiveDate;
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use wdid::catalog::{self, CatalogError, Programs};
+use wdid::defs;
 use wdid::history::{self, HistoryError};
 use wdid::render;
 use wdid::shell::{self, Definitions, Resolver, ShellError, ShellKind};
@@ -53,8 +55,17 @@ const EXIT_ERROR: u8 = 1;
 
 /// The command line of `wdid`.
 #[derive(Parser)]
-#[command(version = version_string!(), about = ABOUT)]
+#[command(
+    version = version_string!(),
+    about = ABOUT,
+    args_conflicts_with_subcommands = true
+)]
 struct Cli {
+    /// The report to give. Without a subcommand, wdid reports on the tools of
+    /// a cargo workspace.
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// The cargo workspace to report on. Without this flag, wdid uses the git
     /// work tree of the current directory when it holds a Cargo.toml, else the
     /// workspace that the installed wdid came from.
@@ -85,6 +96,32 @@ struct Cli {
     new_days: u32,
 
     /// A tool is idle when its last use is older than this many days.
+    #[arg(long, value_name = "DAYS", default_value = DEFAULT_IDLE_DAYS)]
+    idle_days: u32,
+}
+
+/// The subcommands of `wdid`.
+#[derive(Subcommand)]
+enum Command {
+    /// Report on each alias and each function of the interactive shell: the
+    /// uses, the definitions that gave the other uses, and the definitions
+    /// never used or idle. Needs no cargo workspace.
+    Defs(DefsArgs),
+}
+
+/// The flags of `wdid defs`.
+#[derive(Args)]
+struct DefsArgs {
+    /// Count only the history rows from this date on. A row on this date
+    /// counts.
+    #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_date)]
+    since: Option<NaiveDate>,
+
+    /// Print the report as one JSON document.
+    #[arg(long)]
+    json: bool,
+
+    /// A definition is idle when its last use is older than this many days.
     #[arg(long, value_name = "DAYS", default_value = DEFAULT_IDLE_DAYS)]
     idle_days: u32,
 }
@@ -174,6 +211,36 @@ fn run(cli: &Cli) -> Result<String, Error> {
     })
 }
 
+/// Runs the report of `wdid defs` and gives the text for standard output.
+///
+/// The report reads only the atuin history and the interactive shell. It
+/// starts no cargo process and no git process, and it needs no workspace.
+fn run_defs(args: &DefsArgs) -> Result<String, Error> {
+    let today = chrono::Utc::now().date_naive();
+    let entries = history::read(OsStr::new(history::ATUIN))?;
+    let shell = std::env::var_os(SHELL_VARIABLE);
+    let shell_text = shell
+        .as_deref()
+        .map(|shell| shell.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let definitions = definitions(shell)?;
+    let window = defs::Window {
+        today,
+        since: args.since,
+        idle_days: args.idle_days,
+    };
+    let tally = defs::tally(&entries, &definitions, &window);
+    Ok(if args.json {
+        defs::render::json(&tally, &window, &shell_text)
+    } else {
+        let width = render::table_width(
+            std::env::var(WIDTH_VARIABLE).ok().as_deref(),
+            termsize::controlling_columns(),
+        );
+        defs::render::text(&tally, &window, &shell_text, width)
+    })
+}
+
 /// Writes the output to standard output.
 ///
 /// A reader that closed the pipe (`wdid | head`, `wdid | true`) took what it
@@ -195,7 +262,11 @@ fn write_output(output: &str) -> ExitCode {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(&cli) {
+    let result = match &cli.command {
+        None => run(&cli),
+        Some(Command::Defs(args)) => run_defs(args),
+    };
+    match result {
         Ok(output) => write_output(&output),
         Err(error) => {
             eprintln!("{TOOL}: {error}");

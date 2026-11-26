@@ -3,7 +3,8 @@
 //!
 //! A workspace of many small tools makes one question hard to answer: which of
 //! these tools does the person really use? The shell history holds the answer.
-//! `wdid` reads that history through atuin, and it counts each tool.
+//! `wdid` reads that history through atuin, and it counts each tool. `wdid defs`
+//! gives the same count for each alias and each function of the shell.
 //!
 //! # The modules
 //! - [`catalog`] reads the tools of the workspace: names, crate directories,

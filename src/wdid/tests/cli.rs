@@ -707,7 +707,8 @@ fn defs_outside_each_work_tree_prints_the_report_and_starts_no_cargo_and_no_git(
     let wt = text
         .lines()
         .find(|line| {
-            line.contains("alias") && line.trim_start_matches([' ', '|']).starts_with("wt ")
+            line.trim_start_matches(['\u{2502}', ' '])
+                .starts_with("wt ")
         })
         .unwrap_or_else(|| panic!("no row of wt in {text}"));
     assert!(wt.contains("wtf 1"), "{wt}");
