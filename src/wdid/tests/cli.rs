@@ -432,9 +432,11 @@ fn a_shell_that_wdid_cannot_read_stops_the_run_and_names_no_shell() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1), "{output:?}");
-    let message = stderr(&output);
-    assert!(message.starts_with("wdid: "), "{message}");
-    assert!(message.contains("--no-shell"), "{message}");
+    assert_eq!(
+        stderr(&output),
+        "wdid: wdid reads aliases and functions from zsh and bash only, \
+         and SHELL is /usr/bin/fish (wdid --no-shell skips the aliases and functions)\n"
+    );
 }
 
 #[test]
@@ -843,7 +845,12 @@ fn defs_with_a_shell_that_wdid_cannot_read_stops_the_run() {
         .unwrap();
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(stdout(&output).is_empty());
-    assert!(stderr(&output).starts_with("wdid: "), "{output:?}");
+    assert_eq!(
+        stderr(&output),
+        "wdid: wdid reads aliases and functions from zsh and bash only, \
+         and SHELL is /usr/bin/fish\n",
+        "wdid defs has no --no-shell, thus its message names no such flag"
+    );
 }
 
 #[test]

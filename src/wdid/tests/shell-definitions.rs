@@ -447,9 +447,11 @@ fn the_shell_gets_the_interactive_flag_and_the_script_with_stdin_closed() {
     assert!(first.starts_with("print -r -- '__WDID_"), "{first}");
 }
 
+/// A shell error names no flag, because `wdid` and `wdid defs` both give it,
+/// and only the tools report has `--no-shell`. The tools report adds the flag
+/// itself.
 #[test]
-fn every_error_message_ends_with_the_no_shell_hint() {
-    const HINT: &str = " (wdid --no-shell skips the aliases and functions)";
+fn no_error_message_names_a_flag_of_one_report() {
     let errors = [
         ShellError::NotSet,
         ShellError::NotSupported {
@@ -466,34 +468,17 @@ fn every_error_message_ends_with_the_no_shell_hint() {
         },
         ShellError::NoMarkers,
     ];
-    for error in &errors {
-        assert!(error.to_string().ends_with(HINT), "{error}");
-    }
+    let texts: Vec<String> = errors.iter().map(ToString::to_string).collect();
     assert_eq!(
-        errors[0].to_string(),
-        format!("SHELL is not set, so wdid cannot read the aliases and functions{HINT}")
-    );
-    assert_eq!(
-        errors[1].to_string(),
-        format!(
-            "wdid reads aliases and functions from zsh and bash only, and SHELL is /bin/fish{HINT}"
-        )
-    );
-    assert_eq!(
-        errors[3].to_string(),
-        format!("the shell did not stop in 30 seconds{HINT}")
-    );
-    assert_eq!(
-        errors[4].to_string(),
-        format!("the shell failed (exit status: 3): boom{HINT}")
-    );
-    assert_eq!(
-        errors[5].to_string(),
-        format!("the shell output does not hold the start and end markers of wdid{HINT}")
-    );
-    assert_eq!(
-        errors[2].to_string(),
-        format!("cannot start zsh: entity not found{HINT}")
+        texts,
+        [
+            "SHELL is not set, so wdid cannot read the aliases and functions",
+            "wdid reads aliases and functions from zsh and bash only, and SHELL is /bin/fish",
+            "cannot start zsh: entity not found",
+            "the shell did not stop in 30 seconds",
+            "the shell failed (exit status: 3): boom",
+            "the shell output does not hold the start and end markers of wdid",
+        ]
     );
 }
 
