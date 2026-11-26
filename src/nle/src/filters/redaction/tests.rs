@@ -93,3 +93,86 @@ fn multi_byte_text_split_across_events_is_replaced() {
     );
     assert_eq!(datas(&got), vec!["?", " 🎉 café"]);
 }
+
+fn one(data: &str, find: &str, replacement: &str) -> String {
+    let got = run(vec![out(1.0, data)], &text(find, replacement));
+    got.into_iter().map(|e| e.data).collect()
+}
+
+#[test]
+fn escape_codes_around_a_match_stay() {
+    assert_eq!(
+        one("\x1b[31mhunter2\x1b[0m", "hunter2", "[R]"),
+        "\x1b[31m[R]\x1b[0m"
+    );
+}
+
+#[test]
+fn text_that_looks_like_the_parameters_of_an_escape_code_is_not_found() {
+    assert_eq!(one("\x1b[31mred", "31", "X"), "\x1b[31mred");
+    assert_eq!(one("\x1b[31mred", "[31m", "X"), "\x1b[31mred");
+}
+
+#[test]
+fn a_match_across_an_escape_code_keeps_the_code() {
+    assert_eq!(
+        one("hun\x1b[1mter2", "hunter2", "[REDACTED]"),
+        "[REDACTED]\x1b[1m"
+    );
+}
+
+#[test]
+fn an_escape_code_split_across_events_is_one_code() {
+    let got = run(vec![out(1.0, "\x1b[3"), out(1.1, "1m x")], &text("1m", "Z"));
+    assert_eq!(datas(&got), vec!["\x1b[3", "1m x"]);
+}
+
+#[test]
+fn an_osc_title_is_searched() {
+    assert_eq!(
+        one("\x1b]0;user@prod-db\x07", "prod-db", "HOST"),
+        "\x1b]0;user@HOST\x07"
+    );
+    assert_eq!(
+        one("\x1b]0;user@prod-db\x1b\\x", "prod-db", "HOST"),
+        "\x1b]0;user@HOST\x1b\\x"
+    );
+}
+
+#[test]
+fn a_match_does_not_span_visible_text_and_an_osc_payload() {
+    assert_eq!(one("ab\x1b]0;cd\x07", "b0", "X"), "ab\x1b]0;cd\x07");
+    assert_eq!(one("ab\x1b]0;cd\x07", "bcd", "X"), "ab\x1b]0;cd\x07");
+}
+
+#[test]
+fn the_content_of_a_device_control_string_is_not_searched() {
+    assert_eq!(
+        one("\x1bPqhunter2\x1b\\ hunter2", "hunter2", "X"),
+        "\x1bPqhunter2\x1b\\ X"
+    );
+    assert_eq!(
+        one("\x1b_Gkitty-hunter2\x1b\\", "hunter2", "X"),
+        "\x1b_Gkitty-hunter2\x1b\\"
+    );
+}
+
+#[test]
+fn a_charset_escape_is_not_text() {
+    assert_eq!(one("\x1b(Bhello", "B", "X"), "\x1b(Bhello");
+    assert_eq!(one("\x1b(BBello", "B", "X"), "\x1b(BXello");
+}
+
+#[test]
+fn a_bare_escape_does_not_swallow_the_text_after_it() {
+    assert_eq!(one("\x1b\x1bhunter2", "hunter2", "X"), "\x1b\x1bX");
+    assert_eq!(one("a\x1b", "a", "X"), "X\x1b");
+}
+
+#[test]
+fn multi_byte_text_beside_escape_codes_is_replaced() {
+    assert_eq!(
+        one("\x1b[1m日本語\x1b[0m café", "日本語", "?"),
+        "\x1b[1m?\x1b[0m café"
+    );
+}
