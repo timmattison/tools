@@ -1405,3 +1405,87 @@ fn removed_rust_file_runs_the_rust_gate() {
         );
     }
 }
+
+/// The folder of the filler files of a large commit. `git diff` lists the
+/// staged paths in byte order, and `z` sorts after the first letter of each
+/// path that a trigger of the hook names. Thus each trigger path comes before
+/// the filler.
+const FILLER_DIR: &str = "zz-filler";
+
+/// The count of filler files in a large commit.
+const FILLER_COUNT: usize = 2000;
+
+/// The length of the long part of the name of each filler file. A long name
+/// gives a long list from few files, and few files keep the fixture fast.
+const FILLER_NAME_LENGTH: usize = 200;
+
+/// The least length, in bytes, of the staged list of a large commit.
+///
+/// `grep -q` stops at its first match. A pipe holds 64 KiB on Linux and on
+/// macOS, and GNU grep reads at most 96 KiB at a time. When the list is much
+/// longer than the sum of the two, `git diff` still has paths to write when
+/// grep stops, so it gets SIGPIPE every time, and a short list does not show
+/// the fault.
+const LARGE_LIST_MIN_BYTES: usize = 256 * 1024;
+
+/// Stage `staged`, which the caller wrote into `dir`, and [`FILLER_COUNT`]
+/// empty filler files, in a new repository in `dir`.
+///
+/// It asserts the two facts that make the fixture show the fault: the staged
+/// list is longer than [`LARGE_LIST_MIN_BYTES`], and each path of `staged`
+/// comes before the filler. A fixture that loses either fact fails here, and
+/// not as a clean pass of the hook.
+fn stage_with_large_filler(dir: &Path, staged: &[&str]) {
+    let filler_dir = dir.join(FILLER_DIR);
+    fs::create_dir_all(&filler_dir).expect("create the filler directory");
+    let long_part = "x".repeat(FILLER_NAME_LENGTH);
+    for index in 0..FILLER_COUNT {
+        let name = format!("{index:04}-{long_part}.txt");
+        fs::write(filler_dir.join(&name), "")
+            .unwrap_or_else(|e| panic!("write the filler file {name}: {e}"));
+    }
+    let mut paths = staged.to_vec();
+    paths.push(FILLER_DIR);
+    git_init_and_stage(dir, &paths);
+
+    let list = run_git(
+        dir,
+        &["diff", "--cached", "--name-only", "--no-renames", "--no-color"],
+    );
+    assert!(
+        list.len() > LARGE_LIST_MIN_BYTES,
+        "the staged list of a large commit holds {} bytes, and it must hold more than {LARGE_LIST_MIN_BYTES}",
+        list.len()
+    );
+    let first_paths: Vec<&str> = list.lines().take(staged.len()).collect();
+    for path in staged {
+        assert!(
+            first_paths.contains(path),
+            "{path} must come before the filler in the staged list: {first_paths:?}"
+        );
+    }
+}
+
+/// A commit that stages a tool index among some thousand other paths must run
+/// the tool-index guard. `README.md` sorts before the filler, so `grep -q`
+/// finds it in the first read and stops. If the trigger reads the list from a
+/// pipe, `git diff` then gets SIGPIPE, `pipefail` makes the pipe false, and
+/// the hook runs no guard and exits 0.
+#[test]
+fn tool_index_in_a_large_commit_runs_the_index_guard() {
+    let dir = unique_fixture_dir();
+    write_files(&dir, &["README.md"]);
+    stage_with_large_filler(&dir, &["README.md"]);
+    let cargo = install_fake_cargo(&dir);
+
+    let HookRun { passed, output } = run_hook_with_planted_git_variables(&dir, &cargo);
+    let calls = read_recording(&cargo);
+    cleanup(&dir);
+
+    assert!(passed, "the hook must pass with a fake cargo: {output}");
+    assert_eq!(
+        calls.arguments,
+        [INDEX_GUARD_CARGO_CALL],
+        "README.md in a large commit must run the tool-index guard: {output}"
+    );
+}
