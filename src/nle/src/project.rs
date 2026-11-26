@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::error::NleError;
+use crate::json_file;
 use crate::types::{
     Clip, ClipId, EditProject, Event, FilterRegion, Recording, Seconds, TimelineTrack, TrackId,
 };
@@ -90,8 +91,9 @@ impl EditProject {
     /// (a negative time is a parse failure), and `NleError::InvalidProject`
     /// when it parses but breaks a rule of `validate`.
     pub fn load(path: &Path) -> Result<Self, NleError> {
-        let _ = path;
-        Ok(Self::default())
+        let project: Self = json_file::load(path, "project")?;
+        project.validate()?;
+        Ok(project)
     }
 
     /// Save the project to a JSON file, optionally gzip compressed. The save is
@@ -101,8 +103,7 @@ impl EditProject {
     /// Returns `NleError::SaveError` when the project cannot be serialized,
     /// compressed, or written.
     pub fn save(&self, path: &Path, compress: bool) -> Result<(), NleError> {
-        let _ = (path, compress);
-        Ok(())
+        json_file::save(self, path, compress, "project")
     }
 
     /// Check the rules of a project.
