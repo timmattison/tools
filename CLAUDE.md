@@ -291,6 +291,8 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
   prints for a person to paste
 - `crap` - the paths that the tests of the shell function put into the fake
   scripts
+- `drun` - the fixture directory that the tests write into the fake docker
+  script
 - `faulte` - the text and the PID file path that the stream tests put into
   the stub scripts
 - `gitscratch` - the log path, the path of the real git, and the subcommand
