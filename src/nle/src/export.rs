@@ -4,7 +4,7 @@
 use std::ffi::OsString;
 use std::fmt;
 use std::num::NonZeroU32;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crate::commands::{
@@ -202,8 +202,26 @@ pub(crate) async fn export_recording_with(
     mut progress: impl FnMut(ExportProgress) + Send + 'static,
     var: impl Fn(&'static str) -> Option<OsString>,
 ) -> Result<PathBuf, NleError> {
-    let Some(mut options) = beta_options(&request) else {
-        return write_recording_file(recording, request, progress).await;
+    let mut options = match &request.target {
+        ExportTarget::Recording { compress } => {
+            let compress = *compress;
+            return write_recording_file(recording, request.output_path, compress, progress).await;
+        }
+        ExportTarget::Web { theme, compress } => ExportOptions {
+            compress: Some(*compress),
+            ..beta_options(&request.output_path, ExportFormat::Web, *theme)
+        },
+        ExportTarget::Video {
+            theme,
+            fps,
+            resolution,
+            optimize_web,
+        } => ExportOptions {
+            fps: fps.map(NonZeroU32::get),
+            resolution: resolution.map(|size| size.to_string()),
+            optimize_web: Some(*optimize_web),
+            ..beta_options(&request.output_path, ExportFormat::Video, *theme)
+        },
     };
     let work_dir = run_blocking(|| {
         tempfile::tempdir()
@@ -231,54 +249,32 @@ pub(crate) async fn export_recording_with(
     Ok(request.output_path)
 }
 
-/// Write `recording` to the file of `request`, which is a recording target,
-/// and report the `Writing` stage.
+/// Write `recording` to `output_path` as a recording file, and report the
+/// `Writing` stage. `compress: None` follows the `.gz` ending.
 async fn write_recording_file(
     recording: Recording,
-    request: ExportRequest,
+    output_path: PathBuf,
+    compress: Option<bool>,
     mut progress: impl FnMut(ExportProgress),
 ) -> Result<PathBuf, NleError> {
-    let compress = match request.target {
-        ExportTarget::Recording { compress } => compress,
-        ExportTarget::Web { .. } | ExportTarget::Video { .. } => None,
-    };
     progress(ExportProgress::Writing);
-    let path = request.output_path.to_string_lossy().into_owned();
+    let path = output_path.to_string_lossy().into_owned();
     run_blocking(move || save_recording_to(&path, &recording, compress)).await?;
-    Ok(request.output_path)
+    Ok(output_path)
 }
 
-/// The options of a `beta export` run for `request`, with an empty input
-/// path, or `None` when the target is not a run of `beta`.
-fn beta_options(request: &ExportRequest) -> Option<ExportOptions> {
-    let output_path = request.output_path.to_string_lossy().into_owned();
-    match &request.target {
-        ExportTarget::Recording { .. } => None,
-        ExportTarget::Web { theme, compress } => Some(ExportOptions {
-            input_path: String::new(),
-            output_path,
-            format: ExportFormat::Web,
-            theme: Some(theme.as_str().to_string()),
-            compress: Some(*compress),
-            fps: None,
-            resolution: None,
-            optimize_web: None,
-        }),
-        ExportTarget::Video {
-            theme,
-            fps,
-            resolution,
-            optimize_web,
-        } => Some(ExportOptions {
-            input_path: String::new(),
-            output_path,
-            format: ExportFormat::Video,
-            theme: Some(theme.as_str().to_string()),
-            compress: None,
-            fps: fps.map(NonZeroU32::get),
-            resolution: resolution.map(|size| size.to_string()),
-            optimize_web: Some(*optimize_web),
-        }),
+/// The options of a `beta export` run of `format` to `output_path` with
+/// `theme`. The input path is empty, and the caller sets the other options.
+fn beta_options(output_path: &Path, format: ExportFormat, theme: Theme) -> ExportOptions {
+    ExportOptions {
+        input_path: String::new(),
+        output_path: output_path.to_string_lossy().into_owned(),
+        format,
+        theme: Some(theme.as_str().to_string()),
+        compress: None,
+        fps: None,
+        resolution: None,
+        optimize_web: None,
     }
 }
 
