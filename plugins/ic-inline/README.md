@@ -39,13 +39,13 @@ claude --plugin-dir ~/code/tools/plugins/ic-inline
 
 The plugin runs `ic --diff [--diff-mode MODE] --emit-rgba 720x720 -- <first> <second>`, and it draws that picture the same way as `/ic` draws one image. The caption names the two files: `before.png vs after.png · 800×600`. When the two files have the same name, the caption shows the two paths: `old/shot.png vs new/shot.png`. [`ic --diff`](../../src/ic/README.md#show-the-differences-between-two-images) compares the two images pixel by pixel, with no tolerance, and it scales neither one.
 
-`--mode` selects how the picture shows the differences. With no `--mode`, the plugin gives no `--diff-mode` to `ic`, thus `ic` applies its default, `boxes`. Red is RGBA `(255, 0, 0, 255)`.
+`--mode` selects how the picture shows the differences. With no `--mode`, the plugin gives no `--diff-mode` to `ic`, thus `ic` applies its default, `highlight`. Red is RGBA `(255, 0, 0, 255)`.
 
-| `--mode`          | A pixel that is the same | A pixel that differs                                    |
-| ----------------- | ------------------------ | ------------------------------------------------------- |
-| `boxes` (default) | the second image         | the second image, with a red outline around each region |
-| `highlight`       | the first image          | opaque red                                              |
-| `mask`            | opaque black             | opaque red                                              |
+| `--mode`              | A pixel that is the same | A pixel that differs                                    |
+| --------------------- | ------------------------ | ------------------------------------------------------- |
+| `boxes`               | the second image         | the second image, with a red outline around each region |
+| `highlight` (default) | the first image          | opaque red                                              |
+| `mask`                | opaque black             | opaque red                                              |
 
 The rules of the command form:
 

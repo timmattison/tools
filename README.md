@@ -313,7 +313,7 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
       The [`ic-inline`](plugins/ic-inline/README.md) Claude Code plugin uses it to show pictures inline in the transcript:
       `/plugin install ic-inline --marketplace timmattison/tools`
     - `ic --diff before.png after.png` compares two images pixel by pixel and shows one picture of the differences.
-      `--diff-mode` selects red boxes around each region (the default), a red highlight on the first image, or a mask.
+      `--diff-mode` selects red boxes around each region, a red highlight on the first image (the default), or a mask.
       The `ic-inline` plugin shows the same picture in the transcript: `/ic diff before.png after.png` for you,
       and the tool `show_diff` for Claude.
 - inscribe

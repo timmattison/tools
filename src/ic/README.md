@@ -140,8 +140,8 @@ Each side of the box takes 1 to 4096 pixels. A picture that fits the box keeps i
 ### Show the differences between two images:
 
 ```bash
-ic --diff before.png after.png                          # red boxes (the default)
-ic --diff --diff-mode highlight before.png after.png
+ic --diff before.png after.png                          # a red highlight (the default)
+ic --diff --diff-mode boxes before.png after.png
 ic --diff --diff-mode mask before.png after.png
 ```
 
@@ -160,11 +160,11 @@ When no pixel differs, the second line is `the images are the same`, and `ic` st
 
 `--diff-mode` selects how the picture shows the differences. Red is RGBA `(255, 0, 0, 255)`.
 
-| `--diff-mode`     | A pixel that is the same | A pixel that differs                                     |
-| ----------------- | ------------------------ | -------------------------------------------------------- |
-| `boxes` (default) | the second image         | the second image, with a red outline around each region  |
-| `highlight`       | the first image          | opaque red                                               |
-| `mask`            | opaque black             | opaque red                                               |
+| `--diff-mode`         | A pixel that is the same | A pixel that differs                                    |
+| --------------------- | ------------------------ | ------------------------------------------------------- |
+| `boxes`               | the second image         | the second image, with a red outline around each region |
+| `highlight` (default) | the first image          | opaque red                                              |
+| `mask`                | opaque black             | opaque red                                              |
 
 In `boxes`, two pixels that differ are in one region when they touch, also at a corner. The line of each outline is `max(2, ceil(L / 400))` pixels thick, where `L` is the longer side of the picture. Thus a terminal that shrinks a large screenshot still shows the line. The box of each region has a margin of the line thickness plus 2 pixels, thus the line covers no pixel that differs, except at the edge of the picture. When two boxes overlap or touch, `ic` draws one box around both. The header counts these boxes as the regions, in each mode.
 
@@ -186,7 +186,7 @@ In `boxes`, two pixels that differ are in one region when they touch, also at a 
 - `--will-display` - Report whether this session can display an image, then exit (0 = yes, 1 = no with the reason on stderr)
 - `--emit-rgba <WIDTHxHEIGHT>` - Print the picture, fitted inside the box, as one line of JSON with base64 RGBA pixels, then exit. It writes nothing to the terminal (see [Give the pixels to a program that draws the picture itself](#give-the-pixels-to-a-program-that-draws-the-picture-itself))
 - `--diff` - Compare two image files pixel by pixel, and show one picture of the differences (see [Show the differences between two images](#show-the-differences-between-two-images))
-- `--diff-mode <boxes|highlight|mask>` - How the picture of `--diff` shows the differences (default: `boxes`). It needs `--diff`
+- `--diff-mode <boxes|highlight|mask>` - How the picture of `--diff` shows the differences (default: `highlight`). It needs `--diff`
 - `--protocol <auto|sixel|kitty|iterm2>` - Force an image protocol in place of the one that `ic` selects for the terminal (default: the value of `IC_PROTOCOL`, else `auto`). A forced protocol also skips the checks that refuse a session. See [Forcing a Protocol](#forcing-a-protocol). The `IC_PROTOCOL` environment variable does the same.
 - `-h, --help` - Print help information
 - `-V, --version` - Print version information
