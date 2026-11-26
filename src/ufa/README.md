@@ -167,7 +167,8 @@ It looks for a controller in this order:
    prefix in the URL, as for a controller behind a reverse proxy, and setup saves the URL exactly as
    you typed it. A name stays a name, so a certificate that is valid for that name stays valid. A
    URL that answers with a redirect fails, because each later command refuses a redirect. Setup
-   names where the redirect goes, so you can type that URL instead.
+   names where the redirect goes. When the redirect keeps the path of the probe, as a redirect from
+   `http` to `https` does, setup also names the URL of the controller to type instead.
 
 For a controller from the network or a typed URL, setup asks you to paste its key. It then asks
 whether to skip TLS verification, tests the connection, and finally offers to store a Site Manager

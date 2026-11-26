@@ -254,7 +254,9 @@ fn probe_url(controller: &Url) -> Result<Url> {
 /// Returns an error if the host cannot be reached, or if it answers with a
 /// redirect. The client of each later command refuses a redirect, so a
 /// controller that the probe reaches only through one is of no use. The error
-/// names the status and the `Location` of the redirect.
+/// names the status and the `Location` of the redirect. When the redirect
+/// keeps the path of the probe, the error also names the URL of the controller
+/// to type.
 async fn probe(url: Url) -> Result<ProbeVerdict> {
     // Controllers ship a self-signed certificate out of the box, so discovery
     // -- which runs before any trust decision has been made -- cannot insist
@@ -275,16 +277,50 @@ async fn probe(url: Url) -> Result<ProbeVerdict> {
         let location = response
             .headers()
             .get(reqwest::header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("no Location");
+            .and_then(|value| value.to_str().ok());
+        let advice = location
+            .and_then(|location| controller_behind_redirect(&url, location))
+            .map(|controller| format!(". Type {controller} instead"))
+            .unwrap_or_default();
+        let location = location.unwrap_or("no Location");
         anyhow::bail!(
             "{url} answered {status} and sends the client to {location}. \
-             ufa does not follow a redirect, so give the URL of the controller itself"
+             ufa does not follow a redirect, so give the URL of the controller itself{advice}"
         );
     }
     let body = response.text().await.unwrap_or_default();
 
     Ok(judge_probe(status.as_u16(), &body))
+}
+
+/// Name the URL of the controller that a refused redirect points at.
+///
+/// The probe asks the `info` endpoint, so a redirect that keeps the path, as a
+/// redirect from `http` to `https` does, names that endpoint. The client
+/// appends the integration path to each URL it gets, so the user must type the
+/// URL without it.
+///
+/// # Arguments
+///
+/// * `probed` - The URL of the probe that met the redirect.
+/// * `location` - The `Location` of the redirect, absolute or relative.
+///
+/// # Returns
+///
+/// The URL of the controller to type, with no probe path, query, fragment or
+/// trailing slash, or `None` if the `Location` does not end in the path that
+/// the probe adds.
+fn controller_behind_redirect(probed: &Url, location: &str) -> Option<String> {
+    let target = probed.join(location).ok()?;
+    let mut root = target.clone();
+    root.set_path("/");
+    let probe_path = probe_url(&root).ok()?.path().to_string();
+    let prefix = target.path().strip_suffix(probe_path.as_str())?;
+    let mut controller = target.clone();
+    controller.set_path(prefix);
+    controller.set_query(None);
+    controller.set_fragment(None);
+    Some(controller.as_str().trim_end_matches('/').to_string())
 }
 
 /// Resolve `host` to an address, falling back to the name itself.
