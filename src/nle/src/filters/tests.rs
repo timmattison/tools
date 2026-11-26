@@ -301,6 +301,30 @@ fn pause_insertion_on_a_range_moves_what_is_after_the_range_also_when_no_event_o
 }
 
 #[test]
+fn pause_insertion_refuses_a_point_past_the_end_of_its_range() {
+    // The range from 3 to 8 is 5 long, so the point 20 is 23 on the timeline.
+    // A pause there must move the event at 25 and not the event at 9. The
+    // events after the range all move by one shift, so the point is an error.
+    let events = || outputs(&[0.0, 4.0, 9.0, 25.0]);
+    let result = run(
+        events(),
+        range(PAUSE_INSERTION, 3.0, 8.0, insertion(20.0, 1.0)),
+    );
+
+    assert_invalid_options(result, PAUSE_INSERTION, "past the end of the region");
+
+    // The point 5 is the end of the range, 8 on the timeline, and each event
+    // after the range is after it.
+    let out = run(
+        events(),
+        range(PAUSE_INSERTION, 3.0, 8.0, insertion(5.0, 1.0)),
+    )
+    .unwrap();
+
+    assert_eq!(times(&out), vec![0.0, 4.0, 10.0, 26.0]);
+}
+
+#[test]
 fn pause_insertion_refuses_invalid_options() {
     let cases = [
         (FilterOptions::new().with("duration", 1.0), "at"),
