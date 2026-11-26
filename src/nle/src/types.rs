@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::error::NleError;
 use crate::json_file;
@@ -117,6 +118,109 @@ impl From<Seconds> for f64 {
     fn from(value: Seconds) -> f64 {
         value.0
     }
+}
+
+/// The identifier of a clip. It is unique within one project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ClipId(pub u64);
+
+/// The identifier of a timeline track. It is unique within one project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TrackId(pub u64);
+
+/// A clip: a range of one source recording, placed on the timeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Clip {
+    pub id: ClipId,
+    /// The source recording. It is shared and never changed, so the undo
+    /// history and the clones of a project cost no copy of the events.
+    pub source: Arc<Recording>,
+    /// The start time within the source.
+    pub in_point: Seconds,
+    /// The end time within the source.
+    pub out_point: Seconds,
+    /// Where the clip starts on the timeline.
+    pub timeline_offset: Seconds,
+}
+
+/// A track of the timeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TimelineTrack {
+    pub id: TrackId,
+    /// The clips on this track, by id, in the order they were put on it.
+    pub clips: Vec<ClipId>,
+}
+
+/// The kind of a filter: its name in the filter registry.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct FilterKind(String);
+
+impl FilterKind {
+    /// Make a filter kind from its name.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    /// The name of the filter kind.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The options of one filter: a JSON object.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct FilterOptions(serde_json::Map<String, serde_json::Value>);
+
+impl FilterOptions {
+    /// Make an empty set of options.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the options with `key` set to `value`.
+    #[must_use]
+    pub fn with(mut self, key: impl Into<String>, value: impl Into<serde_json::Value>) -> Self {
+        self.0.insert(key.into(), value.into());
+        self
+    }
+
+    /// The value of `key`, when it is set.
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<&serde_json::Value> {
+        self.0.get(key)
+    }
+}
+
+/// The part of the timeline that a filter works on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum FilterRegion {
+    /// The whole timeline.
+    All,
+    /// The times from `start` up to, and not including, `end`.
+    Range { start: Seconds, end: Seconds },
+}
+
+/// A filter that the project applies when it renders.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppliedFilter {
+    pub kind: FilterKind,
+    pub region: FilterRegion,
+    pub options: FilterOptions,
+}
+
+/// An edit project: clips of source recordings placed on tracks, and the
+/// filters that apply to the result. It never changes a source.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EditProject {
+    pub clips: Vec<Clip>,
+    pub timeline: Vec<TimelineTrack>,
+    pub filters: Vec<AppliedFilter>,
 }
 
 impl Recording {
