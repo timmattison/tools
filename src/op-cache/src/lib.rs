@@ -1243,8 +1243,29 @@ mod tests {
             .expect_err("output that is not JSON names no fields");
 
         assert!(
-            matches!(error, Error::Json(_)),
-            "output that is not a 1Password item is a JSON fault, got {error:?}"
+            matches!(error, Error::ItemJsonParse(_)),
+            "output that is not a 1Password item is a fault of the item, got {error:?}"
+        );
+    }
+
+    /// A listing of labels reads no cache file. Its parse error must not send
+    /// the user to one, and it must not quote the printed item, because the
+    /// item holds the value of each concealed field.
+    #[test]
+    fn a_parse_error_names_no_cache_and_quotes_no_value() {
+        let printed = format!(r#"{{"id": "hcxxfyzabc123", "fields": "{FAKE_CONTROLLER_KEY}"}}"#);
+
+        let error = labels_of_printed(&printed)
+            .expect_err("a fields entry that is not an array names no fields");
+        let message = error.to_string();
+
+        assert!(
+            !message.contains("cache"),
+            "the listing reads no cache, so its error must not name one, got {message}"
+        );
+        assert!(
+            !message.contains(FAKE_CONTROLLER_KEY),
+            "a field value must not leave this crate in an error, got {message}"
         );
     }
 
@@ -1257,8 +1278,8 @@ mod tests {
             .expect_err("an item with no fields array names no fields");
 
         assert!(
-            matches!(error, Error::Json(_)),
-            "an item with no fields array is a JSON fault, got {error:?}"
+            matches!(error, Error::ItemJsonParse(_)),
+            "an item with no fields array is a fault of the item, got {error:?}"
         );
     }
 
