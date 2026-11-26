@@ -19,7 +19,7 @@ use chrono::NaiveDate;
 use crate::tool::{ToolName, ToolNames};
 
 /// The file that marks a cargo workspace.
-const MANIFEST: &str = "Cargo.toml";
+pub(crate) const MANIFEST: &str = "Cargo.toml";
 
 /// The arguments that give the top level of the git work tree.
 const TOP_LEVEL_ARGUMENTS: [&str; 2] = ["rev-parse", "--show-toplevel"];
@@ -232,7 +232,7 @@ fn require_manifest(root: PathBuf) -> Result<PathBuf, CatalogError> {
 
 /// Runs `command` to its end with both output pipes read. `program` names the
 /// program in an error.
-fn run(command: &mut Command, program: &OsStr) -> Result<Output, CatalogError> {
+pub(crate) fn run(command: &mut Command, program: &OsStr) -> Result<Output, CatalogError> {
     command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
