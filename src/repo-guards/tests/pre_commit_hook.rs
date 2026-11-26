@@ -1369,3 +1369,39 @@ fn staged_msgs_file_runs_the_msgs_checks() {
         }
     }
 }
+
+/// The Rust file that the removal fixtures of the Rust gate commit, and then
+/// take away from its path.
+const REMOVED_RUST_FILE: &str = "src/gone.rs";
+
+/// A move of a Rust file to a path that is not Rust, a deletion of it, and a
+/// symbolic link in its place must each run the Rust gate, with no `GIT_`
+/// variable. A `mod` item can still name the file, so the build of the tree
+/// fails, and without the gate the next commit that stages a Rust file fails
+/// in a change that did not cause it. `git diff` finds renames by default, and
+/// `--name-only` then prints only the new path, so a trigger that matches the
+/// old path misses the move.
+#[test]
+fn removed_rust_file_runs_the_rust_gate() {
+    for removal in each_removal("src/gone.txt") {
+        let dir = unique_fixture_dir();
+        write_toolchain_and_check_script(&dir);
+        write_files(&dir, &[REMOVED_RUST_FILE]);
+        commit_then_stage_removal(&dir, REMOVED_RUST_FILE, removal);
+        let cargo = install_fake_cargo(&dir);
+
+        let HookRun { passed, output } = run_hook_with_planted_git_variables(&dir, &cargo);
+        let calls = read_recording(&cargo);
+        cleanup(&dir);
+
+        assert!(
+            passed,
+            "the hook must pass with a fake cargo ({removal:?}): {output}"
+        );
+        assert_clean_recording(
+            &calls,
+            &["fmt", "clippy", "test"],
+            &format!("{removal:?} of {REMOVED_RUST_FILE}"),
+        );
+    }
+}
