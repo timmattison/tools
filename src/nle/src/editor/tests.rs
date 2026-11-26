@@ -415,3 +415,91 @@ fn add_filter_with_a_backwards_range_fails_as_an_invalid_project() {
         },
     }));
 }
+
+// Group 6: undo and redo.
+
+fn add_track(editor: &mut Editor, id: u64) {
+    editor.apply(Edit::AddTrack { id: TrackId(id) }).unwrap();
+}
+
+#[test]
+fn undo_restores_the_exact_project_before_the_edit() {
+    let mut editor = editor();
+    let before = editor.project().clone();
+    editor
+        .apply(Edit::TrimClip {
+            id: ClipId(1),
+            in_point: secs(1.0),
+            out_point: secs(2.0),
+        })
+        .unwrap();
+
+    assert!(editor.undo());
+
+    assert_eq!(editor.project(), &before);
+    assert!(!editor.can_undo());
+    assert!(editor.can_redo());
+}
+
+#[test]
+fn redo_replays_the_edit_to_the_exact_project_after_it() {
+    let mut editor = editor();
+    add_track(&mut editor, 7);
+    let after = editor.project().clone();
+    assert!(editor.undo());
+
+    assert!(editor.redo().unwrap());
+
+    assert_eq!(editor.project(), &after);
+    assert!(editor.can_undo());
+    assert!(!editor.can_redo());
+}
+
+#[test]
+fn three_edits_undo_in_reverse_order_and_redo_in_order() {
+    let mut editor = editor();
+    let mut states = vec![editor.project().clone()];
+    for id in [10, 11, 12] {
+        add_track(&mut editor, id);
+        states.push(editor.project().clone());
+    }
+
+    for expected in states.iter().rev().skip(1) {
+        assert!(editor.undo());
+        assert_eq!(editor.project(), expected);
+    }
+    assert!(!editor.undo());
+    for expected in states.iter().skip(1) {
+        assert!(editor.redo().unwrap());
+        assert_eq!(editor.project(), expected);
+    }
+    assert!(!editor.redo().unwrap());
+}
+
+#[test]
+fn undo_with_nothing_to_undo_is_false() {
+    let mut editor = editor();
+
+    assert!(!editor.undo());
+    assert_eq!(editor.project(), &project());
+}
+
+#[test]
+fn redo_with_nothing_to_redo_is_ok_false() {
+    let mut editor = editor();
+
+    assert!(!editor.redo().unwrap());
+}
+
+#[test]
+fn a_new_edit_after_an_undo_clears_the_redo_history() {
+    let mut editor = editor();
+    add_track(&mut editor, 7);
+    assert!(editor.undo());
+    assert!(editor.can_redo());
+
+    add_track(&mut editor, 8);
+
+    assert!(!editor.can_redo());
+    assert!(!editor.redo().unwrap());
+}
