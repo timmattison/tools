@@ -577,9 +577,7 @@ impl Config {
 
         let contents = toml::to_string_pretty(self).context("Failed to serialize configuration")?;
 
-        let mut file = create_config_file(config_path)
-            .with_context(|| format!("Failed to create config file: {}", config_path.display()))?;
-        file.write_all(contents.as_bytes())
+        replace_config_file(config_path, |file| file.write_all(contents.as_bytes()))
             .with_context(|| format!("Failed to write config file: {}", config_path.display()))?;
 
         println!("Configuration saved to: {}", config_path.display());
@@ -962,6 +960,27 @@ fn create_config_file(path: &Path) -> std::io::Result<fs::File> {
 #[cfg(not(unix))]
 fn create_config_file(path: &Path) -> std::io::Result<fs::File> {
     fs::File::create(path)
+}
+
+/// Replace the configuration file at `path` with the bytes that `write` puts
+/// into the file it is given.
+///
+/// The seam lets a test make a step after the open fail.
+///
+/// # Arguments
+///
+/// * `path` - Where the configuration file goes.
+/// * `write` - Puts the new contents into the open file.
+///
+/// # Errors
+///
+/// Returns the error of the open, or the error that `write` returns.
+fn replace_config_file(
+    path: &Path,
+    write: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut file = create_config_file(path)?;
+    write(&mut file)
 }
 
 /// The store that reads the keys that 1Password holds.
