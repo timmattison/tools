@@ -302,25 +302,68 @@ fn self_projects(home: &Path) -> UserProjects {
 /// `is_self` is set when `name` names the tree of `self_name` (the invoking
 /// user), so a `--user` that names the current account is treated as a
 /// same-user hit. One home can answer to several names: a case variant on a
-/// case-insensitive filesystem (`Tim` for `tim` on the macOS default), or a
-/// symlinked alias. A name compare misses both, and sent such a hit down the
-/// cross-user fork path, past the live-session guard of an in-place resume
-/// (issue #314). So when the names differ, the two trees are compared on their
-/// canonical paths (see [`canonical_or_verbatim`]), the same key that
-/// [`enumerate_user_projects`] dedupes on. A tree that does not resolve keeps
-/// its literal path, so the compare then falls back to the plain name test.
-/// Like [`self_projects`], every input is explicit so the mapping is
-/// tempdir-testable.
+/// case-insensitive filesystem (`Tim` for `tim` on the macOS default, or on an
+/// ext4 casefold, CIFS or ntfs3 home on Linux), or a symlinked alias. A name
+/// compare misses both, and sent such a hit down the cross-user fork path, past
+/// the live-session guard of an in-place resume (issue #314). So when the names
+/// differ, the two trees are compared on their identity (see [`tree_key`]): the
+/// device and the inode, the same key that [`enumerate_user_projects`] dedupes
+/// on. A tree that does not exist has no inode, so the compare then falls back
+/// to the plain name test. Like [`self_projects`], every input is explicit so
+/// the mapping is tempdir-testable.
 fn user_projects(users_parent: &Path, name: &str, self_name: &str) -> UserProjects {
     let dir = projects_dir(&users_parent.join(name));
     let is_self = name == self_name
-        || canonical_or_verbatim(&dir)
-            == canonical_or_verbatim(&projects_dir(&users_parent.join(self_name)));
+        || tree_key(&dir) == tree_key(&projects_dir(&users_parent.join(self_name)));
     UserProjects {
         user: name.to_string(),
         projects_dir: dir,
         is_self,
     }
+}
+
+/// The identity of one directory tree, which is the same for each name of it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum TreeKey {
+    /// The device and the inode of a directory that exists (`st_dev`,
+    /// `st_ino`).
+    #[cfg(unix)]
+    Inode {
+        /// The device that holds the directory.
+        dev: u64,
+        /// The inode of the directory on that device.
+        ino: u64,
+    },
+    /// The canonical path, for a directory that has no inode to read (see
+    /// [`canonical_or_verbatim`]).
+    Path(PathBuf),
+}
+
+/// The identity of the tree at `path`, to find two names of one tree.
+///
+/// On unix the identity is the device and the inode of the directory, which
+/// the filesystem gives each name of it. A canonical path is not sufficient.
+/// macOS `realpath` gives the on-disk name of each component, but glibc
+/// `realpath` keeps the spelling of each component that is not a symlink. Thus
+/// on a case-insensitive Linux home (ext4 casefold, CIFS, ntfs3), `/home/Tim`
+/// and `/home/tim` give two canonical paths for one tree.
+///
+/// When the read of the metadata fails, usually because the tree does not
+/// exist, and on a platform with no inode, the identity is the canonical path.
+/// Two names of a tree that does not exist then match only when they are the
+/// same path.
+fn tree_key(path: &Path) -> TreeKey {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            return TreeKey::Inode {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+            };
+        }
+    }
+    TreeKey::Path(canonical_or_verbatim(path))
 }
 
 /// The canonical form of `path`, falling back to `path` verbatim when it cannot
@@ -350,8 +393,8 @@ fn canonical_or_verbatim(path: &Path) -> PathBuf {
 /// ordered after self by account name so the result never depends on the order
 /// the filesystem happens to list the parent directory in.
 ///
-/// Roots are then deduped on their *canonical* `projects_dir` (see
-/// [`canonical_or_verbatim`]) rather than on account name, because one home can
+/// Roots are then deduped on the identity of their `projects_dir` (see
+/// [`tree_key`]) rather than on account name, because one home can
 /// answer to several names: a symlinked alias (`/Users/me-alias -> /Users/me`),
 /// or a `HOME` whose case differs from the on-disk directory on a
 /// case-insensitive filesystem. Name comparison misses both, so the same tree
@@ -392,16 +435,16 @@ fn enumerate_user_projects(users_parent: &Path, self_name: &str) -> Vec<UserProj
     others.sort_by(|a, b| a.user.cmp(&b.user));
 
     let mut roots = Vec::with_capacity(others.len() + 1);
-    // Self goes in first and unconditionally, claiming its canonical tree, so it
+    // Self goes in first and unconditionally, claiming the key of its tree, so it
     // stays root zero and is the only entry that can ever carry `is_self`. A
     // sibling that names this tree, by the name of self or by an alias, has the
-    // same canonical tree, so the dedupe below drops it.
+    // same tree key, so the dedupe below drops it.
     let me = user_projects(users_parent, self_name, self_name);
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    seen.insert(canonical_or_verbatim(&me.projects_dir));
+    let mut seen: HashSet<TreeKey> = HashSet::new();
+    seen.insert(tree_key(&me.projects_dir));
     roots.push(me);
     for root in others {
-        if seen.insert(canonical_or_verbatim(&root.projects_dir)) {
+        if seen.insert(tree_key(&root.projects_dir)) {
             roots.push(root);
         }
     }
@@ -4599,8 +4642,8 @@ mod tests {
 
         let roots = enumerate_user_projects(parent, "me");
         let users: Vec<&str> = roots.iter().map(|r| r.user.as_str()).collect();
-        // Only the real self root survives: the alias resolves to the same
-        // canonical projects dir and is deduped away.
+        // Only the real self root survives: the alias reaches the same
+        // projects dir (one tree key), so the dedupe drops it.
         assert_eq!(users, ["me"]);
         assert!(roots[0].is_self);
         assert_eq!(roots.iter().filter(|r| r.is_self).count(), 1);
