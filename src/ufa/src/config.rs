@@ -1401,7 +1401,7 @@ fn url_after_validation(
         }
         Err(e) => {
             writeln!(out, " ✗")?;
-            writeln!(out, "Failed to validate controller: {e}")?;
+            writeln!(out, "Failed to validate controller: {e:#}")?;
             if prompt::confirm(console, USE_URL_ANYWAY)? {
                 Ok(Some(typed))
             } else {
