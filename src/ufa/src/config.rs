@@ -603,17 +603,8 @@ impl Config {
         println!("================================\n");
 
         // Step 1: Try 1Password first, then fall back to network discovery
-        let op_controllers = match discover_op_controllers() {
-            Ok(c) if !c.is_empty() => c,
-            Ok(_) => {
-                println!("No controllers found in 1Password (Private/ufa).\n");
-                Vec::new()
-            }
-            Err(e) => {
-                println!("Could not query 1Password: {e}\n");
-                Vec::new()
-            }
-        };
+        let op_controllers =
+            controllers_to_offer(discover_op_controllers(), &mut std::io::stdout())?;
 
         #[derive(Debug)]
         enum Selection {
@@ -794,6 +785,39 @@ async fn run_connection_test(
             version: info.application_version,
         },
         Err(error) => ConnectionTest::Failed(error),
+    }
+}
+
+/// The controllers that the setup wizard offers from 1Password, after it
+/// tells the user what the read found.
+///
+/// # Arguments
+///
+/// * `found` - The answer of [`discover_op_controllers`].
+/// * `out` - Where the wizard writes.
+///
+/// # Returns
+///
+/// The controllers to offer. The list is empty when 1Password holds none, or
+/// when the read failed.
+///
+/// # Errors
+///
+/// Returns an error if the result cannot be written.
+fn controllers_to_offer(
+    found: Result<Vec<OpController>>,
+    out: &mut impl Write,
+) -> Result<Vec<OpController>> {
+    match found {
+        Ok(controllers) if !controllers.is_empty() => Ok(controllers),
+        Ok(_) => {
+            writeln!(out, "No controllers found in 1Password (Private/ufa).\n")?;
+            Ok(Vec::new())
+        }
+        Err(e) => {
+            writeln!(out, "Could not query 1Password: {e}\n")?;
+            Ok(Vec::new())
+        }
     }
 }
 
@@ -2505,6 +2529,29 @@ mod connection_test_tests {
 
     /// The version the answering controller gives.
     const CONTROLLER_VERSION: &str = "9.3.45";
+
+    /// The wizard shows the cause of a failed read of 1Password, not only the
+    /// outer context that `discover_op_controllers` adds.
+    #[test]
+    fn a_failed_read_of_1password_shows_its_cause() {
+        const CAUSE: &str = "op: command not found";
+        const CONTEXT: &str = "Failed to list the fields of Private/ufa";
+        let found: Result<Vec<OpController>> = Err(anyhow::anyhow!(CAUSE)).context(CONTEXT);
+        let mut out = Vec::new();
+
+        let offered = controllers_to_offer(found, &mut out).unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            offered.is_empty(),
+            "no controller to offer, got {offered:?}"
+        );
+        assert!(
+            text.contains(CONTEXT),
+            "the context is missing from {text:?}"
+        );
+        assert!(text.contains(CAUSE), "the cause is missing from {text:?}");
+    }
 
     /// A controller that does not accept the key.
     fn unauthorized() -> String {
