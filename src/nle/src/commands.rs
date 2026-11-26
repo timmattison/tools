@@ -2,6 +2,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use crate::error::NleError;
+use crate::export::ExportProgress;
 use crate::types::{ExportFormat, ExportOptions, LoadedRecording, Recording, RecordingMetadata};
 
 /// Run blocking file work on the blocking pool of the tokio runtime that the
@@ -324,6 +325,7 @@ async fn run_beta(
     args: &[String],
     output_path: &str,
     var: impl Fn(&'static str) -> Option<OsString>,
+    _on_progress: impl FnMut(ExportProgress) + Send,
 ) -> Result<String, NleError> {
     let output = tokio::process::Command::from(beta_command(args, var))
         .output()
@@ -352,7 +354,7 @@ async fn run_beta(
 /// refused, `beta` cannot start, or `beta` fails.
 pub async fn export_video(options: ExportOptions) -> Result<String, NleError> {
     let args = video_export_args(&options)?;
-    run_beta(&args, &options.output_path, std::env::var_os).await
+    run_beta(&args, &options.output_path, std::env::var_os, |_| {}).await
 }
 
 /// Export a recording to web (HTML) format by shelling out to the beta CLI.
@@ -363,7 +365,7 @@ pub async fn export_video(options: ExportOptions) -> Result<String, NleError> {
 /// refused, `beta` cannot start, or `beta` fails.
 pub async fn export_web(options: ExportOptions) -> Result<String, NleError> {
     let args = web_export_args(&options)?;
-    run_beta(&args, &options.output_path, std::env::var_os).await
+    run_beta(&args, &options.output_path, std::env::var_os, |_| {}).await
 }
 
 #[cfg(test)]

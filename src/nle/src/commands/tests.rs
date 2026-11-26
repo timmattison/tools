@@ -562,7 +562,7 @@ fn beta_command_finds_beta_in_cargo_bin_from_the_finder_path() {
 fn run_beta_returns_the_output_path_when_beta_succeeds() {
     let home = home_with_beta_script(SUCCEEDING_BETA);
 
-    let result = block_on(run_beta(&[], "out.mp4", finder_vars(&home)));
+    let result = block_on(run_beta(&[], "out.mp4", finder_vars(&home), |_| {}));
 
     assert_eq!(result.unwrap(), "out.mp4");
 }
@@ -574,13 +574,39 @@ fn run_beta_reports_the_stderr_of_a_failed_beta() {
     let missing = home.path().join("no-such-file");
     let args = vec![missing.to_string_lossy().to_string()];
 
-    let result = block_on(run_beta(&args, "out.mp4", finder_vars(&home)));
+    let result = block_on(run_beta(&args, "out.mp4", finder_vars(&home), |_| {}));
 
     let Err(NleError::ExportError(text)) = result else {
         panic!("expected an ExportError, got {result:?}");
     };
     assert!(text.contains("beta export failed"), "got {text}");
     assert!(text.contains("no-such-file"), "got {text}");
+}
+
+/// A `beta` that prints one frame line, then waits for the marker file that
+/// its first argument names. It gives up after about 20 seconds.
+#[cfg(unix)]
+const WAITING_BETA: &str = "#!/bin/sh\n\
+    echo 'Processed frame 1 / 2'\n\
+    i=0; while [ ! -e \"$1\" ]; do i=$((i+1)); \
+    if [ \"$i\" -gt 200 ]; then echo 'no progress arrived' >&2; exit 1; fi; \
+    sleep 0.1; done; exit 0\n";
+
+#[cfg(unix)]
+#[test]
+fn run_beta_reports_progress_while_beta_runs() {
+    let home = home_with_beta_script(WAITING_BETA);
+    let marker = home.path().join("progress-arrived");
+    let args = vec![marker.to_string_lossy().to_string()];
+    let mut reported = Vec::new();
+
+    let result = block_on(run_beta(&args, "out.mp4", finder_vars(&home), |progress| {
+        reported.push(progress);
+        fs::write(&marker, b"").unwrap();
+    }));
+
+    assert_eq!(result.unwrap(), "out.mp4");
+    assert_eq!(reported, [ExportProgress::Frames { done: 1, total: 2 }]);
 }
 
 /// The variable that makes the probe test run. It is set only by the outer
@@ -600,7 +626,7 @@ fn stdin_probe_runs_beta_with_the_stdin_of_this_process() {
     }
     let home = home_with_beta_script(NULL_STDIN_BETA);
 
-    let result = block_on(run_beta(&[], "out.mp4", finder_vars(&home)));
+    let result = block_on(run_beta(&[], "out.mp4", finder_vars(&home), |_| {}));
 
     assert_eq!(result.unwrap(), "out.mp4");
 }
