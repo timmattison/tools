@@ -731,3 +731,34 @@ fn the_token_preset_keeps_text_that_is_not_a_token() {
         assert_unchanged(Preset::Token, text);
     }
 }
+
+#[test]
+fn the_hostname_preset_masks_hostnames() {
+    for host in [
+        "api.example.com",
+        "ip-10-0-0-1.ec2.internal",
+        "db.prod.local",
+    ] {
+        assert_masked(Preset::Hostname, host);
+    }
+    assert_value_masked(
+        Preset::Hostname,
+        "https://",
+        "github.com",
+        "/timmattison/tools",
+    );
+}
+
+#[test]
+fn the_hostname_preset_keeps_file_names_and_single_labels() {
+    for text in [
+        "main.rs",
+        "notes.txt",
+        "Cargo.toml",
+        "index.html",
+        "localhost",
+        "v1.2.3",
+    ] {
+        assert_unchanged(Preset::Hostname, text);
+    }
+}
