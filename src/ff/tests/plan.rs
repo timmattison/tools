@@ -97,17 +97,21 @@ fn the_plan_walks_the_data_volume_once_and_covers_each_directory_without_a_firml
     let data = &plan.roots[1];
     assert_eq!(
         data.prune,
+        paths(&["/System/Volumes/Data/home"]),
+        "the data volume prunes its mount points and nothing else"
+    );
+    assert_eq!(
+        data.hide,
         paths(&[
             "/System/Volumes/Data/Applications",
             "/System/Volumes/Data/Library",
             "/System/Volumes/Data/System/Library/Caches",
             "/System/Volumes/Data/Users",
             "/System/Volumes/Data/Volumes",
-            "/System/Volumes/Data/home",
             "/System/Volumes/Data/private",
             "/System/Volumes/Data/usr/local",
         ]),
-        "the data volume prunes each firmlinked directory and nothing else"
+        "the data volume hides each firmlinked directory and nothing else"
     );
     for uncovered in [
         "/System/Volumes/Data/mnt",
@@ -116,9 +120,12 @@ fn the_plan_walks_the_data_volume_once_and_covers_each_directory_without_a_firml
         "/System/Volumes/Data/.PreviousSystemInformation",
     ] {
         assert!(!data.prune.contains(Path::new(uncovered)), "{uncovered}");
+        assert!(!data.hide.contains(Path::new(uncovered)), "{uncovered}");
     }
 
+    assert!(system.hide.is_empty());
     assert!(plan.roots[2].prune.is_empty());
+    assert!(plan.roots[2].hide.is_empty());
 }
 
 #[test]
@@ -178,13 +185,17 @@ fn a_mount_point_that_the_table_lists_twice_is_one_root() {
 }
 
 #[test]
-fn without_the_system_root_the_data_volume_prunes_no_firmlink() {
+fn without_the_system_root_the_data_volume_hides_no_firmlink() {
     let table = [Mount::new("/System/Volumes/Data", "apfs")];
     let plan = plan_machine(Path::new("/"), &table, &Firmlinks::parse(FIRMLINKS));
 
     assert_eq!(plan.roots.len(), 1);
     assert!(
         plan.roots[0].prune.is_empty(),
+        "no walk reaches a firmlinked directory through its firmlink"
+    );
+    assert!(
+        plan.roots[0].hide.is_empty(),
         "no walk reaches a firmlinked directory through its firmlink"
     );
 }
@@ -289,4 +300,5 @@ fn a_named_root_with_one_file_system_stays_on_its_device_and_prunes_each_mount_p
     assert_eq!(root.path, PathBuf::from("./sub"));
     assert!(root.stay_on_device);
     assert_eq!(root.prune, paths(&["./sub/deep/er", "./sub/mnt"]));
+    assert!(root.hide.is_empty());
 }

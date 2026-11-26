@@ -122,8 +122,9 @@ pub struct MachinePlan {
 /// test gives a temporary directory, and the same rules apply there.
 ///
 /// Each volume becomes one root that stays on its device, and that prunes each
-/// mount point below it. The data volume prunes each firmlinked directory too,
-/// because the walk of `system_root` reaches it through its firmlink.
+/// mount point below it. The data volume hides each firmlinked directory: its
+/// walk neither reports nor enters it, because the walk of `system_root`
+/// reports it and enters it through its firmlink.
 #[must_use]
 pub fn plan_machine(system_root: &Path, mounts: &[Mount], firmlinks: &Firmlinks) -> MachinePlan {
     let mut unique: Vec<&Mount> = Vec::new();
@@ -162,29 +163,36 @@ pub fn plan_machine(system_root: &Path, mounts: &[Mount], firmlinks: &Firmlinks)
 
     // A firmlinked directory is reached through its firmlink only when the
     // walk of the system root runs. Without that walk, the data volume must
-    // cover it.
+    // cover it, thus it hides the directory only with that walk.
     let system_walked = walked.iter().any(|mount| mount.mount_point == system_root);
     let data_volume = system_root.join(DATA_VOLUME);
     let mut roots: Vec<WalkRoot> = walked
         .iter()
         .map(|mount| {
-            let mut prune: BTreeSet<PathBuf> = unique
+            let prune: BTreeSet<PathBuf> = unique
                 .iter()
                 .filter(|other| strictly_below(&other.mount_point, &mount.mount_point))
                 .map(|other| other.mount_point.clone())
                 .collect();
-            if system_walked && mount.mount_point == data_volume {
-                prune.extend(firmlinks.entries().iter().map(|firmlink| {
-                    let relative = firmlink
-                        .data_path
-                        .strip_prefix("/")
-                        .unwrap_or(&firmlink.data_path);
-                    data_volume.join(relative)
-                }));
-            }
+            let hide: BTreeSet<PathBuf> = if system_walked && mount.mount_point == data_volume {
+                firmlinks
+                    .entries()
+                    .iter()
+                    .map(|firmlink| {
+                        let relative = firmlink
+                            .data_path
+                            .strip_prefix("/")
+                            .unwrap_or(&firmlink.data_path);
+                        data_volume.join(relative)
+                    })
+                    .collect()
+            } else {
+                BTreeSet::new()
+            };
             WalkRoot {
                 path: mount.mount_point.clone(),
                 prune,
+                hide,
                 stay_on_device: true,
             }
         })
@@ -268,6 +276,7 @@ pub fn named_root(
     WalkRoot {
         path: path.to_path_buf(),
         prune,
+        hide: BTreeSet::new(),
         stay_on_device: true,
     }
 }

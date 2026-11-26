@@ -19,6 +19,11 @@ pub struct WalkRoot {
     /// The directories below `path` that the walk does not enter. Each one is
     /// written as the walk writes it: `path` joined with the names below it.
     pub prune: BTreeSet<PathBuf>,
+    /// The entries below `path` that the walk neither counts, reports, nor
+    /// enters, because a different root of the same walk reaches the same
+    /// directory. Each one is written as the walk writes it: `path` joined
+    /// with the names below it.
+    pub hide: BTreeSet<PathBuf>,
     /// When true, the walk does not enter a directory on a device that is not
     /// the device of `path`.
     pub stay_on_device: bool,
@@ -31,6 +36,7 @@ impl WalkRoot {
         Self {
             path: path.into(),
             prune: BTreeSet::new(),
+            hide: BTreeSet::new(),
             stay_on_device: false,
         }
     }
@@ -273,8 +279,11 @@ where
                     return;
                 }
             };
-            self.entries.fetch_add(1, Ordering::Relaxed);
             let child = path.join(&entry.name);
+            if root.hide.contains(&child) {
+                continue;
+            }
+            self.entries.fetch_add(1, Ordering::Relaxed);
             if self.matcher.is_match(&entry.name) {
                 self.matches.fetch_add(1, Ordering::Relaxed);
                 if let Err(error) = (self.sink)(&child) {
