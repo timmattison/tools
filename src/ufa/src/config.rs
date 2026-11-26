@@ -1679,6 +1679,40 @@ mod tests {
         );
     }
 
+    /// A save that fails after the file is open must not cost the user the old
+    /// file. The URL, the 1Password references and the keys of the old file
+    /// stay on disk, and the failed save leaves no other file in the directory.
+    #[test]
+    fn a_save_that_fails_after_the_open_leaves_the_old_config_file_whole() {
+        let temp = TempConfigDir::new("failed-save");
+        create_directory(&temp.dir);
+        let path = temp.config_file();
+        let old_contents = "url = \"https://192.168.1.1\"\n";
+        write_file(&path, old_contents);
+
+        let result = replace_config_file(&path, |_| {
+            Err(std::io::Error::other("the write step failed"))
+        });
+
+        assert!(result.is_err(), "a failed write step must be an error");
+        assert_eq!(
+            fs::read_to_string(&path).expect("the old config file must still exist"),
+            old_contents,
+            "the URL, the 1Password references and the keys of the old file \
+             must survive a save that failed"
+        );
+        let mut names: Vec<_> = fs::read_dir(&temp.dir)
+            .expect("the config directory must be readable")
+            .map(|entry| entry.expect("a directory entry must be readable").file_name())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![std::ffi::OsString::from("config.toml")],
+            "a failed save must leave no other file behind"
+        );
+    }
+
     /// A 1Password reference names the item that holds the key. It is not the
     /// key, and a dump that hides it says nothing a reader can act on.
     const OP_REFERENCE: &str = "op://Private/ufa/key - 192.168.1.1 port 443";
