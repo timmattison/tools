@@ -287,7 +287,6 @@ where
         path: PathBuf,
         mut dir: F::Dir,
     ) {
-        let canonical = canonical_dir(root, &path).into_owned();
         loop {
             if self.stop.load(Ordering::Relaxed) {
                 return;
@@ -329,7 +328,9 @@ where
             if !is_directory || root.prune.contains(&child) {
                 continue;
             }
-            if !self.options.include_cloud && is_cloud_directory(&canonical, &entry.name) {
+            if !self.options.include_cloud
+                && is_cloud_directory(&canonical_dir(root, &path), &entry.name)
+            {
                 self.findings().cloud_skipped.push(child);
                 continue;
             }
