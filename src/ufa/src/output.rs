@@ -390,7 +390,8 @@ where
 /// The rendered page, together with the note about whatever it left out. A
 /// page of a collection that holds nothing has no table, as
 /// [`Report::of_empty_collection`] says. The caller adds the note that says
-/// why.
+/// why. A page past the end of a collection that holds items keeps its table
+/// of headings, and the note gives the size of the collection.
 ///
 /// # Errors
 ///
@@ -404,7 +405,9 @@ where
         // The whole page, `totalCount` included: a program that reads this
         // wants the figure itself rather than a sentence about it.
         OutputFormat::Json => Some(render_output(page, format)?),
-        // A table of headings alone tells a person nothing.
+        // A table of headings alone tells a person nothing about an empty
+        // collection. A page past the end keeps its headings, because the
+        // note beside them gives the size of the collection.
         OutputFormat::Table if page.collection_is_empty() => None,
         OutputFormat::Table => {
             let rows: Vec<R> = page.data.iter().map(R::from).collect();
