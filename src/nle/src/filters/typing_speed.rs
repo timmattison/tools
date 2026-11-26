@@ -2,7 +2,9 @@
 
 use crate::error::NleError;
 use crate::pipeline::{FilterRegistry, Span};
-use crate::types::{AppliedFilter, FilterKind, FilterOptions, FilterRegion, Seconds};
+use crate::types::{
+    AppliedFilter, Event, EventType, FilterKind, FilterOptions, FilterRegion, Seconds,
+};
 
 /// The kind of the typing speed filter.
 pub const KIND: &str = "typing-speed";
@@ -94,9 +96,30 @@ pub fn register(registry: &mut FilterRegistry) {
     registry.register_span(kind(), normalize);
 }
 
-/// The filter. It changes nothing yet.
-fn normalize(span: Span, _options: &FilterOptions) -> Result<Span, String> {
-    Ok(span)
+/// Put each key after the first one interval after the key before it.
+fn normalize(span: Span, options: &FilterOptions) -> Result<Span, String> {
+    let rate = options
+        .get(RATE_OPTION)
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| format!("the option \"{RATE_OPTION}\" is missing or is not a number"))?;
+    let interval = 1.0 / rate;
+    let mut previous: Option<f64> = None;
+    let events = span
+        .events
+        .into_iter()
+        .map(|event| {
+            if event.event_type != EventType::Input {
+                return event;
+            }
+            let time = previous.map_or(event.time, |before| before + interval);
+            previous = Some(time);
+            Event { time, ..event }
+        })
+        .collect();
+    Ok(Span {
+        events,
+        length: span.length,
+    })
 }
 
 #[cfg(test)]
