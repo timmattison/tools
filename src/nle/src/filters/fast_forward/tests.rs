@@ -496,3 +496,115 @@ fn summary_shortens_the_length_by_the_dropped_time() {
     assert_eq!(rendered.duration, 35.0);
     assert_eq!(rendered.events.last().map(|e| e.time), Some(30.0));
 }
+
+fn inp(time: f64, data: &str) -> Triple {
+    (time, EventType::Input, data.to_string())
+}
+
+#[test]
+fn summary_drops_inputs_between_dropped_output_and_moves_later_inputs() {
+    let input = vec![
+        inp(11.0, "i1"),
+        out(12.0, "a\r\n"),
+        out(13.0, "b\r\n"),
+        inp(14.0, "i2"),
+        out(15.0, "c\r\n"),
+        out(16.0, "d\r\n"),
+        inp(18.0, "i3"),
+    ];
+    let got = run_summary(&input, &summary(10.0, 30.0, 1, 1));
+    assert_eq!(
+        got,
+        vec![
+            inp(11.0, "i1"),
+            out(12.0, "a\r\n"),
+            out(13.0, "...\r\n"),
+            out(14.0, "d\r\n"),
+            inp(16.0, "i3"),
+        ]
+    );
+}
+
+#[test]
+fn summary_with_no_tail_keeps_only_the_head() {
+    let mut input: Vec<Triple> = (1..=5)
+        .map(|n| out(10.0 + f64::from(n), &format!("l{n}\r\n")))
+        .collect();
+    input.push(inp(17.0, "i"));
+    let got = run_summary(&input, &summary(10.0, 30.0, 1, 0));
+    assert_eq!(
+        got,
+        vec![out(11.0, "l1\r\n"), out(12.0, "...\r\n"), inp(14.0, "i")]
+    );
+}
+
+#[test]
+fn summary_with_no_head_puts_the_marker_at_the_first_output() {
+    let input: Vec<Triple> = (1..=4)
+        .map(|n| out(10.0 + f64::from(n), &format!("l{n}\r\n")))
+        .collect();
+    let got = run_summary(&input, &summary(10.0, 30.0, 0, 1));
+    assert_eq!(got, vec![out(11.0, "...\r\n"), out(12.0, "l4\r\n")]);
+}
+
+#[test]
+fn summary_of_a_region_without_output_is_unchanged() {
+    let only_inputs = vec![inp(11.0, "a\n"), inp(12.0, "b\n"), inp(13.0, "c\n")];
+    assert_eq!(
+        run_summary(&only_inputs, &summary(10.0, 30.0, 0, 0)),
+        only_inputs
+    );
+    assert_eq!(run_summary(&[], &summary(10.0, 30.0, 0, 0)), vec![]);
+}
+
+fn render_summary(items: &[(f64, &str)], duration: f64, head: usize, tail: usize) -> Recording {
+    let recording = Recording {
+        version: 2,
+        width: 80,
+        height: 24,
+        timestamp: 0.0,
+        duration,
+        command: String::new(),
+        title: String::new(),
+        env: BTreeMap::new(),
+        events: items
+            .iter()
+            .map(|(time, data)| Event {
+                time: *time,
+                event_type: EventType::Output,
+                data: (*data).to_string(),
+            })
+            .collect(),
+    };
+    let mut project = EditProject::from_recording(Arc::new(recording)).unwrap();
+    project
+        .filters
+        .push(applied(FilterRegion::All, Mode::Summary { head, tail }));
+    filters::registry().render(&project).unwrap()
+}
+
+#[test]
+fn summary_length_never_falls_below_the_largest_time_after_rounding() {
+    let items = [(0.0, "a\r\n"), (0.1, "b\r\n"), (0.4, "c\r\n")];
+    let rendered = render_summary(&items, 0.4, 1, 0);
+    assert_eq!(
+        triples(&rendered.events),
+        vec![out(0.0, "a\r\n"), out(0.1, "...\r\n")]
+    );
+    assert_eq!(rendered.duration, 0.1);
+}
+
+#[test]
+fn summary_tail_never_moves_before_the_marker_after_rounding() {
+    let items = [
+        (0.0, "a\r\n"),
+        (0.1, "b\r\n"),
+        (0.4, "c\r\n"),
+        (0.4, "d\r\n"),
+    ];
+    let rendered = render_summary(&items, 0.4, 1, 1);
+    assert_eq!(
+        triples(&rendered.events),
+        vec![out(0.0, "a\r\n"), out(0.1, "...\r\n"), out(0.1, "d\r\n")]
+    );
+}
