@@ -10,5 +10,6 @@ use crate::pipeline::FilterRegistry;
 pub fn registry() -> FilterRegistry {
     let mut registry = FilterRegistry::new();
     time_dilation::register(&mut registry);
+    fast_forward::register(&mut registry);
     registry
 }

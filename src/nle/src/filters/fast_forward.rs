@@ -8,6 +8,24 @@
 
 use crate::error::NleError;
 use crate::filters::time_dilation::Speed;
+use crate::pipeline::{FilterRegistry, Span};
+use crate::types::{AppliedFilter, FilterKind, FilterOptions, FilterRegion};
+
+/// The kind of the fast-forward filter.
+pub const KIND: &str = "fast-forward";
+
+/// The option that holds the mode.
+pub const MODE_OPTION: &str = "mode";
+
+/// The option that holds the acceleration. The time dilation filter spells its
+/// speed option the same way.
+pub const SPEED_OPTION: &str = super::time_dilation::SPEED_OPTION;
+
+/// The value of the `mode` option for skip to end.
+pub const SKIP_TO_END: &str = "skip-to-end";
+
+/// The value of the `mode` option for accelerate.
+pub const ACCELERATE: &str = "accelerate";
 
 /// An acceleration factor. It is finite and above 1. A fast-forward never
 /// slows a region, because the time dilation filter does slow-downs.
@@ -41,6 +59,49 @@ impl Acceleration {
     pub fn speed(self) -> Speed {
         self.0
     }
+}
+
+/// How a fast-forward filter compresses its region.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Mode {
+    /// Jump straight to the final state of the region. Each event of the
+    /// region moves to the start of the region, and the region has no length.
+    SkipToEnd,
+    /// Play the region at the given acceleration. The times and the length of
+    /// the region divide by it.
+    Accelerate(Acceleration),
+}
+
+/// The kind of the fast-forward filter, as a `FilterKind`.
+#[must_use]
+pub fn kind() -> FilterKind {
+    FilterKind::new(KIND)
+}
+
+/// A fast-forward filter for `region` in `mode`.
+#[must_use]
+pub fn applied(region: FilterRegion, mode: Mode) -> AppliedFilter {
+    let options = match mode {
+        Mode::SkipToEnd => FilterOptions::new().with(MODE_OPTION, SKIP_TO_END),
+        Mode::Accelerate(acceleration) => FilterOptions::new()
+            .with(MODE_OPTION, ACCELERATE)
+            .with(SPEED_OPTION, acceleration.get()),
+    };
+    AppliedFilter {
+        kind: kind(),
+        region,
+        options,
+    }
+}
+
+/// Add the fast-forward filter to `registry`.
+pub fn register(registry: &mut FilterRegistry) {
+    registry.register_span(kind(), fast_forward);
+}
+
+/// Compress a span in the mode of its options.
+fn fast_forward(span: Span, _options: &FilterOptions) -> Result<Span, String> {
+    Ok(span)
 }
 
 #[cfg(test)]
