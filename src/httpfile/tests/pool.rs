@@ -1,6 +1,13 @@
 //! Tests of `httpfile::Pool` that need no file server: the handler is a
 //! closure, so each test states the behavior of the pool alone.
 //!
+//! A real accept failure (EMFILE, for example) cannot be made safely in a
+//! test, because a full file-descriptor table can stop other work on the same
+//! machine. One `server.unblock()` with no `Pool::shutdown` behind it makes
+//! the same event shape: `tiny_http` releases one worker with an `Err`, and
+//! the state of the pool does not explain it. The pool must treat that
+//! release as a failure.
+//!
 //! Every server binds `127.0.0.1:0`, and every wait is bounded.
 
 mod common;
@@ -14,6 +21,20 @@ use std::time::Duration;
 
 /// Bounds every read below, so a pool that stops answering fails the test.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The workers of a pool that must show "one released, the others still
+/// blocked". At least two, so one release leaves a worker in `recv()`.
+const WORKERS: usize = 3;
+
+/// Binds a server on an ephemeral loopback port.
+fn bind() -> Arc<tiny_http::Server> {
+    Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port"))
+}
+
+/// Answers each request with an empty `200`.
+fn answer_ok(request: tiny_http::Request) -> std::io::Result<()> {
+    request.respond(tiny_http::Response::empty(200))
+}
 
 /// Sends one `GET /` and returns the status code.
 fn get_status(addr: std::net::SocketAddr) -> u16 {
@@ -72,4 +93,46 @@ fn the_handler_is_released_when_the_pool_ends() {
     within_timeout(move || pool.shutdown()).expect("pool shuts down cleanly");
 
     assert_eq!(Arc::strong_count(&witness), 1, "the handler is still alive");
+}
+
+/// One release that no shutdown asked for ends every worker, not only the
+/// worker that got the `Err`, and `join` reports it as a failure.
+#[test]
+fn an_unexplained_release_ends_every_worker_and_join_reports_it() {
+    let server = bind();
+    let pool = httpfile::Pool::spawn(Arc::clone(&server), WORKERS, answer_ok);
+
+    server.unblock();
+
+    let result = within_timeout(move || pool.join());
+
+    assert!(
+        result.is_err(),
+        "an unexplained release must make join() return Err, got Ok(())"
+    );
+}
+
+/// A deliberate shutdown ends every worker and reports no error.
+#[test]
+fn a_deliberate_shutdown_ends_every_worker_and_reports_no_error() {
+    let pool = httpfile::Pool::spawn(bind(), WORKERS, answer_ok);
+
+    let result = within_timeout(move || pool.shutdown());
+
+    assert!(
+        result.is_ok(),
+        "a deliberate shutdown must return Ok(()), got {result:?}"
+    );
+}
+
+/// A pool of zero workers still spawns one, and that worker answers.
+#[test]
+fn zero_workers_still_spawns_one() {
+    let server = bind();
+    let addr = server.server_addr().to_ip().expect("ip addr");
+    let pool = httpfile::Pool::spawn(server, 0, answer_ok);
+
+    assert_eq!(get_status(addr), 200, "no worker answered the request");
+
+    within_timeout(move || pool.shutdown()).expect("pool shuts down cleanly");
 }
