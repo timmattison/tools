@@ -16,7 +16,7 @@ use dioxus::prelude::*;
 
 use crate::editor::{Edit, Editor};
 use crate::error::NleError;
-use crate::filters::redaction::Preset;
+use crate::filters::redaction::{self, Find, Preset, Redaction, Replacement};
 use crate::filters::time_dilation::{self, Speed};
 use crate::pipeline::FilterRegistry;
 use crate::types::{AppliedFilter, EditProject, FilterRegion, Seconds};
@@ -114,6 +114,12 @@ const EVENTS_OUTPUT_LABEL: &str = "Output";
 const EVENTS_OUTPUT_AND_INPUT: &str = "output-and-input";
 /// The text of the menu entry for the output and the input events.
 const EVENTS_OUTPUT_AND_INPUT_LABEL: &str = "Output and input";
+/// The text of a redaction row for the output and the input events.
+const ROW_EVENTS_OUTPUT_AND_INPUT: &str = "output and input";
+/// The start of the reason for a value of the Find menu that no entry has.
+const UNKNOWN_FIND: &str = "unknown find";
+/// The start of the reason for a value of the Replace with menu that no entry has.
+const UNKNOWN_REPLACEMENT: &str = "unknown replacement";
 /// The text of the button that applies the redaction.
 const APPLY_REDACTION_LABEL: &str = "Apply Redaction";
 /// The start of the message for a redaction that does not apply.
@@ -342,8 +348,9 @@ fn summary(open: &Document) -> String {
     )
 }
 
-/// The metadata of the open recording, and the speed panel. `on_result` gets
-/// the outcome of each speed change: `Ok`, or the message of the banner.
+/// The metadata of the open recording, the speed panel, and the redaction
+/// panel. `on_result` gets the outcome of each edit: `Ok`, or the message of
+/// the banner.
 #[component]
 fn PropertiesPanel(
     loaded: Signal<Option<Document>>,
@@ -420,7 +427,7 @@ fn SpeedPanel(
                             filter,
                         })
                     });
-                    report(on_result, outcome);
+                    report(on_result, SPEED_FAILED_PREFIX, outcome);
                 },
                 {APPLY_SPEED_LABEL}
             }
@@ -430,7 +437,7 @@ fn SpeedPanel(
                     button {
                         onclick: move |_| {
                             let outcome = edit_document(loaded, |_| Edit::RemoveFilter { index });
-                            report(on_result, outcome);
+                            report(on_result, SPEED_FAILED_PREFIX, outcome);
                         },
                         {REMOVE_LABEL}
                     }
@@ -452,12 +459,12 @@ fn RedactionPanel(
     loaded: Signal<Option<Document>>,
     on_result: EventHandler<Result<(), String>>,
 ) -> Element {
-    let _ = (loaded, on_result);
     let mut find = use_signal(|| FIND_TEXT.to_owned());
     let mut pattern = use_signal(String::new);
     let mut replace = use_signal(|| REPLACE_ASTERISKS.to_owned());
     let mut replacement = use_signal(String::new);
     let mut events = use_signal(|| EVENTS_OUTPUT.to_owned());
+    let rows = redaction_rows(&loaded.read());
     rsx! {
         div { class: "redaction-panel",
             h3 { {REDACTION_HEADING} }
@@ -507,7 +514,37 @@ fn RedactionPanel(
                     option { value: EVENTS_OUTPUT_AND_INPUT, {EVENTS_OUTPUT_AND_INPUT_LABEL} }
                 }
             }
-            button { onclick: move |_| {}, {APPLY_REDACTION_LABEL} }
+            button {
+                onclick: move |_| {
+                    let change = redaction_change(
+                        &find.read(),
+                        &pattern.read(),
+                        &replace.read(),
+                        &replacement.read(),
+                        &events.read(),
+                    );
+                    let outcome = change.and_then(|filter| {
+                        edit_document(loaded, |project| Edit::AddFilter {
+                            index: project.filters.len(),
+                            filter,
+                        })
+                    });
+                    report(on_result, REDACTION_FAILED_PREFIX, outcome);
+                },
+                {APPLY_REDACTION_LABEL}
+            }
+            for (index , text) in rows {
+                div { class: "redaction-row", key: "{index}",
+                    span { "{text}" }
+                    button {
+                        onclick: move |_| {
+                            let outcome = edit_document(loaded, |_| Edit::RemoveFilter { index });
+                            report(on_result, REDACTION_FAILED_PREFIX, outcome);
+                        },
+                        {REMOVE_LABEL}
+                    }
+                }
+            }
         }
     }
 }
@@ -531,10 +568,11 @@ fn edit_document(
     })
 }
 
-/// Sends the outcome of a speed change to `on_result`: `Ok` for a change that
-/// applied, or the message of the banner for a change that did not.
-fn report(on_result: EventHandler<Result<(), String>>, outcome: Result<(), String>) {
-    on_result.call(outcome.map_err(|reason| format!("{SPEED_FAILED_PREFIX}: {reason}")));
+/// Sends the outcome of an edit to `on_result`: `Ok` for an edit that applied,
+/// or the message of the banner for an edit that did not. The message starts
+/// with `prefix`.
+fn report(on_result: EventHandler<Result<(), String>>, prefix: &str, outcome: Result<(), String>) {
+    on_result.call(outcome.map_err(|reason| format!("{prefix}: {reason}")));
 }
 
 /// One row for each time dilation filter of the project: the index of the
@@ -580,6 +618,77 @@ fn speed_change(start: &str, end: &str, speed: &str) -> Result<AppliedFilter, St
         FilterRegion::Range { start, end },
         speed,
     ))
+}
+
+/// One row for each redaction filter of the project: the index of the filter
+/// in the project, and the text of its row. Filters of other kinds have no
+/// row, but they keep their place in the index.
+fn redaction_rows(document: &Option<Document>) -> Vec<(usize, String)> {
+    let Some(open) = document else {
+        return Vec::new();
+    };
+    open.editor
+        .project()
+        .filters
+        .iter()
+        .enumerate()
+        .filter_map(|(index, filter)| {
+            let found = redaction::redaction_of(filter)?;
+            let find = match found.find() {
+                Find::Text(text) => format!("text \u{201c}{text}\u{201d}"),
+                Find::Regex(pattern) => format!("regex /{pattern}/"),
+                Find::Preset(preset) => preset.label().to_owned(),
+            };
+            let replacement = match found.replacement() {
+                Replacement::Asterisks => REPLACE_ASTERISKS.to_owned(),
+                Replacement::Blocks => REPLACE_BLOCKS.to_owned(),
+                Replacement::Text(text) => format!("\u{201c}{text}\u{201d}"),
+            };
+            let events = if found.includes_input() {
+                ROW_EVENTS_OUTPUT_AND_INPUT
+            } else {
+                EVENTS_OUTPUT
+            };
+            let region = match filter.region {
+                FilterRegion::All => String::new(),
+                FilterRegion::Range { start, end } => {
+                    format!(", {} s to {} s", start.get(), end.get())
+                }
+            };
+            Some((
+                index,
+                format!("{find} \u{2192} {replacement} ({events}){region}"),
+            ))
+        })
+        .collect()
+}
+
+/// Reads the five fields of the redaction panel. `find` is the value of the
+/// Find menu, `replace` is the value of the Replace with menu, and `events`
+/// is the value of the Events menu. The pattern and the replacement text keep
+/// their spaces, because a space can matter. The answer is the filter to add,
+/// or the reason why the fields do not make one.
+fn redaction_change(
+    find: &str,
+    pattern: &str,
+    replace: &str,
+    replacement: &str,
+    events: &str,
+) -> Result<AppliedFilter, String> {
+    let find = match find {
+        FIND_TEXT => Find::Text(pattern.to_owned()),
+        FIND_REGEX => Find::Regex(pattern.to_owned()),
+        key => Find::Preset(Preset::from_key(key).ok_or_else(|| format!("{UNKNOWN_FIND}: {key}"))?),
+    };
+    let replacement = match replace {
+        REPLACE_ASTERISKS => Replacement::Asterisks,
+        REPLACE_BLOCKS => Replacement::Blocks,
+        REPLACE_TEXT => Replacement::Text(replacement.to_owned()),
+        other => return Err(format!("{UNKNOWN_REPLACEMENT}: {other}")),
+    };
+    let redaction = Redaction::new(find, replacement, events == EVENTS_OUTPUT_AND_INPUT)
+        .map_err(|error| error.to_string())?;
+    Ok(redaction::applied(FilterRegion::All, &redaction))
 }
 
 /// The duration of the rendered project of the document as text, or the text
