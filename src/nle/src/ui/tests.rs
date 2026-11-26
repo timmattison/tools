@@ -927,3 +927,17 @@ async fn a_bad_frame_rate_shows_the_banner_and_asks_no_dialog() {
     assert!(fakes.dialogs().is_empty());
     assert!(!window.export_is_disabled(), "{page}");
 }
+
+#[tokio::test]
+async fn a_cancelled_save_dialog_exports_nothing() {
+    let fakes = fakes_with_recording().dialog(Answer::Ready(None));
+    let mut window = window_with_recording(&fakes).await;
+    window.click(window.export_button());
+    window.settle().await;
+    let page = window.html();
+    assert_eq!(fakes.dialogs().len(), 1);
+    assert!(fakes.export_requests().is_empty());
+    assert!(!window.export_is_disabled(), "{page}");
+    assert!(!page.contains("role=\"alert\""), "{page}");
+    assert!(!page.contains("role=\"status\""), "{page}");
+}
