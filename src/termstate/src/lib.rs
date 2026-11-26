@@ -540,7 +540,7 @@ impl TerminalState {
     pub fn process_output(&mut self, data: &str) -> Result<()> {
         // The parser calls back into `self`, so take it out for the whole call.
         let mut parser = std::mem::take(&mut self.parser);
-        let mut utf8 = [0u8; 4];
+        let mut utf8 = [0_u8; 4];
         for ch in data.chars() {
             let was_settled = self.pending.is_empty();
             let bytes = ch.encode_utf8(&mut utf8).as_bytes();
