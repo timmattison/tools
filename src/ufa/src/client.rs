@@ -416,6 +416,71 @@ mod tests {
         );
     }
 
+    /// What a plain HTTP server writes when a client opens a TLS handshake on
+    /// it: an HTTP answer, which is not a TLS record.
+    const PLAIN_HTTP_ANSWER: &[u8] =
+        b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+    /// Start a host that answers the first bytes of each connection with
+    /// [`PLAIN_HTTP_ANSWER`], and then closes the connection.
+    ///
+    /// [`TestServer`] reads an HTTP request head before it answers, and a
+    /// `ClientHello` holds no such head, thus this host reads one chunk only.
+    ///
+    /// # Returns
+    ///
+    /// The port of the host, and the task that serves it.
+    async fn plain_http_host() -> (u16, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a test host must be able to bind a loopback port");
+        let port = listener
+            .local_addr()
+            .expect("a bound listener has a local address")
+            .port();
+
+        let task = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut hello = [0_u8; 1_024];
+                let _ = socket.read(&mut hello).await;
+                let _ = socket.write_all(PLAIN_HTTP_ANSWER).await;
+                let _ = socket.flush().await;
+            }
+        });
+
+        (port, task)
+    }
+
+    /// A real handshake that the host refuses is a TLS failure, in each
+    /// build of `ufa`.
+    ///
+    /// The tests above build the refusal by hand, in the shape that rustls
+    /// gives. Only a real handshake shows the shape that the TLS backend of
+    /// the client gives. A build of the whole workspace turns on the default
+    /// features of reqwest, and reqwest then picks native-tls unless the
+    /// builder names a backend. native-tls reports the refusal in a different
+    /// shape, and the advice about `--insecure` does not show.
+    #[tokio::test]
+    async fn a_refused_handshake_of_a_real_client_is_a_tls_failure() {
+        let (port, host) = plain_http_host().await;
+        let client = build_client(Api::Controller, "an-api-key", false, Timeouts::PRODUCTION)
+            .expect("a test key must build a client");
+
+        let error = client
+            .get(format!("https://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .expect_err("a host that answers in plain HTTP cannot complete a TLS handshake");
+        host.abort();
+
+        assert!(
+            is_tls_failure(&error),
+            "a refused handshake must be recognised as a TLS failure, got: {error:?}"
+        );
+    }
+
     /// The ordinary connection failures must stay ordinary.
     #[test]
     fn a_refused_connection_is_not_a_tls_failure() {
