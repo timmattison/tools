@@ -246,6 +246,25 @@ fn long_through_cell_wraps_inside_thirty_columns() {
     );
 }
 
+/// With no width, a long `Through` cell stays on one line.
+#[test]
+fn no_width_keeps_the_through_cell_on_one_line() {
+    let mut used = never("wt", Kind::Alias, "cwt");
+    used.through = (1..=6_u64).map(|n| (format!("alias{n}"), 7 - n)).collect();
+    used.uses = 21;
+    used.classification = Classification::Used;
+    let report = text(&tally(vec![used]), &window(), "/bin/zsh", None);
+    assert_eq!(
+        table_lines(&report).len(),
+        5,
+        "top, header, rule, one row, bottom: {report}"
+    );
+    assert_eq!(
+        row(&report, "wt")[4],
+        "alias1 6, alias2 5, alias3 4, alias4 3, alias5 2, alias6 1"
+    );
+}
+
 /// With no width, the whole definition stays.
 #[test]
 fn no_width_keeps_the_definition() {
