@@ -186,9 +186,11 @@ async fn discover_via_mdns() -> Result<Vec<DiscoveredController>> {
     // Verify each discovered controller
     let mut verified_controllers = Vec::new();
     for mut controller in controllers {
-        if let Ok(verified) = validate_controller(&controller.ip, controller.port).await {
+        if validate_controller(&controller.ip, controller.port)
+            .await
+            .is_ok()
+        {
             controller.is_verified = true;
-            controller.name = controller.name.or(verified.name);
             verified_controllers.push(controller);
         }
     }
