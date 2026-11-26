@@ -30,7 +30,10 @@ fn seconds_is_a_plain_json_number_and_refuses_a_negative_one() {
     assert!(serde_json::from_str::<Seconds>("-1.0").is_err());
 }
 
-use crate::types::{Clip, ClipId, EditProject, Recording, TimelineTrack, TrackId};
+use crate::types::{
+    AppliedFilter, Clip, ClipId, EditProject, FilterKind, FilterOptions, FilterRegion, Recording,
+    TimelineTrack, TrackId,
+};
 use std::sync::Arc;
 
 #[test]
@@ -64,4 +67,116 @@ fn from_recording_refuses_a_negative_duration() {
     let result = EditProject::from_recording(Arc::new(source));
 
     assert!(matches!(result, Err(NleError::InvalidTime(_))));
+}
+
+fn clip(id: u64, in_point: f64, out_point: f64, offset: f64) -> Clip {
+    Clip {
+        id: ClipId(id),
+        source: Arc::new(Recording::test_fixture()),
+        in_point: Seconds::new(in_point).unwrap(),
+        out_point: Seconds::new(out_point).unwrap(),
+        timeline_offset: Seconds::new(offset).unwrap(),
+    }
+}
+
+fn track(id: u64, clips: &[u64]) -> TimelineTrack {
+    TimelineTrack {
+        id: TrackId(id),
+        clips: clips.iter().copied().map(ClipId).collect(),
+    }
+}
+
+/// Two tracks: clips 1 and 2 on track 1, clip 3 on track 2. The source lasts 5 s.
+fn valid_project() -> EditProject {
+    EditProject {
+        clips: vec![
+            clip(1, 0.0, 2.0, 0.0),
+            clip(2, 1.0, 5.0, 2.0),
+            clip(3, 0.0, 5.0, 0.0),
+        ],
+        timeline: vec![track(1, &[1, 2]), track(2, &[3])],
+        filters: Vec::new(),
+    }
+}
+
+fn assert_invalid(project: &EditProject, rule: &str) {
+    assert!(
+        matches!(project.validate(), Err(NleError::InvalidProject(_))),
+        "{rule} was accepted"
+    );
+}
+
+#[test]
+fn validate_accepts_a_valid_two_track_project() {
+    valid_project().validate().unwrap();
+}
+
+#[test]
+fn validate_refuses_a_duplicate_clip_id() {
+    let mut project = valid_project();
+    project.clips[2].id = ClipId(1);
+    assert_invalid(&project, "a duplicate clip id");
+}
+
+#[test]
+fn validate_refuses_a_duplicate_track_id() {
+    let mut project = valid_project();
+    project.timeline[1].id = TrackId(1);
+    assert_invalid(&project, "a duplicate track id");
+}
+
+#[test]
+fn validate_refuses_an_in_point_after_the_out_point() {
+    let mut project = valid_project();
+    project.clips[0] = clip(1, 3.0, 2.0, 0.0);
+    assert_invalid(&project, "in_point > out_point");
+}
+
+#[test]
+fn validate_refuses_an_out_point_after_the_source_duration() {
+    let mut project = valid_project();
+    project.clips[0] = clip(1, 0.0, 5.5, 0.0);
+    assert_invalid(&project, "out_point > source duration");
+}
+
+#[test]
+fn validate_refuses_a_track_that_names_a_missing_clip() {
+    let mut project = valid_project();
+    project.timeline[1].clips.push(ClipId(99));
+    assert_invalid(&project, "a track that names a missing clip");
+}
+
+#[test]
+fn validate_refuses_a_clip_on_no_track() {
+    let mut project = valid_project();
+    project.timeline[1].clips.clear();
+    assert_invalid(&project, "a clip on no track");
+}
+
+#[test]
+fn validate_refuses_a_clip_on_two_tracks() {
+    let mut project = valid_project();
+    project.timeline[1].clips.push(ClipId(1));
+    assert_invalid(&project, "a clip on two tracks");
+}
+
+#[test]
+fn validate_refuses_a_clip_twice_on_one_track() {
+    let mut project = valid_project();
+    project.timeline[0].clips.push(ClipId(1));
+    assert_invalid(&project, "a clip twice on one track");
+}
+
+#[test]
+fn validate_refuses_a_filter_range_with_start_after_end() {
+    let mut project = valid_project();
+    project.filters.push(AppliedFilter {
+        kind: FilterKind::new("speed"),
+        region: FilterRegion::Range {
+            start: Seconds::new(2.0).unwrap(),
+            end: Seconds::new(1.0).unwrap(),
+        },
+        options: FilterOptions::new(),
+    });
+    assert_invalid(&project, "a range with start > end");
 }

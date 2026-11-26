@@ -30,6 +30,19 @@ impl EditProject {
             filters: Vec::new(),
         })
     }
+
+    /// Check the rules of a project.
+    ///
+    /// The rules, in order: each clip id and each track id is unique; each clip
+    /// has `in_point <= out_point <= source duration`; each clip id on a track
+    /// names a clip, and each clip is on exactly one track, exactly once; each
+    /// filter range has `start <= end`.
+    ///
+    /// # Errors
+    /// Returns `NleError::InvalidProject` for the first broken rule.
+    pub fn validate(&self) -> Result<(), NleError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
