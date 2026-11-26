@@ -67,14 +67,23 @@ impl FilterRegistry {
         kind: FilterKind,
         filter: impl Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync + 'static,
     ) {
-        let _ = (kind, filter);
+        self.filters.insert(kind, Arc::new(filter));
     }
 
     /// Whether a filter is registered under `kind`.
     #[must_use]
     pub fn contains(&self, kind: &FilterKind) -> bool {
-        let _ = kind;
-        false
+        self.filters.contains_key(kind)
+    }
+
+    /// The filter under `kind`, or a render error that names the kind.
+    fn lookup(&self, kind: &FilterKind) -> Result<&Arc<FilterFn>, NleError> {
+        self.filters.get(kind).ok_or_else(|| {
+            NleError::RenderError(format!(
+                "no filter is registered for kind \"{}\"",
+                kind.as_str()
+            ))
+        })
     }
 
     /// Run `filters` in order over `events`, by the steps on `FilterFn`. The
@@ -89,8 +98,11 @@ impl FilterRegistry {
         events: Vec<Event>,
         filters: &[AppliedFilter],
     ) -> Result<Vec<Event>, NleError> {
-        let _ = filters;
-        Ok(events)
+        let Some(applied) = filters.first() else {
+            return Ok(events);
+        };
+        let filter = self.lookup(&applied.kind)?;
+        Ok(filter(&events, &applied.options))
     }
 
     /// Flatten `project` into one recording.
