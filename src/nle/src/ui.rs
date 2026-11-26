@@ -9,6 +9,7 @@
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
@@ -127,11 +128,18 @@ impl Services {
     }
 }
 
+/// The serial of the next document that `Document::open` builds.
+static NEXT_DOCUMENT_SERIAL: AtomicU64 = AtomicU64::new(1);
+
 /// The open document of the window: the editor of its project, and the
 /// metadata of the recording file that it came from.
 struct Document {
     editor: Editor,
     metadata: RecordingMetadata,
+    /// A number that no other document of this process has. A component that
+    /// keeps state about one document takes it as its key, thus each new
+    /// document gets a new component.
+    serial: u64,
 }
 
 impl Document {
@@ -142,6 +150,7 @@ impl Document {
         Ok(Self {
             editor: Editor::new(project, filters)?,
             metadata: loaded.metadata,
+            serial: NEXT_DOCUMENT_SERIAL.fetch_add(1, Ordering::Relaxed),
         })
     }
 }
@@ -271,13 +280,19 @@ fn PropertiesPanel(
     loaded: Signal<Option<Document>>,
     on_result: EventHandler<Result<(), String>>,
 ) -> Element {
-    let metadata = loaded.read().as_ref().map(|open| open.metadata.clone());
+    let open = loaded
+        .read()
+        .as_ref()
+        .map(|open| (open.metadata.clone(), open.serial));
     rsx! {
         div { class: "properties-panel",
             h3 { "Properties" }
-            if let Some(metadata) = metadata {
+            if let Some((metadata, serial)) = open {
                 {metadata_rows(&metadata)}
-                ChaptersPanel { loaded, on_result }
+                // A key counts only on the first node of a block. A keyed node
+                // in its own block gets the keyed diff, thus each new document
+                // gets a new panel, with no edit and no search.
+                {rsx! { ChaptersPanel { key: "{serial}", loaded, on_result } }}
             } else {
                 div { class: "placeholder", "No recording loaded" }
             }
