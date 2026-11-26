@@ -233,6 +233,8 @@ struct Window {
     inputs: Vec<ElementId>,
     /// The Apply Speed button, when a test noted it.
     apply: Option<ElementId>,
+    /// The Skip to End, Accelerate, and Summarize buttons, when a test noted them.
+    fast_forward_buttons: Option<[ElementId; 3]>,
 }
 
 impl Window {
@@ -251,6 +253,7 @@ impl Window {
             first_render: Vec::new(),
             inputs: Vec::new(),
             apply: None,
+            fast_forward_buttons: None,
         };
         window.note_listeners(&edits);
         window.first_render = window.clicks.clone();
@@ -318,19 +321,53 @@ impl Window {
         self.render();
     }
 
-    /// The Start, End, and Speed fields, in this order.
+    /// The number of input fields of the page with an open recording: the
+    /// three of the speed panel, then the five of the fast-forward panel.
+    const FIELD_COUNT: usize = 8;
+
+    /// The input listeners of the page, after a check of their number.
+    fn fields(&self) -> &[ElementId] {
+        assert_eq!(
+            self.inputs.len(),
+            Self::FIELD_COUNT,
+            "the page has the inputs {:?}",
+            self.inputs
+        );
+        &self.inputs
+    }
+
+    /// The Start, End, and Speed fields of the speed panel, in this order.
     fn speed_fields(&self) -> [ElementId; 3] {
-        let fields: [ElementId; 3] = self
-            .inputs
-            .clone()
-            .try_into()
-            .unwrap_or_else(|ids: Vec<ElementId>| panic!("the page has the inputs {ids:?}"));
-        fields
+        self.fields()
+            .get(..3)
+            .and_then(|ids| ids.try_into().ok())
+            .expect("three speed fields")
+    }
+
+    /// The Start, End, Speed, First lines, and Last lines fields of the
+    /// fast-forward panel, in this order.
+    fn fast_forward_fields(&self) -> [ElementId; 5] {
+        self.fields()
+            .get(3..)
+            .and_then(|ids| ids.try_into().ok())
+            .expect("five fast-forward fields")
     }
 
     /// The Apply Speed button. `open_recording` noted it.
     fn apply_button(&self) -> ElementId {
         self.apply.expect("a window with an open recording")
+    }
+
+    /// The button of the fast-forward panel. `open_recording` noted it.
+    fn fast_forward_button(&self, button: FastForwardButton) -> ElementId {
+        let [skip, accelerate, summarize] = self
+            .fast_forward_buttons
+            .expect("a window with an open recording");
+        match button {
+            FastForwardButton::SkipToEnd => skip,
+            FastForwardButton::Accelerate => accelerate,
+            FastForwardButton::Summarize => summarize,
+        }
     }
 
     /// The Remove button of the row that the newest render added.
@@ -346,6 +383,15 @@ impl Window {
         self.type_into(end_field, end);
         self.type_into(speed_field, speed);
         self.click(self.apply_button());
+    }
+
+    /// Fills the Start and End fields of the fast-forward panel and clicks
+    /// `button`. The other fields keep their text.
+    fn fast_forward(&mut self, button: FastForwardButton, start: &str, end: &str) {
+        let [start_field, end_field, ..] = self.fast_forward_fields();
+        self.type_into(start_field, start);
+        self.type_into(end_field, end);
+        self.click(self.fast_forward_button(button));
     }
 
     /// Runs the tasks of the app until they have no more work, and renders
@@ -663,16 +709,24 @@ fn edited_row(text: &str) -> String {
 }
 
 /// Opens the fixture recording through the fakes, and notes the Apply Speed
-/// button.
+/// button and the three fast-forward buttons.
 async fn open_recording() -> Window {
+    open_loaded(fixture()).await
+}
+
+/// Opens `recording` through the fakes, and notes the buttons of the panels.
+/// The open render makes four click listeners: Apply Speed, Skip to End,
+/// Accelerate, and Summarize, in this order.
+async fn open_loaded(recording: LoadedRecording) -> Window {
     let fakes = Fakes::new()
         .pick(picked())
-        .load(Answer::Ready(Ok(fixture())));
+        .load(Answer::Ready(Ok(recording)));
     let mut window = Window::open(&fakes);
     window.click(window.open_button());
     window.settle().await;
-    assert_eq!(window.newest.len(), 1, "{:?}", window.newest);
+    assert_eq!(window.newest.len(), 4, "{:?}", window.newest);
     window.apply = Some(window.newest[0]);
+    window.fast_forward_buttons = Some([window.newest[1], window.newest[2], window.newest[3]]);
     window
 }
 
@@ -1084,4 +1138,103 @@ fn fast_forward_rows_keep_the_place_of_each_filter_in_the_project() {
         ]
     );
     assert!(fast_forward_rows(&None).is_empty());
+}
+
+// The fast-forward panel.
+
+/// The row text of a fast-forward as the page shows it.
+fn fast_forward_row(text: &str) -> String {
+    format!("<span>{text}</span>")
+}
+
+#[tokio::test]
+async fn the_fast_forward_panel_shows_its_fields_buttons_and_hint() {
+    let window = open_recording().await;
+    let page = window.html();
+    for text in [
+        "Fast-Forward",
+        "Speed (Accelerate)",
+        "First lines (Summarize)",
+        "Last lines (Summarize)",
+        ">Skip to End</button>",
+        ">Accelerate</button>",
+        ">Summarize</button>",
+        "value=\"20\"",
+    ] {
+        assert!(page.contains(text), "{text} missing in {page}");
+    }
+    assert_eq!(page.matches("value=\"3\"").count(), 2, "{page}");
+    assert_eq!(page.matches("Start (s)").count(), 2, "{page}");
+    assert_eq!(page.matches("End (s)").count(), 2, "{page}");
+    let hint = "Times are in seconds, on the timeline after the speed changes and fast-forwards that you applied before.";
+    assert_eq!(page.matches(hint).count(), 2, "{page}");
+    assert_eq!(page.matches("Edited duration").count(), 1, "{page}");
+    assert_eq!(window.fast_forward_fields().len(), 5);
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn the_edited_duration_follows_both_panels() {
+    let page = open_recording().await.html();
+    let edited = page.find("Edited duration").expect("the row");
+    assert!(
+        edited > page.find("Fast-Forward").expect("the panel"),
+        "{page}"
+    );
+}
+
+#[tokio::test]
+async fn skip_to_end_adds_a_row_and_shortens_the_recording() {
+    let mut window = open_recording().await;
+    window.fast_forward(FastForwardButton::SkipToEnd, "10", "20");
+    let page = window.html();
+    assert!(
+        page.contains(&fast_forward_row("10 s to 20 s: skip to end")),
+        "{page}"
+    );
+    assert!(page.contains(&edited_row(&format_duration(55.3))), "{page}");
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn accelerate_adds_a_row_and_shortens_the_recording() {
+    let mut window = open_recording().await;
+    window.fast_forward(FastForwardButton::Accelerate, "10", "30");
+    let page = window.html();
+    assert!(
+        page.contains(&fast_forward_row("10 s to 30 s: accelerate at 20\u{d7}")),
+        "{page}"
+    );
+    // 20 s at 20 times the speed take 1 s, thus the recording is 19 s shorter.
+    assert!(page.contains(&edited_row(&format_duration(46.3))), "{page}");
+}
+
+#[tokio::test]
+async fn a_fast_forward_row_and_a_speed_row_stay_in_their_own_lists() {
+    let mut window = open_recording().await;
+    window.apply_speed("10", "20", "2");
+    window.fast_forward(FastForwardButton::SkipToEnd, "30", "40");
+    let page = window.html();
+    for row in [
+        speed_row("10 s to 20 s", "2"),
+        fast_forward_row("30 s to 40 s: skip to end"),
+    ] {
+        assert_eq!(page.matches(&row).count(), 1, "{row} in {page}");
+    }
+}
+
+#[tokio::test]
+async fn a_field_that_the_mode_does_not_read_does_not_block_it() {
+    let mut window = open_recording().await;
+    let [_, _, speed, first, last] = window.fast_forward_fields();
+    window.type_into(speed, "abc");
+    window.type_into(first, "x");
+    window.type_into(last, "x");
+    window.fast_forward(FastForwardButton::SkipToEnd, "10", "20");
+    let page = window.html();
+    assert!(
+        page.contains(&fast_forward_row("10 s to 20 s: skip to end")),
+        "{page}"
+    );
+    assert!(!page.contains("role=\"alert\""), "{page}");
 }
