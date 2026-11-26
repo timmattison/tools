@@ -112,7 +112,7 @@ const FRAGMENTS: &[&str] = &[
     "\x7f",
 ];
 
-/// A small SplitMix64 generator. The seed alone decides the sequence.
+/// A small `SplitMix64` generator. The seed alone decides the sequence.
 struct SplitMix64(u64);
 
 impl SplitMix64 {
