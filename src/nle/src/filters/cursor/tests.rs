@@ -412,6 +412,22 @@ fn a_shape_and_a_blink_together_ignore_the_shape_of_the_recording() {
 }
 
 #[test]
+fn a_decscusr_whose_first_parameter_is_not_a_number_is_dropped_too() {
+    // The first value does not fit in a u64, and the second has a
+    // sub-parameter.
+    let events = vec![out(0.0, "\x1b[99999999999999999999 qa\x1b[2:1 qb")];
+
+    let got = run(
+        events,
+        json!({ "shape": "underline", "blink": true }),
+        FilterRegion::All,
+    )
+    .unwrap();
+
+    assert_eq!(got, vec![out(0.0, "\x1b[3 q"), out(0.0, "ab")]);
+}
+
+#[test]
 fn a_shape_alone_keeps_the_blink_mode_of_the_recording() {
     let events = vec![out(0.0, "\x1b[?12la")];
 
