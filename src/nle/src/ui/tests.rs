@@ -1004,3 +1004,141 @@ async fn applying_a_text_redaction_adds_a_row_and_keeps_the_duration() {
     assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
     assert!(!page.contains("role=\"alert\""), "{page}");
 }
+
+#[tokio::test]
+async fn a_preset_redaction_shows_the_label_of_the_preset() {
+    let mut window = open_recording().await;
+    window.apply_redaction("email", "ignored", "asterisks", "", "output");
+    let page = window.html();
+    let row = redaction_row("Email addresses \u{2192} asterisks (output)");
+    assert!(page.contains(&row), "{row} missing in {page}");
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn every_preset_of_the_menu_applies() {
+    for preset in crate::filters::redaction::Preset::ALL {
+        let mut window = open_recording().await;
+        window.apply_redaction(preset.key(), "", "blocks", "", "output");
+        let page = window.html();
+        let row = redaction_row(&format!("{} \u{2192} blocks (output)", preset.label()));
+        assert!(page.contains(&row), "{row} missing in {page}");
+    }
+}
+
+#[tokio::test]
+async fn a_text_replacement_and_both_kinds_of_events_show_in_the_row() {
+    let mut window = open_recording().await;
+    window.apply_redaction("email", "", "text", "[REDACTED]", "output-and-input");
+    let page = window.html();
+    let row =
+        redaction_row("Email addresses \u{2192} \u{201c}[REDACTED]\u{201d} (output and input)");
+    assert!(page.contains(&row), "{row} missing in {page}");
+}
+
+#[tokio::test]
+async fn a_regex_redaction_shows_its_pattern() {
+    let mut window = open_recording().await;
+    window.apply_redaction("regex", "a+b", "blocks", "", "output");
+    let page = window.html();
+    let row = redaction_row("regex /a+b/ \u{2192} blocks (output)");
+    assert!(page.contains(&row), "{row} missing in {page}");
+}
+
+#[tokio::test]
+async fn a_pattern_keeps_its_spaces() {
+    let mut window = open_recording().await;
+    window.apply_redaction("text", " a ", "text", " x ", "output");
+    let page = window.html();
+    let row = redaction_row("text \u{201c} a \u{201d} \u{2192} \u{201c} x \u{201d} (output)");
+    assert!(page.contains(&row), "{row} missing in {page}");
+}
+
+#[tokio::test]
+async fn a_bad_redaction_shows_the_reason_and_adds_no_row() {
+    let cases = [
+        (
+            ("text", "", "asterisks", ""),
+            "Invalid redaction: the text to find is empty",
+        ),
+        (
+            ("regex", "(", "asterisks", ""),
+            "Invalid redaction: the regular expression does not compile",
+        ),
+        (
+            ("text", "a", "text", "a\tb"),
+            "Invalid redaction: the replacement holds a control character",
+        ),
+    ];
+    for ((find, pattern, replace, replacement), reason) in cases {
+        let mut window = open_recording().await;
+        window.apply_redaction(find, pattern, replace, replacement, "output");
+        let page = window.html();
+        let banner = format!("Failed to redact: {reason}");
+        assert!(page.contains(&banner), "{banner} missing in {page}");
+        assert!(!page.contains("class=\"redaction-row\""), "{page}");
+    }
+}
+
+#[tokio::test]
+async fn a_good_redaction_after_a_bad_one_removes_the_banner() {
+    let mut window = open_recording().await;
+    window.apply_redaction("text", "", "asterisks", "", "output");
+    assert!(window.html().contains("role=\"alert\""));
+    let [_, pattern_field, ..] = window.redaction_fields();
+    window.type_into(pattern_field, "hunter2");
+    window.click(window.redact_button());
+    let page = window.html();
+    assert!(page.contains("hunter2"), "{page}");
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn removing_a_redaction_row_removes_it() {
+    let mut window = open_recording().await;
+    window.apply_redaction("text", "hunter2", "asterisks", "", "output");
+    window.click(window.remove_button());
+    let page = window.html();
+    assert!(!page.contains("class=\"redaction-row\""), "{page}");
+    assert!(!page.contains("\u{2192} asterisks"), "{page}");
+    assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
+}
+
+#[tokio::test]
+async fn each_remove_button_keeps_the_rows_of_the_other_panel() {
+    let mut window = open_recording().await;
+    window.apply_speed("10", "20", "2");
+    let speed_remove = window.remove_button();
+    window.apply_redaction("text", "hunter2", "asterisks", "", "output");
+    let redaction_remove = window.remove_button();
+    let speed = speed_row("10 s to 20 s", "2");
+    let redaction = redaction_row("text \u{201c}hunter2\u{201d} \u{2192} asterisks (output)");
+
+    window.click(redaction_remove);
+    let page = window.html();
+    assert!(page.contains(&speed), "{page}");
+    assert!(!page.contains(&redaction), "{page}");
+    assert!(page.contains(&edited_row("1m 0.3s")), "{page}");
+
+    window.apply_redaction("text", "hunter2", "asterisks", "", "output");
+    window.click(speed_remove);
+    let page = window.html();
+    assert!(!page.contains(&speed), "{page}");
+    assert!(page.contains(&redaction), "{page}");
+    assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
+}
+
+#[test]
+fn a_redaction_of_a_range_shows_its_region() {
+    use crate::filters::redaction::{self, Find, Redaction, Replacement};
+    let redaction =
+        Redaction::new(Find::Text("key".into()), Replacement::Blocks, false).expect("a redaction");
+    let region = FilterRegion::Range {
+        start: Seconds::new(10.0).expect("a time"),
+        end: Seconds::new(20.0).expect("a time"),
+    };
+    let filter = redaction::applied(region, &redaction);
+    let page = render_edited_panels(fixture(), vec![Edit::AddFilter { index: 0, filter }]);
+    let row = redaction_row("text \u{201c}key\u{201d} \u{2192} blocks (output), 10 s to 20 s");
+    assert!(page.contains(&row), "{row} missing in {page}");
+}
