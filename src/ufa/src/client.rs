@@ -162,7 +162,7 @@ impl UnifiClient {
     fn handle_request_error(&self, error: reqwest::Error, method: &str) -> anyhow::Error {
         if is_tls_failure(&error) {
             anyhow::anyhow!(
-                "TLS certificate error: {}\n\nTo connect to a UniFi controller with a self-signed certificate:\n  - Use the --insecure flag\n  - Or set UNIFI_INSECURE=true in your .env file\n\nNote: This disables certificate verification and should only be used for trusted networks.",
+                "TLS certificate error: {}\n\nTo connect to a UniFi controller with a self-signed certificate:\n  - Use the --insecure flag\n  - Or set UNIFI_INSECURE=true in the .env file beside the config file (`ufa config path` prints the config file)\n\nNote: This disables certificate verification and should only be used for trusted networks.",
                 error
             )
         } else {
