@@ -840,12 +840,11 @@ console.log(String(player.pausedAt));
         assert!((loaded.chapters[0].time - 2.5).abs() < f64::EPSILON);
     }
 
-    #[test]
-    fn the_player_builds_one_marker_for_each_chapter_under_node() {
-        let html = page(
-            &recording(vec![chapter(2.5, "Setup"), chapter(5.0, "Build")]),
-            false,
-        );
+    /// Run the player of the page of `recording` under the real `node`. Give
+    /// each marker that it built, and where the player stands after a click on
+    /// the second marker.
+    fn run_player(recording: &Recording) -> (Vec<serde_json::Value>, String) {
+        let html = page(recording, false);
         let dir = tempfile::tempdir().expect("temp dir");
         let file = dir.path().join("player.js");
         let program = format!("{NODE_PRELUDE}\n{}\n{NODE_EPILOGUE}", inline_script(&html));
@@ -862,7 +861,15 @@ console.log(String(player.pausedAt));
         let mut lines = stdout.lines();
         let markers: serde_json::Value =
             serde_json::from_str(lines.next().expect("marker line")).expect("marker json");
-        let markers = markers.as_array().expect("marker array");
+        let markers = markers.as_array().expect("marker array").clone();
+        let paused_at = lines.next().expect("position line").to_owned();
+        (markers, paused_at)
+    }
+
+    #[test]
+    fn the_player_builds_one_marker_for_each_chapter_under_node() {
+        let (markers, paused_at) =
+            run_player(&recording(vec![chapter(2.5, "Setup"), chapter(5.0, "Build")]));
         assert_eq!(markers.len(), 2);
         let lefts: Vec<&str> = markers.iter().filter_map(|m| m["left"].as_str()).collect();
         assert_eq!(lefts, vec!["25%", "50%"]);
@@ -875,6 +882,21 @@ console.log(String(player.pausedAt));
         assert_eq!(aria, titles);
         assert!(markers.iter().all(|m| m["type"] == "button"));
         assert!(markers.iter().all(|m| m["className"] == "chapter-marker"));
-        assert_eq!(lines.next(), Some("5"));
+        assert_eq!(paused_at, "5");
+    }
+
+    #[test]
+    fn the_player_makes_no_marker_for_a_chapter_outside_the_recording() {
+        // JSON has no NaN, thus the time of the chapter "nan" is null in the page.
+        let (markers, paused_at) = run_player(&recording(vec![
+            chapter(-1.0, "before"),
+            chapter(2.5, "Setup"),
+            chapter(f64::NAN, "nan"),
+            chapter(5.0, "Build"),
+            chapter(15.0, "after"),
+        ]));
+        let titles: Vec<&str> = markers.iter().filter_map(|m| m["title"].as_str()).collect();
+        assert_eq!(titles, vec!["Setup (0:02)", "Build (0:05)"]);
+        assert_eq!(paused_at, "5");
     }
 }
