@@ -680,7 +680,12 @@ fn an_in_place_mark_at_the_region_end_lands_on_the_end_when_the_sum_rounds_up() 
 
     assert_eq!(
         with_data(&out),
-        vec![(0.0, "e0"), (1.73, "e1.73"), (5.79, "mark"), (5.79, "e5.79")]
+        vec![
+            (0.0, "e0"),
+            (1.73, "e1.73"),
+            (5.79, "mark"),
+            (5.79, "e5.79")
+        ]
     );
 }
 

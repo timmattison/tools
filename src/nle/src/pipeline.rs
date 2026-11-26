@@ -79,8 +79,11 @@ pub struct RegionView {
 ///    region, both included. Else the pipeline fails with a render error that
 ///    names the kind.
 /// 4. Nothing moves: the events after the region keep their times, and the
-///    end of the timeline stays. An answered event at the end of the region
-///    comes before an event after the region at the same time.
+///    end of the timeline stays. An answered time goes back onto the timeline
+///    as the relative time plus the region start, but never after the end of
+///    the region, because that sum can round up. Thus an answered event at
+///    the length lands on the end of the region, and it comes before an
+///    event after the region at the same time.
 pub type InPlaceFilterFn =
     dyn Fn(&[Event], RegionView, &FilterOptions) -> Result<Vec<Event>, String> + Send + Sync;
 
@@ -188,18 +191,21 @@ impl FilterRegistry {
         }
 
         let kind = applied.kind.as_str();
-        // The answer, and the view of an in-place filter.
-        let (answer, view) = match filter {
-            Registered::Events(filter) => (filter(&inside, &applied.options), None),
+        // The answer, the view of an in-place filter, and the latest time on
+        // the timeline that the answer can get.
+        let (answer, view, ceiling) = match filter {
+            Registered::Events(filter) => (filter(&inside, &applied.options), None, f64::INFINITY),
             Registered::InPlace(filter) => {
+                // The end of the region on the timeline.
+                let top = region_end.min(*end).max(start);
                 let view = RegionView {
-                    length: (region_end.min(*end) - start).max(0.0),
+                    length: top - start,
                     open: after.is_empty() && region_end >= *end,
                 };
                 let answer = filter(&inside, view, &applied.options).map_err(|message| {
                     NleError::RenderError(format!("filter \"{kind}\" failed: {message}"))
                 })?;
-                (answer, Some(view))
+                (answer, Some(view), top)
             }
         };
         for event in &answer {
@@ -221,7 +227,7 @@ impl FilterRegistry {
                     return Err(NleError::RenderError(format!(
                         "filter \"{kind}\" answered the time {} s, which is outside its region from {start} s to {} s",
                         outside.time + start,
-                        view.length + start
+                        ceiling
                     )));
                 }
                 0.0
@@ -229,8 +235,10 @@ impl FilterRegistry {
         };
 
         let mut result = before;
+        // The length plus the start can round up by one step, so a time is
+        // held at the ceiling.
         result.extend(answer.into_iter().map(|event| Event {
-            time: event.time + start,
+            time: (event.time + start).min(ceiling),
             ..event
         }));
         result.extend(after.into_iter().map(|event| Event {
