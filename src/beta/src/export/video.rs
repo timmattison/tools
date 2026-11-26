@@ -151,7 +151,7 @@ pub async fn export_video(
     let (width, height) = parse_resolution(&resolution, &recording)?;
     let terminal_theme = TerminalTheme::from_name(&theme);
 
-    let chapters_text = if is_gif(&output_path) {
+    let chapters = if is_gif(&output_path) {
         if !recording.chapters.is_empty() {
             println!(
                 "GIF has no chapters: the {} chapter(s) are not in the GIF.",
@@ -163,8 +163,8 @@ pub async fn export_video(
         chapter_metadata(&recording.chapters, recording.duration)
     };
     // The file must stay alive until FFmpeg exits.
-    let chapters_file = match &chapters_text {
-        Some(text) => {
+    let chapters_file = match &chapters {
+        Some(ChapterMetadata { text, .. }) => {
             let mut file = tempfile::Builder::new()
                 .prefix("beta-chapters-")
                 .suffix(".txt")
@@ -182,8 +182,8 @@ pub async fn export_video(
     println!("Resolution: {}x{}", width, height);
     println!("FPS: {}", fps);
     println!("Theme: {}", theme);
-    if let Some(text) = &chapters_text {
-        println!("Chapters: {}", text.matches("[CHAPTER]").count());
+    if let Some(metadata) = &chapters {
+        println!("Chapters: {}", metadata.count);
     }
 
     let total_frames = generate_and_encode_video(
@@ -585,6 +585,16 @@ fn is_gif(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// The FFmpeg metadata text of the chapters of a recording, and the number of
+/// chapters that it holds.
+#[derive(Debug, PartialEq)]
+struct ChapterMetadata {
+    /// The text of the FFMETADATA file.
+    text: String,
+    /// The number of `[CHAPTER]` blocks in `text`.
+    count: usize,
+}
+
 /// Builds the FFmpeg metadata text that holds the chapters of a recording.
 ///
 /// Returns `None` when no chapter is usable.
@@ -592,7 +602,7 @@ fn is_gif(path: &Path) -> bool {
 /// Keeps the chapters whose time is finite and within `0..=duration`, in time order.
 /// Times are whole milliseconds. A chapter ends where the next one starts, and the last
 /// one ends at `duration`. A chapter that would end at or before its start is dropped.
-fn chapter_metadata(chapters: &[Chapter], duration: f64) -> Option<String> {
+fn chapter_metadata(chapters: &[Chapter], duration: f64) -> Option<ChapterMetadata> {
     let mut usable: Vec<&Chapter> = chapters
         .iter()
         .filter(|c| c.time.is_finite() && c.time >= 0.0 && c.time <= duration)
@@ -618,7 +628,8 @@ fn chapter_metadata(chapters: &[Chapter], duration: f64) -> Option<String> {
             escape_metadata(label)
         ));
     }
-    (!text.is_empty()).then_some(text)
+    let count = text.matches("[CHAPTER]").count();
+    (!text.is_empty()).then_some(ChapterMetadata { text, count })
 }
 
 /// Converts a finite, non-negative number of seconds to whole milliseconds.
@@ -773,11 +784,21 @@ mod tests {
     fn two_chapters_give_the_metadata_text() {
         let text = chapter_metadata(&[chapter(2.5, "Setup"), chapter(5.0, "Build")], 10.0);
         assert_eq!(
-            text.as_deref(),
+            text.as_ref().map(|metadata| metadata.text.as_str()),
             Some(
                 ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=2500\nEND=5000\ntitle=Setup\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=5000\nEND=10000\ntitle=Build\n"
             )
         );
+    }
+
+    #[test]
+    fn the_count_is_the_number_of_chapters() {
+        let two = chapter_metadata(&[chapter(2.5, "Setup"), chapter(5.0, "Build")], 10.0);
+        assert_eq!(two.map(|metadata| metadata.count), Some(2));
+
+        // A label can hold the text of a block header, also after a newline.
+        let one = chapter_metadata(&[chapter(1.0, "[CHAPTER]\n[CHAPTER] x")], 10.0);
+        assert_eq!(one.map(|metadata| metadata.count), Some(1));
     }
 
     #[test]
@@ -801,7 +822,7 @@ mod tests {
     fn chapters_out_of_order_come_out_in_time_order() {
         let text = chapter_metadata(&[chapter(5.0, "B"), chapter(1.0, "A")], 10.0);
         assert_eq!(
-            text.as_deref(),
+            text.as_ref().map(|metadata| metadata.text.as_str()),
             Some(
                 ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=1000\nEND=5000\ntitle=A\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=5000\nEND=10000\ntitle=B\n"
             )
@@ -812,7 +833,7 @@ mod tests {
     fn two_chapters_at_one_millisecond_keep_the_later_one() {
         let text = chapter_metadata(&[chapter(3.0, "first"), chapter(3.0004, "second")], 10.0);
         assert_eq!(
-            text.as_deref(),
+            text.as_ref().map(|metadata| metadata.text.as_str()),
             Some(";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=3000\nEND=10000\ntitle=second\n")
         );
     }
@@ -821,7 +842,7 @@ mod tests {
     fn a_chapter_at_the_duration_is_dropped() {
         let text = chapter_metadata(&[chapter(1.0, "A"), chapter(10.0, "end")], 10.0);
         assert_eq!(
-            text.as_deref(),
+            text.as_ref().map(|metadata| metadata.text.as_str()),
             Some(";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=1000\nEND=10000\ntitle=A\n")
         );
     }
