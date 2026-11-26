@@ -415,7 +415,7 @@ enum Commands {
 
     /// Manage devices
     Devices {
-        /// Site ID (if not provided, will auto-detect)
+        /// Site ID (if omitted: the only site, else a choice at a terminal)
         #[clap(long)]
         site_id: Option<Uuid>,
 
@@ -425,7 +425,7 @@ enum Commands {
 
     /// Manage clients
     Clients {
-        /// Site ID (if not provided, will auto-detect)
+        /// Site ID (if omitted: the only site, else a choice at a terminal)
         #[clap(long)]
         site_id: Option<Uuid>,
 
@@ -435,7 +435,7 @@ enum Commands {
 
     /// Manage hotspot vouchers
     Vouchers {
-        /// Site ID (if not provided, will auto-detect)
+        /// Site ID (if omitted: the only site, else a choice at a terminal)
         #[clap(long)]
         site_id: Option<Uuid>,
 
