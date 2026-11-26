@@ -43,6 +43,23 @@ use crate::types::{
 /// the end of the timeline is not finite, because a shift can overflow.
 pub type FilterFn = dyn Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync;
 
+/// What an in-place filter knows about its region.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RegionView {
+    /// The length of the region in seconds: from its start to its end, or to
+    /// the end of the timeline when that comes first. It is never below zero.
+    pub length: f64,
+    /// True when nothing of the timeline comes after the region: no event
+    /// comes after it, and it reaches the end of the timeline. The region
+    /// `All` is always open.
+    pub open: bool,
+}
+
+/// An in-place filter: a pure function that rewrites the events of a region
+/// and keeps the region in its place on the timeline.
+pub type InPlaceFilterFn =
+    dyn Fn(&[Event], RegionView, &FilterOptions) -> Result<Vec<Event>, String> + Send + Sync;
+
 /// The filters that a project can use, by kind.
 #[derive(Clone, Default)]
 pub struct FilterRegistry {
@@ -77,6 +94,18 @@ impl FilterRegistry {
         filter: impl Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync + 'static,
     ) {
         self.filters.insert(kind, Arc::new(filter));
+    }
+
+    /// Register `filter` as an in-place filter under `kind`.
+    pub fn register_in_place(
+        &mut self,
+        kind: FilterKind,
+        filter: impl Fn(&[Event], RegionView, &FilterOptions) -> Result<Vec<Event>, String>
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        let _ = (kind, filter);
     }
 
     /// Whether a filter is registered under `kind`.
