@@ -118,6 +118,32 @@ fn from_recording_refuses_a_chapter_time_below_zero() {
     );
 }
 
+#[test]
+fn from_recording_refuses_a_chapter_with_a_blank_label() {
+    for label in ["", "  \t"] {
+        let mut source = Recording::test_fixture();
+        source.chapters = vec![
+            Chapter {
+                time: 1.0,
+                label: "Setup".to_string(),
+            },
+            Chapter {
+                time: 2.0,
+                label: label.to_string(),
+            },
+        ];
+
+        let result = EditProject::from_recording(Arc::new(source));
+
+        match result {
+            Err(NleError::InvalidProject(message)) => {
+                assert_eq!(message, "chapter 2 has an empty label", "{label:?}");
+            }
+            other => panic!("the label {label:?} gave {other:?}"),
+        }
+    }
+}
+
 fn clip(id: u64, in_point: f64, out_point: f64, offset: f64) -> Clip {
     Clip {
         id: ClipId(id),
