@@ -7,7 +7,7 @@
 //! gives skip to end and accelerate.
 
 use crate::error::NleError;
-use crate::filters::time_dilation::Speed;
+use crate::filters::time_dilation::{self, Speed};
 use crate::pipeline::{FilterRegistry, Span};
 use crate::types::{AppliedFilter, Event, FilterKind, FilterOptions, FilterRegion};
 
@@ -104,7 +104,14 @@ fn fast_forward(span: Span, options: &FilterOptions) -> Result<Span, String> {
     if options.get(MODE_OPTION).and_then(serde_json::Value::as_str) == Some(SKIP_TO_END) {
         return Ok(skip_to_end(span));
     }
-    Ok(span)
+    let acceleration = options
+        .get(SPEED_OPTION)
+        .and_then(serde_json::Value::as_f64)
+        .and_then(|value| Acceleration::new(value).ok());
+    match acceleration {
+        Some(acceleration) => Ok(time_dilation::scale(span, acceleration.speed())),
+        None => Ok(span),
+    }
 }
 
 /// Move each event of a span to the start of the span, and remove the length.

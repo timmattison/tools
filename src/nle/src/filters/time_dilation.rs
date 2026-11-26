@@ -86,18 +86,25 @@ fn dilate(span: Span, options: &FilterOptions) -> Result<Span, String> {
         .get(SPEED_OPTION)
         .and_then(serde_json::Value::as_f64)
         .ok_or_else(|| format!("the option \"{SPEED_OPTION}\" is missing or is not a number"))?;
-    let speed = Speed::new(value).map_err(|error| error.to_string())?.get();
-    Ok(Span {
+    let speed = Speed::new(value).map_err(|error| error.to_string())?;
+    Ok(scale(span, speed))
+}
+
+/// Divide the times and the length of a span by `speed`. Each event keeps its
+/// data, its type, and its place in the list.
+pub(crate) fn scale(span: Span, speed: Speed) -> Span {
+    let factor = speed.get();
+    Span {
         events: span
             .events
             .into_iter()
             .map(|event| Event {
-                time: event.time / speed,
+                time: event.time / factor,
                 ..event
             })
             .collect(),
-        length: span.length / speed,
-    })
+        length: span.length / factor,
+    }
 }
 
 #[cfg(test)]
