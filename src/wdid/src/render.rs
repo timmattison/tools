@@ -403,6 +403,44 @@ struct ToolDocument<'a> {
     classification: Classification,
 }
 
+/// The step that found the workspace, in the JSON document, with the facts of
+/// the record for step 3.
+#[derive(Serialize)]
+#[serde(tag = "found_by", rename_all = "snake_case")]
+enum FoundByDocument<'a> {
+    RepoFlag,
+    WorkTree,
+    InstalledGit { url: &'a str, commit: &'a str },
+    InstalledPath { crate_dir: String },
+}
+
+/// The `workspace` block of the JSON document.
+#[derive(Serialize)]
+struct WorkspaceDocument<'a> {
+    root: String,
+    #[serde(flatten)]
+    found_by: FoundByDocument<'a>,
+}
+
+/// Gives the JSON form of the workspace.
+fn workspace_document(workspace: &Workspace) -> WorkspaceDocument<'_> {
+    let found_by = match &workspace.found_by {
+        FoundBy::RepoFlag => FoundByDocument::RepoFlag,
+        FoundBy::WorkTree => FoundByDocument::WorkTree,
+        FoundBy::InstalledGit { url, commit } => FoundByDocument::InstalledGit {
+            url,
+            commit: commit.as_str(),
+        },
+        FoundBy::InstalledPath { crate_dir } => FoundByDocument::InstalledPath {
+            crate_dir: crate_dir.to_string_lossy().into_owned(),
+        },
+    };
+    WorkspaceDocument {
+        root: workspace.root.to_string_lossy().into_owned(),
+        found_by,
+    }
+}
+
 /// The whole JSON document.
 #[derive(Serialize)]
 struct Document<'a> {
@@ -416,6 +454,7 @@ struct Document<'a> {
     never_used_old: Vec<&'a ToolName>,
     never_used_new: Vec<&'a ToolName>,
     idle: Vec<&'a ToolName>,
+    workspace: WorkspaceDocument<'a>,
 }
 
 /// Gives the JSON form of the state of the PATH.
@@ -459,15 +498,16 @@ fn names_of<'a>(tools: &[&'a ToolUsage]) -> Vec<&'a ToolName> {
 /// Gives the JSON document, pretty-printed, with a final newline.
 /// `workspace` is the workspace of the report.
 ///
-/// The crate directory is a text with `/` separators. The three lists at the
-/// end follow the order of the text report.
+/// The crate directory is a text with `/` separators. The three lists after
+/// the tools follow the order of the text report. The `workspace` block at the
+/// end names the root of the workspace and the step that found it.
 ///
 /// # Panics
 ///
 /// Never in practice. The document holds only numbers, dates, and text, and
 /// `serde_json` serializes each of them without an error.
 #[must_use]
-pub fn json(tally: &Tally, window: &Window, _workspace: &Workspace) -> String {
+pub fn json(tally: &Tally, window: &Window, workspace: &Workspace) -> String {
     let summary = &tally.summary;
     let document = Document {
         today: window.today,
@@ -498,6 +538,7 @@ pub fn json(tally: &Tally, window: &Window, _workspace: &Workspace) -> String {
         never_used_old: names_of(&tools_with(tally, Classification::NeverUsedOld)),
         never_used_new: names_of(&tools_with(tally, Classification::NeverUsedNew)),
         idle: names_of(&idle_tools(tally)),
+        workspace: workspace_document(workspace),
     };
     let mut text = serde_json::to_string_pretty(&document)
         .expect("a document of numbers, dates, and text always serializes");
