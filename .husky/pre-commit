@@ -49,12 +49,12 @@ staged_paths="$(staged_paths_with_deletions)"
 #
 # grep -q stops at its first match. A block must not send the list through a
 # pipe into it: in a large list, the writer of the pipe then still has paths
-# to write, it gets SIGPIPE, `set -o pipefail` makes the pipe false, and the
-# block runs no gate and says nothing. A commit that stages some thousand
+# to write, it gets SIGPIPE, `set -o pipefail` makes the pipeline false, and
+# the block runs no gate and says nothing. A commit that stages some thousand
 # paths and Cargo.lock ran no Rust gate in this way.
 #
-# A here-document is not a pipe. The status of the command is the status of
-# grep, and a writer that the shell starts for a long document is not part
+# A here-document is not a pipeline. The status of the command is the status
+# of grep, and a writer that the shell starts for a long document is not part
 # of that status. Do not write `| grep -E ... >/dev/null` instead of -q:
 # GNU grep also stops at its first match when its output is /dev/null. Husky
 # starts this file with `sh`, so the bash here-string `<<<` is not available.
