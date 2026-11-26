@@ -524,13 +524,13 @@ impl<'a> Rewriter<'a> {
                 // A terminal reads the first parameter. A value that it does
                 // not know changes nothing, but the filter drops it too.
                 let first = params.split(';').next().unwrap_or_default();
-                let value: u64 = if first.is_empty() {
-                    0
+                let value: Option<u64> = if first.is_empty() {
+                    Some(0)
                 } else {
-                    first.parse().ok()?
+                    first.parse().ok()
                 };
-                if let Some(style) = u16::try_from(value)
-                    .ok()
+                if let Some(style) = value
+                    .and_then(|value| u16::try_from(value).ok())
                     .filter(|style| *style <= LAST_STYLE)
                 {
                     self.recording.style = style;
