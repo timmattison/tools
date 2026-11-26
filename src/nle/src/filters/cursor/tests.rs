@@ -357,3 +357,119 @@ fn a_sequence_that_an_osc_break_starts_is_rewritten_whole() {
         ]
     );
 }
+
+// Tests of the shape and the blink.
+
+#[test]
+fn a_shape_sets_decscusr_and_keeps_the_blink_of_the_recording() {
+    let events = vec![out(0.0, "a"), out(1.0, "\x1b[4 qb"), out(2.0, "\x1b[ qc")];
+
+    let got = run(events, json!({ "shape": "bar" }), FilterRegion::All).unwrap();
+
+    // The default (0) blinks. 4 is a steady underline, thus a steady bar (6).
+    assert_eq!(
+        got,
+        vec![
+            out(0.0, "\x1b[5 q"),
+            out(0.0, "a"),
+            out(1.0, "\x1b[6 qb"),
+            out(2.0, "\x1b[5 qc"),
+        ]
+    );
+}
+
+#[test]
+fn a_blink_makes_each_shape_of_the_recording_steady_or_blinking() {
+    let events = vec![out(
+        0.0,
+        "\x1b[1 qa\x1b[3 qb\x1b[5 qc\x1b[?12h\x1b[?12;25ld",
+    )];
+
+    let got = run(events, json!({ "blink": false }), FilterRegion::All).unwrap();
+
+    // Mode 12 also starts and stops the blink, so the filter owns it too.
+    assert_eq!(
+        got,
+        vec![
+            out(0.0, "\x1b[2 q"),
+            out(0.0, "a\x1b[4 qb\x1b[6 qc\x1b[?25ld"),
+        ]
+    );
+}
+
+#[test]
+fn a_shape_and_a_blink_together_ignore_the_shape_of_the_recording() {
+    let events = vec![out(0.0, "\x1b[6 qa\x1b[9 qb")];
+
+    let got = run(
+        events,
+        json!({ "shape": "underline", "blink": true }),
+        FilterRegion::All,
+    )
+    .unwrap();
+
+    assert_eq!(got, vec![out(0.0, "\x1b[3 q"), out(0.0, "ab")]);
+}
+
+#[test]
+fn a_shape_alone_keeps_the_blink_mode_of_the_recording() {
+    let events = vec![out(0.0, "\x1b[?12la")];
+
+    let got = run(events, json!({ "shape": "block" }), FilterRegion::All).unwrap();
+
+    assert_eq!(got, vec![out(0.0, "\x1b[1 q"), out(0.0, "\x1b[?12la")]);
+}
+
+#[test]
+fn the_shape_of_the_recording_comes_back_at_the_end_of_a_range() {
+    let events = vec![
+        out(0.0, "a"),
+        out(1.0, "\x1b[3 qb"),
+        out(1.5, "\x1b[?12lc"),
+        out(3.0, "d"),
+    ];
+    let steady_bar = json!({ "shape": "bar", "blink": false });
+
+    assert_eq!(
+        run(events, steady_bar.clone(), range(0.5, 2.0)).unwrap(),
+        vec![
+            out(0.0, "a"),
+            out(0.5, "\x1b[6 q"),
+            out(1.0, "b"),
+            out(1.5, "c"),
+            out(2.0, "\x1b[3 q\x1b[?12l"),
+            out(3.0, "d"),
+        ]
+    );
+    // A range that does not set the shape gives back the default: 0.
+    assert_eq!(
+        run(
+            vec![out(1.0, "b"), out(3.0, "d")],
+            steady_bar,
+            range(0.5, 2.0)
+        )
+        .unwrap(),
+        vec![
+            out(0.5, "\x1b[6 q"),
+            out(1.0, "b"),
+            out(2.0, "\x1b[0 q"),
+            out(3.0, "d"),
+        ]
+    );
+}
+
+#[test]
+fn a_reset_of_the_terminal_gets_the_shape_again() {
+    let events = vec![out(0.0, "a"), out(1.0, "\x1bcb")];
+
+    let got = run(events, json!({ "shape": "bar" }), FilterRegion::All).unwrap();
+
+    assert_eq!(
+        got,
+        vec![
+            out(0.0, "\x1b[5 q"),
+            out(0.0, "a"),
+            out(1.0, "\x1bc\x1b[5 qb")
+        ]
+    );
+}
