@@ -1076,3 +1076,55 @@ async fn a_video_export_carries_the_theme_the_resolution_and_the_optimize_box() 
         }]
     );
 }
+
+#[tokio::test]
+async fn open_recording_is_disabled_while_the_save_dialog_shows() {
+    let (answer, pending) = Answer::later();
+    let fakes = fakes_with_recording().dialog(pending);
+    let mut window = window_with_recording(&fakes).await;
+    window.click(window.export_button());
+    window.settle().await;
+    assert!(window.open_is_disabled(), "{}", window.html());
+    window.click(window.open_button());
+    window.settle().await;
+    assert_eq!(fakes.picks(), 1);
+    answer.send(None).expect("the dialog future waits");
+    window.settle().await;
+    assert!(!window.open_is_disabled(), "{}", window.html());
+}
+
+#[tokio::test]
+async fn open_recording_is_disabled_while_an_export_runs() {
+    let (finish, pending) = Answer::later();
+    let fakes = fakes_with_recording()
+        .dialog(Answer::Ready(Some(PathBuf::from(EXPORT_PICKED))))
+        .export(Vec::new(), pending);
+    let mut window = window_with_recording(&fakes).await;
+    window.click(window.export_button());
+    window.settle().await;
+    assert!(window.open_is_disabled(), "{}", window.html());
+    window.click(window.open_button());
+    window.settle().await;
+    assert_eq!(fakes.picks(), 1);
+    finish
+        .send(Ok(PathBuf::from(EXPORT_WRITTEN)))
+        .expect("the export future waits");
+    window.settle().await;
+    assert!(!window.open_is_disabled(), "{}", window.html());
+}
+
+#[tokio::test]
+async fn export_is_disabled_while_a_second_recording_opens() {
+    let (answer, pending) = Answer::later();
+    let fakes = fakes_with_recording().pick(pending);
+    let mut window = window_with_recording(&fakes).await;
+    window.click(window.open_button());
+    window.settle().await;
+    assert!(window.export_is_disabled(), "{}", window.html());
+    window.click(window.export_button());
+    window.settle().await;
+    assert!(fakes.dialogs().is_empty());
+    answer.send(None).expect("the pick future waits");
+    window.settle().await;
+    assert!(!window.export_is_disabled(), "{}", window.html());
+}
