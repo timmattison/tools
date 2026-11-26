@@ -29,9 +29,12 @@ their slices make them final.
    a plugin from the plugin itself.
 3. **One plugin is one folder, one manifest, one component, and one function.**
 4. **Each call gets a new instance.** No state survives from one call to the
-   next, and the same input always gives the same output.
+   next, and the same input always gives the same output. A failure at a
+   limit is also the same on each machine, because fuel, not the clock,
+   bounds the work of a call.
 5. **The sandbox gives a plugin no file, no network, no environment, no real
-   clock, and no real random source.** Limits bound its memory and its time.
+   clock, and no real random source.** Limits bound its memory and its work. A
+   wall-clock deadline is only a backstop.
 6. **The event form `FilterFn` returns a `Result`, like the span form.** A
    plugin can fail, and the pipeline must report that failure. Both forms
    carry the error as a `String`. This change comes before the first built-in
@@ -427,7 +430,8 @@ Each of these failures stops the call, and the render fails with a
 
 - The plugin answers `err(message)`.
 - The plugin traps, for example on a Rust panic.
-- The call passes its time limit or its memory limit.
+- The call passes its fuel limit, its memory limit, or the deadline of the
+  backstop.
 - The component does not export the interface of its manifest `type`, or it
   exports a version that the host does not know.
 
@@ -442,10 +446,10 @@ cargo feature, because the checks of the workspace do not build a feature that
 is off by default.
 
 - **One `Engine` for each process**, with the Cranelift compiler, NaN
-  canonicalization, and epoch interruption on. NaN canonicalization makes the
-  float results of a plugin the same on each platform. The threads proposal and
-  the relaxed SIMD proposal stay off, because each can make two runs give
-  different results.
+  canonicalization, fuel, and epoch interruption on. NaN canonicalization makes
+  the float results of a plugin the same on each platform. The threads
+  proposal and the relaxed SIMD proposal stay off, because each can make two
+  runs give different results.
 - **One `InstancePre` for each plugin.** The host compiles and links a plugin
   once, when it loads. A call makes a new `Store` and a new instance from the
   `InstancePre`, and drops both when the call ends. The closure that wraps a
@@ -460,9 +464,15 @@ is off by default.
   fixed sequence. Standard output and standard error go to the plugin log. The contract needs no async function, thus it
   does not depend on WASI 0.3. When a guest toolchain imports WASI 0.3, the
   host links an empty context for it too.
-- **Limits.** A `StoreLimits` bounds the memory of each instance. An epoch
-  deadline bounds the time of each call. A thread of the host increments the
-  epoch. Slice 2 sets the two defaults, and the settings of the editor can
+- **Limits.** A `StoreLimits` bounds the memory of each instance. Fuel bounds
+  the work of each call. Fuel counts the WASM instructions of the call, and
+  that count does not depend on the speed or the load of the machine. Thus a
+  call that passes the fuel limit fails on each machine, at the preview and at
+  the export. An epoch deadline is only a backstop for a call that stalls and
+  uses no fuel, for example in a host function. Its bound is many times the
+  time that the fuel limit takes on a slow machine. Only the backstop depends
+  on the machine. A thread of the host increments the epoch. Slice 2 sets the
+  three defaults, and the settings of the editor can
   change them.
 - **A cache of compiled code.** A compile with Cranelift costs time at each
   start of the editor. The host turns on the compilation cache of wasmtime
@@ -471,10 +481,11 @@ is off by default.
   that function is `unsafe`: it trusts the bytes that it reads. Compiled code
   also fits only the exact version of wasmtime that made it.
 
-A new instance for each call costs time. Slice 2 measures a render of 100,000
-events through a plugin that answers its input, and it records the result in
-the pull request. If the instantiation is a large part of that time, slice 2
-turns on the pooling allocator.
+A new instance for each call costs time, and fuel makes the code of a plugin
+slower. Slice 2 measures a render of 100,000 events through a plugin that
+answers its input, with fuel on, and it records the result in the pull
+request. If the instantiation is a large part of that time, slice 2 turns on
+the pooling allocator.
 
 ## The manifest
 
@@ -594,7 +605,7 @@ not finish.
 | --- | --- |
 | A plugin reads or writes a file, or uses the network | The world imports no such interface, and the WASI context gives no directory and no socket. |
 | A plugin reads the environment, for example a token | The WASI context gives no environment variable. |
-| A plugin runs forever | The epoch deadline stops the call. |
+| A plugin runs forever | The fuel limit stops the call. The epoch deadline stops a call that stalls and uses no fuel. |
 | A plugin takes all of the memory | `StoreLimits` stops the growth. |
 | A plugin escapes through a defect of the runtime | The host pins an LTS line of wasmtime, which gets security fixes for 24 months. A known advisory against wasmtime must stop the checks, thus slice 2 waits for issue #740, which puts `cargo audit` in the one list of `scripts/rust-checks.sh`, at pre-push and in CI. |
 | A renderer writes outside its frame | The frame resource is the only target, and each method clips to the frame. |
@@ -713,7 +724,8 @@ A new library crate, `src/nle-plugins`, with no WASM runtime yet.
   - A file open and a socket connect fail.
   - The clock gives the fixed time.
   - A trap, an endless loop, and a memory bomb each fail with an error that
-    names the cause.
+    names the cause. The endless loop fails at the fuel limit, not at the
+    deadline.
 - An author guide tells a plugin author how to build, test, and install a
   filter plugin of each form in Rust.
 
