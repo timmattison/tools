@@ -759,9 +759,8 @@ fn a_typed_filter_that_answers_an_end_sets_the_end_of_the_timeline() {
 fn a_typed_filter_that_answers_an_end_outside_its_region_fails_and_names_the_kind() {
     // The range starts after the end of the project at 10, so the filter
     // does not see the end, and it cannot set it.
-    let result = end_registry(Some(1.0)).render(&one_clip_project(vec![range(
-        "set-end", 20.0, 30.0,
-    )]));
+    let result =
+        end_registry(Some(1.0)).render(&one_clip_project(vec![range("set-end", 20.0, 30.0)]));
 
     assert_render_names(result, "\"set-end\"");
 }
@@ -775,9 +774,8 @@ fn a_typed_filter_that_answers_an_end_that_is_not_finite_or_is_below_zero_fails(
     }
 
     // Relative -6 on a range that starts at 5 is -1 on the timeline.
-    let result = end_registry(Some(-6.0)).render(&one_clip_project(vec![range(
-        "set-end", 5.0, 20.0,
-    )]));
+    let result =
+        end_registry(Some(-6.0)).render(&one_clip_project(vec![range("set-end", 5.0, 20.0)]));
     assert_render_names(result, "\"set-end\"");
 
     // Relative -1 on a range that starts at 5 is 4 on the timeline, which is

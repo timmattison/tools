@@ -143,7 +143,11 @@ fn pause_removal_keeps_the_order_of_events_at_one_time() {
 #[test]
 fn pause_removal_measures_the_gaps_in_time_order() {
     // The pipeline gives a filter the events in the order of its input.
-    let out = run(outputs(&[5.0, 0.0, 1.0]), all(PAUSE_REMOVAL, removal(2.0, 1.0))).unwrap();
+    let out = run(
+        outputs(&[5.0, 0.0, 1.0]),
+        all(PAUSE_REMOVAL, removal(2.0, 1.0)),
+    )
+    .unwrap();
 
     assert_eq!(times(&out), vec![0.0, 1.0, 2.0]);
 }
@@ -152,7 +156,11 @@ fn pause_removal_measures_the_gaps_in_time_order() {
 fn pause_removal_moves_the_end_by_the_removed_time_and_keeps_the_time_after_the_last_event() {
     // The time from the last event at 5 to the end at 7 is not a gap between
     // two events, so it stays.
-    let rendered = render(outputs(&[0.0, 1.0, 5.0]), 7.0, all(PAUSE_REMOVAL, removal(2.0, 1.0)));
+    let rendered = render(
+        outputs(&[0.0, 1.0, 5.0]),
+        7.0,
+        all(PAUSE_REMOVAL, removal(2.0, 1.0)),
+    );
 
     assert_eq!(times(&rendered.events), vec![0.0, 1.0, 2.0]);
     assert_eq!(rendered.duration, 4.0);
@@ -218,7 +226,11 @@ fn pause_insertion_moves_each_event_at_or_after_the_point_later_by_the_duration(
 
 #[test]
 fn pause_insertion_makes_the_timeline_longer_by_the_duration() {
-    let rendered = render(outputs(&[0.0, 2.0]), 3.0, all(PAUSE_INSERTION, insertion(1.0, 2.0)));
+    let rendered = render(
+        outputs(&[0.0, 2.0]),
+        3.0,
+        all(PAUSE_INSERTION, insertion(1.0, 2.0)),
+    );
 
     assert_eq!(times(&rendered.events), vec![0.0, 4.0]);
     assert_eq!(rendered.duration, 5.0);
@@ -227,7 +239,11 @@ fn pause_insertion_makes_the_timeline_longer_by_the_duration() {
 #[test]
 fn pause_insertion_after_the_last_event_still_makes_the_timeline_longer() {
     // No event moves, but the end at 3 comes after the point at 2.5.
-    let rendered = render(outputs(&[0.0, 2.0]), 3.0, all(PAUSE_INSERTION, insertion(2.5, 1.0)));
+    let rendered = render(
+        outputs(&[0.0, 2.0]),
+        3.0,
+        all(PAUSE_INSERTION, insertion(2.5, 1.0)),
+    );
 
     assert_eq!(times(&rendered.events), vec![0.0, 2.0]);
     assert_eq!(rendered.duration, 4.0);
@@ -235,7 +251,11 @@ fn pause_insertion_after_the_last_event_still_makes_the_timeline_longer() {
 
 #[test]
 fn pause_insertion_after_the_end_of_the_timeline_changes_nothing() {
-    let rendered = render(outputs(&[0.0, 2.0]), 3.0, all(PAUSE_INSERTION, insertion(5.0, 1.0)));
+    let rendered = render(
+        outputs(&[0.0, 2.0]),
+        3.0,
+        all(PAUSE_INSERTION, insertion(5.0, 1.0)),
+    );
 
     assert_eq!(times(&rendered.events), vec![0.0, 2.0]);
     assert_eq!(rendered.duration, 3.0);
@@ -297,10 +317,7 @@ fn auto_trim_removes_the_time_before_the_first_input_event() {
 
     // The output before the first input moves to the start, in its order,
     // so the screen that the user saw before the first key is still there.
-    assert_eq!(
-        times(&rendered.events),
-        vec![0.0, 0.0, 0.0, 0.25, 1.0, 1.5]
-    );
+    assert_eq!(times(&rendered.events), vec![0.0, 0.0, 0.0, 0.25, 1.0, 1.5]);
     assert_eq!(
         data(&rendered.events),
         vec!["o0.5", "o2", "i5", "o5.25", "i6", "o6.5"]
@@ -342,7 +359,11 @@ fn auto_trim_trims_both_ends_when_the_options_are_empty() {
 
 #[test]
 fn auto_trim_keeps_the_start_with_no_input_and_the_end_with_no_output() {
-    let rendered = render(outputs(&[1.0, 2.0]), 4.0, all(AUTO_TRIM, FilterOptions::new()));
+    let rendered = render(
+        outputs(&[1.0, 2.0]),
+        4.0,
+        all(AUTO_TRIM, FilterOptions::new()),
+    );
     assert_eq!(times(&rendered.events), vec![1.0, 2.0]);
     assert_eq!(rendered.duration, 2.0);
 

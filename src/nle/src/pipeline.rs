@@ -197,7 +197,7 @@ impl FilterRegistry {
         let end_inside = start <= *end && *end < region_end;
         let span = Span {
             events: inside,
-            end: end_inside.then(|| *end - start),
+            end: end_inside.then_some(*end - start),
         };
         let Span {
             events: answer,

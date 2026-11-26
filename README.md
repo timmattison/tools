@@ -6240,7 +6240,19 @@ The editing engine of the crate has four parts:
 - **Filter pipeline** (`FilterRegistry`): a filter is a pure function
   `Fn(&[Event], &FilterOptions) -> Vec<Event>`, registered by kind. The filters
   of a project run in order, each on the whole timeline or on a range of it.
-  No filter ships yet. Issues #152 to #168 add them.
+  A filter that `register_typed` registers gets its options as a Rust type, and
+  the render refuses options that break a rule of that type. Such a filter can
+  also set the end of the timeline. Three filters ship (`filters::builtin`), and
+  each option is a number of seconds or a boolean:
+  - `pause-removal` (`threshold`, `max_pause`): each gap between two events that
+    is longer than `threshold` becomes `max_pause` long.
+  - `pause-insertion` (`at`, `duration`): each event at or after `at` moves
+    later by `duration`, and so does the end of the timeline.
+  - `auto-trim` (`leading`, `trailing`, both on when not set): removes the time
+    before the first input event and the time after the last output event.
+
+  The window cannot add a filter yet (issue #150). Issues #152, #153, and #155
+  to #168 add more filters.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an

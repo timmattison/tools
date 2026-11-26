@@ -166,10 +166,7 @@ fn on() -> bool {
 }
 
 /// The times of the events of `events` that have the type `event_type`.
-fn times_of<'a>(
-    events: &'a [Event],
-    event_type: &'a EventType,
-) -> impl Iterator<Item = f64> + 'a {
+fn times_of<'a>(events: &'a [Event], event_type: &'a EventType) -> impl Iterator<Item = f64> + 'a {
     events
         .iter()
         .filter(move |event| event.event_type == *event_type)
