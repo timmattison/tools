@@ -19,7 +19,7 @@ use std::time::Duration;
 // `localnext`. Re-exported here so `sirn::content_type_for`,
 // `sirn::resolve_under_root`, and `sirn::PathResolution` keep working for
 // every existing caller.
-pub use httpfile::{content_type_for, resolve_under_root, PathResolution};
+pub use httpfile::{content_type_for, resolve_under_root, PathResolution, Pool};
 
 /// HTML-escapes `s` for safe insertion into element text or a double-quoted
 /// attribute value. Escapes `&`, `<`, `>`, `"`, and `'`.
@@ -333,33 +333,14 @@ pub enum ServeMode {
 }
 
 /// Serves requests on `server` in the given `mode` using a fixed pool of
-/// `workers` threads.
+/// `workers` threads, and returns the [`Pool`] that owns them.
 ///
-/// Each worker loops on `server.recv()`; the pool shuts down when the server is
-/// unblocked (`server.unblock()` once per worker), at which point `recv()` errors
-/// and the workers exit. Returns the worker handles so the caller can join them.
-/// At least one worker is always spawned even if `workers` is `0`.
+/// [`Pool::join`] reports a dead accept thread as an `Err`, and
+/// [`Pool::shutdown`] ends the pool on purpose. At least one worker is always
+/// spawned, even when `workers` is `0`.
 #[must_use]
-pub fn serve(
-    server: Arc<tiny_http::Server>,
-    mode: ServeMode,
-    workers: usize,
-) -> Vec<JoinHandle<()>> {
-    (0..workers.max(1))
-        .map(|_| {
-            let server = Arc::clone(&server);
-            let mode = mode.clone();
-            std::thread::spawn(move || {
-                // `recv()` errors when the server is unblocked, ending the loop.
-                while let Ok(request) = server.recv() {
-                    // A request or mid-response IO error (e.g. a client
-                    // disconnecting) is swallowed so a single bad request can
-                    // never panic a worker and poison the pool.
-                    let _ = respond(&mode, request);
-                }
-            })
-        })
-        .collect()
+pub fn serve(server: Arc<tiny_http::Server>, mode: ServeMode, workers: usize) -> Pool {
+    Pool::spawn(server, workers, move |request| respond(&mode, request))
 }
 
 /// How often the availability monitor restats the served files.

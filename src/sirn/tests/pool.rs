@@ -4,13 +4,17 @@
 //! `Message::Error`, then the accept loop exits). Both paths release exactly
 //! one `recv()`-blocked worker per event, and both surface to that worker as
 //! an `Err`. Nothing in the error's `Display` text or its `ErrorKind` tells
-//! the two apart, so this suite never inspects either.
+//! the two apart, so this suite never inspects either. `sirn::Pool` tells them
+//! apart with a shutdown flag it owns: `Pool::shutdown` sets the flag before it
+//! releases any worker, and `Pool::join` reports an error only when a worker
+//! woke to a flag that was still clear.
 //!
 //! A real accept failure (EMFILE, say) cannot be triggered safely in a test,
 //! because exhausting the file-descriptor table could take down unrelated
 //! work on the same machine. Calling `server.unblock()` exactly once, with no
 //! deliberate shutdown behind it, reproduces the same event shape: one worker
 //! released with an `Err`, and nothing in the pool's own state explains it.
+//! `Pool::join` must report that as an `Err`.
 //!
 //! Every fixture is a unique `tempfile::TempDir`, every server binds
 //! `127.0.0.1:0`, and every wait is bounded.
@@ -22,7 +26,6 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::thread::JoinHandle;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -49,17 +52,22 @@ fn bind() -> Arc<tiny_http::Server> {
     Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port"))
 }
 
-/// Joins every handle on its own thread and reports whether that finished
-/// within [`JOIN_TIMEOUT`].
-fn joined_in_time(handles: Vec<JoinHandle<()>>) -> bool {
+/// Runs a consuming `Pool` method on its own thread and returns its result
+/// within [`JOIN_TIMEOUT`], or panics. A `Pool` that never finishes ending is
+/// the defect these tests catch, and a test that hangs with it would be worse
+/// than the bug.
+fn within_timeout<F>(run: F) -> std::io::Result<()>
+where
+    F: FnOnce() -> std::io::Result<()> + Send + 'static,
+{
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
-        for handle in handles {
-            let _ = handle.join();
-        }
-        let _ = sender.send(());
+        let _ = sender.send(run());
     });
-    receiver.recv_timeout(JOIN_TIMEOUT).is_ok()
+
+    receiver
+        .recv_timeout(JOIN_TIMEOUT)
+        .unwrap_or_else(|_| panic!("did not finish within {JOIN_TIMEOUT:?}"))
 }
 
 /// Writes `big.bin` and `small.txt` into `dir` and routes both.
@@ -82,13 +90,15 @@ fn an_unexplained_release_brings_down_every_worker_and_surfaces() {
     let dir = TempDir::new().expect("temp dir");
     let server = bind();
     let mode = sirn::ServeMode::Files(Arc::new(routes_for(&dir)));
-    let handles = sirn::serve(Arc::clone(&server), mode, WORKERS);
+    let pool = sirn::serve(Arc::clone(&server), mode, WORKERS);
 
     server.unblock();
 
+    let result = within_timeout(move || pool.join());
+
     assert!(
-        joined_in_time(handles),
-        "an unexplained release left workers blocked in recv() for {JOIN_TIMEOUT:?}"
+        result.is_err(),
+        "an unexplained release should surface as a join() error, got Ok(())"
     );
 }
 
@@ -98,15 +108,13 @@ fn a_deliberate_shutdown_ends_every_worker_cleanly() {
     let dir = TempDir::new().expect("temp dir");
     let server = bind();
     let mode = sirn::ServeMode::Files(Arc::new(routes_for(&dir)));
-    let handles = sirn::serve(Arc::clone(&server), mode, WORKERS);
+    let pool = sirn::serve(server, mode, WORKERS);
 
-    for _ in 0..WORKERS {
-        server.unblock();
-    }
+    let result = within_timeout(move || pool.shutdown());
 
     assert!(
-        joined_in_time(handles),
-        "a deliberate shutdown left workers running for {JOIN_TIMEOUT:?}"
+        result.is_ok(),
+        "a deliberate shutdown should report no error, got {result:?}"
     );
 }
 
@@ -120,7 +128,7 @@ fn a_client_that_hangs_up_mid_response_leaves_the_pool_serving() {
     let server = bind();
     let addr = server.server_addr().to_ip().expect("ip addr");
     let mode = sirn::ServeMode::Files(Arc::new(routes_for(&dir)));
-    let handles = sirn::serve(Arc::clone(&server), mode, 1);
+    let pool = sirn::serve(Arc::clone(&server), mode, 1);
 
     let mut client = TcpStream::connect(addr).expect("connect to server");
     client
@@ -140,7 +148,7 @@ fn a_client_that_hangs_up_mid_response_leaves_the_pool_serving() {
     assert_eq!(status, 200, "the worker did not survive the IO error");
     assert_eq!(body, SMALL_BYTES);
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 /// The regression guard: a pool of zero workers still spawns one.
@@ -150,11 +158,11 @@ fn zero_workers_still_spawns_one() {
     let server = bind();
     let addr = server.server_addr().to_ip().expect("ip addr");
     let mode = sirn::ServeMode::Files(Arc::new(routes_for(&dir)));
-    let handles = sirn::serve(Arc::clone(&server), mode, 0);
+    let pool = sirn::serve(Arc::clone(&server), mode, 0);
 
     let (status, _headers, body) = http_get_with_timeout(addr, "/small.txt", READ_TIMEOUT);
     assert_eq!(status, 200);
     assert_eq!(body, SMALL_BYTES);
 
-    stop(&server, handles);
+    stop(pool);
 }

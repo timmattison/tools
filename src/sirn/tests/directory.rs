@@ -17,7 +17,7 @@ fn root_request_returns_listing_with_entries() {
     std::fs::create_dir(dir.path().join("sub")).expect("create sub dir");
     let root = dir.path().canonicalize().expect("canonicalize root");
 
-    let (addr, server, handles) = start_dir(root);
+    let (addr, pool) = start_dir(root);
 
     let (status, headers, body) = http_get(addr, "/");
     assert_eq!(status, 200);
@@ -35,7 +35,7 @@ fn root_request_returns_listing_with_entries() {
         "listing should include the subdirectory entry, got:\n{html}"
     );
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 #[test]
@@ -45,7 +45,7 @@ fn nested_file_fetch_returns_bytes_and_headers() {
     std::fs::write(dir.path().join("a.txt"), contents).expect("write a.txt");
     let root = dir.path().canonicalize().expect("canonicalize root");
 
-    let (addr, server, handles) = start_dir(root);
+    let (addr, pool) = start_dir(root);
 
     let (status, headers, body) = http_get(addr, "/a.txt");
     assert_eq!(status, 200);
@@ -59,7 +59,7 @@ fn nested_file_fetch_returns_bytes_and_headers() {
         Some(body.len().to_string().as_str())
     );
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 #[test]
@@ -70,13 +70,13 @@ fn subdir_file_fetch_works() {
     std::fs::write(sub.join("inner.txt"), b"deep").expect("write inner.txt");
     let root = dir.path().canonicalize().expect("canonicalize root");
 
-    let (addr, server, handles) = start_dir(root);
+    let (addr, pool) = start_dir(root);
 
     let (status, _headers, body) = http_get(addr, "/sub/inner.txt");
     assert_eq!(status, 200);
     assert_eq!(body, b"deep");
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 #[test]
@@ -84,12 +84,12 @@ fn parent_traversal_is_forbidden() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let root = dir.path().canonicalize().expect("canonicalize root");
 
-    let (addr, server, handles) = start_dir(root);
+    let (addr, pool) = start_dir(root);
 
     let (status, _headers, _body) = http_get(addr, "/../../etc/passwd");
     assert_eq!(status, 403);
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 /// A file whose name contains a space arrives percent-encoded (`%20`); the
@@ -102,13 +102,13 @@ fn file_with_space_is_reachable_via_percent_encoded_path() {
     std::fs::write(dir.path().join("my file.txt"), contents).expect("write my file.txt");
     let root = dir.path().canonicalize().expect("canonicalize root");
 
-    let (addr, server, handles) = start_dir(root);
+    let (addr, pool) = start_dir(root);
 
     let (status, _headers, body) = http_get(addr, "/my%20file.txt");
     assert_eq!(status, 200);
     assert_eq!(body, contents);
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 /// A non-ASCII nested file arrives UTF-8 percent-encoded in every path segment;
@@ -122,13 +122,13 @@ fn non_ascii_nested_file_is_reachable_via_percent_encoded_path() {
     std::fs::write(sub.join("naïve.txt"), contents).expect("write naïve.txt");
     let root = dir.path().canonicalize().expect("canonicalize root");
 
-    let (addr, server, handles) = start_dir(root);
+    let (addr, pool) = start_dir(root);
 
     let (status, _headers, body) = http_get(addr, "/caf%C3%A9/na%C3%AFve.txt");
     assert_eq!(status, 200);
     assert_eq!(body, contents);
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 /// Percent-decoding must NOT open a path-traversal hole. A request whose encoded
@@ -139,12 +139,12 @@ fn percent_encoded_dot_dot_traversal_is_forbidden() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let root = dir.path().canonicalize().expect("canonicalize root");
 
-    let (addr, server, handles) = start_dir(root);
+    let (addr, pool) = start_dir(root);
 
     let (status, _headers, _body) = http_get(addr, "/%2e%2e/%2e%2e/etc/passwd");
     assert_eq!(status, 403);
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 /// A request hiding both encoded slashes and `..` (`%2f` -> `/`, `..` ->
@@ -154,12 +154,12 @@ fn percent_encoded_slash_traversal_is_forbidden() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let root = dir.path().canonicalize().expect("canonicalize root");
 
-    let (addr, server, handles) = start_dir(root);
+    let (addr, pool) = start_dir(root);
 
     let (status, _headers, _body) = http_get(addr, "/sub%2f..%2f..%2fetc");
     assert_eq!(status, 403);
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 #[test]
@@ -167,10 +167,10 @@ fn missing_path_returns_404() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let root = dir.path().canonicalize().expect("canonicalize root");
 
-    let (addr, server, handles) = start_dir(root);
+    let (addr, pool) = start_dir(root);
 
     let (status, _headers, _body) = http_get(addr, "/nope.txt");
     assert_eq!(status, 404);
 
-    stop(&server, handles);
+    stop(pool);
 }

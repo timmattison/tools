@@ -7,6 +7,13 @@
 //! three, so every static-file server in this workspace shares one
 //! content-type table and one traversal guard. A fix to either reaches every
 //! caller instead of having to be repeated per crate.
+//!
+//! The fourth shared piece is the worker pool. It ends the duplicated
+//! `recv()` loop, which treated a dead accept thread like a deliberate
+//! shutdown, so one worker exited and the others blocked forever.
+
+mod pool;
+pub use pool::Pool;
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};

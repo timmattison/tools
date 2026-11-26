@@ -18,7 +18,7 @@ fn existing_file_serves_bytes_content_type_and_length() {
     std::fs::write(&path, contents).expect("write hello.txt");
 
     let routes = sirn::build_routes(std::slice::from_ref(&path)).expect("routes build");
-    let (addr, server, handles) = start(routes);
+    let (addr, pool) = start(routes);
 
     let (status, headers, body) = http_get(addr, "/hello.txt");
     assert_eq!(status, 200);
@@ -32,7 +32,7 @@ fn existing_file_serves_bytes_content_type_and_length() {
         Some(body.len().to_string().as_str())
     );
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 #[test]
@@ -44,7 +44,7 @@ fn large_multi_chunk_file_streams_correctly() {
     std::fs::write(&path, &data).expect("write big.bin");
 
     let routes = sirn::build_routes(std::slice::from_ref(&path)).expect("routes build");
-    let (addr, server, handles) = start(routes);
+    let (addr, pool) = start(routes);
 
     let (status, headers, body) = http_get(addr, "/big.bin");
     assert_eq!(status, 200);
@@ -54,7 +54,7 @@ fn large_multi_chunk_file_streams_correctly() {
         Some(data.len().to_string().as_str())
     );
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 #[test]
@@ -64,14 +64,14 @@ fn empty_file_serves_200_with_empty_body() {
     std::fs::write(&path, b"").expect("write empty.txt");
 
     let routes = sirn::build_routes(std::slice::from_ref(&path)).expect("routes build");
-    let (addr, server, handles) = start(routes);
+    let (addr, pool) = start(routes);
 
     let (status, headers, body) = http_get(addr, "/empty.txt");
     assert_eq!(status, 200);
     assert!(body.is_empty(), "empty file should serve an empty body");
     assert_eq!(headers.get("content-length").map(String::as_str), Some("0"));
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 #[test]
@@ -83,13 +83,13 @@ fn registered_route_with_missing_file_returns_404() {
     let routes = sirn::build_routes(std::slice::from_ref(&path)).expect("routes build");
     std::fs::remove_file(&path).expect("remove gone.txt");
 
-    let (addr, server, handles) = start(routes);
+    let (addr, pool) = start(routes);
 
     let (status, _headers, body) = http_get(addr, "/gone.txt");
     assert_eq!(status, 404);
     assert!(body.is_empty(), "404 should have an empty body");
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 /// A files-mode route whose target is a DIRECTORY must return `404` and must not
@@ -110,14 +110,14 @@ fn route_to_a_directory_returns_404_without_hanging() {
         .to_string_lossy()
         .into_owned();
 
-    let (addr, server, handles) = start(routes);
+    let (addr, pool) = start(routes);
 
     let (status, _headers, body) =
         http_get_with_timeout(addr, &format!("/{dir_name}"), Duration::from_secs(5));
     assert_eq!(status, 404);
     assert!(body.is_empty(), "404 should have an empty body");
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 /// A served filename containing a space arrives percent-encoded (`%20`) from a
@@ -131,13 +131,13 @@ fn file_with_space_is_reachable_via_percent_encoded_path() {
     std::fs::write(&path, contents).expect("write with space.txt");
 
     let routes = sirn::build_routes(std::slice::from_ref(&path)).expect("routes build");
-    let (addr, server, handles) = start(routes);
+    let (addr, pool) = start(routes);
 
     let (status, _headers, body) = http_get(addr, "/with%20space.txt");
     assert_eq!(status, 200);
     assert_eq!(body, contents);
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 /// A non-ASCII filename arrives UTF-8 percent-encoded (`café.txt` ->
@@ -150,13 +150,13 @@ fn non_ascii_file_is_reachable_via_percent_encoded_path() {
     std::fs::write(&path, contents).expect("write café.txt");
 
     let routes = sirn::build_routes(std::slice::from_ref(&path)).expect("routes build");
-    let (addr, server, handles) = start(routes);
+    let (addr, pool) = start(routes);
 
     let (status, _headers, body) = http_get(addr, "/caf%C3%A9.txt");
     assert_eq!(status, 200);
     assert_eq!(body, contents);
 
-    stop(&server, handles);
+    stop(pool);
 }
 
 #[test]
@@ -166,11 +166,11 @@ fn unregistered_route_returns_404() {
     std::fs::write(&path, b"present").expect("write present.txt");
 
     let routes = sirn::build_routes(std::slice::from_ref(&path)).expect("routes build");
-    let (addr, server, handles) = start(routes);
+    let (addr, pool) = start(routes);
 
     let (status, _headers, body) = http_get(addr, "/does-not-exist.txt");
     assert_eq!(status, 404);
     assert!(body.is_empty(), "404 should have an empty body");
 
-    stop(&server, handles);
+    stop(pool);
 }

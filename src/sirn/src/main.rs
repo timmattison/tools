@@ -122,16 +122,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let handles = sirn::serve(server, mode, WORKER_THREADS);
-    for h in handles {
-        let _ = h.join();
-    }
-
-    // Workers exit only when the server is unblocked; on a clean exit, stop the
-    // monitor too (files mode) and join it so teardown is orderly.
+    // The pool ends in one of two ways: a deliberate shutdown (`Ok`) or a dead
+    // accept thread (`Err`). Stop and join the monitor on both paths, before
+    // the error leaves `main`.
+    let served = sirn::serve(server, mode, WORKER_THREADS).join();
     if let Some((shutdown_tx, monitor)) = monitor {
         drop(shutdown_tx);
         let _ = monitor.join();
     }
+    served.map_err(|e| format!("sirn stopped accepting connections on {bind}:{port}: {e}"))?;
     Ok(())
 }
