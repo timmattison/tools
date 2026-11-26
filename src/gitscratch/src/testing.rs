@@ -36,6 +36,13 @@ use crate::scratch::Scratch;
 #[cfg(unix)]
 pub mod pty;
 
+/// The writer of a script that a test runs, with no race against a concurrent
+/// fork on Linux.
+///
+/// Unix only, because the writer is `/bin/sh` and the mode is a Unix mode.
+#[cfg(unix)]
+pub mod executable;
+
 /// A `git` on `PATH` that logs each call and can pause before a subcommand, so a
 /// test sees which git processes a replay starts. `gitscratch` sheds `GIT_*`, so
 /// only a `git` on `PATH` sees the calls.

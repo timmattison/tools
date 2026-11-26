@@ -5,11 +5,15 @@ target
 .env.bak
 .env.local
 .claude/
+.superpowers/
 .op-cache.json
 node_modules
 .wrangler/
 # swt's green-check escape hatch: per-developer, never committed.
 .swt-check
+!src/msgs/icons/
+!pnpm-lock.yaml
+src/msgs/gen/
 # A cdva test plants build output here for one run. A killed run leaves it behind.
 src/cdva/tests/planted-*/
 

@@ -29,6 +29,10 @@ rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 [dev-dependencies]
 dioxus-ssr = "0.7"
 toml = { workspace = true }
+# The tests of dev-script.rs and of src/commands/tests.rs write their shims
+# through testing::executable::write_executable. Linux refuses to run a shim
+# that a fork on another test thread holds open for writing (ETXTBSY).
+gitscratch = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

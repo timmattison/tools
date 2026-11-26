@@ -499,12 +499,16 @@ fn a_table_without_a_section_raises_no_warning() {
     );
 }
 
-/// macOS hands the environment of another process to root only. A run without
-/// root must say so rather than print an empty section, because an empty
-/// section teaches the reader that the process carries no environment.
+/// macOS usually hands the environment of another process to root only. A run
+/// without root must say so rather than print an empty section, because an
+/// empty section teaches the reader that the process carries no environment.
+///
+/// Some Macs hand the environment to the owner of the process too. A GitHub
+/// Actions runner is one. There the section must show the environment. Thus
+/// the test takes each of the two honest answers, and it refuses the false one.
 #[cfg(target_os = "macos")]
 #[test]
-fn the_environment_of_another_process_is_refused_with_a_reason() {
+fn the_environment_of_another_process_is_shown_or_refused_with_a_reason() {
     // SAFETY: geteuid is a POSIX call that reads an integer out of the process
     // credentials. It takes no pointer, it cannot fail, and it changes nothing.
     let euid = unsafe { libc::geteuid() };
@@ -525,9 +529,12 @@ fn the_environment_of_another_process_is_refused_with_a_reason() {
         "the section names itself; stdout: {stdout}"
     );
     let section = after_heading(&stdout, "Environment for");
+    let shown = section.contains("SPV_PLAIN") && section.contains("hello");
+    let refused = section.contains("unavailable:") && section.contains("sudo");
     assert!(
-        section.contains("unavailable:") && section.contains("sudo"),
-        "the section says why it is empty and names the remedy; stdout: {stdout}"
+        shown || refused,
+        "the section shows the environment, or it says why it is empty and names the remedy; \
+         stdout: {stdout}"
     );
     assert!(
         !section.contains("none found"),

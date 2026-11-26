@@ -8,7 +8,7 @@
     {
       "name": "ic-inline",
       "source": "./plugins/ic-inline",
-      "description": "Shows images inline in the Claude Code transcript, decoded by ic"
+      "description": "Shows images, and the differences between two images, inline in the Claude Code transcript, decoded by ic"
     }
   ]
 }

@@ -504,16 +504,37 @@ fn paths(entries: &[&str]) -> Vec<PathBuf> {
     entries.iter().map(PathBuf::from).collect()
 }
 
-/// The Finder PATH and a temporary home whose `.cargo/bin` holds a `beta` that
-/// links to `target`. A symlink, not a written script: a written script gives
-/// ETXTBSY on Linux when another thread forks while the file is open for
-/// writing.
+/// A `beta` that prints its arguments, as `echo` does.
 #[cfg(unix)]
-fn home_with_beta_linked_to(target: &str) -> tempfile::TempDir {
+const ECHO_BETA: &str = "#!/bin/sh\nprintf '%s\\n' \"$*\"\n";
+
+/// A `beta` that succeeds.
+#[cfg(unix)]
+const SUCCEEDING_BETA: &str = "#!/bin/sh\nexit 0\n";
+
+/// A `beta` that prints its arguments on stderr, then fails.
+#[cfg(unix)]
+const FAILING_BETA: &str = "#!/bin/sh\nprintf '%s\\n' \"$*\" >&2\nexit 1\n";
+
+/// A `beta` that succeeds only when its stdin is `/dev/null`.
+#[cfg(unix)]
+const NULL_STDIN_BETA: &str = "#!/bin/sh\n\
+    if [ /dev/fd/0 -ef /dev/null ]; then exit 0; fi\n\
+    echo 'the stdin of beta is not /dev/null' >&2\n\
+    exit 1\n";
+
+/// A temporary home whose `.cargo/bin` holds a `beta` script with the text
+/// `script`.
+///
+/// A script, not a link to a system program: the Rust coreutils of Ubuntu
+/// 26.04 refuse to run under a name other than their own. The writer of
+/// `gitscratch` stops the ETXTBSY race of a written script on Linux.
+#[cfg(unix)]
+fn home_with_beta_script(script: &str) -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join(".cargo").join("bin");
     fs::create_dir_all(&bin).unwrap();
-    std::os::unix::fs::symlink(target, bin.join("beta")).unwrap();
+    gitscratch::testing::executable::write_executable(bin.join("beta"), script).unwrap();
     home
 }
 
@@ -535,20 +556,24 @@ fn is_git_variable(name: &OsStr) -> bool {
 #[cfg(unix)]
 #[test]
 fn beta_command_finds_beta_in_cargo_bin_from_the_finder_path() {
-    let home = home_with_beta_linked_to("/bin/echo");
+    let home = home_with_beta_script(ECHO_BETA);
 
     let output = beta_command(&["found-beta".to_string()], finder_vars(&home))
         .output()
         .unwrap();
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "the stub beta failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(output.stdout, b"found-beta\n");
 }
 
 #[cfg(unix)]
 #[test]
 fn run_beta_returns_the_output_path_when_beta_succeeds() {
-    let home = home_with_beta_linked_to("/usr/bin/true");
+    let home = home_with_beta_script(SUCCEEDING_BETA);
 
     let result = block_on(run_beta(&[], "out.mp4", finder_vars(&home)));
 
@@ -558,7 +583,7 @@ fn run_beta_returns_the_output_path_when_beta_succeeds() {
 #[cfg(unix)]
 #[test]
 fn run_beta_reports_the_stderr_of_a_failed_beta() {
-    let home = home_with_beta_linked_to("/bin/ls");
+    let home = home_with_beta_script(FAILING_BETA);
     let missing = home.path().join("no-such-file");
     let args = vec![missing.to_string_lossy().to_string()];
 
@@ -586,13 +611,9 @@ fn stdin_probe_runs_beta_with_the_stdin_of_this_process() {
     if std::env::var_os(STDIN_PROBE_VAR).is_none() {
         return;
     }
-    let home = home_with_beta_linked_to("/bin/sh");
-    let args = strings(&[
-        "-c",
-        "if [ /dev/fd/0 -ef /dev/null ]; then exit 0; fi; echo 'the stdin of beta is not /dev/null' >&2; exit 1",
-    ]);
+    let home = home_with_beta_script(NULL_STDIN_BETA);
 
-    let result = block_on(run_beta(&args, "out.mp4", finder_vars(&home)));
+    let result = block_on(run_beta(&[], "out.mp4", finder_vars(&home)));
 
     assert_eq!(result.unwrap(), "out.mp4");
 }

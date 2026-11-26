@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node"],
+    "typeRoots": ["../frontend/node_modules/@types"],
+    "baseUrl": ".",
+    "paths": { "vitest": ["../frontend/node_modules/vitest"] }
+  },
+  "include": ["dev.ts", "dev-utils.ts", "dev-utils.test.ts"]
+}
