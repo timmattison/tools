@@ -105,10 +105,7 @@ impl Edit {
                     .get(position)
                     .is_some_and(|track| !track.clips.is_empty())
                 {
-                    return Err(NleError::EditError(format!(
-                        "track {} holds a clip",
-                        id.0
-                    )));
+                    return Err(NleError::EditError(format!("track {} holds a clip", id.0)));
                 }
                 project.timeline.remove(position);
                 Ok(())

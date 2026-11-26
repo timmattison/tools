@@ -176,10 +176,7 @@ fn add_clip_appends_to_the_clips_and_to_the_end_of_the_track() {
         .unwrap();
 
     assert_eq!(editor.project().clips.last().unwrap(), &new);
-    assert_eq!(
-        clip_ids_of(editor.project(), 1),
-        vec![ClipId(1), ClipId(2)]
-    );
+    assert_eq!(clip_ids_of(editor.project(), 1), vec![ClipId(1), ClipId(2)]);
 }
 
 #[test]
@@ -278,10 +275,7 @@ fn move_clip_sets_the_offset_and_moves_it_to_the_end_of_the_track() {
 
     assert_eq!(clip_in(editor.project(), 1).timeline_offset, secs(4.0));
     assert!(clip_ids_of(editor.project(), 1).is_empty());
-    assert_eq!(
-        clip_ids_of(editor.project(), 2),
-        vec![ClipId(2), ClipId(1)]
-    );
+    assert_eq!(clip_ids_of(editor.project(), 2), vec![ClipId(2), ClipId(1)]);
 }
 
 #[test]
@@ -302,10 +296,7 @@ fn move_clip_to_its_own_track_puts_it_at_the_end() {
         })
         .unwrap();
 
-    assert_eq!(
-        clip_ids_of(editor.project(), 1),
-        vec![ClipId(2), ClipId(1)]
-    );
+    assert_eq!(clip_ids_of(editor.project(), 1), vec![ClipId(2), ClipId(1)]);
 }
 
 #[test]
@@ -553,10 +544,124 @@ fn render_equals_the_registry_render_of_an_edited_project() {
 
     let rendered = editor.render().unwrap();
 
-    assert_eq!(
-        rendered,
-        registry().render(editor.project()).unwrap()
-    );
+    assert_eq!(rendered, registry().render(editor.project()).unwrap());
     // The filter doubled the time of the event at 1.5.
     assert!(rendered.events.iter().any(|e| e.time == 3.0));
+}
+
+// Group 7: editing never changes a source.
+
+#[test]
+fn edits_renders_and_undo_never_change_the_source() {
+    let held = source();
+    let deep_copy: Recording = (*held).clone();
+    let project = EditProject {
+        clips: vec![clip(1, &held, 0.0, 5.0, 0.0)],
+        timeline: vec![TimelineTrack {
+            id: TrackId(1),
+            clips: vec![ClipId(1)],
+        }],
+        filters: vec![],
+    };
+    let mut editor = Editor::new(project, registry()).unwrap();
+
+    editor
+        .apply(Edit::TrimClip {
+            id: ClipId(1),
+            in_point: secs(1.0),
+            out_point: secs(4.0),
+        })
+        .unwrap();
+    editor.apply(Edit::AddTrack { id: TrackId(2) }).unwrap();
+    editor
+        .apply(Edit::MoveClip {
+            id: ClipId(1),
+            track: TrackId(2),
+            timeline_offset: secs(2.0),
+        })
+        .unwrap();
+    editor
+        .apply(Edit::AddFilter {
+            index: 0,
+            filter: filter("double"),
+        })
+        .unwrap();
+    editor.render().unwrap();
+    while editor.undo() {}
+
+    assert_eq!(*held, deep_copy);
+    assert!(Arc::ptr_eq(&editor.project().clips[0].source, &held));
+    assert_eq!(editor.project().clips[0].in_point, secs(0.0));
+}
+
+// Group 9: save_recording.
+
+fn trimmed_editor() -> Editor {
+    let mut editor = editor();
+    editor
+        .apply(Edit::TrimClip {
+            id: ClipId(1),
+            in_point: secs(0.0),
+            out_point: secs(1.0),
+        })
+        .unwrap();
+    editor
+}
+
+#[tokio::test]
+async fn save_recording_writes_the_rendered_recording() {
+    let editor = trimmed_editor();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("out.json");
+
+    editor
+        .save_recording(file.to_string_lossy().to_string(), None)
+        .await
+        .unwrap();
+
+    let loaded = Recording::load(&file).unwrap();
+    assert_eq!(loaded, editor.render().unwrap());
+    assert_ne!(loaded, Recording::test_fixture());
+}
+
+#[tokio::test]
+async fn the_save_future_does_not_borrow_the_editor() {
+    let editor = trimmed_editor();
+    let expected = editor.render().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("out.json");
+
+    let future = editor.save_recording(file.to_string_lossy().to_string(), None);
+    drop(editor);
+    future.await.unwrap();
+
+    assert_eq!(Recording::load(&file).unwrap(), expected);
+}
+
+#[tokio::test]
+async fn save_recording_gzips_a_gz_name_when_compress_is_absent() {
+    let editor = trimmed_editor();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("out.json.gz");
+
+    editor
+        .save_recording(file.to_string_lossy().to_string(), None)
+        .await
+        .unwrap();
+
+    assert!(std::fs::read(&file).unwrap().starts_with(&[0x1f, 0x8b]));
+}
+
+#[tokio::test]
+async fn save_recording_refuses_a_txt_name() {
+    let editor = trimmed_editor();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("out.txt");
+
+    let result = editor
+        .save_recording(file.to_string_lossy().to_string(), None)
+        .await;
+
+    assert!(matches!(result, Err(NleError::SaveError(_))), "{result:?}");
+    assert!(!file.exists());
 }
