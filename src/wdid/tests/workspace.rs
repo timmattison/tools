@@ -10,13 +10,11 @@ use std::path::{Path, PathBuf};
 
 use gitscratch::testing::{not_a_repository, TestRepo};
 use support::{
-    git_key, short, workspace_repository, CargoHome, BINARY, CHECKOUT_DIRECTORY, REPOSITORY_URL,
+    git_key, short, workspace_repository, CargoHome, Installed, BINARY, CHECKOUT_DIRECTORY,
+    OTHER_COMMIT, REPOSITORY_URL,
 };
 use wdid::catalog::{InstallLocation, Programs};
 use wdid::workspace::{find, FoundBy, Workspace};
-
-/// A commit that no fixture repository holds.
-const OTHER_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 
 /// Canonicalizes a path for a comparison.
 fn canonical(path: &Path) -> PathBuf {
@@ -29,41 +27,7 @@ fn find_from(cwd: &Path, location: &InstallLocation<'_>) -> Workspace {
         .unwrap_or_else(|error| panic!("no workspace: {error}"))
 }
 
-/// A cargo home with a `git+` record of [`BINARY`] and the checkout of its
-/// commit, beside the records of other binaries.
-struct Installed {
-    /// The cargo home.
-    home: CargoHome,
-    /// The checkout of the commit of the record.
-    checkout: PathBuf,
-    /// The full commit of the record.
-    commit: String,
-}
-
 impl Installed {
-    /// Makes the cargo home. The records file holds the record of
-    /// [`BINARY`], a `git+` record of another binary at another commit, and a
-    /// record from the registry.
-    fn new() -> Self {
-        let source = workspace_repository();
-        let commit = source.rev_parse("HEAD");
-        let home = CargoHome::new();
-        let checkout = home.add_checkout(&source, CHECKOUT_DIRECTORY, short(&commit));
-        home.write_records(&[
-            (&git_key("gsw", REPOSITORY_URL, OTHER_COMMIT), &["gsw"]),
-            (&git_key(BINARY, REPOSITORY_URL, &commit), &[BINARY]),
-            (
-                "ripgrep 14.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
-                &["rg"],
-            ),
-        ]);
-        Self {
-            home,
-            checkout,
-            commit,
-        }
-    }
-
     /// Says that `workspace` is the checkout, found by step 3.
     fn assert_found(&self, workspace: &Workspace) {
         assert_eq!(canonical(&workspace.root), canonical(&self.checkout));

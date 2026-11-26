@@ -536,41 +536,9 @@ fn a_use_through_an_alias_of_the_real_zsh_counts_for_the_tool() {
     );
 }
 
-/// A cargo home in which the installed `wdid` came from a checkout of the
-/// fixture workspace, through `cargo install --git`.
-struct Installed {
-    /// The cargo home.
-    home: support::CargoHome,
-    /// The checkout of the commit of the record.
-    checkout: PathBuf,
-    /// The full commit of the record.
-    commit: String,
-}
-
-/// Makes the cargo home of [`Installed`].
-fn installed_from_a_checkout() -> Installed {
-    let source = support::workspace_repository();
-    let commit = source.rev_parse("HEAD");
-    let home = support::CargoHome::new();
-    let checkout = home.add_checkout(
-        &source,
-        support::CHECKOUT_DIRECTORY,
-        support::short(&commit),
-    );
-    home.write_records(&[(
-        &support::git_key(support::BINARY, support::REPOSITORY_URL, &commit),
-        &[support::BINARY],
-    )]);
-    Installed {
-        home,
-        checkout,
-        commit,
-    }
-}
-
 /// Says that the `workspace` block of `document` names the checkout of
 /// `installed`, found by step 3.
-fn assert_installed_workspace(document: &Value, installed: &Installed) {
+fn assert_installed_workspace(document: &Value, installed: &support::Installed) {
     let workspace = &document["workspace"];
     assert_eq!(workspace["found_by"], "installed_git", "{document}");
     assert_eq!(workspace["url"], support::REPOSITORY_URL, "{document}");
@@ -597,7 +565,7 @@ fn run_in(setup: &Setup, home: &support::CargoHome, cwd: &Path) -> Output {
 #[test]
 fn outside_each_work_tree_the_report_is_on_the_source_of_the_installed_wdid() {
     let setup = Setup::new(&Atuin::Rows(&[row(1, "wdid-fixture-one a")]));
-    let installed = installed_from_a_checkout();
+    let installed = support::Installed::new();
     let cwd = gitscratch::testing::not_a_repository();
 
     let document = json(&run_in(&setup, &installed.home, cwd.path()));
@@ -610,7 +578,7 @@ fn outside_each_work_tree_the_report_is_on_the_source_of_the_installed_wdid() {
 #[test]
 fn in_a_work_tree_without_a_cargo_toml_the_report_is_on_the_source_of_the_installed_wdid() {
     let setup = Setup::new(&Atuin::Rows(&[row(1, "wdid-fixture-one a")]));
-    let installed = installed_from_a_checkout();
+    let installed = support::Installed::new();
     let work_tree = gitscratch::testing::TestRepo::init();
     work_tree.commit_file("README.md", "not a workspace\n", "add a readme");
 
@@ -626,7 +594,7 @@ fn in_a_work_tree_without_a_cargo_toml_the_report_is_on_the_source_of_the_instal
 #[test]
 fn in_a_cargo_workspace_the_report_is_on_that_workspace() {
     let setup = Setup::new(&Atuin::Rows(&[row(1, "wdid-fixture-one a")]));
-    let installed = installed_from_a_checkout();
+    let installed = support::Installed::new();
 
     let document = json(&run_in(&setup, &installed.home, setup.workspace.path()));
 

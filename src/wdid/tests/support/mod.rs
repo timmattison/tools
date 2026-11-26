@@ -30,6 +30,45 @@ pub const RECORDS_FILE: &str = ".crates2.json";
 /// the binary.
 pub const CRATES: [(&str, &str); 2] = [("one", "wdid-fixture-one"), ("two", "wdid-fixture-two")];
 
+/// A commit that no fixture repository holds.
+pub const OTHER_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+/// A cargo home in which the installed [`BINARY`] came from a checkout of
+/// [`workspace_repository`], through `cargo install --git`. The records file
+/// also holds a `git+` record of another binary at [`OTHER_COMMIT`] and a
+/// record from the registry.
+pub struct Installed {
+    /// The cargo home.
+    pub home: CargoHome,
+    /// The checkout of the commit of the record.
+    pub checkout: PathBuf,
+    /// The full commit of the record.
+    pub commit: String,
+}
+
+impl Installed {
+    /// Makes the cargo home and the checkout.
+    pub fn new() -> Self {
+        let source = workspace_repository();
+        let commit = source.rev_parse("HEAD");
+        let home = CargoHome::new();
+        let checkout = home.add_checkout(&source, CHECKOUT_DIRECTORY, short(&commit));
+        home.write_records(&[
+            (&git_key("gsw", REPOSITORY_URL, OTHER_COMMIT), &["gsw"]),
+            (&git_key(BINARY, REPOSITORY_URL, &commit), &[BINARY]),
+            (
+                "ripgrep 14.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+                &["rg"],
+            ),
+        ]);
+        Self {
+            home,
+            checkout,
+            commit,
+        }
+    }
+}
+
 /// The number of characters of a commit in the name of a checkout directory.
 pub const SHORT_COMMIT_LENGTH: usize = 7;
 
