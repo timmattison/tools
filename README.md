@@ -6235,7 +6235,8 @@ The editing engine of the crate has four parts:
 - **Edit project** (`EditProject`): clips of source recordings, placed on the
   tracks of the timeline, and the filters that apply to the result. An edit
   never changes a source recording. A project saves to JSON, plain or gzip, and
-  loads back.
+  loads back. A save writes each source recording once, also when several clips
+  cut it.
 - **Filter pipeline** (`FilterRegistry`): a filter is a pure function
   `Fn(&[Event], &FilterOptions) -> Vec<Event>`, registered by kind. The filters
   of a project run in order, each on the whole timeline or on a range of it.

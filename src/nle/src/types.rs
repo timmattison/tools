@@ -131,11 +131,13 @@ pub struct ClipId(pub u64);
 pub struct TrackId(pub u64);
 
 /// A clip: a range of one source recording, placed on the timeline.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Clip {
     pub id: ClipId,
     /// The source recording. It is shared and never changed, so the undo
-    /// history and the clones of a project cost no copy of the events.
+    /// history and the clones of a project cost no copy of the events. A save
+    /// writes each source once, and a load gives one shared source to all the
+    /// clips that name it.
     pub source: Arc<Recording>,
     /// The start time within the source.
     pub in_point: Seconds,
@@ -217,6 +219,10 @@ pub struct AppliedFilter {
 /// An edit project: clips of source recordings placed on tracks, and the
 /// filters that apply to the result. It never changes a source.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(
+    into = "crate::project::ProjectFile",
+    try_from = "crate::project::ProjectFile"
+)]
 pub struct EditProject {
     pub clips: Vec<Clip>,
     pub timeline: Vec<TimelineTrack>,

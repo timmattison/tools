@@ -6,11 +6,97 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::NleError;
 use crate::json_file;
 use crate::types::{
-    Clip, ClipId, EditProject, Event, FilterRegion, Recording, Seconds, TimelineTrack, TrackId,
+    AppliedFilter, Clip, ClipId, EditProject, Event, FilterRegion, Recording, Seconds,
+    TimelineTrack, TrackId,
 };
+
+/// The form of a project in its file. Each source is written once, and each
+/// clip names its source by its index in `sources`.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ProjectFile {
+    sources: Vec<Arc<Recording>>,
+    clips: Vec<ClipFile>,
+    timeline: Vec<TimelineTrack>,
+    filters: Vec<AppliedFilter>,
+}
+
+/// A clip in the file of a project: `source` is an index in `ProjectFile::sources`.
+#[derive(Serialize, Deserialize)]
+struct ClipFile {
+    id: ClipId,
+    source: usize,
+    in_point: Seconds,
+    out_point: Seconds,
+    timeline_offset: Seconds,
+}
+
+impl From<EditProject> for ProjectFile {
+    /// Share sources by `Arc::ptr_eq` only. Two different `Arc`s with equal
+    /// content stay two entries, because a compare of the events is costly.
+    fn from(project: EditProject) -> Self {
+        let mut sources: Vec<Arc<Recording>> = Vec::new();
+        let mut clips = Vec::with_capacity(project.clips.len());
+        for clip in project.clips {
+            let index = sources
+                .iter()
+                .position(|known| Arc::ptr_eq(known, &clip.source))
+                .unwrap_or_else(|| {
+                    sources.push(Arc::clone(&clip.source));
+                    sources.len() - 1
+                });
+            clips.push(ClipFile {
+                id: clip.id,
+                source: index,
+                in_point: clip.in_point,
+                out_point: clip.out_point,
+                timeline_offset: clip.timeline_offset,
+            });
+        }
+        Self {
+            sources,
+            clips,
+            timeline: project.timeline,
+            filters: project.filters,
+        }
+    }
+}
+
+impl TryFrom<ProjectFile> for EditProject {
+    type Error = String;
+
+    /// A clip that names a source the table does not hold is an error. A source
+    /// that no clip names is dropped.
+    fn try_from(file: ProjectFile) -> Result<Self, Self::Error> {
+        let mut clips = Vec::with_capacity(file.clips.len());
+        for clip in file.clips {
+            let source = file.sources.get(clip.source).ok_or_else(|| {
+                format!(
+                    "clip {} names source {}, but the file holds {} sources",
+                    clip.id.0,
+                    clip.source,
+                    file.sources.len()
+                )
+            })?;
+            clips.push(Clip {
+                id: clip.id,
+                source: Arc::clone(source),
+                in_point: clip.in_point,
+                out_point: clip.out_point,
+                timeline_offset: clip.timeline_offset,
+            });
+        }
+        Ok(Self {
+            clips,
+            timeline: file.timeline,
+            filters: file.filters,
+        })
+    }
+}
 
 impl EditProject {
     /// Make a project of one clip that holds the whole `source`, on one track.
@@ -84,12 +170,14 @@ impl EditProject {
     }
 
     /// Load a project from a JSON file, plain or gzip (found by its magic
-    /// bytes), and check its rules.
+    /// bytes), and check its rules. The clips that name one source of the file
+    /// share one `Arc` of it.
     ///
     /// # Errors
     /// Returns `NleError::LoadError` when the file cannot be read,
     /// `NleError::InvalidFormat` when it is empty or does not parse as a project
-    /// (a negative time is a parse failure), and `NleError::InvalidProject`
+    /// (a negative time is a parse failure, and so is a clip that names a source
+    /// that the file does not hold), and `NleError::InvalidProject`
     /// when it parses but breaks a rule of `validate`.
     pub fn load(path: &Path) -> Result<Self, NleError> {
         let project: Self = json_file::load(path, "project")?;
@@ -98,7 +186,8 @@ impl EditProject {
     }
 
     /// Save the project to a JSON file, optionally gzip compressed. The save is
-    /// atomic, as the save of a recording is.
+    /// atomic, as the save of a recording is. The file holds each source once:
+    /// the clips that share one `Arc` name one entry.
     ///
     /// # Errors
     /// Returns `NleError::SaveError` when the project cannot be serialized,

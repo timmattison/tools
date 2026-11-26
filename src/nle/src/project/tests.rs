@@ -369,6 +369,20 @@ fn a_save_writes_a_shared_source_once() {
 }
 
 #[test]
+fn load_refuses_a_clip_that_names_a_missing_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("missing-source.json");
+    let mut value = serde_json::to_value(two_clip_project()).unwrap();
+    value["clips"][1]["source"] = serde_json::json!(7);
+    std::fs::write(&path, value.to_string()).unwrap();
+
+    assert!(matches!(
+        EditProject::load(&path),
+        Err(NleError::InvalidFormat(_))
+    ));
+}
+
+#[test]
 fn load_refuses_a_file_that_parses_but_breaks_a_rule() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("broken.json");
