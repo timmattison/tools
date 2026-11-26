@@ -344,6 +344,31 @@ fn a_project_survives_a_save_and_a_load_plain_and_gzip() {
 }
 
 #[test]
+fn clips_that_share_a_source_still_share_it_after_a_save_and_a_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shared.json");
+    two_clip_project().save(&path, false).unwrap();
+
+    let loaded = EditProject::load(&path).unwrap();
+
+    assert!(std::sync::Arc::ptr_eq(
+        &loaded.clips[0].source,
+        &loaded.clips[1].source
+    ));
+}
+
+#[test]
+fn a_save_writes_a_shared_source_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("once.json");
+    two_clip_project().save(&path, false).unwrap();
+
+    let text = std::fs::read_to_string(&path).unwrap();
+
+    assert_eq!(text.matches("\"e3\"").count(), 1);
+}
+
+#[test]
 fn load_refuses_a_file_that_parses_but_breaks_a_rule() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("broken.json");
