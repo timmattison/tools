@@ -101,7 +101,8 @@ enum Error {
     /// The system does not give the current directory.
     #[error("cannot read the current directory: {0}")]
     CurrentDirectory(#[source] std::io::Error),
-    /// No step finds the workspace.
+    /// The workspace cannot be found: `--repo` is not a cargo workspace, git
+    /// does not start, or no step gives a workspace.
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
     /// The catalog of the workspace cannot be read.
