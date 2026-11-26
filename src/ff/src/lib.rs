@@ -10,4 +10,5 @@ pub mod fs;
 pub mod machine;
 pub mod pattern;
 pub mod plan;
+pub mod summary;
 pub mod walk;
