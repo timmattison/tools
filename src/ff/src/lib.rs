@@ -6,6 +6,8 @@
 //! it did not print yet.
 
 pub mod fs;
+#[cfg(target_os = "macos")]
+pub mod machine;
 pub mod pattern;
 pub mod plan;
 pub mod walk;

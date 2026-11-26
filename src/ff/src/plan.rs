@@ -239,3 +239,21 @@ fn direct_skip_reason(system_root: &Path, mount: &Mount) -> Option<SkipReason> {
 fn strictly_below(path: &Path, ancestor: &Path) -> bool {
     path != ancestor && path.starts_with(ancestor)
 }
+
+/// Plans the walk of a directory that the user named.
+///
+/// `path` is the path as the user wrote it, and `canonical` is the same
+/// directory with each symbolic link and each `..` resolved. Without
+/// `one_file_system`, the walk crosses each mount point, as `find` does. With
+/// it, the walk stays on the device of `path`, and it prunes each mount point
+/// of `mounts` below `canonical`. A device check alone cannot stop at the data
+/// volume of macOS, because it has the device id of `/`.
+#[must_use]
+pub fn named_root(
+    path: &Path,
+    _canonical: &Path,
+    _one_file_system: bool,
+    _mounts: &[Mount],
+) -> WalkRoot {
+    WalkRoot::new(path)
+}

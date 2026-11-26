@@ -228,3 +228,28 @@ fn a_walk_of_the_plan_finds_each_file_once_and_each_file_without_a_firmlink() {
     assert_eq!(found.sorted(), sorted(expected));
     assert!(report.is_complete(), "{report:?}");
 }
+
+#[test]
+fn a_named_root_crosses_each_mount_point_without_one_file_system() {
+    let table = [Mount::new("/data/sub/mnt", "apfs")];
+    let root = ff::plan::named_root(Path::new("./sub"), Path::new("/data/sub"), false, &table);
+
+    assert_eq!(root, ff::walk::WalkRoot::new("./sub"));
+}
+
+#[test]
+fn a_named_root_with_one_file_system_stays_on_its_device_and_prunes_each_mount_point_below_it() {
+    let table = [
+        Mount::new("/", "apfs"),
+        Mount::new("/data/sub", "apfs"),
+        Mount::new("/data/sub/mnt", "apfs"),
+        Mount::new("/data/sub/deep/er", "nfs"),
+        Mount::new("/data/other", "apfs"),
+        Mount::new("/data/subway", "apfs"),
+    ];
+    let root = ff::plan::named_root(Path::new("./sub"), Path::new("/data/sub"), true, &table);
+
+    assert_eq!(root.path, PathBuf::from("./sub"));
+    assert!(root.stay_on_device);
+    assert_eq!(root.prune, paths(&["./sub/deep/er", "./sub/mnt"]));
+}
