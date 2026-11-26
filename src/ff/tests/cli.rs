@@ -265,3 +265,56 @@ fn a_search_of_dot_inside_library_skips_the_file_provider_directories() {
     );
     assert_eq!(output.status.code(), Some(0), "{summary}");
 }
+
+#[test]
+fn include_cloud_searches_the_file_provider_directories() {
+    let tree = Tree::new("cli-include-cloud");
+    let cloud = tree.file("Library/CloudStorage/GoogleDrive-me@example.com/120.mp4");
+    let other = tree.file("Library/Other/120.mp4");
+
+    let skipped = run(&["120.mp4"], &[tree.root()]);
+    let searched = run(&["--include-cloud", "120.mp4"], &[tree.root()]);
+
+    assert_eq!(stdout_lines(&skipped), vec![other.clone()]);
+    let skipped_summary = stderr(&skipped);
+    assert!(
+        skipped_summary.contains("ff: cloud directories skipped: 1 "),
+        "{skipped_summary}"
+    );
+    assert_eq!(stdout_lines(&searched), sorted(vec![cloud, other]));
+    let searched_summary = stderr(&searched);
+    assert!(
+        !searched_summary.contains("ff: cloud directories skipped"),
+        "{searched_summary}"
+    );
+    assert_eq!(searched.status.code(), Some(0), "{searched_summary}");
+}
+
+/// A mount point cannot be made in a temporary directory without privileges.
+/// So this test reads `/System/Volumes`, which holds the data volume
+/// `/System/Volumes/Data` on each Mac. Each other child of it is a mount point
+/// or an empty directory. With `-x`, `ff` prints nothing and exits. Without
+/// `-x`, it enters the data volume and prints a match within milliseconds, so
+/// the test reads one line and stops `ff`, and a regression fails fast.
+#[cfg(target_os = "macos")]
+#[test]
+fn one_file_system_does_not_enter_the_data_volume_below_a_named_path() {
+    use std::io::BufRead;
+
+    let mut child = ff(&["-x", "Users", "/System/Volumes"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start ff");
+    let stdout = child.stdout.take().expect("the output is piped");
+    let mut line = String::new();
+    let read = std::io::BufReader::new(stdout).read_line(&mut line);
+    let _ = child.kill();
+    let _ = child.wait();
+    read.expect("read the first line of the output");
+
+    assert!(
+        line.is_empty(),
+        "-x entered a volume below /System/Volumes: {line}"
+    );
+}
