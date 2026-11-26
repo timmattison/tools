@@ -19,6 +19,9 @@ use crate::types::{FilterKind, Seconds};
 /// event.
 pub const PAUSE_REMOVAL: &str = "pause-removal";
 
+/// The kind of the filter that puts a pause into the timeline.
+pub const PAUSE_INSERTION: &str = "pause-insertion";
+
 /// A registry that holds each built-in filter under its kind.
 #[must_use]
 pub fn builtin() -> FilterRegistry {

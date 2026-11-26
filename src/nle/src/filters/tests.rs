@@ -193,3 +193,79 @@ fn pause_removal_refuses_invalid_options() {
         assert_invalid_options(result, PAUSE_REMOVAL, reason);
     }
 }
+
+// Tests of pause insertion.
+
+fn insertion(at: f64, duration: f64) -> FilterOptions {
+    FilterOptions::new()
+        .with("at", at)
+        .with("duration", duration)
+}
+
+#[test]
+fn pause_insertion_moves_each_event_at_or_after_the_point_later_by_the_duration() {
+    let events = vec![output(0.0), input(1.0), input(2.0), output(3.0)];
+
+    let out = run(events.clone(), all(PAUSE_INSERTION, insertion(2.0, 1.5))).unwrap();
+
+    // The event at the point moves too, so a pause can come before a key.
+    assert_eq!(times(&out), vec![0.0, 1.0, 3.5, 4.5]);
+    for (before, after) in events.iter().zip(&out) {
+        assert_eq!(before.event_type, after.event_type);
+        assert_eq!(before.data, after.data);
+    }
+}
+
+#[test]
+fn pause_insertion_makes_the_timeline_longer_by_the_duration() {
+    let rendered = render(outputs(&[0.0, 2.0]), 3.0, all(PAUSE_INSERTION, insertion(1.0, 2.0)));
+
+    assert_eq!(times(&rendered.events), vec![0.0, 4.0]);
+    assert_eq!(rendered.duration, 5.0);
+}
+
+#[test]
+fn pause_insertion_after_the_last_event_still_makes_the_timeline_longer() {
+    // No event moves, but the end at 3 comes after the point at 2.5.
+    let rendered = render(outputs(&[0.0, 2.0]), 3.0, all(PAUSE_INSERTION, insertion(2.5, 1.0)));
+
+    assert_eq!(times(&rendered.events), vec![0.0, 2.0]);
+    assert_eq!(rendered.duration, 4.0);
+}
+
+#[test]
+fn pause_insertion_after_the_end_of_the_timeline_changes_nothing() {
+    let rendered = render(outputs(&[0.0, 2.0]), 3.0, all(PAUSE_INSERTION, insertion(5.0, 1.0)));
+
+    assert_eq!(times(&rendered.events), vec![0.0, 2.0]);
+    assert_eq!(rendered.duration, 3.0);
+}
+
+#[test]
+fn pause_insertion_on_a_range_takes_the_point_from_the_start_of_the_range() {
+    // The point 2 in the range from 3 is 5 on the timeline. The event at 6
+    // moves to 7, and the event after the range moves by the same shift.
+    let out = run(
+        outputs(&[0.0, 4.0, 6.0, 10.0]),
+        range(PAUSE_INSERTION, 3.0, 8.0, insertion(2.0, 1.0)),
+    )
+    .unwrap();
+
+    assert_eq!(times(&out), vec![0.0, 4.0, 7.0, 11.0]);
+}
+
+#[test]
+fn pause_insertion_refuses_invalid_options() {
+    let cases = [
+        (FilterOptions::new().with("duration", 1.0), "at"),
+        (FilterOptions::new().with("at", 1.0), "duration"),
+        (insertion(1.0, -1.0), "below zero"),
+        (insertion(-1.0, 1.0), "below zero"),
+        (insertion(1.0, 1.0).with("length", 1.0), "length"),
+    ];
+    for (options, reason) in cases {
+        let result = run(outputs(&[0.0, 5.0]), all(PAUSE_INSERTION, options));
+
+        assert_invalid_options(result, PAUSE_INSERTION, reason);
+    }
+}
