@@ -247,7 +247,13 @@ windows-sys = { version = "0.60", features = [
 # tauri-plugin-dialog 2.7 and later need tauri ^2.10, so the tauri pin also
 # holds the dialog plugin on 2.6.
 #
-# Remove the pins when a stable dioxus-desktop uses wry >= 0.54.
+# src/msgs/frontend/package.json pins @tauri-apps/api to ~2.9 and
+# @tauri-apps/plugin-dialog to ~2.6, because the Tauri CLI refuses a build
+# when a crate and its npm package differ in the minor version.
+# src/msgs/tests/tauri-versions.rs holds that rule.
+#
+# Remove the pins and the two npm pins when a stable dioxus-desktop uses
+# wry >= 0.54.
 tauri = "~2.9"
 tauri-runtime = "~2.9"
 tauri-utils = "~2.9"
