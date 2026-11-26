@@ -188,6 +188,11 @@ pub struct Definitions {
     pub aliases: Aliases,
     /// The command words of the body of each function that parsed, by name.
     pub functions: BTreeMap<String, Vec<CommandWord>>,
+    /// The first line of the body of each function, parsed or not, by name.
+    /// It is the first line whose text is not blank and is not `{` alone,
+    /// without the blanks at its start and at its end. It is empty when the
+    /// body has no such line.
+    pub function_lines: BTreeMap<String, String>,
     /// The names of the functions whose body did not parse, sorted.
     pub unparsed_functions: Vec<String>,
     /// The alias lines that did not parse, in output order.

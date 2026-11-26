@@ -1,6 +1,8 @@
 //! Tests of the command words of one command line.
 
-use wdid::command_words::{command_words, parse_line, AliasUse, Aliases, CommandWord, Parsed};
+use wdid::command_words::{
+    command_words, parse_line, AliasDefinition, AliasKind, AliasUse, Aliases, CommandWord, Parsed,
+};
 
 /// Runs every row of a table. Each row is a line and the value that
 /// `command_words` must give for it, with an empty alias table.
@@ -1217,4 +1219,51 @@ fn the_words_of_parse_line_are_the_words_of_command_words() {
         };
         assert_eq!(parsed, expected, "line: {line:?}");
     }
+}
+
+/// `definitions` gives each alias with its kind, sorted by name. The name of a
+/// suffix alias has its marker.
+#[test]
+fn definitions_give_each_alias_with_its_kind_sorted_by_name() {
+    let mut aliases = Aliases::new();
+    aliases.insert("ll", "ls -l");
+    aliases.insert_global("G", "| grep");
+    aliases.insert_suffix("md", "glow");
+    let expected = vec![
+        AliasDefinition {
+            name: "*.md".to_owned(),
+            kind: AliasKind::Suffix,
+            value: "glow".to_owned(),
+        },
+        AliasDefinition {
+            name: "G".to_owned(),
+            kind: AliasKind::Global,
+            value: "| grep".to_owned(),
+        },
+        AliasDefinition {
+            name: "ll".to_owned(),
+            kind: AliasKind::Regular,
+            value: "ls -l".to_owned(),
+        },
+    ];
+    assert_eq!(aliases.definitions(), expected);
+}
+
+#[test]
+fn definitions_of_an_empty_table_are_empty() {
+    assert_eq!(Aliases::new().definitions(), Vec::new());
+}
+
+#[test]
+fn definitions_keep_a_multibyte_name_and_value() {
+    let mut aliases = Aliases::new();
+    aliases.insert("日本", "echo 日本語 🎉");
+    assert_eq!(
+        aliases.definitions(),
+        vec![AliasDefinition {
+            name: "日本".to_owned(),
+            kind: AliasKind::Regular,
+            value: "echo 日本語 🎉".to_owned(),
+        }]
+    );
 }

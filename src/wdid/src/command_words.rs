@@ -110,6 +110,28 @@ struct Alias {
     global: bool,
 }
 
+/// The kind of an alias.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AliasKind {
+    /// An alias that expands at command position only.
+    Regular,
+    /// A zsh alias that expands in every word position (`alias -g`).
+    Global,
+    /// A zsh alias that expands a command word with its suffix (`alias -s`).
+    Suffix,
+}
+
+/// One alias of the table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasDefinition {
+    /// The name. A suffix alias has its marker, `*.` and the suffix (`*.md`).
+    pub name: String,
+    /// The kind.
+    pub kind: AliasKind,
+    /// The value, after quote removal.
+    pub value: String,
+}
+
 /// The character that comes before the suffix of a word.
 const SUFFIX_DOT: char = '.';
 
@@ -200,6 +222,12 @@ impl Aliases {
         self.values
             .iter()
             .any(|(name, alias)| alias.global && text.contains(name.as_str()))
+    }
+
+    /// Gives each alias of the table, sorted by name, then by kind.
+    #[must_use]
+    pub fn definitions(&self) -> Vec<AliasDefinition> {
+        Vec::new()
     }
 
     /// Gives the number of aliases of all three kinds.
