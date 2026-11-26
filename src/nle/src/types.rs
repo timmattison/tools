@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use crate::error::NleError;
+use crate::json_file;
 
 /// A terminal recording, compatible with the beta recorder format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,109 +85,19 @@ impl Recording {
     /// and `NleError::InvalidFormat` when the file is empty or does not parse
     /// as a recording.
     pub fn load(path: &Path) -> Result<Self, NleError> {
-        let mut file = std::fs::File::open(path).map_err(|e| {
-            NleError::LoadError(format!(
-                "Failed to open recording file {}: {e}",
-                path.display()
-            ))
-        })?;
-
-        if file
-            .metadata()
-            .map_err(|e| NleError::LoadError(e.to_string()))?
-            .len()
-            == 0
-        {
-            return Err(NleError::InvalidFormat("Recording file is empty".into()));
-        }
-
-        // Check for gzip magic bytes (0x1f 0x8b) instead of relying on extension
-        let mut magic = [0_u8; 2];
-        let is_gzip = file.read_exact(&mut magic).is_ok() && magic == [0x1f, 0x8b];
-
-        // Seek back to the beginning for the actual read
-        file.seek(SeekFrom::Start(0))
-            .map_err(|e| NleError::LoadError(e.to_string()))?;
-        let reader = std::io::BufReader::new(file);
-
-        if is_gzip {
-            let decoder = flate2::read::GzDecoder::new(reader);
-            serde_json::from_reader(decoder).map_err(|e| {
-                NleError::InvalidFormat(format!("Failed to parse compressed recording: {e}"))
-            })
-        } else {
-            serde_json::from_reader(reader)
-                .map_err(|e| NleError::InvalidFormat(format!("Failed to parse recording: {e}")))
-        }
+        json_file::load(path, "recording")
     }
 
     /// Save a recording to a file, optionally using gzip compression.
     ///
-    /// The data goes to a temp file in the directory of `path`. The temp file
-    /// is synced, given the mode of the old file, and renamed over `path`, so
-    /// a save that fails leaves the old file as it was. A save to a new path
-    /// gives the mode that `File::create` gives.
+    /// The save is atomic: a save that fails leaves the old file as it was
+    /// (see the private `json_file` module for the temp file and rename).
     ///
     /// # Errors
     /// Returns `NleError::SaveError` when the recording cannot be serialized,
     /// compressed, or written.
     pub fn save(&self, path: &Path, compress: bool) -> Result<(), NleError> {
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| NleError::SaveError(format!("Failed to serialize recording: {e}")))?;
-
-        let dir = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let mut temp = create_temp_file(dir).map_err(|e| {
-            NleError::SaveError(format!(
-                "Failed to create temp file for {}: {e}",
-                path.display()
-            ))
-        })?;
-
-        if compress {
-            let mut encoder =
-                flate2::write::GzEncoder::new(temp.as_file(), flate2::Compression::default());
-            encoder.write_all(json.as_bytes()).map_err(|e| {
-                NleError::SaveError(format!("Failed to write gzip file {}: {e}", path.display()))
-            })?;
-            encoder.finish().map_err(|e| {
-                NleError::SaveError(format!(
-                    "Failed to finish gzip file {}: {e}",
-                    path.display()
-                ))
-            })?;
-        } else {
-            temp.write_all(json.as_bytes()).map_err(|e| {
-                NleError::SaveError(format!("Failed to write file {}: {e}", path.display()))
-            })?;
-        }
-
-        temp.as_file().sync_all().map_err(|e| {
-            NleError::SaveError(format!("Failed to sync file {}: {e}", path.display()))
-        })?;
-
-        if let Ok(old) = std::fs::metadata(path) {
-            temp.as_file()
-                .set_permissions(old.permissions())
-                .map_err(|e| {
-                    NleError::SaveError(format!(
-                        "Failed to copy permissions to {}: {e}",
-                        path.display()
-                    ))
-                })?;
-        }
-
-        temp.persist(path).map_err(|e| {
-            NleError::SaveError(format!(
-                "Failed to replace file {}: {}",
-                path.display(),
-                e.error
-            ))
-        })?;
-
-        Ok(())
+        json_file::save(self, path, compress, "recording")
     }
 
     /// Extract metadata from this recording.
@@ -232,27 +142,10 @@ impl Recording {
     }
 }
 
-/// Create the temp file of a save in `dir`.
-///
-/// On Unix the temp file asks open(2) for mode 0o666, and the umask reduces
-/// that mode, as it does for `File::create`. The default of `tempfile` is
-/// 0o600, which gives an owner-only file on the first save to a path.
-fn create_temp_file(dir: &Path) -> std::io::Result<tempfile::NamedTempFile> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tempfile::Builder::new()
-            .permissions(std::fs::Permissions::from_mode(0o666))
-            .tempfile_in(dir)
-    }
-    #[cfg(not(unix))]
-    {
-        tempfile::NamedTempFile::new_in(dir)
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
 
     #[test]
