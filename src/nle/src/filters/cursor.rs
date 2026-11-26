@@ -258,6 +258,10 @@ struct CursorState {
     /// The last set (`true`) or reset (`false`) of mode 12, when one came.
     blink_mode: Option<bool>,
     color: CursorColor,
+    /// The visibility that the last XTSAVE of mode 25 saved, when one came.
+    saved_visible: Option<bool>,
+    /// The mode 12 that the last XTSAVE of mode 12 saved, when one came.
+    saved_blink_mode: Option<Option<bool>>,
 }
 
 impl Default for CursorState {
@@ -268,6 +272,8 @@ impl Default for CursorState {
             style: 0,
             blink_mode: None,
             color: CursorColor::Default,
+            saved_visible: None,
+            saved_blink_mode: None,
         }
     }
 }
@@ -480,10 +486,12 @@ impl<'a> Rewriter<'a> {
     /// text that replaces the sequence, or `None` when it stays.
     fn rewrite(&mut self, sequence: &Sequence) -> Option<String> {
         match sequence {
+            // A DEC private mode set (h), reset (l), save (s), or restore
+            // (r).
             Sequence::Csi {
                 params,
                 intermediates,
-                final_char: final_char @ ('h' | 'l'),
+                final_char: final_char @ ('h' | 'l' | 's' | 'r'),
                 controls,
             } if intermediates.is_empty() => {
                 let modes = params.strip_prefix('?')?;
@@ -538,21 +546,37 @@ impl<'a> Rewriter<'a> {
         }
     }
 
-    /// Drop the modes of a DEC private mode set (`h`) or reset (`l`) that the
-    /// filter owns. Returns the rest of the sequence after the controls in
-    /// it, or `None` when the filter owns no mode of it.
+    /// Drop the modes that the filter owns from a DEC private mode set
+    /// (`h`), reset (`l`), save (`s`), or restore (`r`), and follow what each
+    /// one does to the recording. Returns the rest of the sequence after the
+    /// controls in it, or `None` when the filter owns no mode of it.
     fn dec_modes(&mut self, modes: &str, final_char: char, controls: &str) -> Option<String> {
         let set = final_char == 'h';
+        let recording = &mut self.recording;
         let mut kept = Vec::new();
         let mut dropped = false;
         for mode in modes.split(';') {
             match mode.parse() {
                 Ok(DECTCEM) if self.cursor.show != Show::Honor => {
-                    self.recording.visible = set;
+                    match final_char {
+                        's' => recording.saved_visible = Some(recording.visible),
+                        'r' => {
+                            recording.visible = recording.saved_visible.unwrap_or(recording.visible)
+                        }
+                        _ => recording.visible = set,
+                    }
                     dropped = true;
                 }
                 Ok(BLINK_MODE) if self.cursor.blink.is_some() => {
-                    self.recording.blink_mode = Some(set);
+                    match final_char {
+                        's' => recording.saved_blink_mode = Some(recording.blink_mode),
+                        'r' => {
+                            if let Some(saved) = recording.saved_blink_mode {
+                                recording.blink_mode = saved;
+                            }
+                        }
+                        _ => recording.blink_mode = Some(set),
+                    }
                     dropped = true;
                 }
                 _ => kept.push(mode),
