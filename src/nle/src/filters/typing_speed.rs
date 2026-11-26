@@ -102,7 +102,11 @@ fn normalize(span: Span, options: &FilterOptions) -> Result<Span, String> {
         .get(RATE_OPTION)
         .and_then(serde_json::Value::as_f64)
         .ok_or_else(|| format!("the option \"{RATE_OPTION}\" is missing or is not a number"))?;
-    let keys = new_keys(&span.events, 1.0 / rate);
+    let pause = options
+        .get(PAUSE_OPTION)
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| format!("the option \"{PAUSE_OPTION}\" is missing or is not a number"))?;
+    let keys = new_keys(&span.events, 1.0 / rate, pause);
     let length = new_time(span.length, keys.last().copied(), None);
     let mut upcoming = keys.into_iter().peekable();
     let mut before = None;
@@ -136,17 +140,19 @@ struct Key {
     new: f64,
 }
 
-/// The keys of `events`, in order. The first key keeps its time, and each
-/// next key comes `interval` after the key before it.
-fn new_keys(events: &[Event], interval: f64) -> Vec<Key> {
+/// The keys of `events`, in order. The first key keeps its time. A gap
+/// longer than `pause` keeps its length. Each other key comes `interval`
+/// after the key before it.
+fn new_keys(events: &[Event], interval: f64, pause: f64) -> Vec<Key> {
     let mut keys: Vec<Key> = Vec::new();
     for event in events {
         if event.event_type != EventType::Input {
             continue;
         }
-        let new = keys
-            .last()
-            .map_or(event.time, |before| before.new + interval);
+        let new = keys.last().map_or(event.time, |before| {
+            let gap = event.time - before.old;
+            before.new + if gap > pause { gap } else { interval }
+        });
         keys.push(Key {
             old: event.time,
             new,
