@@ -18,7 +18,7 @@ pub const PAUSE_OPTION: &str = "pause";
 /// The option that holds the jitter.
 pub const JITTER_OPTION: &str = "jitter";
 
-/// A typing rate in characters per second.
+/// A typing rate in characters per second. It is finite and above zero.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct TypingRate(f64);
 
@@ -26,9 +26,14 @@ impl TypingRate {
     /// Make a typing rate from a number of characters per second.
     ///
     /// # Errors
-    /// None yet.
+    /// Returns `NleError::InvalidTypingRate` when `value` is NaN, infinite,
+    /// zero, or below zero.
     pub fn new(value: f64) -> Result<Self, NleError> {
-        Ok(Self(value))
+        if value.is_finite() && value > 0.0 {
+            Ok(Self(value))
+        } else {
+            Err(NleError::InvalidTypingRate(value))
+        }
     }
 
     /// The rate as a number of characters per second.
@@ -38,7 +43,9 @@ impl TypingRate {
     }
 }
 
-/// The jitter of the interval between two keystrokes.
+/// The jitter of the interval between two keys: the largest change of an
+/// interval, as a fraction of the interval. It is from 0 up to, and not
+/// including, 1, so each interval stays above zero.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct Jitter(f64);
 
@@ -49,9 +56,14 @@ impl Jitter {
     /// Make a jitter from a fraction of the interval.
     ///
     /// # Errors
-    /// None yet.
+    /// Returns `NleError::InvalidJitter` when `value` is NaN, below zero, or
+    /// not below 1.
     pub fn new(value: f64) -> Result<Self, NleError> {
-        Ok(Self(value))
+        if (0.0..1.0).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(NleError::InvalidJitter(value))
+        }
     }
 
     /// The jitter as a fraction of the interval.
