@@ -81,7 +81,7 @@ These filters need deeper terminal state analysis or more complex heuristics.
 |-------|-------------|-------|
 | #163 | Captions and annotations | Text overlays at timestamps. UI-heavy. |
 | #165 | Terminal crop and zoom | Dynamic viewport requires deep escape sequence understanding. |
-| #169 | Plugin architecture | Design can start earlier, but API should stabilize first. TypeScript primary, WASM for advanced. |
+| #169 | Plugin architecture | Designed in [the plugin spec](../../specs/2026-11-26-nle-plugin-architecture-design.md): WASM components on wasmtime, with a WIT contract. The spec lists the slices of the implementation. Its slice 0 (`FilterFn` returns a `Result`) comes before the first filter of Phase 1. |
 
 ## Difficulty Assessment
 
@@ -112,10 +112,12 @@ These filters need deeper terminal state analysis or more complex heuristics.
 
 1. **Dioxus app**: One Rust crate, with the desktop (webview) renderer of Dioxus 0.7. The components call the Rust code directly, thus no IPC layer and no second copy of the types exist. The state of the app is Dioxus state (signals), which is Rust, thus the one source of truth is in Rust by construction. On 2026-11-25, Tim chose Dioxus in place of Tauri (issue #761).
 
-2. **Filter interface**: `Fn(&[Event], &FilterOptions) -> Vec<Event>` is the core API (`FilterFn` in `src/nle/src/pipeline.rs`). A filter gets the events of its region, with times relative to the start of the region. The pipeline moves the events after the region by the change in the time of the last event of the region. Some filters (#166 color scheme, #168 cursor) operate at the ANSI escape sequence level within `event.data` rather than at the timestamp level — same signature, different transformation target.
+2. **Filter interface**: `Fn(&[Event], &FilterOptions) -> Vec<Event>` is the core API (`FilterFn` in `src/nle/src/pipeline.rs`). A filter gets the events of its region, with times relative to the start of the region. The pipeline moves the events after the region by the change in the time of the last event of the region. Some filters (#166 color scheme, #168 cursor) operate at the ANSI escape sequence level within `event.data` rather than at the timestamp level — same signature, different transformation target. Slice 0 of the plugin spec (see decision 4 below) changes the return type to a `Result`, because a plugin filter can fail.
 
 3. **Existing code to reuse**:
    - `src/main.rs` lines 85-113: `Recording`, `Event`, `EventType` structs (the types in `src/nle/src/types.rs` must mirror these exactly)
    - `src/export/web.rs`: `TerminalPlayer` JavaScript class (prototype for #151)
    - `src/export/video.rs`: Frame-to-FFmpeg pipeline (#160 already exists)
    - `src/export/terminal_renderer.rs`: VT100 emulator (reference for #152's state analysis)
+
+4. **Plugins**: Third-party filters, analyzers, and renderers are WASM components that run on wasmtime, in a sandbox with no file, no network, and no real clock. One WIT package, `nle:plugin`, is the contract. The built-in filters stay native `FilterFn` closures. See [the plugin spec](../../specs/2026-11-26-nle-plugin-architecture-design.md) (issue #169).
