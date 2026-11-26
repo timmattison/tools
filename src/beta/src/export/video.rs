@@ -615,6 +615,7 @@ fn chapter_metadata(chapters: &[Chapter], duration: f64) -> Option<ChapterMetada
     let duration_ms = to_millis(duration);
 
     let mut text = String::new();
+    let mut count = 0;
     for (index, &(start, label)) in kept.iter().enumerate() {
         let end = kept.get(index + 1).map_or(duration_ms, |&(next, _)| next);
         if end <= start {
@@ -627,9 +628,9 @@ fn chapter_metadata(chapters: &[Chapter], duration: f64) -> Option<ChapterMetada
             "[CHAPTER]\nTIMEBASE=1/1000\nSTART={start}\nEND={end}\ntitle={}\n",
             escape_metadata(label)
         ));
+        count += 1;
     }
-    let count = text.matches("[CHAPTER]").count();
-    (!text.is_empty()).then_some(ChapterMetadata { text, count })
+    (count > 0).then_some(ChapterMetadata { text, count })
 }
 
 /// Converts a finite, non-negative number of seconds to whole milliseconds.
