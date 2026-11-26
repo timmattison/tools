@@ -41,6 +41,29 @@ staged_paths_with_deletions() {
     git diff --cached --name-only --no-renames
 }
 
+# The list, read one time. Under `set -e`, a failed git diff stops the hook
+# here, so no block reads a list that git did not finish.
+staged_paths="$(staged_paths_with_deletions)"
+
+# Succeed when a line of the list matches the extended regular expression $1.
+#
+# grep -q stops at its first match. A block must not send the list through a
+# pipe into it: in a large list, the writer of the pipe then still has paths
+# to write, it gets SIGPIPE, `set -o pipefail` makes the pipe false, and the
+# block runs no gate and says nothing. A commit that stages some thousand
+# paths and Cargo.lock ran no Rust gate in this way.
+#
+# A here-document is not a pipe. The status of the command is the status of
+# grep, and a writer that the shell starts for a long document is not part
+# of that status. Do not write `| grep -E ... >/dev/null` instead of -q:
+# GNU grep also stops at its first match when its output is /dev/null. Husky
+# starts this file with `sh`, so the bash here-string `<<<` is not available.
+staged_path_matches() {
+    grep -qE -- "$1" <<EOF
+$staged_paths
+EOF
+}
+
 # The Rust block reads staged_paths_with_deletions: a deletion of a Rust file,
 # a move of it to a path that is not Rust, or a link in its place leaves each
 # `mod` item that names the file without its file, and the build of the tree
@@ -72,7 +95,7 @@ fi
 # `without_git_environment` as each cargo command of scripts/rust-checks.sh
 # keeps the two symmetric.
 if [ "${rust_gate_ran:-}" != yes ] &&
-    staged_paths_with_deletions | grep -qE '^(README|TLDR)\.md$'; then
+    staged_path_matches '^(README|TLDR)\.md$'; then
     echo "pre-commit: running cargo test -p repo-guards --test tool_index_coverage"
     without_git_environment cargo test -p repo-guards --test tool_index_coverage
 fi
