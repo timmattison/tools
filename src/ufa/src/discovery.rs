@@ -627,7 +627,7 @@ mod typed_url_tests {
     /// The client refuses each redirect, so a URL that reaches the controller
     /// only through a redirect fails each later command. The probe refuses
     /// the redirect too, and its error names the status and the place the
-    /// redirect goes, so the wizard shows the user the URL to type.
+    /// redirect goes, so the wizard shows the user where it goes.
     #[tokio::test]
     async fn a_typed_url_that_redirects_fails_and_names_where_it_goes() {
         let controller = TestServer::replying(&json_response(CONTROLLER_INFO)).await;
@@ -652,6 +652,59 @@ mod typed_url_tests {
         assert!(
             error.contains(&location),
             "the error must name where the redirect goes, got: {error}"
+        );
+    }
+
+    /// A redirect that keeps the path of the probe, as a redirect from `http`
+    /// to `https` does, points at the `info` endpoint of the controller, not
+    /// at the URL to type. The client appends the integration path to each URL
+    /// it gets, so the error names the URL of the controller without that
+    /// path.
+    #[tokio::test]
+    async fn a_redirect_that_keeps_the_probe_path_names_the_controller_url_to_type() {
+        let controller = TestServer::replying(&json_response(CONTROLLER_INFO)).await;
+        let location = format!("{}/proxy/network/integration/v1/info", controller.origin());
+        let redirecting = TestServer::replying(&redirect_to(&location)).await;
+        let error = format!(
+            "{:#}",
+            validate_user_url(redirecting.origin())
+                .await
+                .expect_err("a URL that answers with a redirect must not validate")
+        );
+        assert!(
+            error.contains(&format!("Type {} instead", controller.origin())),
+            "the error must name the URL of the controller to type, got: {error}"
+        );
+
+        let controller2 = TestServer::replying(&json_response(CONTROLLER_INFO)).await;
+        let location2 = format!(
+            "{}/unifi/proxy/network/integration/v1/info",
+            controller2.origin()
+        );
+        let redirecting2 = TestServer::replying(&redirect_to(&location2)).await;
+        let error2 = format!(
+            "{:#}",
+            validate_user_url(redirecting2.origin())
+                .await
+                .expect_err("a URL that answers with a redirect must not validate")
+        );
+        assert!(
+            error2.contains(&format!("Type {}/unifi instead", controller2.origin())),
+            "the error must keep the path prefix, got: {error2}"
+        );
+
+        let controller3 = TestServer::replying(&json_response(CONTROLLER_INFO)).await;
+        let location3 = format!("{}/login", controller3.origin());
+        let redirecting3 = TestServer::replying(&redirect_to(&location3)).await;
+        let error3 = format!(
+            "{:#}",
+            validate_user_url(redirecting3.origin())
+                .await
+                .expect_err("a URL that answers with a redirect must not validate")
+        );
+        assert!(
+            !error3.contains("Type "),
+            "a redirect that does not keep the probe path names no URL to type, got: {error3}"
         );
     }
 }
