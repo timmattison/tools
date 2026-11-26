@@ -3,6 +3,9 @@
 //!
 //! Every server binds `127.0.0.1:0`, and every wait is bounded.
 
+mod common;
+use common::within_timeout;
+
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -52,7 +55,7 @@ fn a_handler_error_leaves_the_worker_serving() {
     assert_eq!(get_status(addr), 204, "the worker did not survive the Err");
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 
-    pool.shutdown().expect("pool shuts down cleanly");
+    within_timeout(move || pool.shutdown()).expect("pool shuts down cleanly");
 }
 
 /// The pool keeps no reference to the handler after the workers end.
@@ -66,7 +69,7 @@ fn the_handler_is_released_when_the_pool_ends() {
         request.respond(tiny_http::Response::empty(200))
     });
 
-    pool.shutdown().expect("pool shuts down cleanly");
+    within_timeout(move || pool.shutdown()).expect("pool shuts down cleanly");
 
     assert_eq!(Arc::strong_count(&witness), 1, "the handler is still alive");
 }
