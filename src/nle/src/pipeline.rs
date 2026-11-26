@@ -55,6 +55,11 @@ impl fmt::Debug for FilterRegistry {
     }
 }
 
+/// The largest time of `events`, or 0.0 when there is none.
+fn last_time(events: &[Event]) -> f64 {
+    events.iter().map(|event| event.time).fold(0.0, f64::max)
+}
+
 impl FilterRegistry {
     /// Make a registry with no filter.
     #[must_use]
@@ -113,9 +118,7 @@ impl FilterRegistry {
         }
 
         let answer = filter(&inside, &applied.options);
-        let shift = answer.last().map_or(0.0, |last| {
-            last.time - inside.last().map_or(0.0, |event| event.time)
-        });
+        let shift = last_time(&answer) - last_time(&inside);
 
         let mut result = before;
         result.extend(answer.into_iter().map(|event| Event {
