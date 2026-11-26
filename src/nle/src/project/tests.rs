@@ -180,3 +180,29 @@ fn validate_refuses_a_filter_range_with_start_after_end() {
     });
     assert_invalid(&project, "a range with start > end");
 }
+
+#[test]
+fn next_ids_are_one_for_an_empty_project() {
+    let project = EditProject::default();
+    assert_eq!(project.next_clip_id(), ClipId(1));
+    assert_eq!(project.next_track_id(), TrackId(1));
+}
+
+#[test]
+fn next_ids_are_one_more_than_the_largest_id_in_use() {
+    let mut project = valid_project();
+    project.clips[0].id = ClipId(7);
+    project.timeline[0].clips[0] = ClipId(7);
+    project.timeline[1].id = TrackId(4);
+    assert_eq!(project.next_clip_id(), ClipId(8));
+    assert_eq!(project.next_track_id(), TrackId(5));
+}
+
+#[test]
+fn next_ids_saturate_instead_of_overflowing() {
+    let mut project = valid_project();
+    project.clips[0].id = ClipId(u64::MAX);
+    project.timeline[1].id = TrackId(u64::MAX);
+    assert_eq!(project.next_clip_id(), ClipId(u64::MAX));
+    assert_eq!(project.next_track_id(), TrackId(u64::MAX));
+}

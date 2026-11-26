@@ -34,6 +34,20 @@ impl EditProject {
         })
     }
 
+    /// The id for a new clip: one more than the largest id in use, or 1 when
+    /// there is no clip. The id saturates at `u64::MAX`.
+    #[must_use]
+    pub fn next_clip_id(&self) -> ClipId {
+        ClipId(1)
+    }
+
+    /// The id for a new track: one more than the largest id in use, or 1 when
+    /// there is no track. The id saturates at `u64::MAX`.
+    #[must_use]
+    pub fn next_track_id(&self) -> TrackId {
+        TrackId(1)
+    }
+
     /// Check the rules of a project.
     ///
     /// The rules, in order: each clip id and each track id is unique; each clip
