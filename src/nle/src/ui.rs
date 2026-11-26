@@ -3,9 +3,9 @@
 //! This module holds the window settings, the root component, and the four
 //! regions of the window: the menu bar, the preview pane, the timeline, and
 //! the properties panel. The menu bar holds the Open Recording button and the
-//! export bar of the `export` module. The open document lives in the state of `App`: the
-//! `Editor` of its project, and the metadata of the recording file that it
-//! came from.
+//! export bar of the `export` module. The open document lives in the state of
+//! `App`: the `Editor` of its project, and the metadata of the recording file
+//! that it came from.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -151,8 +151,8 @@ impl Services {
                 })
             },
             |editor, request, sender| {
-                // A failed send means that the export bar stopped to listen.
-                // The export goes on, so the failure is no error.
+                // A send fails only when the export bar no longer listens.
+                // The export continues, so that failure is not an error.
                 Box::pin(editor.export(request, move |progress| {
                     sender.send(progress).ok();
                 }))

@@ -205,7 +205,7 @@ fn parse_resolution(text: &str) -> Result<Option<Resolution>, NleError> {
 }
 
 /// The text of the progress bar for the newest stage. `None` means that no
-/// stage has been reported yet.
+/// stage arrived yet.
 pub(crate) fn progress_text(progress: Option<ExportProgress>) -> String {
     match progress {
         None => "Export started".to_owned(),
@@ -315,8 +315,8 @@ pub(super) fn ExportBar(
     // True from the click until the dialog and the export end.
     let mut busy = use_signal(|| false);
     // True while the export runs, and the newest stage that it reported.
-    let mut exporting = use_signal(|| false);
-    let mut progress = use_signal(|| None::<ExportProgress>);
+    let exporting = use_signal(|| false);
+    let progress = use_signal(|| None::<ExportProgress>);
     let mut status = use_signal(|| None::<String>);
     if loaded.read().is_none() {
         return rsx! {};
@@ -427,43 +427,10 @@ pub(super) fn ExportBar(
                     busy.set(true);
                     let services = services.clone();
                     spawn(async move {
-                        let dialog = settings.kind.save_dialog(&source);
-                        if let Some(picked) = services.pick_export_path(dialog).await {
-                            let request = settings.request(picked);
-                            if let Err(error) = &request {
-                                on_result.call(Err(error.to_string()));
-                            }
-                            if let Ok(request) = request {
-                                let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-                                let export = {
-                                    let guard = loaded.read();
-                                    guard.as_ref().map(|document| {
-                                        services.export(&document.editor, request, sender)
-                                    })
-                                };
-                                if let Some(mut export) = export {
-                                    progress.set(None);
-                                    exporting.set(true);
-                                    let result = loop {
-                                        tokio::select! {
-                                            biased;
-                                            Some(stage) = receiver.recv() => progress.set(Some(stage)),
-                                            result = &mut export => break result,
-                                        }
-                                    };
-                                    match result {
-                                        Ok(path) => {
-                                            status.set(Some(format!(
-                                                "{EXPORTED_PREFIX} {}",
-                                                path.display()
-                                            )));
-                                            on_result.call(Ok(()));
-                                        }
-                                        Err(error) => on_result.call(Err(error.to_string())),
-                                    }
-                                    exporting.set(false);
-                                }
-                            }
+                        let view = ExportView { progress, exporting, status };
+                        let result = export_once(&services, loaded, &settings, &source, view).await;
+                        if let Some(result) = result {
+                            on_result.call(result);
                         }
                         busy.set(false);
                     });
@@ -484,6 +451,62 @@ pub(super) fn ExportBar(
             }
         }
     }
+}
+
+/// The signals of the export bar that show one export as it runs.
+#[derive(Clone, Copy)]
+struct ExportView {
+    /// The newest stage that the export reported.
+    progress: Signal<Option<ExportProgress>>,
+    /// True while the export runs.
+    exporting: Signal<bool>,
+    /// The text that names the written file, after a success.
+    status: Signal<Option<String>>,
+}
+
+/// Asks for a file, then exports the open project there and shows each stage
+/// in `view`.
+///
+/// Returns `None` when the user cancels the dialog or no document is open,
+/// `Some(Ok(()))` after a success, and `Some(Err(message))` after a failure.
+async fn export_once(
+    services: &Services,
+    loaded: ReadSignal<Option<Document>>,
+    settings: &ExportSettings,
+    source: &str,
+    mut view: ExportView,
+) -> Option<Result<(), String>> {
+    let picked = services
+        .pick_export_path(settings.kind.save_dialog(source))
+        .await?;
+    let request = match settings.request(picked) {
+        Ok(request) => request,
+        Err(error) => return Some(Err(error.to_string())),
+    };
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    // The read guard ends in this statement, so no guard lives across an await.
+    let mut export = loaded
+        .read()
+        .as_ref()
+        .map(|document| services.export(&document.editor, request, sender))?;
+    view.progress.set(None);
+    view.exporting.set(true);
+    let result = loop {
+        tokio::select! {
+            biased;
+            Some(stage) = receiver.recv() => view.progress.set(Some(stage)),
+            result = &mut export => break result,
+        }
+    };
+    view.exporting.set(false);
+    Some(match result {
+        Ok(path) => {
+            view.status
+                .set(Some(format!("{EXPORTED_PREFIX} {}", path.display())));
+            Ok(())
+        }
+        Err(error) => Err(error.to_string()),
+    })
 }
 
 #[cfg(test)]

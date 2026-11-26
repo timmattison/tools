@@ -346,7 +346,8 @@ impl Window {
         window
     }
 
-    /// Keeps the id of each new click listener in `edits`.
+    /// Keeps the id of each new listener in `edits`, by event name, and the id
+    /// of each new click listener in `clicks`.
     fn note_listeners(&mut self, edits: &[Mutation]) {
         let mut created_by_name: BTreeMap<String, Vec<ElementId>> = BTreeMap::new();
         for edit in edits {
@@ -410,18 +411,20 @@ impl Window {
     /// controls of the bar come after it.
     fn kind_select(&self) -> ElementId {
         assert!(self.html().contains(EXPORT_BAR_TAG), "no export bar");
-        let changes = self.listeners.get("change");
-        assert!(changes.is_some(), "no kind select in {}", self.html());
-        changes.map_or_else(|| unreachable!("asserted above"), |ids| ids[0])
+        self.listeners
+            .get("change")
+            .and_then(|ids| ids.first().copied())
+            .unwrap_or_else(|| panic!("no kind select in {}", self.html()))
     }
 
     /// The FPS field. It is the first of the `input` listeners that the newest
     /// render of such listeners made, because the FPS field comes before the
     /// resolution field in a bar that shows both.
     fn fps_input(&self) -> ElementId {
-        let inputs = self.newest_listeners.get("input");
-        assert!(inputs.is_some(), "no FPS field in {}", self.html());
-        inputs.map_or_else(|| unreachable!("asserted above"), |ids| ids[0])
+        self.newest_listeners
+            .get("input")
+            .and_then(|ids| ids.first().copied())
+            .unwrap_or_else(|| panic!("no FPS field in {}", self.html()))
     }
 
     /// Sends a change of a form control to the element, and renders.
