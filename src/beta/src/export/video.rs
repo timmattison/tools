@@ -151,10 +151,40 @@ pub async fn export_video(
     let (width, height) = parse_resolution(&resolution, &recording)?;
     let terminal_theme = TerminalTheme::from_name(&theme);
 
+    let chapters_text = if is_gif(&output_path) {
+        if !recording.chapters.is_empty() {
+            println!(
+                "GIF has no chapters: the {} chapter(s) are not in the GIF.",
+                recording.chapters.len()
+            );
+        }
+        None
+    } else {
+        chapter_metadata(&recording.chapters, recording.duration)
+    };
+    // The file must stay alive until FFmpeg exits.
+    let chapters_file = match &chapters_text {
+        Some(text) => {
+            let mut file = tempfile::Builder::new()
+                .prefix("beta-chapters-")
+                .suffix(".txt")
+                .tempfile()
+                .context("Failed to create the chapters file")?;
+            file.write_all(text.as_bytes())
+                .context("Failed to write the chapters file")?;
+            file.flush().context("Failed to write the chapters file")?;
+            Some(file)
+        }
+        None => None,
+    };
+
     println!("Generating and encoding video...");
     println!("Resolution: {}x{}", width, height);
     println!("FPS: {}", fps);
     println!("Theme: {}", theme);
+    if let Some(text) = &chapters_text {
+        println!("Chapters: {}", text.matches("[CHAPTER]").count());
+    }
 
     let total_frames = generate_and_encode_video(
         &recording,
@@ -164,6 +194,7 @@ pub async fn export_video(
         fps,
         terminal_theme,
         optimize_web,
+        chapters_file.as_ref().map(|file| file.path()),
     )?;
 
     println!("Video export saved to: {}", output_path.display());
@@ -201,14 +232,19 @@ fn parse_resolution(resolution: &Option<String>, recording: &Recording) -> Resul
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a separate export setting, and a settings struct would only move the list"
+)]
 fn generate_and_encode_video(
     recording: &Recording,
-    output_path: &PathBuf,
+    output_path: &Path,
     width: u32,
     height: u32,
     fps: u32,
     theme: TerminalTheme,
     optimize_web: bool,
+    chapters_file: Option<&Path>,
 ) -> Result<usize> {
     let frame_duration = 1.0 / f64::from(fps);
     #[expect(
@@ -219,7 +255,8 @@ fn generate_and_encode_video(
     let total_frames = (recording.duration * f64::from(fps)).ceil() as usize;
 
     // Start FFmpeg process first
-    let mut ffmpeg_process = spawn_ffmpeg(output_path, width, height, fps, optimize_web, None)?;
+    let mut ffmpeg_process =
+        spawn_ffmpeg(output_path, width, height, fps, optimize_web, chapters_file)?;
     let mut stdin = ffmpeg_process
         .stdin
         .take()
@@ -551,13 +588,61 @@ fn is_gif(path: &Path) -> bool {
 /// Builds the FFmpeg metadata text that holds the chapters of a recording.
 ///
 /// Returns `None` when no chapter is usable.
-fn chapter_metadata(_chapters: &[Chapter], _duration: f64) -> Option<String> {
-    None
+///
+/// Keeps the chapters whose time is finite and within `0..=duration`, in time order.
+/// Times are whole milliseconds. A chapter ends where the next one starts, and the last
+/// one ends at `duration`. A chapter that would end at or before its start is dropped.
+fn chapter_metadata(chapters: &[Chapter], duration: f64) -> Option<String> {
+    let mut usable: Vec<&Chapter> = chapters
+        .iter()
+        .filter(|c| c.time.is_finite() && c.time >= 0.0 && c.time <= duration)
+        .collect();
+    usable.sort_by(|a, b| a.time.total_cmp(&b.time));
+    let kept: Vec<(u64, &str)> = usable
+        .iter()
+        .map(|c| (to_millis(c.time), c.label.as_str()))
+        .collect();
+    let duration_ms = to_millis(duration);
+
+    let mut text = String::new();
+    for (index, &(start, label)) in kept.iter().enumerate() {
+        let end = kept.get(index + 1).map_or(duration_ms, |&(next, _)| next);
+        if end <= start {
+            continue;
+        }
+        if text.is_empty() {
+            text.push_str(";FFMETADATA1\n");
+        }
+        text.push_str(&format!(
+            "[CHAPTER]\nTIMEBASE=1/1000\nSTART={start}\nEND={end}\ntitle={}\n",
+            escape_metadata(label)
+        ));
+    }
+    (!text.is_empty()).then_some(text)
+}
+
+/// Converts a finite, non-negative number of seconds to whole milliseconds.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the value is finite and not below zero here, and the saturating cast clamps a huge one"
+)]
+fn to_millis(seconds: f64) -> u64 {
+    (seconds * 1000.0).round() as u64
 }
 
 /// Escapes a text for the FFmpeg metadata format.
+///
+/// A backslash goes before `=`, `;`, `#`, `\`, and a newline.
 fn escape_metadata(text: &str) -> String {
-    text.to_string()
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if matches!(ch, '=' | ';' | '#' | '\\' | '\n') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
 }
 
 /// Builds the FFmpeg arguments for one export.
@@ -569,7 +654,7 @@ fn ffmpeg_args(
     height: u32,
     fps: u32,
     optimize_web: bool,
-    _chapters_file: Option<&Path>,
+    chapters_file: Option<&Path>,
 ) -> Vec<OsString> {
     let mut args: Vec<OsString> = Vec::new();
     let mut push = |value: &str| args.push(OsString::from(value));
@@ -586,6 +671,14 @@ fn ffmpeg_args(
     push(&fps.to_string());
     push("-i");
     push("pipe:0");
+    let chapters_file = chapters_file.filter(|_| !is_gif(output_path));
+    if let Some(file) = chapters_file {
+        args.push(OsString::from("-f"));
+        args.push(OsString::from("ffmetadata"));
+        args.push(OsString::from("-i"));
+        args.push(file.as_os_str().to_os_string());
+    }
+    let mut push = |value: &str| args.push(OsString::from(value));
     push("-r");
     push(&fps.to_string());
     push("-sws_flags");
@@ -619,6 +712,11 @@ fn ffmpeg_args(
         push("hvc1");
     }
 
+    if chapters_file.is_some() {
+        for value in ["-map", "0:v", "-map_chapters", "1"] {
+            args.push(OsString::from(value));
+        }
+    }
     args.push(output_path.as_os_str().to_os_string());
     args
 }
