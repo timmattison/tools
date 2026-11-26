@@ -206,7 +206,9 @@ When the controller or the Site Manager API refuses a key from that file (HTTP 4
 forgets the copy and reads the key from 1Password again. If 1Password now holds a different key, as
 after a rotation, `ufa` writes one note and runs the command once more with the new key. If
 1Password holds the same key, you get the refusal. `ufa config setup` also reads the key from
-1Password again before it tests it.
+1Password again before it tests it. A key with limited permissions gets a 403 for a request that
+it has no permission for. Each such command thus reads the key from 1Password one more time, and
+1Password can ask you to unlock it.
 
 ```toml
 op_path    = "op://Private/ufa/key - 192.168.1.1 port 443"

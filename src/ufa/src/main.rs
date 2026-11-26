@@ -186,6 +186,11 @@ fn resolve_credential(
 /// - A read that fails: the first error comes back, and one note gives the
 ///   reason of the failed read.
 ///
+/// A 403 can also refuse a key that is current but has limited permissions.
+/// For such a key, each command that gets a 403 costs one more read of
+/// 1Password, which can show a prompt of 1Password, and the first error comes
+/// back.
+///
 /// Any other failure, and a failure with a key that came from no reference,
 /// comes back as it is, and 1Password gets no request.
 ///
