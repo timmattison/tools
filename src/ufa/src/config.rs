@@ -1665,12 +1665,12 @@ mod tests {
     }
 
     /// The mode of the old file does not matter, because the keys go into a new
-    /// file. The test reads the mode of the file that the write step is given,
-    /// which is the moment before the keys go in.
+    /// file. The test reads the inode and the mode of the file that the write
+    /// step is given, which is the moment before the keys go in.
     #[cfg(unix)]
     #[test]
     fn the_keys_go_into_a_new_owner_only_file_when_a_wider_one_exists() {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
         let temp = TempConfigDir::new("new-file-for-keys");
         create_directory(&temp.dir);
@@ -1678,14 +1678,25 @@ mod tests {
         write_file(&path, "url = \"https://192.168.1.1\"\n");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
             .expect("the existing file must be settable to a wider mode");
+        let old_inode = fs::metadata(&path)
+            .expect("the existing file must have metadata")
+            .ino();
 
+        let mut inode_during_write = old_inode;
         let mut mode_during_write = 0;
         replace_config_file(&path, |file| {
-            mode_during_write = file.metadata()?.permissions().mode() & 0o777;
+            let metadata = file.metadata()?;
+            inode_during_write = metadata.ino();
+            mode_during_write = metadata.permissions().mode() & 0o777;
             Ok(())
         })
         .expect("replacing the config file must succeed");
 
+        assert_ne!(
+            inode_during_write, old_inode,
+            "the keys must go into a new file, not into the old one that another \
+             user can hold open"
+        );
         assert_eq!(
             mode_during_write, 0o600,
             "the keys are written next, and a file that is readable by others \
