@@ -203,16 +203,16 @@ pub struct Definitions {
 #[derive(Debug, thiserror::Error)]
 pub enum ShellError {
     /// The variable `SHELL` does not exist.
-    #[error("SHELL is not set, so wdid cannot read the aliases and functions (wdid --no-shell skips the aliases and functions)")]
+    #[error("SHELL is not set, so wdid cannot read the aliases and functions")]
     NotSet,
     /// The shell is not zsh and not bash.
-    #[error("wdid reads aliases and functions from zsh and bash only, and SHELL is {shell} (wdid --no-shell skips the aliases and functions)")]
+    #[error("wdid reads aliases and functions from zsh and bash only, and SHELL is {shell}")]
     NotSupported {
         /// The value of `SHELL`.
         shell: String,
     },
     /// The system cannot start the shell.
-    #[error("cannot start {shell}: {source} (wdid --no-shell skips the aliases and functions)")]
+    #[error("cannot start {shell}: {source}")]
     Spawn {
         /// The shell program.
         shell: String,
@@ -220,15 +220,13 @@ pub enum ShellError {
         source: std::io::Error,
     },
     /// The shell ran for too long.
-    #[error("the shell did not stop in {seconds} seconds (wdid --no-shell skips the aliases and functions)")]
+    #[error("the shell did not stop in {seconds} seconds")]
     TimedOut {
         /// The bound, in seconds.
         seconds: u64,
     },
     /// The shell ended with a non-zero status.
-    #[error(
-        "the shell failed ({status}): {stderr} (wdid --no-shell skips the aliases and functions)"
-    )]
+    #[error("the shell failed ({status}): {stderr}")]
     Failed {
         /// The text of the exit status.
         status: String,
@@ -236,7 +234,7 @@ pub enum ShellError {
         stderr: String,
     },
     /// The output has no start marker or no end marker.
-    #[error("the shell output does not hold the start and end markers of wdid (wdid --no-shell skips the aliases and functions)")]
+    #[error("the shell output does not hold the start and end markers of wdid")]
     NoMarkers,
 }
 

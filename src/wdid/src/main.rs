@@ -148,9 +148,14 @@ enum Error {
     /// The history cannot be read.
     #[error(transparent)]
     History(#[from] HistoryError),
-    /// The aliases and the functions cannot be read.
+    /// The aliases and the functions cannot be read for the tools report. The
+    /// text names `--no-shell`, the flag of the tools report that skips them.
+    #[error("{0} (wdid --no-shell skips the aliases and functions)")]
+    Shell(#[source] ShellError),
+    /// The aliases and the functions cannot be read for `wdid defs`. That
+    /// report has no flag that skips them, thus the text names no flag.
     #[error(transparent)]
-    Shell(#[from] ShellError),
+    DefsShell(ShellError),
 }
 
 /// Reads the aliases and the functions of the interactive shell.
@@ -188,7 +193,7 @@ fn run(cli: &Cli) -> Result<String, Error> {
     let definitions = if cli.no_shell {
         Definitions::default()
     } else {
-        definitions(std::env::var_os(SHELL_VARIABLE))?
+        definitions(std::env::var_os(SHELL_VARIABLE)).map_err(Error::Shell)?
     };
     let resolver = Resolver::new(&definitions, &catalog.names());
     let window = Window {
@@ -223,7 +228,7 @@ fn run_defs(args: &DefsArgs) -> Result<String, Error> {
         .as_deref()
         .map(|shell| shell.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let definitions = definitions(shell)?;
+    let definitions = definitions(shell).map_err(Error::DefsShell)?;
     let window = defs::Window {
         today,
         since: args.since,
