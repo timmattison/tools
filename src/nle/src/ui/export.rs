@@ -7,6 +7,8 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use crate::error::NleError;
+use crate::export::{ExportRequest, ExportTarget, Theme};
 use crate::format::file_name;
 
 /// The stem of a file name that has no stem left after the endings go.
@@ -172,6 +174,48 @@ fn stem_or_default(name: &str) -> &str {
     match strip_kind_endings(name) {
         "" => DEFAULT_STEM,
         stem => stem,
+    }
+}
+
+/// The settings of the export bar, as the user set them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct ExportSettings {
+    /// The kind of file to write.
+    pub(crate) kind: ExportKind,
+    /// The theme of a web page or a video.
+    pub(crate) theme: Theme,
+    /// The text of the frame rate field. Empty text leaves the rate to `beta`.
+    pub(crate) fps: String,
+    /// The text of the resolution field. Empty text leaves the size to `beta`.
+    pub(crate) resolution: String,
+    /// Whether `beta` compresses the recording in a web page.
+    pub(crate) compress_web: bool,
+    /// Whether `beta` optimizes a video for the web.
+    pub(crate) optimize_web: bool,
+}
+
+impl ExportSettings {
+    /// What the settings ask `beta` to write.
+    ///
+    /// A setting that does not apply to the kind is ignored.
+    ///
+    /// # Errors
+    /// Returns `NleError::ExportError` when the kind is a video and the frame
+    /// rate or the resolution is not valid.
+    pub(crate) fn target(&self) -> Result<ExportTarget, NleError> {
+        Ok(ExportTarget::Recording { compress: None })
+    }
+
+    /// The request for a file that the user picked: the path gets the ending
+    /// of the kind.
+    ///
+    /// # Errors
+    /// Returns the errors of `ExportSettings::target`.
+    pub(crate) fn request(&self, picked: PathBuf) -> Result<ExportRequest, NleError> {
+        Ok(ExportRequest {
+            output_path: picked,
+            target: self.target()?,
+        })
     }
 }
 

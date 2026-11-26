@@ -1,5 +1,7 @@
 //! Tests of the model of the export bar.
 
+use std::num::NonZeroU32;
+
 use super::*;
 
 #[test]
@@ -78,4 +80,139 @@ fn each_kind_has_a_key_and_a_label_for_the_menu() {
         assert_eq!(ExportKind::from_key(key), Some(kind));
     }
     assert_eq!(ExportKind::from_key("pdf"), None);
+}
+
+/// The settings of a kind, and the default values for the rest.
+fn settings(kind: ExportKind) -> ExportSettings {
+    ExportSettings {
+        kind,
+        ..ExportSettings::default()
+    }
+}
+
+/// The text of the error of `result`.
+fn error_text(result: Result<ExportTarget, NleError>) -> String {
+    result.expect_err("an error").to_string()
+}
+
+#[test]
+fn settings_make_the_target_of_a_recording() {
+    assert_eq!(
+        settings(ExportKind::Recording).target().expect("a target"),
+        ExportTarget::Recording {
+            compress: Some(false)
+        }
+    );
+    assert_eq!(
+        settings(ExportKind::CompressedRecording)
+            .target()
+            .expect("a target"),
+        ExportTarget::Recording {
+            compress: Some(true)
+        }
+    );
+}
+
+#[test]
+fn settings_make_the_target_of_a_web_page() {
+    let web = ExportSettings {
+        theme: Theme::Monokai,
+        compress_web: true,
+        optimize_web: true,
+        ..settings(ExportKind::Web)
+    };
+    assert_eq!(
+        web.target().expect("a target"),
+        ExportTarget::Web {
+            theme: Theme::Monokai,
+            compress: true
+        }
+    );
+}
+
+#[test]
+fn settings_make_the_target_of_a_video() {
+    let mp4 = ExportSettings {
+        theme: Theme::Dracula,
+        fps: " 30 ".into(),
+        resolution: "1280x720".into(),
+        optimize_web: true,
+        compress_web: true,
+        ..settings(ExportKind::Mp4)
+    };
+    assert_eq!(
+        mp4.target().expect("a target"),
+        ExportTarget::Video {
+            theme: Theme::Dracula,
+            fps: NonZeroU32::new(30),
+            resolution: "1280x720".parse().ok(),
+            optimize_web: true
+        }
+    );
+    assert_eq!(
+        settings(ExportKind::Gif).target().expect("a target"),
+        ExportTarget::Video {
+            theme: Theme::Auto,
+            fps: None,
+            resolution: None,
+            optimize_web: false
+        }
+    );
+}
+
+#[test]
+fn settings_refuse_a_frame_rate_that_is_not_above_zero() {
+    for text in ["0", "abc", "-1", "2.5"] {
+        let mp4 = ExportSettings {
+            fps: format!(" {text} "),
+            ..settings(ExportKind::Mp4)
+        };
+        let message = error_text(mp4.target());
+        assert!(
+            message.contains(&format!(
+                "the frame rate \"{text}\" is not a whole number above zero"
+            )),
+            "{message}"
+        );
+        assert!(message.starts_with("Export failed: "), "{message}");
+    }
+}
+
+#[test]
+fn settings_refuse_a_resolution_that_is_not_valid() {
+    let mp4 = ExportSettings {
+        resolution: "big".into(),
+        ..settings(ExportKind::Mp4)
+    };
+    let message = error_text(mp4.target());
+    assert!(message.contains("the resolution \"big\""), "{message}");
+}
+
+#[test]
+fn settings_ignore_a_field_that_the_kind_does_not_use() {
+    for kind in [ExportKind::Recording, ExportKind::Web] {
+        let bad = ExportSettings {
+            fps: "abc".into(),
+            resolution: "big".into(),
+            ..settings(kind)
+        };
+        assert!(bad.target().is_ok(), "{kind:?}");
+    }
+}
+
+#[test]
+fn the_request_holds_the_path_with_the_ending_of_the_kind() {
+    let request = settings(ExportKind::Mp4)
+        .request(PathBuf::from("/tmp/out"))
+        .expect("a request");
+    assert_eq!(request.output_path, PathBuf::from("/tmp/out.mp4"));
+    assert_eq!(
+        request.target,
+        settings(ExportKind::Mp4).target().expect("a target")
+    );
+    let bad = ExportSettings {
+        fps: "0".into(),
+        ..settings(ExportKind::Gif)
+    };
+    assert!(bad.request(PathBuf::from("/tmp/out")).is_err());
 }
