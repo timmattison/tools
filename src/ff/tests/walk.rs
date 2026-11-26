@@ -104,3 +104,23 @@ fn the_walk_covers_each_root() {
     assert_eq!(found.sorted(), sorted(expected));
     assert!(report.is_complete(), "{report:?}");
 }
+
+#[test]
+fn the_walk_matches_the_name_of_a_root_that_is_a_directory() {
+    let tree = Tree::new("walk-root-name");
+    let named = tree.dir("data/120.mp4");
+    let inner = tree.file("data/120.mp4/inner/120.mp4");
+
+    let found = Found::default();
+    let report = walk(
+        &RealFs,
+        &[WalkRoot::new(&named)],
+        Options::default(),
+        &glob("120.mp4"),
+        found.sink(),
+    );
+
+    assert_eq!(found.sorted(), sorted(vec![named, inner]));
+    assert_eq!(report.matches, 2);
+    assert!(report.is_complete(), "{report:?}");
+}
