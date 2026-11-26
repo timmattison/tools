@@ -976,6 +976,7 @@ dependencies = [
  "clap",
  "crossterm",
  "flate2",
+ "gitscratch",
  "image",
  "imageproc",
  "minijinja",
