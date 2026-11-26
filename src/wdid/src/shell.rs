@@ -280,12 +280,27 @@ pub fn parse_output(stdout: &str, marker: &Marker) -> Result<Definitions, ShellE
     }
 }
 
-/// Reads the body of one function into `definitions`.
+/// Gives the first line of a function body whose text is not blank and is not
+/// `{` alone, without the blanks at its start and at its end. Gives an empty
+/// text when the body has no such line. A bash body starts with a line `{`.
+fn first_line(body: &str) -> String {
+    body.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && *line != "{")
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// Reads the body of one function into `definitions`. It keeps the first line
+/// of the body for each function, also for a body that does not parse.
 ///
 /// The shell expanded the aliases of the body when it read the definition,
 /// the global and the suffix aliases included. Thus the parse of the body uses
 /// an empty alias table.
 fn read_function(name: &str, body: &str, definitions: &mut Definitions) {
+    definitions
+        .function_lines
+        .insert(name.to_owned(), first_line(body));
     match command_words(body, &Aliases::new()) {
         Parsed::Words(words) => {
             definitions.functions.insert(name.to_owned(), words);

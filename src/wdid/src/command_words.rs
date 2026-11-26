@@ -227,7 +227,23 @@ impl Aliases {
     /// Gives each alias of the table, sorted by name, then by kind.
     #[must_use]
     pub fn definitions(&self) -> Vec<AliasDefinition> {
-        Vec::new()
+        let regular_and_global = self.values.iter().map(|(name, alias)| AliasDefinition {
+            name: name.clone(),
+            kind: if alias.global {
+                AliasKind::Global
+            } else {
+                AliasKind::Regular
+            },
+            value: alias.value.clone(),
+        });
+        let suffix = self.suffixes.iter().map(|(suffix, value)| AliasDefinition {
+            name: format!("{SUFFIX_MARKER}{suffix}"),
+            kind: AliasKind::Suffix,
+            value: value.clone(),
+        });
+        let mut all: Vec<AliasDefinition> = regular_and_global.chain(suffix).collect();
+        all.sort_by(|a, b| a.name.cmp(&b.name).then(a.kind.cmp(&b.kind)));
+        all
     }
 
     /// Gives the number of aliases of all three kinds.
