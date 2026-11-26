@@ -194,6 +194,25 @@ fn a_checkout_of_another_repository_does_not_count() {
     installed.assert_found(&workspace);
 }
 
+/// A checkout that misses does not stop the search. Here the first directory
+/// holds no repository, and the second is at another commit. Both sort before
+/// the directory that holds the checkout of the commit.
+#[test]
+fn a_checkout_that_misses_does_not_hide_a_later_checkout_of_the_commit() {
+    let installed = Installed::new();
+    let name = short(&installed.commit);
+    let checkouts = installed.home.path().join("git").join("checkouts");
+    std::fs::create_dir_all(checkouts.join("tools-0000000000000000").join(name)).unwrap();
+    let other = TestRepo::init();
+    other.commit_file("README.md", "other\n", "add a readme");
+    installed.home.add_checkout(&other, "tools-0000000000000001", name);
+
+    let cwd = not_a_repository();
+    let workspace = find_from(cwd.path(), &installed.home.location());
+
+    installed.assert_found(&workspace);
+}
+
 /// Step 2 comes before step 3: in a cargo workspace, `wdid` reports on that
 /// workspace also when a record names another one.
 #[test]
