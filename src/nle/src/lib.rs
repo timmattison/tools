@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod editor;
 pub mod error;
 mod format;
 mod json_file;
