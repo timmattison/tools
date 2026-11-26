@@ -90,12 +90,102 @@ fn edit_stream(
     Ok(())
 }
 
-/// Cut the joined string into runs of text.
+/// The escape byte.
+const ESC: u8 = 0x1B;
+
+/// The bell byte. It ends an OSC sequence.
+const BEL: u8 = 0x07;
+
+/// The segment of the visible text.
+const VISIBLE: usize = 0;
+
+/// Cut the joined string into runs of text. Escape sequences are not text.
+/// The payload of an OSC sequence is a run of its own segment.
 fn runs(joined: &str) -> Vec<Run> {
-    vec![Run {
-        segment: 0,
-        range: 0..joined.len(),
-    }]
+    let bytes = joined.as_bytes();
+    let mut runs = Vec::new();
+    let mut at = 0;
+    let mut segments = 1;
+    while at < bytes.len() {
+        if bytes.get(at) != Some(&ESC) {
+            let end = bytes
+                .get(at..)
+                .and_then(|rest| rest.iter().position(|&byte| byte == ESC))
+                .map_or(bytes.len(), |offset| at + offset);
+            runs.push(Run {
+                segment: VISIBLE,
+                range: at..end,
+            });
+            at = end;
+            continue;
+        }
+        let (payload, end) = escape_sequence(bytes, at);
+        if let Some(range) = payload.filter(|range| !range.is_empty()) {
+            runs.push(Run {
+                segment: segments,
+                range,
+            });
+            segments += 1;
+        }
+        at = end;
+    }
+    runs
+}
+
+/// Read the escape sequence that starts at `at`, where `bytes[at]` is ESC.
+/// The answer is the range of the payload when the sequence is an OSC
+/// sequence, and the end of the sequence. The end is always above `at`.
+fn escape_sequence(bytes: &[u8], at: usize) -> (Option<Range<usize>>, usize) {
+    let length = bytes.len();
+    match bytes.get(at + 1) {
+        Some(b'[') => {
+            let mut end = at + 2;
+            end = skip_while(bytes, end, |byte| (0x20..=0x3F).contains(&byte));
+            if bytes.get(end).is_some_and(|byte| (0x40..=0x7E).contains(byte)) {
+                end += 1;
+            }
+            (None, end)
+        }
+        Some(b']') => {
+            let start = at + 2;
+            let mut end = start;
+            while end < length {
+                match (bytes.get(end), bytes.get(end + 1)) {
+                    (Some(&BEL), _) => return (Some(start..end), end + 1),
+                    (Some(&ESC), Some(b'\\')) => return (Some(start..end), end + 2),
+                    _ => end += 1,
+                }
+            }
+            (Some(start..length), length)
+        }
+        Some(b'P' | b'X' | b'^' | b'_') => {
+            let mut end = at + 2;
+            while end < length {
+                if bytes.get(end) == Some(&ESC) && bytes.get(end + 1) == Some(&b'\\') {
+                    return (None, end + 2);
+                }
+                end += 1;
+            }
+            (None, length)
+        }
+        Some(_) => {
+            let mut end = skip_while(bytes, at + 1, |byte| (0x20..=0x2F).contains(&byte));
+            if bytes.get(end).is_some_and(|byte| (0x30..=0x7E).contains(byte)) {
+                end += 1;
+            }
+            (None, end)
+        }
+        None => (None, length),
+    }
+}
+
+/// The first index from `from` where `bytes` has no byte that `test` accepts.
+fn skip_while(bytes: &[u8], from: usize, test: impl Fn(u8) -> bool) -> usize {
+    let mut at = from;
+    while bytes.get(at).is_some_and(|&byte| test(byte)) {
+        at += 1;
+    }
+    at
 }
 
 /// Build the segments from the runs. A run that crosses an event boundary

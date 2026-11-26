@@ -165,7 +165,7 @@ fn a_charset_escape_is_not_text() {
 
 #[test]
 fn a_bare_escape_does_not_swallow_the_text_after_it() {
-    assert_eq!(one("\x1b\x1bhunter2", "hunter2", "X"), "\x1b\x1bX");
+    assert_eq!(one("\x1b\x1b\rhunter2", "hunter2", "X"), "\x1b\x1b\rX");
     assert_eq!(one("a\x1b", "a", "X"), "X\x1b");
 }
 
