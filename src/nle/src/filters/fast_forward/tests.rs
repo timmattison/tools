@@ -349,10 +349,6 @@ fn out(time: f64, data: &str) -> Triple {
     (time, EventType::Output, data.to_string())
 }
 
-fn inp(time: f64, data: &str) -> Triple {
-    (time, EventType::Input, data.to_string())
-}
-
 fn event_of(triple: &Triple) -> Event {
     Event {
         time: triple.0,
@@ -392,4 +388,16 @@ fn summary_of_one_event_for_each_line_drops_the_middle_and_the_time() {
             out(30.0, "late"),
         ]
     );
+}
+
+#[test]
+fn summary_of_short_output_leaves_the_span_unchanged() {
+    let input = vec![
+        out(11.0, "a\r\nb\r\n"),
+        out(12.0, "c\r\n"),
+        out(13.0, "d\r\n"),
+        out(35.0, "late"),
+    ];
+    let got = run_summary(&input, &summary(10.0, 30.0, 2, 2));
+    assert_eq!(got, input);
 }

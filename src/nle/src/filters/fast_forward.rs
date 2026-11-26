@@ -14,7 +14,7 @@
 use crate::error::NleError;
 use crate::filters::time_dilation::{self, Speed};
 use crate::pipeline::{FilterRegistry, Span};
-use crate::types::{AppliedFilter, Event, FilterKind, FilterOptions, FilterRegion};
+use crate::types::{AppliedFilter, Event, EventType, FilterKind, FilterOptions, FilterRegion};
 
 /// The kind of the fast-forward filter.
 pub const KIND: &str = "fast-forward";
@@ -209,10 +209,125 @@ fn line_count_from(options: &FilterOptions, name: &str) -> Result<usize, String>
         })
 }
 
+/// The pieces of the data of one output event, sorted by the part of the
+/// summary that they belong to.
+#[derive(Default)]
+struct Pieces {
+    /// The text of the lines before the dropped lines.
+    head: String,
+    /// The text of the lines after the dropped lines.
+    tail: String,
+    /// Whether the event holds text of a dropped line.
+    drops: bool,
+}
+
+/// Count the lines of the output stream of a span. A line ends with a line
+/// feed. A last run with no line feed is a line too, when it is not empty.
+fn count_lines(events: &[Event]) -> usize {
+    let mut lines = 0_usize;
+    let mut open = false;
+    for event in events.iter().filter(|e| e.event_type == EventType::Output) {
+        for piece in event.data.split_inclusive('\n') {
+            if piece.ends_with('\n') {
+                lines = lines.saturating_add(1);
+                open = false;
+            } else {
+                open = true;
+            }
+        }
+    }
+    lines.saturating_add(usize::from(open))
+}
+
 /// Keep the first `head` lines and the last `tail` lines of the output of a
-/// span. Not written yet: this gives the span back.
-fn summarize(span: Span, _head: usize, _tail: usize) -> Span {
-    span
+/// span, and put the marker line in place of the lines between them.
+///
+/// The output stream is the data of the output events, joined in order. A line
+/// is a run of text that ends with a line feed, and a last run with no line
+/// feed is a line too. Input events hold no lines. The span stays as it is
+/// when the stream has `head + tail` lines or fewer.
+///
+/// Else this function drops the lines from `head` up to the last `tail` lines.
+/// The marker takes the time of the first output event that holds a dropped
+/// line, together with the head text of that event. Each event between the
+/// first and the last output event that hold a dropped line goes away, input
+/// events included. The tail text of the last such event takes the time of the
+/// first. Each later event moves back by the time between the first and the
+/// last such event, and the length of the span shrinks by the same time. The
+/// summary drops each terminal change that a dropped line holds.
+fn summarize(span: Span, head: usize, tail: usize) -> Span {
+    let lines = count_lines(&span.events);
+    if lines <= head.saturating_add(tail) {
+        return span;
+    }
+    let tail_start = lines.saturating_sub(tail);
+
+    let mut line = 0_usize;
+    let mut pieces: Vec<Option<Pieces>> = Vec::with_capacity(span.events.len());
+    for event in &span.events {
+        if event.event_type != EventType::Output {
+            pieces.push(None);
+            continue;
+        }
+        let mut split = Pieces::default();
+        for piece in event.data.split_inclusive('\n') {
+            if line < head {
+                split.head.push_str(piece);
+            } else if line >= tail_start {
+                split.tail.push_str(piece);
+            } else {
+                split.drops = true;
+            }
+            if piece.ends_with('\n') {
+                line = line.saturating_add(1);
+            }
+        }
+        pieces.push(Some(split));
+    }
+
+    let drops = |split: &Option<Pieces>| split.as_ref().is_some_and(|p| p.drops);
+    let (Some(first), Some(last)) = (
+        pieces.iter().position(drops),
+        pieces.iter().rposition(drops),
+    ) else {
+        return span;
+    };
+    let start = span.events.get(first).map_or(0.0, |e| e.time);
+    let end = span.events.get(last).map_or(start, |e| e.time);
+    let shift = end - start;
+
+    let output = |time: f64, data: String| Event {
+        time,
+        event_type: EventType::Output,
+        data,
+    };
+    let mut events = Vec::with_capacity(span.events.len());
+    for (index, (event, split)) in span.events.into_iter().zip(pieces).enumerate() {
+        if index < first {
+            events.push(event);
+        } else if index == first || index == last {
+            let split = split.unwrap_or_default();
+            if index == first {
+                if !split.head.is_empty() {
+                    events.push(output(start, split.head));
+                }
+                events.push(output(start, SUMMARY_MARKER.to_string()));
+            }
+            if index == last && !split.tail.is_empty() {
+                events.push(output(start, split.tail));
+            }
+        } else if index > last {
+            events.push(Event {
+                time: (event.time - shift).max(start),
+                ..event
+            });
+        }
+    }
+    let latest = events.iter().map(|e| e.time).fold(0.0_f64, f64::max);
+    Span {
+        events,
+        length: (span.length - shift).max(latest),
+    }
 }
 
 /// Move each event of a span to the start of the span, and remove the length.
