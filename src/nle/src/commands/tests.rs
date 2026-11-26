@@ -519,6 +519,80 @@ fn save_recording_to_refuses_a_chain_of_more_than_max_links_symlinks() {
 
 #[cfg(unix)]
 #[test]
+fn save_recording_to_refuses_a_json_link_to_a_gzip_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("b.json.gz");
+    fs::write(&target, b"keep").unwrap();
+    let link = dir.path().join("a.json");
+    std::os::unix::fs::symlink("b.json.gz", &link).unwrap();
+    let err = save_recording_to(
+        &link.to_string_lossy(),
+        &Recording::test_fixture(),
+        Some(false),
+    )
+    .unwrap_err();
+    assert!(matches!(err, NleError::SaveError(_)), "got {err}");
+    assert!(err.to_string().contains("must end in .json"), "got {err}");
+    assert_eq!(fs::read(&target).unwrap(), b"keep");
+}
+
+#[cfg(unix)]
+#[test]
+fn save_recording_to_refuses_a_gzip_link_to_a_json_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("b.json");
+    fs::write(&target, b"keep").unwrap();
+    let link = dir.path().join("a.json.gz");
+    std::os::unix::fs::symlink("b.json", &link).unwrap();
+    let err = save_recording_to(
+        &link.to_string_lossy(),
+        &Recording::test_fixture(),
+        Some(true),
+    )
+    .unwrap_err();
+    assert!(matches!(err, NleError::SaveError(_)), "got {err}");
+    assert!(err.to_string().contains("must end in .json.gz"), "got {err}");
+    assert_eq!(fs::read(&target).unwrap(), b"keep");
+}
+
+#[cfg(unix)]
+#[test]
+fn video_export_args_refuses_an_mp4_link_to_a_gif_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("a.json");
+    write_fixture(&input, false);
+    let link = dir.path().join("out.mp4");
+    std::os::unix::fs::symlink(dir.path().join("real.gif"), &link).unwrap();
+    let err = video_export_args(&options(
+        &input,
+        &link.to_string_lossy(),
+        ExportFormat::Video,
+    ))
+    .unwrap_err();
+    assert!(matches!(err, NleError::ExportError(_)), "got {err}");
+    assert!(err.to_string().contains("must end in .mp4"), "got {err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn video_export_args_accepts_a_link_whose_ending_differs_only_in_case() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("a.json");
+    write_fixture(&input, false);
+    let link = dir.path().join("OUT.MP4");
+    std::os::unix::fs::symlink(dir.path().join("real.mp4"), &link).unwrap();
+    let args = video_export_args(&options(
+        &input,
+        &link.to_string_lossy(),
+        ExportFormat::Video,
+    ))
+    .unwrap();
+    let at = args.iter().position(|a| a == "--output").unwrap();
+    assert_eq!(args[at + 1], canonical_out(&dir, "real.mp4"));
+}
+
+#[cfg(unix)]
+#[test]
 fn video_export_args_gives_beta_the_target_of_a_symlink() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("a.json");
