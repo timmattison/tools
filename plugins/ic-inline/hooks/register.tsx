@@ -149,7 +149,7 @@ export const register: Register = (on, rawOptions) => {
             type: 'string',
             enum: [...DIFF_MODES],
             description: [
-              'How the picture shows the differences. Leave it out for the default of ic, boxes.',
+              'How the picture shows the differences. Leave it out for the default of ic, highlight.',
               'boxes: the second image, with a red outline around each region that differs.',
               'highlight: the first image, with each pixel that differs in opaque red.',
               'mask: opaque black, with each pixel that differs in opaque red.',
