@@ -52,16 +52,74 @@ fn tenths_of_a_second(total_seconds: f64) -> u64 {
 }
 
 /// The message of a time text that is empty.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "TEMP: the chapter panel uses it in the next commit"
+    )
+)]
 const CLOCK_EMPTY: &str = "the time is empty";
+/// The start of the message of a time text that is not a time.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "TEMP: the chapter panel uses it in the next commit"
+    )
+)]
+const CLOCK_BAD_PREFIX: &str = "the time";
+/// The end of the message of a time text that is not a time.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "TEMP: the chapter panel uses it in the next commit"
+    )
+)]
+const CLOCK_BAD_SUFFIX: &str = "is not in seconds, M:SS, or H:MM:SS";
+/// Seconds in one minute, as a count of whole units.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "TEMP: the chapter panel uses it in the next commit"
+    )
+)]
+const SECONDS_PER_MINUTE: u32 = 60;
+/// Seconds in one hour, as a count of whole units.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "TEMP: the chapter panel uses it in the next commit"
+    )
+)]
+const SECONDS_PER_HOUR: u32 = 3600;
 
 /// Formats a time in seconds as `M:SS.s`, or as `H:MM:SS.s` from one hour.
 ///
 /// The function rounds to tenths of a second before it splits the time, so
 /// 59.96 is `1:00.0` and never `0:60.0`. A value that is not finite, or that
 /// is below zero, formats as `0:00.0`.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "TEMP: the chapter panel uses it in the next commit"
+    )
+)]
 pub(crate) fn format_clock(seconds: f64) -> String {
-    let _ = (seconds, tenths_of_a_second(seconds));
-    String::new()
+    let tenths = tenths_of_a_second(seconds);
+    let hours = tenths / TENTHS_PER_HOUR;
+    let minutes = tenths % TENTHS_PER_HOUR / TENTHS_PER_MINUTE;
+    let remainder = tenths % TENTHS_PER_MINUTE;
+    let (whole, tenth) = (remainder / 10, remainder % 10);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{whole:02}.{tenth}")
+    } else {
+        format!("{minutes}:{whole:02}.{tenth}")
+    }
 }
 
 /// Reads a time that a person typed: `S`, `M:SS`, or `H:MM:SS`.
@@ -74,9 +132,78 @@ pub(crate) fn format_clock(seconds: f64) -> String {
 ///
 /// # Errors
 /// Returns the text of the reason when the text is empty or not a time.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "TEMP: the chapter panel uses it in the next commit"
+    )
+)]
 pub(crate) fn parse_clock(text: &str) -> Result<Seconds, String> {
-    let _ = (text, CLOCK_EMPTY);
-    Err(String::new())
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(CLOCK_EMPTY.to_owned());
+    }
+    let bad = || format!("{CLOCK_BAD_PREFIX} \"{text}\" {CLOCK_BAD_SUFFIX}");
+    let parts: Vec<&str> = text.split(':').collect();
+    let total = match parts.as_slice() {
+        [seconds] => seconds.parse::<f64>().ok(),
+        [minutes, seconds] => clock_units(minutes)
+            .zip(clock_seconds(seconds))
+            .map(|(minutes, seconds)| f64::from(minutes) * f64::from(SECONDS_PER_MINUTE) + seconds),
+        [hours, minutes, seconds] => clock_units(hours)
+            .zip(clock_units(minutes).filter(|minutes| *minutes < SECONDS_PER_MINUTE))
+            .zip(clock_seconds(seconds))
+            .map(|((hours, minutes), seconds)| {
+                f64::from(hours) * f64::from(SECONDS_PER_HOUR)
+                    + f64::from(minutes) * f64::from(SECONDS_PER_MINUTE)
+                    + seconds
+            }),
+        _ => None,
+    };
+    total
+        .and_then(|total| Seconds::new(total).ok())
+        .ok_or_else(bad)
+}
+
+/// Reads the hours or the minutes of a time text: ASCII digits only.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "TEMP: the chapter panel uses it in the next commit"
+    )
+)]
+fn clock_units(part: &str) -> Option<u32> {
+    if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    part.parse().ok()
+}
+
+/// Reads the seconds of a time text that has a colon: digits, then an optional
+/// point and a fraction, below 60.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "TEMP: the chapter panel uses it in the next commit"
+    )
+)]
+fn clock_seconds(part: &str) -> Option<f64> {
+    let starts_with_digit = part
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_digit());
+    let only_number = part
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || byte == b'.');
+    if !starts_with_digit || !only_number {
+        return None;
+    }
+    part.parse::<f64>()
+        .ok()
+        .filter(|seconds| *seconds < f64::from(SECONDS_PER_MINUTE))
 }
 
 /// Returns the part of `path` after the last `/` or `\`.
