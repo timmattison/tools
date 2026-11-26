@@ -163,3 +163,34 @@ fn the_cloud_rule_names_each_child_of_cloud_storage_and_mobile_documents() {
         "Mobile Documents".as_ref()
     ));
 }
+
+#[test]
+fn a_root_that_is_a_link_into_a_library_skips_the_file_provider_directories() {
+    let tree = Tree::new("bounds-cloud-link");
+    tree.file("Users/me/Library/CloudStorage/Dropbox/120.mp4");
+    tree.file("Users/me/Library/Mobile Documents/com~apple~CloudDocs/120.mp4");
+    tree.file("Users/me/Library/Other/120.mp4");
+    let link = tree.root().join("lib");
+    std::os::unix::fs::symlink(tree.root().join("Users/me/Library"), &link).expect("make a link");
+    let canonical = std::fs::canonicalize(&link).expect("resolve the link");
+    let root = ff::plan::named_root(&link, &canonical, false, &[]);
+
+    let found = Found::default();
+    let report = walk(
+        &RealFs,
+        &[root],
+        Options::default(),
+        &glob("120.mp4"),
+        found.sink(),
+    );
+
+    assert_eq!(found.sorted(), vec![link.join("Other/120.mp4")]);
+    assert_eq!(
+        report.cloud_skipped,
+        vec![
+            link.join("CloudStorage/Dropbox"),
+            link.join("Mobile Documents")
+        ]
+    );
+    assert!(report.is_complete(), "{report:?}");
+}

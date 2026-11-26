@@ -211,3 +211,27 @@ fn a_search_of_the_whole_machine_is_refused_off_macos() {
     assert!(message.contains("macOS"), "{message}");
     assert!(output.stdout.is_empty());
 }
+
+#[test]
+fn a_search_of_dot_inside_library_skips_the_file_provider_directories() {
+    let tree = Tree::new("cli-cloud-dot");
+    tree.file("Library/CloudStorage/GoogleDrive-me@example.com/120.mp4");
+    tree.file("Library/Mobile Documents/com~apple~CloudDocs/120.mp4");
+    tree.file("Library/Other/120.mp4");
+
+    let output = ff(&["120.mp4", "."])
+        .current_dir(tree.root().join("Library"))
+        .output()
+        .expect("run ff");
+
+    assert_eq!(
+        stdout_lines(&output),
+        vec![PathBuf::from("./Other/120.mp4")]
+    );
+    let summary = stderr(&output);
+    assert!(
+        summary.contains("ff: cloud directories skipped: 2 "),
+        "{summary}"
+    );
+    assert_eq!(output.status.code(), Some(0), "{summary}");
+}
