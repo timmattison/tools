@@ -768,6 +768,20 @@ async fn a_failed_speed_change_keeps_the_fields_and_a_later_one_works() {
         page.contains(&speed_row("0m 10.0s to 0m 20.0s", "2")),
         "{page}"
     );
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn a_remove_after_a_failed_speed_change_removes_the_banner() {
+    let mut window = open_recording().await;
+    window.apply_speed("10", "20", "2");
+    let remove = window.remove_button();
+    window.apply_speed("10", "5", "2");
+    assert!(window.html().contains("role=\"alert\""), "{}", window.html());
+    window.click(remove);
+    let page = window.html();
+    assert!(!page.contains(" at 2\u{d7}"), "{page}");
+    assert!(!page.contains("role=\"alert\""), "{page}");
 }
 
 #[test]
