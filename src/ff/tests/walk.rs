@@ -124,3 +124,54 @@ fn the_walk_matches_the_name_of_a_root_that_is_a_directory() {
     assert_eq!(report.matches, 2);
     assert!(report.is_complete(), "{report:?}");
 }
+
+#[test]
+fn a_root_with_no_name_never_matches() {
+    let tree = Tree::new("walk-root-no-name");
+    tree.dir("sub");
+    tree.file("sub/120.mp4");
+    let root = tree.root().join("sub/..");
+
+    let found = Found::default();
+    let report = walk(
+        &RealFs,
+        &[WalkRoot::new(&root)],
+        Options::default(),
+        &glob("*"),
+        found.sink(),
+    );
+
+    let paths = found.sorted();
+    assert!(!paths.contains(&root), "{paths:?}");
+    assert!(paths.contains(&tree.root().join("sub/../sub")), "{paths:?}");
+    assert!(report.is_complete(), "{report:?}");
+}
+
+#[test]
+fn a_root_with_match_root_off_is_not_matched() {
+    let tree = Tree::new("walk-root-off");
+    let directory = tree.dir("data/120.mp4");
+    let inner = tree.file("data/120.mp4/inner/120.mp4");
+    let file = tree.file("file/120.mp4");
+
+    let found = Found::default();
+    let report = walk(
+        &RealFs,
+        &[
+            WalkRoot {
+                match_root: false,
+                ..WalkRoot::new(&directory)
+            },
+            WalkRoot {
+                match_root: false,
+                ..WalkRoot::new(&file)
+            },
+        ],
+        Options::default(),
+        &glob("120.mp4"),
+        found.sink(),
+    );
+
+    assert_eq!(found.sorted(), vec![inner]);
+    assert!(report.is_complete(), "{report:?}");
+}

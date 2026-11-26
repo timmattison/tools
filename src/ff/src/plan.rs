@@ -192,6 +192,7 @@ pub fn plan_machine(system_root: &Path, mounts: &[Mount], firmlinks: &Firmlinks)
             WalkRoot {
                 path: mount.mount_point.clone(),
                 canonical: mount.mount_point.clone(),
+                match_root: false,
                 prune,
                 hide,
                 stay_on_device: true,
@@ -282,6 +283,7 @@ pub fn named_root(
     WalkRoot {
         path: path.to_path_buf(),
         canonical: canonical.to_path_buf(),
+        match_root: true,
         prune,
         hide: BTreeSet::new(),
         stay_on_device: true,

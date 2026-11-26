@@ -6294,7 +6294,8 @@ ff -0 '*.log' /var/log | xargs -0 ls -l
 
 `ff` prints each match when it finds it. It does not hold the results to the
 end. It does not follow a symbolic link below a path, but it follows a path
-that you name.
+that you name. It matches the name of each path that you name too, as `find`
+does.
 
 ### The summary and the exit status
 

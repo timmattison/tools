@@ -30,6 +30,12 @@ pub struct WalkRoot {
     /// user wrote it, for example `.`, does not show the `Library` above it.
     /// [`WalkRoot::new`] sets it to `path`.
     pub canonical: PathBuf,
+    /// When true, the walk matches the name of `path` itself, as `find`
+    /// matches each path that a user names. [`WalkRoot::new`] sets it to
+    /// true. A root of the plan of the whole machine sets it to false,
+    /// because the walk of the volume above it reads its mount point as an
+    /// entry, and matches it there.
+    pub match_root: bool,
     /// When true, the walk does not enter a directory on a device that is not
     /// the device of `path`.
     pub stay_on_device: bool,
@@ -42,6 +48,7 @@ impl WalkRoot {
         let path = path.into();
         Self {
             canonical: path.clone(),
+            match_root: true,
             path,
             prune: BTreeSet::new(),
             hide: BTreeSet::new(),
@@ -149,7 +156,8 @@ const LIBRARY: &str = "Library";
 /// Walks each root in parallel, and gives each matching path to `sink` when
 /// the walk finds it.
 ///
-/// The walk does not follow a symbolic link below a root. It does an
+/// The walk matches the name of each root with `match_root` set, as `find`
+/// does. It does not follow a symbolic link below a root. It does an
 /// interrupted call again in place. If `sink` returns an error, the walk stops
 /// and puts the error in [`Report::output_error`].
 pub fn walk<F, S>(
@@ -215,7 +223,13 @@ where
         let dir = match self.retry(|| self.fs.open_dir(&root.path, Link::Follow)) {
             Ok(dir) => dir,
             Err(error) if error.kind() == io::ErrorKind::NotADirectory => {
-                self.match_file_root(&root.path, error);
+                // A component above the last one can give `ENOTDIR` too,
+                // thus the root must exist.
+                if std::fs::metadata(&root.path).is_err() {
+                    self.incomplete(root.path.clone(), error);
+                } else {
+                    self.match_root(root);
+                }
                 return;
             }
             Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
@@ -227,6 +241,9 @@ where
                 return;
             }
         };
+        if !self.match_root(root) {
+            return;
+        }
         let device = if root.stay_on_device {
             match self.retry(|| self.fs.device(&dir)) {
                 Ok(device) => Some(device),
@@ -338,21 +355,26 @@ where
         }
     }
 
-    /// Matches a root that is not a directory by its name, as `find` does.
-    /// `error` is the `ENOTDIR` of the open. A component above the last one
-    /// can give that error too, thus the root must exist.
-    fn match_file_root(&self, path: &Path, error: io::Error) {
-        if std::fs::metadata(path).is_err() {
-            self.incomplete(path.to_path_buf(), error);
-            return;
+    /// Gives `root.path` to the sink when `root.match_root` is true and the
+    /// name of `root.path` matches. A path with no name, for example `/` or
+    /// `..`, never matches. Tells if the walk continues: false after an error
+    /// of the sink.
+    fn match_root(&self, root: &WalkRoot) -> bool {
+        if !root.match_root {
+            return true;
         }
-        let Some(name) = path.file_name() else {
-            return;
+        let Some(name) = root.path.file_name() else {
+            return true;
         };
-        if self.matcher.is_match(name) {
-            self.matches.fetch_add(1, Ordering::Relaxed);
-            if let Err(error) = (self.sink)(path) {
+        if !self.matcher.is_match(name) {
+            return true;
+        }
+        self.matches.fetch_add(1, Ordering::Relaxed);
+        match (self.sink)(&root.path) {
+            Ok(()) => true,
+            Err(error) => {
                 self.stop_on_output_error(error);
+                false
             }
         }
     }

@@ -74,6 +74,7 @@ fn the_plan_walks_the_data_volume_once_and_covers_each_directory_without_a_firml
     );
     assert!(plan.roots.iter().all(|root| root.stay_on_device));
     assert!(plan.roots.iter().all(|root| root.canonical == root.path));
+    assert!(plan.roots.iter().all(|root| !root.match_root));
 
     let system = &plan.roots[0];
     assert_eq!(
@@ -278,6 +279,42 @@ fn a_walk_of_the_plan_prints_a_firmlinked_directory_once() {
     assert!(report.is_complete(), "{report:?}");
 }
 
+/// The walk of the volume above a mount point reads it as an entry, and
+/// matches it there. The root of the mount point does not match it again.
+#[test]
+fn a_walk_of_the_plan_prints_each_mount_point_once() {
+    let tree = Tree::new("plan-mount-name");
+    let system = tree.root();
+    tree.file("Users/me/120.mp4");
+    tree.file("System/Library/Caches/120.mp4");
+    tree.file("System/Volumes/Data/mnt/120.mp4");
+    tree.file("System/Volumes/Data/sw/120.mp4");
+    tree.file("System/Volumes/Data/MobileSoftwareUpdate/120.mp4");
+    tree.file("System/Volumes/Data/.PreviousSystemInformation/120.mp4");
+    tree.file("System/Volumes/Data/System/Library/NoFirmlink/120.mp4");
+    tree.file("System/Volumes/Data/Users/me/120.mp4");
+    tree.file("System/Volumes/Data/System/Library/Caches/120.mp4");
+    let table = [
+        Mount::new(system, "apfs"),
+        Mount::new(system.join("System/Volumes/Data"), "apfs"),
+    ];
+    let firmlinks =
+        Firmlinks::parse("/Users\tUsers\n/System/Library/Caches\tSystem/Library/Caches\n");
+    let plan = plan_machine(system, &table, &firmlinks);
+
+    let found = Found::default();
+    let report = walk(
+        &RealFs,
+        &plan.roots,
+        Options::default(),
+        &Matcher::regex("^Data$", Case::Sensitive).expect("a valid regex"),
+        found.sink(),
+    );
+
+    assert_eq!(found.sorted(), vec![system.join("System/Volumes/Data")]);
+    assert!(report.is_complete(), "{report:?}");
+}
+
 #[test]
 fn a_named_root_crosses_each_mount_point_without_one_file_system() {
     let table = [Mount::new("/data/sub/mnt", "apfs")];
@@ -307,6 +344,7 @@ fn a_named_root_with_one_file_system_stays_on_its_device_and_prunes_each_mount_p
     assert_eq!(root.path, PathBuf::from("./sub"));
     assert_eq!(root.canonical, PathBuf::from("/data/sub"));
     assert!(root.stay_on_device);
+    assert!(root.match_root);
     assert_eq!(root.prune, paths(&["./sub/deep/er", "./sub/mnt"]));
     assert!(root.hide.is_empty());
 }
