@@ -238,7 +238,7 @@ fn Timeline(loaded: ReadSignal<Option<Document>>) -> Element {
                 div { class: "placeholder",
                     "Timeline editor \u{2014} coming in #150"
                     br {}
-                    {source_summary(open)}
+                    "{summary(open)}"
                 }
             } else {
                 div { class: "placeholder", "No recording loaded" }
@@ -247,14 +247,13 @@ fn Timeline(loaded: ReadSignal<Option<Document>>) -> Element {
     }
 }
 
-/// The event count and the duration of the source recording. This is a
-/// placeholder until the timeline reads the project.
-fn source_summary(open: &Document) -> String {
-    let source = &open.editor.project().clips[0].source;
+/// The event count and the duration of the project of the document.
+fn summary(open: &Document) -> String {
+    let project = open.editor.project();
     format!(
         "{} events | {}",
-        source.events.len(),
-        format_duration(source.duration)
+        project.event_count(),
+        format_duration(project.duration())
     )
 }
 
