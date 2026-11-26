@@ -3,8 +3,10 @@
 use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
 
-use crate::fs::FileSystem;
+use crate::fs::{EntryKind, FileSystem, Link};
 use crate::pattern::Matcher;
 
 /// One tree to walk.
@@ -98,15 +100,204 @@ pub fn is_cloud_directory(_parent: &Path, _name: &std::ffi::OsStr) -> bool {
 /// interrupted call again in place. If `sink` returns an error, the walk stops
 /// and puts the error in [`Report::output_error`].
 pub fn walk<F, S>(
-    _fs: &F,
-    _roots: &[WalkRoot],
-    _options: Options,
-    _matcher: &Matcher,
-    _sink: S,
+    fs: &F,
+    roots: &[WalkRoot],
+    options: Options,
+    matcher: &Matcher,
+    sink: S,
 ) -> Report
 where
     F: FileSystem,
     S: Fn(&Path) -> io::Result<()> + Sync,
 {
-    Report::default()
+    let walker = Walker {
+        fs,
+        options,
+        matcher,
+        sink,
+        stop: AtomicBool::new(false),
+        entries: AtomicU64::new(0),
+        matches: AtomicU64::new(0),
+        found: Mutex::new(Findings::default()),
+    };
+    rayon::scope(|scope| {
+        for root in roots {
+            let walker = &walker;
+            scope.spawn(move |scope| walker.walk_root(scope, root));
+        }
+    });
+    walker.into_report()
+}
+
+/// What the walk keeps under one lock: each problem that it found.
+#[derive(Default)]
+struct Findings {
+    incomplete: Vec<Incomplete>,
+    denied: Vec<PathBuf>,
+    cloud_skipped: Vec<PathBuf>,
+    output_error: Option<io::Error>,
+}
+
+/// The state that each task of one walk shares.
+struct Walker<'a, F, S> {
+    fs: &'a F,
+    options: Options,
+    matcher: &'a Matcher,
+    sink: S,
+    stop: AtomicBool,
+    entries: AtomicU64,
+    matches: AtomicU64,
+    found: Mutex<Findings>,
+}
+
+impl<'a, F, S> Walker<'a, F, S>
+where
+    F: FileSystem,
+    S: Fn(&Path) -> io::Result<()> + Sync,
+{
+    /// Opens a root, and reads it.
+    fn walk_root<'s>(&'s self, scope: &rayon::Scope<'s>, root: &'s WalkRoot) {
+        let dir = match self.fs.open_dir(&root.path, Link::Follow) {
+            Ok(dir) => dir,
+            Err(error) => {
+                self.incomplete(root.path.clone(), error);
+                return;
+            }
+        };
+        let device = if root.stay_on_device {
+            match self.fs.device(&dir) {
+                Ok(device) => Some(device),
+                Err(error) => {
+                    self.incomplete(root.path.clone(), error);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        self.read_dir(scope, root, device, root.path.clone(), dir);
+    }
+
+    /// Opens a directory below a root, and reads it.
+    fn enter<'s>(
+        &'s self,
+        scope: &rayon::Scope<'s>,
+        root: &'s WalkRoot,
+        device: Option<u64>,
+        path: PathBuf,
+    ) {
+        if self.stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let dir = match self.fs.open_dir(&path, Link::NoFollow) {
+            Ok(dir) => dir,
+            Err(error) => {
+                self.incomplete(path, error);
+                return;
+            }
+        };
+        if let Some(device) = device {
+            match self.fs.device(&dir) {
+                Ok(found) if found == device => {}
+                Ok(_) => return,
+                Err(error) => {
+                    self.incomplete(path, error);
+                    return;
+                }
+            }
+        }
+        self.read_dir(scope, root, device, path, dir);
+    }
+
+    /// Reads each entry of `dir`. It gives each match to the sink, and it
+    /// starts one task for each directory to enter.
+    fn read_dir<'s>(
+        &'s self,
+        scope: &rayon::Scope<'s>,
+        root: &'s WalkRoot,
+        device: Option<u64>,
+        path: PathBuf,
+        mut dir: F::Dir,
+    ) {
+        loop {
+            if self.stop.load(Ordering::Relaxed) {
+                return;
+            }
+            let entry = match self.fs.read_entry(&mut dir) {
+                Ok(Some(entry)) => entry,
+                Ok(None) => return,
+                Err(error) => {
+                    self.incomplete(path, error);
+                    return;
+                }
+            };
+            self.entries.fetch_add(1, Ordering::Relaxed);
+            let child = path.join(&entry.name);
+            if self.matcher.is_match(&entry.name) {
+                self.matches.fetch_add(1, Ordering::Relaxed);
+                if let Err(error) = (self.sink)(&child) {
+                    self.stop_on_output_error(error);
+                    return;
+                }
+            }
+            let is_directory = match entry.kind {
+                EntryKind::Directory => true,
+                EntryKind::Other => false,
+                EntryKind::Unknown => match self.fs.is_directory(&dir, &entry.name) {
+                    Ok(is_directory) => is_directory,
+                    Err(error) => {
+                        self.incomplete(child, error);
+                        continue;
+                    }
+                },
+            };
+            if !is_directory || root.prune.contains(&child) {
+                continue;
+            }
+            scope.spawn(move |scope| self.enter(scope, root, device, child));
+        }
+    }
+
+    fn incomplete(&self, path: PathBuf, error: io::Error) {
+        self.findings().incomplete.push(Incomplete { path, error });
+    }
+
+    fn stop_on_output_error(&self, error: io::Error) {
+        self.stop.store(true, Ordering::Relaxed);
+        let mut findings = self.findings();
+        if findings.output_error.is_none() {
+            findings.output_error = Some(error);
+        }
+    }
+
+    fn findings(&self) -> std::sync::MutexGuard<'_, Findings> {
+        // A task that panicked while it held the lock left complete lists, so
+        // the lists stay usable.
+        self.found
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn into_report(self) -> Report {
+        let options = self.options;
+        let _ = options;
+        let mut findings = self
+            .found
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        findings
+            .incomplete
+            .sort_by(|left, right| left.path.cmp(&right.path));
+        findings.denied.sort();
+        findings.cloud_skipped.sort();
+        Report {
+            entries: self.entries.into_inner(),
+            matches: self.matches.into_inner(),
+            retried_interruptions: 0,
+            incomplete: findings.incomplete,
+            denied: findings.denied,
+            cloud_skipped: findings.cloud_skipped,
+            output_error: findings.output_error,
+        }
+    }
 }
