@@ -28,6 +28,21 @@ const IP_ADDRESS: &str = concat!(
     r"|\b(?:[0-9A-Fa-f]{1,4}:){1,6}(?::[0-9A-Fa-f]{1,4}){1,6}\b",
 );
 
+/// An AWS key in one of two forms.
+///
+/// It matches an access key ID: a known four-letter prefix and 16 capital
+/// letters or digits. It matches the value of a secret access key or a session
+/// token that stands next to its key name. The key name, the quotes, and the
+/// separator stay visible, because the group `redact` holds only the value.
+/// The key name can have an underscore or not, and any case.
+///
+/// It does not match a secret value that has no key name next to it, for
+/// example a bare 40-character string or a git SHA.
+const AWS_KEY: &str = concat!(
+    r"\b(?:AKIA|ASIA|ABIA|ACCA|AGPA|AIDA|AIPA|ANPA|ANVA|APKA|AROA|ASCA)[A-Z0-9]{16}\b",
+    r#"|(?i:secret_?access_?key|session_?token)["']?\s*[:=]\s*["']?(?P<redact>[A-Za-z0-9/+=]{16,})"#,
+);
+
 /// A pattern that ships with the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -72,7 +87,8 @@ impl Preset {
         match self {
             Preset::Email => EMAIL,
             Preset::IpAddress => IP_ADDRESS,
-            Preset::AwsKey | Preset::Token | Preset::Hostname => NOTHING,
+            Preset::AwsKey => AWS_KEY,
+            Preset::Token | Preset::Hostname => NOTHING,
         }
     }
 }
