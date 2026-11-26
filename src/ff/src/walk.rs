@@ -1,6 +1,7 @@
 //! The parallel walk of one or more directory trees.
 
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -99,9 +100,17 @@ fn vanished(error: &io::Error) -> bool {
 /// `~/Library/Mobile Documents`. Such a directory answers `readdir` over the
 /// network.
 #[must_use]
-pub fn is_cloud_directory(_parent: &Path, _name: &std::ffi::OsStr) -> bool {
-    false
+pub fn is_cloud_directory(parent: &Path, name: &OsStr) -> bool {
+    parent.ends_with(CLOUD_STORAGE)
+        || (name == MOBILE_DOCUMENTS && parent.file_name() == Some(OsStr::new(LIBRARY)))
 }
+
+/// The directory of a home that holds the File Provider directories.
+const CLOUD_STORAGE: &str = "Library/CloudStorage";
+/// The directory of a home that holds iCloud Drive.
+const MOBILE_DOCUMENTS: &str = "Mobile Documents";
+/// The directory of a home that holds [`MOBILE_DOCUMENTS`].
+const LIBRARY: &str = "Library";
 
 /// Walks each root in parallel, and gives each matching path to `sink` when
 /// the walk finds it.
@@ -278,6 +287,10 @@ where
             if !is_directory || root.prune.contains(&child) {
                 continue;
             }
+            if !self.options.include_cloud && is_cloud_directory(&path, &entry.name) {
+                self.findings().cloud_skipped.push(child);
+                continue;
+            }
             scope.spawn(move |scope| self.enter(scope, root, device, child));
         }
     }
@@ -326,8 +339,6 @@ where
     }
 
     fn into_report(self) -> Report {
-        let options = self.options;
-        let _ = options;
         let mut findings = self
             .found
             .into_inner()
