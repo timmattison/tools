@@ -815,7 +815,7 @@ fn controllers_to_offer(
             Ok(Vec::new())
         }
         Err(e) => {
-            writeln!(out, "Could not query 1Password: {e}\n")?;
+            writeln!(out, "Could not query 1Password: {e:#}\n")?;
             Ok(Vec::new())
         }
     }
