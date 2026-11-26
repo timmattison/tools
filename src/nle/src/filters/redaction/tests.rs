@@ -267,3 +267,46 @@ fn a_mask_skips_the_escape_codes_inside_a_match() {
         vec![format!("{}\x1b[1m{}", "\u{2588}".repeat(3), "\u{2588}".repeat(4))]
     );
 }
+
+fn with_input(find: &str, replacement: &str, events: Vec<Event>) -> Vec<Event> {
+    let redaction = Redaction::new(
+        find_text(find),
+        Replacement::Text(replacement.to_string()),
+        true,
+    )
+    .unwrap();
+    run(events, &redaction)
+}
+
+#[test]
+fn input_events_are_redacted_when_the_option_says_so() {
+    let got = with_input(
+        "hunter2",
+        "X",
+        vec![out(1.0, "hunter2"), inp(2.0, "hunter2\r")],
+    );
+    assert_eq!(datas(&got), vec!["X", "X\r"]);
+    assert_eq!(got[1].event_type, EventType::Input);
+}
+
+#[test]
+fn input_events_stay_when_the_option_is_off() {
+    let got = run(vec![inp(2.0, "hunter2\r")], &text("hunter2", "X"));
+    assert_eq!(datas(&got), vec!["hunter2\r"]);
+}
+
+#[test]
+fn output_and_input_are_separate_streams() {
+    let got = with_input("hunter2", "X", vec![out(1.0, "hun"), inp(1.1, "ter2")]);
+    assert_eq!(datas(&got), vec!["hun", "ter2"]);
+}
+
+#[test]
+fn a_match_across_input_events_is_replaced() {
+    let got = with_input(
+        "hunter2",
+        "X",
+        vec![inp(1.0, "hun"), out(1.05, "echo"), inp(1.1, "ter2")],
+    );
+    assert_eq!(datas(&got), vec!["X", "echo", ""]);
+}
