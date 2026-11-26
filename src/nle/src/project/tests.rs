@@ -287,3 +287,36 @@ fn a_clip_passes_multi_byte_event_data_through_unchanged() {
     let clip = clip_of(&source, 0.0, 2.0, 0.5);
     assert_eq!(times_and_data(&clip), [(1.5, "日本語🎉".to_string())]);
 }
+
+/// Track 1 holds a clip of e1..e2 at 0 s (ends at 2 s). Track 2 holds a clip
+/// of e3..e5 at 4 s (ends at 6 s).
+fn two_clip_project() -> EditProject {
+    let source = source_with_events();
+    let mut first = clip_of(&source, 1.0, 3.0, 0.0);
+    first.id = ClipId(1);
+    let mut second = clip_of(&source, 3.0, 5.0, 4.0);
+    second.id = ClipId(2);
+    EditProject {
+        clips: vec![first, second],
+        timeline: vec![track(1, &[1]), track(2, &[2])],
+        filters: Vec::new(),
+    }
+}
+
+#[test]
+fn duration_is_the_end_of_the_last_clip_on_the_timeline() {
+    assert_eq!(two_clip_project().duration(), 6.0);
+}
+
+#[test]
+fn event_count_adds_the_events_of_each_clip() {
+    // The first clip holds e1 and e2. The second holds e3, e4 and e5.
+    assert_eq!(two_clip_project().event_count(), 5);
+}
+
+#[test]
+fn an_empty_project_has_no_duration_and_no_events() {
+    let project = EditProject::default();
+    assert_eq!(project.duration(), 0.0);
+    assert_eq!(project.event_count(), 0);
+}

@@ -60,6 +60,20 @@ impl EditProject {
         )
     }
 
+    /// The end of the timeline in seconds: the largest
+    /// `timeline_offset + (out_point - in_point)` over all clips, or 0.0 when
+    /// the project has no clip.
+    #[must_use]
+    pub fn duration(&self) -> f64 {
+        0.0
+    }
+
+    /// The number of events that the clips of the project hold.
+    #[must_use]
+    pub fn event_count(&self) -> usize {
+        0
+    }
+
     /// Check the rules of a project.
     ///
     /// The rules, in order: each clip id and each track id is unique; each clip
