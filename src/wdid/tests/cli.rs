@@ -403,7 +403,7 @@ fn an_empty_history_stops_the_run() {
 }
 
 #[test]
-fn a_repo_that_is_not_a_workspace_stops_the_run_and_names_the_flag() {
+fn a_repo_that_is_not_a_workspace_stops_the_run_and_says_why() {
     let setup = Setup::new(&Atuin::Rows(&[row(1, "ls")]));
     let empty = tempfile::tempdir().unwrap();
     let output = setup
@@ -417,7 +417,8 @@ fn a_repo_that_is_not_a_workspace_stops_the_run_and_names_the_flag() {
     assert!(stdout(&output).is_empty());
     let message = stderr(&output);
     assert!(message.starts_with("wdid: "), "{message}");
-    assert!(message.contains("--repo"), "{message}");
+    assert!(message.contains("is not a cargo workspace"), "{message}");
+    assert!(!message.contains("--repo"), "{message}");
 }
 
 #[test]

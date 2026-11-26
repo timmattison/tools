@@ -205,7 +205,9 @@ fn a_checkout_that_misses_does_not_hide_a_later_checkout_of_the_commit() {
     std::fs::create_dir_all(checkouts.join("tools-0000000000000000").join(name)).unwrap();
     let other = TestRepo::init();
     other.commit_file("README.md", "other\n", "add a readme");
-    installed.home.add_checkout(&other, "tools-0000000000000001", name);
+    installed
+        .home
+        .add_checkout(&other, "tools-0000000000000001", name);
 
     let cwd = not_a_repository();
     let workspace = find_from(cwd.path(), &installed.home.location());
