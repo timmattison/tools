@@ -66,7 +66,7 @@ fn add_one() -> impl Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync {
     mapper(|t| t + 1.0)
 }
 
-// Group 1: the registry.
+// Tests of the registry.
 
 #[test]
 fn contains_is_false_before_and_true_after_register() {
@@ -102,7 +102,7 @@ fn run_with_an_unregistered_kind_fails_and_names_the_kind() {
     }
 }
 
-// Group 2: the region All.
+// Tests of the region All.
 
 #[test]
 fn one_filter_on_all_changes_every_event() {
@@ -133,7 +133,7 @@ fn two_filters_chain_in_order() {
     assert_eq!(times(&double_then_add), vec![3.0, 5.0]);
 }
 
-// Group 3 and 4: a range.
+// Tests of a range.
 
 use std::sync::{Arc as TestArc, Mutex};
 
@@ -208,7 +208,7 @@ fn an_empty_region_still_calls_the_filter_with_an_empty_slice() {
     assert_eq!(times(&out), vec![0.5, 3.5]);
 }
 
-// Group 5: the checks on the answer of a filter.
+// Tests of the checks on the answer of a filter.
 
 fn registry_answering(time: f64) -> FilterRegistry {
     let mut registry = FilterRegistry::new();
@@ -261,7 +261,7 @@ fn a_relative_time_below_zero_is_fine_when_the_timeline_time_is_not() {
     assert_eq!(times(&out), vec![0.5]);
 }
 
-// Group 6: the order of the result.
+// Tests of the order of the result.
 
 fn data_event(time: f64, data: &str) -> Event {
     Event {
@@ -303,7 +303,7 @@ fn events_at_one_time_keep_the_order_the_filter_gave() {
     assert_eq!(data, vec!["first", "second", "third", "late"]);
 }
 
-// Group 7: render of one clip.
+// Tests of the render of one clip.
 
 use std::collections::BTreeMap;
 
@@ -346,7 +346,7 @@ fn render_of_a_whole_recording_with_no_filter_equals_its_source() {
     assert_eq!(rendered, recording);
 }
 
-// Group 8: render of two clips on two tracks.
+// Tests of the render of two clips on two tracks.
 
 fn clip_of(id: u64, source: Recording, offset: f64) -> Clip {
     let duration = source.duration;
@@ -423,7 +423,7 @@ fn render_takes_the_header_from_the_clip_that_starts_first() {
     assert_eq!(rendered.duration, 3.0);
 }
 
-// Group 9: the duration through filters.
+// Tests of the duration through filters.
 
 fn one_clip_project(filters: Vec<AppliedFilter>) -> EditProject {
     let mut project =

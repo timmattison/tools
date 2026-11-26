@@ -2,7 +2,9 @@
 //!
 //! This module holds the window settings, the root component, and the four
 //! regions of the window: the menu bar, the preview pane, the timeline, and
-//! the properties panel. The open recording lives in the state of `App`.
+//! the properties panel. The open document lives in the state of `App`: the
+//! `Editor` of its project, and the metadata of the recording file that it
+//! came from.
 
 use std::future::Future;
 use std::path::PathBuf;

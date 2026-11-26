@@ -6221,17 +6221,34 @@ cargo tauri build --no-bundle   # the binary is target/release/msgs
 
 ## nle (non-linear editor)
 
-A desktop application for the terminal recordings that `beta` writes. This
-version is the scaffold: it opens a `.json` or `.json.gz` recording and shows
-its metadata. The timeline (issue #150) and the preview pane (issue #151) are
-placeholders.
+A desktop application for the terminal recordings that `beta` writes. It opens
+a `.json` or `.json.gz` recording, makes an edit project of it, and shows its
+metadata. The timeline (issue #150) and the preview pane (issue #151) are
+placeholders, thus the window cannot edit yet.
 
 The application is one Rust crate on Dioxus 0.7, with the desktop (webview)
-renderer. Its components call the Rust code directly, and the open recording is
-Dioxus state, thus no IPC layer and no frontend package exist. The crate also
-has functions that save a recording, list the recordings in a directory, and
-export a recording through the `beta` CLI as a video or a web player. The
-window does not call them yet.
+renderer. Its components call the Rust code directly, and the open project is
+Dioxus state, thus no IPC layer and no frontend package exist.
+
+The editing engine of the crate has four parts:
+
+- **Edit project** (`EditProject`): clips of source recordings, placed on the
+  tracks of the timeline, and the filters that apply to the result. An edit
+  never changes a source recording. A project saves to JSON, plain or gzip, and
+  loads back.
+- **Filter pipeline** (`FilterRegistry`): a filter is a pure function
+  `Fn(&[Event], &FilterOptions) -> Vec<Event>`, registered by kind. The filters
+  of a project run in order, each on the whole timeline or on a range of it.
+  No filter ships yet. Issues #152 to #168 add them.
+- **Render**: the registry flattens a project into one `beta` recording.
+- **Edits and history** (`Editor`): each change of a project is an `Edit`. The
+  editor refuses an edit that breaks a rule of the project, and it keeps an
+  undo and redo history.
+
+The crate also has functions that save the rendered recording
+(`Editor::save_recording`), list the recordings in a directory, and export a
+recording through the `beta` CLI as a video or a web player. The window does
+not call them yet.
 
 The export functions run `beta` with the PATH of the app, then
 `$CARGO_HOME/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.

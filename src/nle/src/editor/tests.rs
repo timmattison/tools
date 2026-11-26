@@ -67,7 +67,7 @@ fn editor() -> Editor {
     Editor::new(project(), registry()).unwrap()
 }
 
-// Group 1: new.
+// Tests of `Editor::new`.
 
 #[test]
 fn new_refuses_an_invalid_project() {
@@ -102,7 +102,7 @@ fn assert_invalid_project(result: Result<(), NleError>) {
     );
 }
 
-// Group 2: track edits.
+// Tests of track edits.
 
 #[test]
 fn add_track_appends_an_empty_track() {
@@ -147,7 +147,7 @@ fn remove_track_with_a_missing_id_fails() {
     assert_edit_error(editor.apply(Edit::RemoveTrack { id: TrackId(50) }));
 }
 
-// Group 3: clip edits.
+// Tests of clip edits.
 
 fn clip_ids_of(project: &EditProject, track: u64) -> Vec<ClipId> {
     project
@@ -315,7 +315,7 @@ fn move_clip_with_a_missing_clip_or_track_fails() {
     }));
 }
 
-// Group 4: filter edits.
+// Tests of filter edits.
 
 fn filter_names(project: &EditProject) -> Vec<&str> {
     project.filters.iter().map(|f| f.kind.as_str()).collect()
@@ -407,7 +407,7 @@ fn add_filter_with_a_backwards_range_fails_as_an_invalid_project() {
     }));
 }
 
-// Group 6: undo and redo.
+// Tests of undo and redo.
 
 fn add_track(editor: &mut Editor, id: u64) {
     editor.apply(Edit::AddTrack { id: TrackId(id) }).unwrap();
@@ -495,7 +495,7 @@ fn a_new_edit_after_an_undo_clears_the_redo_history() {
     assert!(!editor.redo().unwrap());
 }
 
-// Group 5: a refused edit changes nothing.
+// A refused edit changes nothing.
 
 #[test]
 fn a_refused_edit_changes_neither_the_project_nor_the_history() {
@@ -523,7 +523,7 @@ fn a_refused_edit_changes_neither_the_project_nor_the_history() {
     );
 }
 
-// Group 8: render.
+// Tests of `Editor::render`.
 
 #[test]
 fn render_equals_the_registry_render_of_an_edited_project() {
@@ -549,7 +549,7 @@ fn render_equals_the_registry_render_of_an_edited_project() {
     assert!(rendered.events.iter().any(|e| e.time == 3.0));
 }
 
-// Group 7: editing never changes a source.
+// An edit never changes a source.
 
 #[test]
 fn edits_renders_and_undo_never_change_the_source() {
@@ -594,7 +594,7 @@ fn edits_renders_and_undo_never_change_the_source() {
     assert_eq!(editor.project().clips[0].in_point, secs(0.0));
 }
 
-// Group 9: save_recording.
+// Tests of `Editor::save_recording`.
 
 fn trimmed_editor() -> Editor {
     let mut editor = editor();
