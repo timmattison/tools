@@ -691,3 +691,43 @@ fn the_aws_preset_masks_only_the_value_of_a_secret_key() {
 fn the_aws_preset_keeps_a_git_sha() {
     assert_unchanged(Preset::AwsKey, "9c12c0325a1b2c3d4e5f60718293a4b5c6d7e8f9");
 }
+
+#[test]
+fn the_token_preset_masks_known_token_formats() {
+    let alnum36 = "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0dE3fGh";
+    assert_eq!(alnum36.len(), 36);
+    let tokens = [
+        format!("ghp_{alnum36}"),
+        "github_pat_11ABCDEFG0abcdefghij12".to_string(),
+        "xoxb-1234567890-abcdefghij".to_string(),
+        "sk-ant-api03-abcdefghij0123456789".to_string(),
+        "sk_live_abcdefghij012345".to_string(),
+        format!("AIza{}", "abcdefghij0123456789ABCDEFGHIJ-_012"),
+        format!("npm_{alnum36}"),
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abc123_-XYZ".to_string(),
+    ];
+    for token in &tokens {
+        assert_masked(Preset::Token, token);
+    }
+}
+
+#[test]
+fn the_token_preset_masks_only_the_token_after_bearer() {
+    assert_value_masked(
+        Preset::Token,
+        "Authorization: Bearer ",
+        "abc.def-ghi",
+        "",
+    );
+}
+
+#[test]
+fn the_token_preset_keeps_text_that_is_not_a_token() {
+    for text in [
+        "risk-assessment-for-the-new-project-x",
+        "desk-top",
+        "ghp_short",
+    ] {
+        assert_unchanged(Preset::Token, text);
+    }
+}
