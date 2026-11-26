@@ -9,6 +9,7 @@
 //! each firmlinked directory through its firmlink, and walks the rest of the
 //! data volume directly.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::walk::WalkRoot;
@@ -55,8 +56,22 @@ impl Firmlinks {
     /// plan does not know costs a second walk of its directory, and never a
     /// lost directory.
     #[must_use]
-    pub fn parse(_text: &str) -> Self {
-        Self::default()
+    pub fn parse(text: &str) -> Self {
+        Self(
+            text.lines()
+                .filter_map(|line| {
+                    let (system_path, data_path) = line.split_once('\t')?;
+                    let (system_path, data_path) = (system_path.trim(), data_path.trim());
+                    if system_path.is_empty() || data_path.is_empty() {
+                        return None;
+                    }
+                    Some(Firmlink {
+                        system_path: PathBuf::from(system_path),
+                        data_path: PathBuf::from(data_path),
+                    })
+                })
+                .collect(),
+        )
     }
 
     /// Each firmlink, in the order of the file.
@@ -110,6 +125,117 @@ pub struct MachinePlan {
 /// mount point below it. The data volume prunes each firmlinked directory too,
 /// because the walk of `system_root` reaches it through its firmlink.
 #[must_use]
-pub fn plan_machine(_system_root: &Path, _mounts: &[Mount], _firmlinks: &Firmlinks) -> MachinePlan {
-    MachinePlan::default()
+pub fn plan_machine(system_root: &Path, mounts: &[Mount], firmlinks: &Firmlinks) -> MachinePlan {
+    let mut unique: Vec<&Mount> = Vec::new();
+    for mount in mounts {
+        if !unique
+            .iter()
+            .any(|seen| seen.mount_point == mount.mount_point)
+        {
+            unique.push(mount);
+        }
+    }
+    let direct: Vec<(&Mount, Option<SkipReason>)> = unique
+        .iter()
+        .map(|mount| (*mount, direct_skip_reason(system_root, mount)))
+        .collect();
+
+    let mut skipped = Vec::new();
+    let mut walked = Vec::new();
+    for (mount, reason) in &direct {
+        let reason = reason.clone().or_else(|| {
+            direct
+                .iter()
+                .find(|(outer, outer_reason)| {
+                    outer_reason.is_some() && strictly_below(&mount.mount_point, &outer.mount_point)
+                })
+                .map(|(outer, _)| SkipReason::InsideSkipped(outer.mount_point.clone()))
+        });
+        match reason {
+            Some(reason) => skipped.push(SkippedMount {
+                mount_point: mount.mount_point.clone(),
+                reason,
+            }),
+            None => walked.push(*mount),
+        }
+    }
+
+    // A firmlinked directory is reached through its firmlink only when the
+    // walk of the system root runs. Without that walk, the data volume must
+    // cover it.
+    let system_walked = walked.iter().any(|mount| mount.mount_point == system_root);
+    let data_volume = system_root.join(DATA_VOLUME);
+    let mut roots: Vec<WalkRoot> = walked
+        .iter()
+        .map(|mount| {
+            let mut prune: BTreeSet<PathBuf> = unique
+                .iter()
+                .filter(|other| strictly_below(&other.mount_point, &mount.mount_point))
+                .map(|other| other.mount_point.clone())
+                .collect();
+            if system_walked && mount.mount_point == data_volume {
+                prune.extend(firmlinks.entries().iter().map(|firmlink| {
+                    let relative = firmlink
+                        .data_path
+                        .strip_prefix("/")
+                        .unwrap_or(&firmlink.data_path);
+                    data_volume.join(relative)
+                }));
+            }
+            WalkRoot {
+                path: mount.mount_point.clone(),
+                prune,
+                stay_on_device: true,
+            }
+        })
+        .collect();
+    roots.sort_by(|left, right| left.path.cmp(&right.path));
+    skipped.sort_by(|left, right| left.mount_point.cmp(&right.mount_point));
+    MachinePlan { roots, skipped }
+}
+
+/// The data volume of macOS, below the system root.
+const DATA_VOLUME: &str = "System/Volumes/Data";
+
+/// The directory of the read-only simulator images, below the system root.
+const SIMULATOR_IMAGES: &str = "Library/Developer/CoreSimulator";
+
+/// The volumes of the system, below the system root. They hold no user files.
+const SYSTEM_VOLUMES: [&str; 6] = [
+    "System/Volumes/VM",
+    "System/Volumes/Preboot",
+    "System/Volumes/Update",
+    "System/Volumes/xarts",
+    "System/Volumes/iSCPreboot",
+    "System/Volumes/Hardware",
+];
+
+/// The type of a file system of device files.
+const DEVICE_FILES_TYPE: &str = "devfs";
+
+/// The type of an automounter map.
+const AUTOMOUNTER_TYPE: &str = "autofs";
+
+/// The rule that skips `mount` by itself, if one does.
+fn direct_skip_reason(system_root: &Path, mount: &Mount) -> Option<SkipReason> {
+    let path = &mount.mount_point;
+    if mount.fs_type == DEVICE_FILES_TYPE {
+        Some(SkipReason::DeviceFiles)
+    } else if mount.fs_type == AUTOMOUNTER_TYPE {
+        Some(SkipReason::Automounter)
+    } else if path.starts_with(system_root.join(SIMULATOR_IMAGES)) {
+        Some(SkipReason::SimulatorImage)
+    } else if SYSTEM_VOLUMES
+        .iter()
+        .any(|volume| path.starts_with(system_root.join(volume)))
+    {
+        Some(SkipReason::SystemVolume)
+    } else {
+        None
+    }
+}
+
+/// Tells if `path` is below `ancestor`, and is not `ancestor`.
+fn strictly_below(path: &Path, ancestor: &Path) -> bool {
+    path != ancestor && path.starts_with(ancestor)
 }
