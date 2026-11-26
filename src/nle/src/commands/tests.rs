@@ -551,7 +551,10 @@ fn save_recording_to_refuses_a_gzip_link_to_a_json_name() {
     )
     .unwrap_err();
     assert!(matches!(err, NleError::SaveError(_)), "got {err}");
-    assert!(err.to_string().contains("must end in .json.gz"), "got {err}");
+    assert!(
+        err.to_string().contains("must end in .json.gz"),
+        "got {err}"
+    );
     assert_eq!(fs::read(&target).unwrap(), b"keep");
 }
 
