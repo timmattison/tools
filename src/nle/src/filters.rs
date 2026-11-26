@@ -8,7 +8,7 @@
 use serde::Deserialize;
 
 use crate::pipeline::{FilterRegistry, Span};
-use crate::types::{FilterKind, Seconds};
+use crate::types::{Event, FilterKind, Seconds};
 
 /// The kind of the filter that shortens the long pauses between events.
 ///
@@ -20,6 +20,13 @@ use crate::types::{FilterKind, Seconds};
 pub const PAUSE_REMOVAL: &str = "pause-removal";
 
 /// The kind of the filter that puts a pause into the timeline.
+///
+/// Options: `at` and `duration`, in seconds. `at` is relative to the start of
+/// the region. Each event at or after `at` moves later by `duration`, so a
+/// pause at the time of a key comes before that key. The end of the timeline
+/// moves later too when it is at or after `at`, also when no event moves.
+/// The normal region is `All`. In a range, the events after the range move by
+/// the shift, thus they move only when an event of the range moves.
 pub const PAUSE_INSERTION: &str = "pause-insertion";
 
 /// A registry that holds each built-in filter under its kind.
@@ -27,6 +34,7 @@ pub const PAUSE_INSERTION: &str = "pause-insertion";
 pub fn builtin() -> FilterRegistry {
     let mut registry = FilterRegistry::new();
     registry.register_typed(FilterKind::new(PAUSE_REMOVAL), remove_pauses);
+    registry.register_typed(FilterKind::new(PAUSE_INSERTION), insert_pause);
     registry
 }
 
@@ -95,6 +103,36 @@ fn remove_pauses(span: Span, options: &PauseRemoval) -> Span {
         previous = Some((old, new));
     }
     Span { events, end: None }
+}
+
+/// The options of pause insertion.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PauseInsertion {
+    at: Seconds,
+    duration: Seconds,
+}
+
+/// Put a pause of the duration at the point `at` of `span`.
+///
+/// Each event at or after the point moves later by the duration. When the
+/// filter sees the end of the timeline, and that end is at or after the
+/// point, the answer sets the end later by the duration. Else the end stays,
+/// or it moves by the shift when the filter does not see it.
+fn insert_pause(span: Span, options: &PauseInsertion) -> Span {
+    let (at, duration) = (options.at.get(), options.duration.get());
+    let later = |time: f64| if time >= at { time + duration } else { time };
+    Span {
+        events: span
+            .events
+            .into_iter()
+            .map(|event| Event {
+                time: later(event.time),
+                ..event
+            })
+            .collect(),
+        end: span.end.map(later),
+    }
 }
 
 #[cfg(test)]
