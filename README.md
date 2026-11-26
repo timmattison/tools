@@ -6233,7 +6233,9 @@ at half speed. Each later event moves by the change in the length of the
 region, also when the region holds no event, for example a silent build step.
 Each region gets a row with a **Remove** button, and different regions can have
 different speeds. The times of a new region are on the timeline after the
-speed changes above it. The panel shows the duration of the edited recording. The panel refuses a change after which the recording does not render, and it shows the reason in the banner.
+speed changes above it. The panel shows the duration of the edited recording.
+The panel refuses a change after which the recording does not render, and it
+shows the reason in the banner.
 
 The application is one Rust crate on Dioxus 0.7, with the desktop (webview)
 renderer. Its components call the Rust code directly, and the open project is

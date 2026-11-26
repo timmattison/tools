@@ -285,7 +285,7 @@ impl Editor {
 
     /// Apply `edit` like `apply`, and also refuse it when the project after
     /// the edit does not render. A project with no clip does not render, so
-    /// use `apply` for an edit that may leave the project empty.
+    /// use `apply` for an edit that can leave the project empty.
     ///
     /// A refused edit changes nothing: the project, the undo history, and the
     /// redo history stay as they were.
