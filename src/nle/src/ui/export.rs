@@ -200,9 +200,17 @@ fn parse_resolution(text: &str) -> Result<Option<Resolution>, NleError> {
     text.parse().map(Some)
 }
 
-/// The text of the progress before the first stage.
+/// The text of the progress bar for the newest stage. `None` means that no
+/// stage has been reported yet.
 pub(crate) fn progress_text(progress: Option<ExportProgress>) -> String {
-    String::new()
+    match progress {
+        None => "Export started".to_owned(),
+        Some(ExportProgress::Rendering) => "Step 1 of 2: render the edit".to_owned(),
+        Some(ExportProgress::Writing) => "Step 2 of 2: write the file".to_owned(),
+        Some(ExportProgress::Frames { done, total }) => {
+            format!("Step 2 of 2: frame {done} of {total}")
+        }
+    }
 }
 
 /// The settings of the export bar, as the user set them.
