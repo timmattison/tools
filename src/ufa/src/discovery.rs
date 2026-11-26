@@ -954,3 +954,64 @@ mod stop_on_drop_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod duplicate_tests {
+    use super::*;
+
+    /// A controller at `ip` and `port`, with the name that mDNS gives, if any.
+    fn found(ip: &str, port: u16, name: Option<&str>) -> DiscoveredController {
+        DiscoveredController {
+            ip: ip.to_string(),
+            port,
+            name: name.map(str::to_string),
+            is_verified: true,
+        }
+    }
+
+    /// The address and the port of each controller, in order.
+    fn origins(controllers: &[DiscoveredController]) -> Vec<(String, u16)> {
+        controllers
+            .iter()
+            .map(|controller| (controller.ip.clone(), controller.port))
+            .collect()
+    }
+
+    /// A console and a Network application on one host answer on 443 and on
+    /// 8443. The two are different controllers, and the user must be able to
+    /// pick either of them.
+    #[test]
+    fn two_ports_of_one_address_are_two_controllers() {
+        let kept = without_duplicates(vec![
+            found("192.168.1.1", 443, None),
+            found("192.168.1.1", 8443, None),
+        ]);
+
+        assert_eq!(
+            origins(&kept),
+            vec![
+                ("192.168.1.1".to_string(), 443),
+                ("192.168.1.1".to_string(), 8443)
+            ],
+            "a second port of one address is a second controller"
+        );
+    }
+
+    /// mDNS and the probe of the common addresses can find one controller two
+    /// times. The first one stays, because the one from mDNS has a name.
+    #[test]
+    fn one_address_and_port_found_two_times_is_one_controller() {
+        let kept = without_duplicates(vec![
+            found("192.168.1.1", 443, Some("UDM Pro._unifi._tcp.local.")),
+            found("192.168.1.1", 443, None),
+        ]);
+
+        assert_eq!(kept.len(), 1, "one address and port is one controller");
+        assert_eq!(
+            kept.first()
+                .and_then(|controller| controller.name.as_deref()),
+            Some("UDM Pro._unifi._tcp.local."),
+            "the first controller stays, with its name"
+        );
+    }
+}
