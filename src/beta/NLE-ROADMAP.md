@@ -118,6 +118,6 @@ These filters need deeper terminal state analysis or more complex heuristics.
    - `src/main.rs` lines 85-113: `Recording`, `Event`, `EventType` structs (the types in `src/nle/src/types.rs` must mirror these exactly)
    - `src/export/web.rs`: `TerminalPlayer` JavaScript class (prototype for #151)
    - `src/export/video.rs`: Frame-to-FFmpeg pipeline (#160 already exists)
-   - `src/export/terminal_renderer.rs`: VT100 emulator (reference for #152's state analysis)
+   - `src/termstate/src/lib.rs` (the `termstate` crate): VT100 emulator (reference for #152's state analysis)
 
 4. **Plugins**: Third-party filters, analyzers, and renderers are WASM components that run on wasmtime, in a sandbox with no file, no network, and no real clock. One WIT package, `nle:plugin`, is the contract. A plugin filter has the event form or the span form, like a built-in filter, and the built-in filters stay native closures. See [the plugin spec](../../specs/2026-11-26-nle-plugin-architecture-design.md) (issue #169).
