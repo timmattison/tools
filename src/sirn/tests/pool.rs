@@ -6,8 +6,8 @@
 //! an `Err`. Nothing in the error's `Display` text or its `ErrorKind` tells
 //! the two apart, so this suite never inspects either. `sirn::Pool` tells them
 //! apart with a shutdown flag it owns: `Pool::shutdown` sets the flag before it
-//! releases any worker, and `Pool::join` reports an error only when a worker
-//! woke to a flag that was still clear.
+//! releases any worker, and `Pool::join` reports an error when a worker woke
+//! to a flag that was still clear.
 //!
 //! A real accept failure (EMFILE, say) cannot be triggered safely in a test,
 //! because exhausting the file-descriptor table could take down unrelated
