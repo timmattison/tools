@@ -1713,6 +1713,49 @@ mod tests {
         );
     }
 
+    /// The kernel checks the mode of a file only at the open. Narrowing the old
+    /// inode does not take back a descriptor that is already open, so a reader
+    /// that opened the old 0644 file before the save must not see the keys of
+    /// the save.
+    #[cfg(unix)]
+    #[test]
+    fn a_reader_of_the_old_config_file_does_not_see_the_new_keys() {
+        use std::io::Read;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempConfigDir::new("old-reader");
+        create_directory(&temp.dir);
+        let path = temp.config_file();
+        write_file(&path, "url = \"https://192.168.1.1\"\n");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
+            .expect("the existing file must be settable to a wider mode");
+        // Stands for another local user who opened the old file before the save.
+        let mut old_reader = fs::File::open(&path).expect("the old file must open");
+
+        Config {
+            api_key: Some("new-plaintext-controller-key".into()),
+            ..Config::default()
+        }
+        .save_to(&path)
+        .expect("saving over the existing file must succeed");
+
+        let mut seen = String::new();
+        old_reader
+            .read_to_string(&mut seen)
+            .expect("the old descriptor must stay readable");
+        assert!(
+            !seen.contains("new-plaintext-controller-key"),
+            "a descriptor opened on the old file before the save must not reach \
+             the new key"
+        );
+        assert!(
+            fs::read_to_string(&path)
+                .expect("the saved config file must exist")
+                .contains("new-plaintext-controller-key"),
+            "the config file at the path must hold the new key"
+        );
+    }
+
     /// A 1Password reference names the item that holds the key. It is not the
     /// key, and a dump that hides it says nothing a reader can act on.
     const OP_REFERENCE: &str = "op://Private/ufa/key - 192.168.1.1 port 443";
