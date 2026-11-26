@@ -642,6 +642,21 @@ mod tests {
     const LABEL_SCRIPT_END: &str = "</script><b>x";
     const LABEL_COMMENT_SCRIPT: &str = "<!--<script>";
     const THEME: &str = "auto";
+    const TITLE_SCRIPT: &str = "</title><script>alert(1)</script>";
+    /// `TITLE_SCRIPT` after the HTML escape of minijinja, which also writes
+    /// each `/` as a character reference.
+    const TITLE_SCRIPT_ESCAPED: &str =
+        "&lt;&#x2f;title&gt;&lt;script&gt;alert(1)&lt;&#x2f;script&gt;";
+    /// The names of the themes that `render_page` knows.
+    const THEMES: [&str; 5] = [
+        "auto",
+        "dracula",
+        "monokai",
+        "solarized-dark",
+        "solarized-light",
+    ];
+    /// The character references that the HTML escape of minijinja writes.
+    const ESCAPE_REFERENCES: [&str; 6] = ["&lt;", "&gt;", "&amp;", "&quot;", "&#x27;", "&#x2f;"];
 
     /// The smallest fakes that the player script needs when it loads.
     ///
@@ -776,6 +791,55 @@ console.log(String(player.pausedAt));
             .filter_map(|c| c["label"].as_str())
             .collect();
         assert_eq!(labels, vec![LABEL_JAPANESE, LABEL_CAFE]);
+    }
+
+    #[test]
+    fn the_page_escapes_the_title() {
+        let mut titled = recording(Vec::new());
+        titled.title = String::from(TITLE_SCRIPT);
+        for compress in [false, true] {
+            let html = page(&titled, compress);
+            let head = html
+                .lines()
+                .find(|line| line.contains("<title>"))
+                .unwrap_or_default();
+            assert!(
+                html.contains(&format!("<title>{TITLE_SCRIPT_ESCAPED}</title>")),
+                "compress {compress}: {head}"
+            );
+            assert!(
+                html.contains(&format!("<h1>{TITLE_SCRIPT_ESCAPED}</h1>")),
+                "compress {compress}: the h1 holds the raw title"
+            );
+            assert!(
+                !html.contains("<script>alert(1)"),
+                "compress {compress}: the title added a script"
+            );
+        }
+    }
+
+    #[test]
+    fn the_escape_changes_no_other_value_of_the_page() {
+        for theme in THEMES {
+            for compress in [false, true] {
+                let html = render_page(&recording(two_chapters()), theme, compress)
+                    .expect("the page renders");
+                for reference in ESCAPE_REFERENCES {
+                    assert!(
+                        !html.contains(reference),
+                        "theme {theme}, compress {compress}: the page holds {reference}"
+                    );
+                }
+                assert!(
+                    html.contains("<p>Duration: 10.0s | 0 events</p>"),
+                    "theme {theme}, compress {compress}: the duration line changed"
+                );
+                assert!(
+                    html.contains(r#"<span id="total-time">0:10</span>"#),
+                    "theme {theme}, compress {compress}: the total time changed"
+                );
+            }
+        }
     }
 
     #[test]
