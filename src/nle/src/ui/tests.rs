@@ -734,6 +734,16 @@ async fn two_regions_keep_their_own_speeds() {
 }
 
 #[tokio::test]
+async fn a_row_shows_the_times_of_its_region_as_typed() {
+    let mut window = open_recording().await;
+    window.apply_speed("0.01", "0.04", "2");
+    window.apply_speed("1.04", "2.04", "2");
+    let page = window.html();
+    assert!(page.contains(&speed_row("0.01 s to 0.04 s", "2")), "{page}");
+    assert!(page.contains(&speed_row("1.04 s to 2.04 s", "2")), "{page}");
+}
+
+#[tokio::test]
 async fn a_bad_speed_change_shows_the_reason_and_adds_no_row() {
     let cases = [
         (("abc", "20", "2"), "the start is not a number"),
