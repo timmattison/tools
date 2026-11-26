@@ -821,6 +821,13 @@ fn controllers_to_offer(
     }
 }
 
+/// The line the wizard shows when the connection test passed.
+const CONNECTION_TEST_PASSED: &str = "✅ Successfully connected to UniFi controller!";
+
+/// The start of the line the wizard shows when the connection test failed.
+/// The error follows it.
+const CONNECTION_TEST_FAILED: &str = "❌ Connection test failed";
+
 /// Show what the connection test found, and decide whether setup saves.
 ///
 /// A test that passed saves without a question. Every failure shows its error
@@ -850,14 +857,14 @@ fn decide_after_connection_test(
 ) -> Result<SaveDecision> {
     let error = match test {
         ConnectionTest::Passed { version } => {
-            writeln!(out, "✅ Successfully connected to UniFi controller!")?;
+            writeln!(out, "{CONNECTION_TEST_PASSED}")?;
             writeln!(out, "   Version: {version}")?;
             return Ok(SaveDecision::Save);
         }
         ConnectionTest::Failed(error) => error,
     };
 
-    writeln!(out, "❌ Connection test failed: {error:#}")?;
+    writeln!(out, "{CONNECTION_TEST_FAILED}: {error:#}")?;
     if answered_status(&error) == Some(StatusCode::FORBIDDEN) {
         writeln!(
             out,
@@ -2801,8 +2808,12 @@ mod connection_test_tests {
         let (_, shown, _) = setup_after_testing(hanging_up.origin(), &["n\n"]).await;
 
         assert!(
-            !shown.contains("Connected"),
+            !shown.contains(CONNECTION_TEST_PASSED),
             "a controller that hangs up must not be reported as connected, it showed {shown:?}"
+        );
+        assert!(
+            shown.contains(CONNECTION_TEST_FAILED),
+            "a controller that hangs up must be reported as a failed test, it showed {shown:?}"
         );
     }
 
