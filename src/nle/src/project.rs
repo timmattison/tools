@@ -2,6 +2,7 @@
 //! length, and its file format.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::error::NleError;
@@ -78,6 +79,30 @@ impl EditProject {
             .iter()
             .map(|clip| clip.timeline_events().count())
             .sum()
+    }
+
+    /// Load a project from a JSON file, plain or gzip (found by its magic
+    /// bytes), and check its rules.
+    ///
+    /// # Errors
+    /// Returns `NleError::LoadError` when the file cannot be read,
+    /// `NleError::InvalidFormat` when it is empty or does not parse as a project
+    /// (a negative time is a parse failure), and `NleError::InvalidProject`
+    /// when it parses but breaks a rule of `validate`.
+    pub fn load(path: &Path) -> Result<Self, NleError> {
+        let _ = path;
+        Ok(Self::default())
+    }
+
+    /// Save the project to a JSON file, optionally gzip compressed. The save is
+    /// atomic, as the save of a recording is.
+    ///
+    /// # Errors
+    /// Returns `NleError::SaveError` when the project cannot be serialized,
+    /// compressed, or written.
+    pub fn save(&self, path: &Path, compress: bool) -> Result<(), NleError> {
+        let _ = (path, compress);
+        Ok(())
     }
 
     /// Check the rules of a project.

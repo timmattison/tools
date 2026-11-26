@@ -320,3 +320,54 @@ fn an_empty_project_has_no_duration_and_no_events() {
     assert_eq!(project.duration(), 0.0);
     assert_eq!(project.event_count(), 0);
 }
+
+#[test]
+fn a_project_survives_a_save_and_a_load_plain_and_gzip() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut project = two_clip_project();
+    project.filters.push(AppliedFilter {
+        kind: FilterKind::new("speed"),
+        region: FilterRegion::Range {
+            start: Seconds::new(1.0).unwrap(),
+            end: Seconds::new(2.0).unwrap(),
+        },
+        options: FilterOptions::new().with("factor", 2.0),
+    });
+    for compress in [false, true] {
+        let path = dir.path().join(format!("project-{compress}.json"));
+
+        project.save(&path, compress).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.starts_with(&[0x1f, 0x8b]), compress);
+        assert_eq!(EditProject::load(&path).unwrap(), project);
+    }
+}
+
+#[test]
+fn load_refuses_a_file_that_parses_but_breaks_a_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("broken.json");
+    let mut project = valid_project();
+    project.timeline[1].clips.clear();
+    project.save(&path, false).unwrap();
+
+    assert!(matches!(
+        EditProject::load(&path),
+        Err(NleError::InvalidProject(_))
+    ));
+}
+
+#[test]
+fn load_refuses_a_file_with_a_negative_in_point() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("negative.json");
+    let mut value = serde_json::to_value(valid_project()).unwrap();
+    value["clips"][0]["in_point"] = serde_json::json!(-1.0);
+    std::fs::write(&path, value.to_string()).unwrap();
+
+    assert!(matches!(
+        EditProject::load(&path),
+        Err(NleError::InvalidFormat(_))
+    ));
+}
