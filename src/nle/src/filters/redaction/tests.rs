@@ -622,3 +622,31 @@ fn a_preset_find_is_written_as_kind_and_value() {
     let back: Find = serde_json::from_value(json).unwrap();
     assert_eq!(back, Find::Preset(Preset::IpAddress));
 }
+
+#[test]
+fn the_ip_preset_masks_ipv4_and_ipv6_addresses() {
+    for address in [
+        "10.0.0.1",
+        "192.168.1.254",
+        "2001:db8::1",
+        "fe80::1ff:fe23:4567:890a",
+        "2001:0db8:85a3:0000:0000:8a2e:0370:7334",
+    ] {
+        assert_masked(Preset::IpAddress, address);
+    }
+}
+
+#[test]
+fn the_ip_preset_keeps_text_that_is_not_an_ip_address() {
+    for text in [
+        "10:42:07",
+        "1.2.3",
+        "999.1.1.1",
+        "v1.2.3.4",
+        "aa:bb:cc:dd:ee:ff",
+        "std::fs::read",
+        "Dec::new",
+    ] {
+        assert_unchanged(Preset::IpAddress, text);
+    }
+}
