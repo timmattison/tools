@@ -37,7 +37,7 @@ All of these can be built **simultaneously** after Phase 0 types exist.
 
 | Issue | Description | Effort | Notes |
 |-------|-------------|--------|-------|
-| #153 | Time dilation | ~30 lines | Multiply timestamps in a range, shift everything after. |
+| #153 | Time dilation | Done | A span filter (`src/nle/src/filters/time_dilation.rs`): it divides the times and the length of a range by a speed, and the pipeline moves everything after by the change in the length. The speed panel of the properties panel applies it until #150 can select a region. |
 | #154 | Pause removal/insertion | Half day | Find gaps > threshold, clamp them, shift subsequent events. Nearly identical pattern to #153. |
 | #155 | Typing speed normalization | Half day | Re-space input event timestamps to a target characters-per-second. |
 | #167 | Idle time compression | Half day | Similar to #154 with additional grid-change heuristic. |
@@ -112,7 +112,7 @@ These filters need deeper terminal state analysis or more complex heuristics.
 
 1. **Dioxus app**: One Rust crate, with the desktop (webview) renderer of Dioxus 0.7. The components call the Rust code directly, thus no IPC layer and no second copy of the types exist. The state of the app is Dioxus state (signals), which is Rust, thus the one source of truth is in Rust by construction. On 2026-11-25, Tim chose Dioxus in place of Tauri (issue #761).
 
-2. **Filter interface**: `Fn(&[Event], &FilterOptions) -> Vec<Event>` is the core API (`FilterFn` in `src/nle/src/pipeline.rs`). A filter gets the events of its region, with times relative to the start of the region. The pipeline moves the events after the region by the change in the time of the last event of the region. Some filters (#166 color scheme, #168 cursor) operate at the ANSI escape sequence level within `event.data` rather than at the timestamp level — same signature, different transformation target. Slice 0 of the plugin spec (see decision 4 below) changes the return type to a `Result`, because a plugin filter can fail.
+2. **Filter interface**: `Fn(&[Event], &FilterOptions) -> Vec<Event>` is the core API (`FilterFn` in `src/nle/src/pipeline.rs`). A filter gets the events of its region, with times relative to the start of the region. The pipeline moves the events after the region by the change in the time of the last event of the region. A filter that changes the length of its region is a span filter (`SpanFilterFn`, `FilterRegistry::register_span`): it also gets the length of its region and answers a new length, and the pipeline moves the events after the region by the change in the length. Time dilation (#153) is a span filter, because a region with no event must also change its length. Pause insertion (#154) and idle time compression (#167) have the same need. Some filters (#166 color scheme, #168 cursor) operate at the ANSI escape sequence level within `event.data` rather than at the timestamp level — same signature, different transformation target. Slice 0 of the plugin spec (see decision 4 below) changes the return type to a `Result`, because a plugin filter can fail.
 
 3. **Existing code to reuse**:
    - `src/main.rs` lines 85-113: `Recording`, `Event`, `EventType` structs (the types in `src/nle/src/types.rs` must mirror these exactly)
