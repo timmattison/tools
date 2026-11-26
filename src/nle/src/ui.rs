@@ -205,7 +205,7 @@ pub(crate) fn App() -> Element {
             Timeline { loaded }
             PropertiesPanel {
                 loaded,
-                on_error: move |message| error.set(Some(message)),
+                on_result: move |result: Result<(), String>| error.set(result.err()),
             }
         }
     }
@@ -293,16 +293,20 @@ fn summary(open: &Document) -> String {
     )
 }
 
-/// The metadata of the open recording, and the speed panel.
+/// The metadata of the open recording, and the speed panel. `on_result` gets
+/// the outcome of each speed change: `Ok`, or the message of the banner.
 #[component]
-fn PropertiesPanel(loaded: Signal<Option<Document>>, on_error: EventHandler<String>) -> Element {
+fn PropertiesPanel(
+    loaded: Signal<Option<Document>>,
+    on_result: EventHandler<Result<(), String>>,
+) -> Element {
     let metadata = loaded.read().as_ref().map(|open| open.metadata.clone());
     rsx! {
         div { class: "properties-panel",
             h3 { "Properties" }
             if let Some(metadata) = metadata {
                 {metadata_rows(&metadata)}
-                SpeedPanel { loaded, on_error }
+                SpeedPanel { loaded, on_result }
             } else {
                 div { class: "placeholder", "No recording loaded" }
             }
@@ -311,9 +315,13 @@ fn PropertiesPanel(loaded: Signal<Option<Document>>, on_error: EventHandler<Stri
 }
 
 /// The speed panel: three fields for a region and a speed, the button that
-/// applies them, and the time dilation filters of the project.
+/// applies them, and the time dilation filters of the project. `on_result`
+/// gets the outcome of each Apply Speed and each Remove.
 #[component]
-fn SpeedPanel(loaded: Signal<Option<Document>>, on_error: EventHandler<String>) -> Element {
+fn SpeedPanel(
+    loaded: Signal<Option<Document>>,
+    on_result: EventHandler<Result<(), String>>,
+) -> Element {
     let mut start = use_signal(String::new);
     let mut end = use_signal(String::new);
     let mut speed = use_signal(String::new);
@@ -356,21 +364,13 @@ fn SpeedPanel(loaded: Signal<Option<Document>>, on_error: EventHandler<String>) 
             button {
                 onclick: move |_| {
                     let change = speed_change(&start.read(), &end.read(), &speed.read());
-                    match change {
-                        Ok(filter) => {
-                            // One write borrow holds the whole edit. No read borrow lives across it.
-                            let outcome = loaded.with_mut(|document| {
-                                document.as_mut().map(|open| {
-                                    let index = open.editor.project().filters.len();
-                                    open.editor.apply(Edit::AddFilter { index, filter })
-                                })
-                            });
-                            if let Some(Err(failure)) = outcome {
-                                on_error.call(format!("{SPEED_FAILED_PREFIX}: {failure}"));
-                            }
-                        }
-                        Err(reason) => on_error.call(format!("{SPEED_FAILED_PREFIX}: {reason}")),
-                    }
+                    let outcome = change.and_then(|filter| {
+                        edit_document(loaded, |project| Edit::AddFilter {
+                            index: project.filters.len(),
+                            filter,
+                        })
+                    });
+                    report(on_result, outcome);
                 },
                 {APPLY_SPEED_LABEL}
             }
@@ -379,14 +379,8 @@ fn SpeedPanel(loaded: Signal<Option<Document>>, on_error: EventHandler<String>) 
                     span { "{text}" }
                     button {
                         onclick: move |_| {
-                            let outcome = loaded.with_mut(|document| {
-                                document
-                                    .as_mut()
-                                    .map(|open| open.editor.apply(Edit::RemoveFilter { index }))
-                            });
-                            if let Some(Err(failure)) = outcome {
-                                on_error.call(format!("{SPEED_FAILED_PREFIX}: {failure}"));
-                            }
+                            let outcome = edit_document(loaded, |_| Edit::RemoveFilter { index });
+                            report(on_result, outcome);
                         },
                         {REMOVE_LABEL}
                     }
@@ -398,6 +392,28 @@ fn SpeedPanel(loaded: Signal<Option<Document>>, on_error: EventHandler<String>) 
             }
         }
     }
+}
+
+/// Applies the edit that `make` builds from the project to the editor of the
+/// open document. The answer is the text of the error of a refused edit. With
+/// no open document, nothing changes and the answer is `Ok`.
+fn edit_document(
+    mut loaded: Signal<Option<Document>>,
+    make: impl FnOnce(&EditProject) -> Edit,
+) -> Result<(), String> {
+    // One write borrow holds the whole edit. No read borrow lives across it.
+    loaded.with_mut(|document| {
+        document.as_mut().map_or(Ok(()), |open| {
+            let edit = make(open.editor.project());
+            open.editor.apply(edit).map_err(|failure| failure.to_string())
+        })
+    })
+}
+
+/// Sends the outcome of a speed change to `on_result`: `Ok` for a change that
+/// applied, or the message of the banner for a change that did not.
+fn report(on_result: EventHandler<Result<(), String>>, outcome: Result<(), String>) {
+    on_result.call(outcome.map_err(|reason| format!("{SPEED_FAILED_PREFIX}: {reason}")));
 }
 
 /// One row for each time dilation filter of the project: the index of the

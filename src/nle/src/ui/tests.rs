@@ -105,7 +105,7 @@ fn panels_root() -> Element {
     rsx! {
         PreviewPane { loaded }
         Timeline { loaded }
-        PropertiesPanel { loaded, on_error: |_| {} }
+        PropertiesPanel { loaded, on_result: |_| {} }
     }
 }
 
