@@ -176,3 +176,94 @@ fn multi_byte_text_beside_escape_codes_is_replaced() {
         "\x1b[1m?\x1b[0m café"
     );
 }
+
+fn masked(find: Find, replacement: Replacement, events: Vec<Event>) -> Vec<Event> {
+    run(events, &Redaction::new(find, replacement, false).unwrap())
+}
+
+fn find_text(text: &str) -> Find {
+    Find::Text(text.to_string())
+}
+
+#[test]
+fn asterisks_take_one_column_for_each_column_of_the_match() {
+    let got = masked(
+        find_text("hunter2"),
+        Replacement::Asterisks,
+        vec![out(1.0, "a hunter2 b")],
+    );
+    assert_eq!(datas(&got), vec!["a ******* b"]);
+}
+
+#[test]
+fn blocks_take_one_column_for_each_column_of_the_match() {
+    let got = masked(
+        find_text("hunter2"),
+        Replacement::Blocks,
+        vec![out(1.0, "hunter2")],
+    );
+    assert_eq!(datas(&got), vec![&BLOCK.to_string().repeat(7)[..]]);
+}
+
+#[test]
+fn a_wide_character_takes_two_columns() {
+    let got = masked(
+        find_text("パスワード"),
+        Replacement::Asterisks,
+        vec![out(1.0, "パスワード")],
+    );
+    assert_eq!(datas(&got), vec!["**********"]);
+}
+
+#[test]
+fn accented_text_keeps_its_width() {
+    let got = masked(
+        find_text("café"),
+        Replacement::Asterisks,
+        vec![out(1.0, "un café!")],
+    );
+    assert_eq!(datas(&got), vec!["un ****!"]);
+}
+
+#[test]
+fn a_combining_mark_adds_no_column() {
+    let got = masked(
+        find_text("cafe\u{301}"),
+        Replacement::Asterisks,
+        vec![out(1.0, "cafe\u{301}")],
+    );
+    assert_eq!(datas(&got), vec!["****"]);
+}
+
+#[test]
+fn control_characters_inside_a_match_stay() {
+    let got = masked(
+        Find::Regex("a\r\nb".to_string()),
+        Replacement::Asterisks,
+        vec![out(1.0, "a\r\nb")],
+    );
+    assert_eq!(datas(&got), vec!["*\r\n*"]);
+}
+
+#[test]
+fn a_match_across_events_is_masked_in_each_piece() {
+    let got = masked(
+        find_text("hunter2"),
+        Replacement::Asterisks,
+        vec![out(1.0, "hun"), out(1.1, "ter2")],
+    );
+    assert_eq!(datas(&got), vec!["***", "****"]);
+}
+
+#[test]
+fn a_mask_skips_the_escape_codes_inside_a_match() {
+    let got = masked(
+        find_text("hunter2"),
+        Replacement::Blocks,
+        vec![out(1.0, "hun\x1b[1mter2")],
+    );
+    assert_eq!(
+        datas(&got),
+        vec![format!("{}\x1b[1m{}", "\u{2588}".repeat(3), "\u{2588}".repeat(4))]
+    );
+}
