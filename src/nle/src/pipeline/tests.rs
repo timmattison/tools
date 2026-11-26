@@ -295,6 +295,21 @@ fn two_shifts_that_add_up_to_infinity_fail_the_run() {
 }
 
 #[test]
+fn an_event_time_that_is_not_finite_fails_the_run_when_the_end_is_finite() {
+    // The end starts at the largest time, and `f64::max` skips NaN and is
+    // never -inf here. So the end stays 0.5, and only the check of each event
+    // time can refuse the run.
+    for bad in [f64::NAN, f64::NEG_INFINITY] {
+        let result = FilterRegistry::new().run(events(&[0.5, bad]), &[]);
+
+        assert!(
+            matches!(result, Err(NleError::RenderError(_))),
+            "{bad}: {result:?}"
+        );
+    }
+}
+
+#[test]
 fn a_relative_time_below_zero_is_fine_when_the_timeline_time_is_not() {
     // Relative -0.5 on a range that starts at 1.0 is 0.5 on the timeline.
     let registry = registry_answering(-0.5);
