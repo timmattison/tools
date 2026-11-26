@@ -23,7 +23,10 @@
 # the version being committed. This is a deliberate trade-off: index-only
 # checking (stash --keep-index dances) is fragile, and the workspace-wide cargo
 # commands cannot operate on a virtual index anyway.
-set -euo pipefail
+#
+# Husky starts this file with `sh -e`, and the sh of Debian and Ubuntu is
+# dash. Dash refuses `set -o pipefail`, so the hook does not set it.
+set -eu
 
 # shellcheck source=scripts/without-git-environment.sh
 . "$(dirname "$0")/../scripts/without-git-environment.sh"
@@ -34,13 +37,42 @@ set -euo pipefail
 # each block that reads the list. git diff finds renames by default, and
 # --name-only then prints only the new path of a move. --no-renames shows a
 # move as a deletion of the old path and an addition of the new path, so a
-# block that matches the old path sees a move out of it. The index block, the
-# msgs block, the plugin block and the ic-inline block below read this list.
+# block that matches the old path sees a move out of it. The Rust block, the
+# index block, the msgs block, the plugin block and the ic-inline block below
+# read this list, each through staged_path_matches.
 staged_paths_with_deletions() {
     git diff --cached --name-only --no-renames
 }
 
-if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$|(^|/)Cargo\.(toml|lock)$|^(rustfmt|rust-toolchain)\.toml$|^scripts/rust-checks\.sh$'; then
+# The list, read one time. Under `set -e`, a failed git diff stops the hook
+# here, so no block reads a list that git did not finish.
+staged_paths="$(staged_paths_with_deletions)"
+
+# Succeed when a line of the list matches the extended regular expression $1.
+#
+# grep -q stops at its first match, so in a large list the writer of a pipe
+# into it still has paths to write, and it gets SIGPIPE. Under
+# `set -o pipefail`, the pipeline is then false, and the block runs no gate
+# and says nothing: a commit that staged some thousand paths and Cargo.lock
+# ran no Rust gate in this way. Dash has no pipefail, but bash has it, so a
+# block must not send the list through a pipe into grep.
+#
+# A here-document is not a pipeline. The status of the command is the status
+# of grep, and a writer that the shell starts for a long document is not part
+# of that status. Do not write `| grep -E ... >/dev/null` instead of -q:
+# GNU grep also stops at its first match when its output is /dev/null. Husky
+# starts this file with `sh`, so the bash here-string `<<<` is not available.
+staged_path_matches() {
+    grep -qE -- "$1" <<EOF
+$staged_paths
+EOF
+}
+
+# The Rust block reads staged_paths_with_deletions: a deletion of a Rust file,
+# a move of it to a path that is not Rust, or a link in its place leaves each
+# `mod` item that names the file without its file, and the build of the tree
+# then fails.
+if staged_path_matches '\.rs$|(^|/)Cargo\.(toml|lock)$|^(rustfmt|rust-toolchain)\.toml$|^scripts/rust-checks\.sh$'; then
     echo "pre-commit: running scripts/rust-checks.sh"
     ./scripts/rust-checks.sh
     rust_gate_ran=yes
@@ -67,7 +99,7 @@ fi
 # `without_git_environment` as each cargo command of scripts/rust-checks.sh
 # keeps the two symmetric.
 if [ "${rust_gate_ran:-}" != yes ] &&
-    staged_paths_with_deletions | grep -qE '^(README|TLDR)\.md$'; then
+    staged_path_matches '^(README|TLDR)\.md$'; then
     echo "pre-commit: running cargo test -p repo-guards --test tool_index_coverage"
     without_git_environment cargo test -p repo-guards --test tool_index_coverage
 fi
@@ -81,7 +113,7 @@ fi
 # The block reads staged_paths_with_deletions, as the index gate above does: a
 # move of a file out of the frontend, a deletion, or a link in its place breaks
 # each import of that file as surely as an edit can.
-if staged_paths_with_deletions | grep -qE '^src/msgs/(frontend|scripts)/'; then
+if staged_path_matches '^src/msgs/(frontend|scripts)/'; then
     msgs_frontend="$(dirname "$0")/../src/msgs/frontend"
     echo "pre-commit: running the msgs frontend checks (tsc --noEmit, vitest run)"
     without_git_environment pnpm --dir "$msgs_frontend" install --frozen-lockfile --prefer-offline
@@ -97,7 +129,7 @@ fi
 # The block reads staged_paths_with_deletions, as the index gate above does:
 # deleting a file of a plugin, or moving it out, can break the plugin as surely
 # as an edit can.
-if staged_paths_with_deletions | grep -qE '^(plugins/|\.claude-plugin/)|^scripts/plugin-checks\.sh$'; then
+if staged_path_matches '^(plugins/|\.claude-plugin/)|^scripts/plugin-checks\.sh$'; then
     echo "pre-commit: running scripts/plugin-checks.sh"
     ./scripts/plugin-checks.sh
 fi
@@ -116,7 +148,7 @@ fi
 # staged_paths_with_deletions, because the test names the old paths, so a
 # deletion or a move of a file of the plugin breaks it as an edit can.
 if [ "${rust_gate_ran:-}" != yes ] &&
-    staged_paths_with_deletions | grep -qE '^plugins/ic-inline/'; then
+    staged_path_matches '^plugins/ic-inline/'; then
     echo "pre-commit: running cargo test -p ic --test emit-rgba"
     without_git_environment cargo test -p ic --test emit-rgba
 fi
