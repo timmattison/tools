@@ -160,10 +160,10 @@ const LIBRARY: &str = "Library";
 /// Walks each root in parallel, and gives each matching path to `sink` when
 /// the walk finds it.
 ///
-/// The walk matches the name of each named root, as `find`
-/// does. It does not follow a symbolic link below a root. It does an
-/// interrupted call again in place. If `sink` returns an error, the walk stops
-/// and puts the error in [`Report::output_error`].
+/// The walk matches the name of each named root, as `find` does. It does not
+/// follow a symbolic link below a root. It does an interrupted call again in
+/// place. If `sink` returns an error, the walk stops and puts the error in
+/// [`Report::output_error`].
 pub fn walk<F, S>(
     fs: &F,
     roots: &[WalkRoot],
