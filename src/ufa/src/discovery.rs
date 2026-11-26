@@ -20,7 +20,6 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 pub struct DiscoveredController {
     pub ip: String,
     pub port: u16,
-    pub name: Option<String>,
     pub is_verified: bool,
 }
 
@@ -126,11 +125,10 @@ pub async fn discover_controllers() -> Result<Vec<DiscoveredController>> {
 /// later one.
 ///
 /// mDNS and the probe of the common addresses can find one controller two
-/// times, and `unifi` and `unifi.local` can resolve to one address. The
-/// controllers from mDNS come first, so the controller that stays is the one
-/// that has a name. The port is part of the rule: a console and a Network
-/// application on one host answer on 443 and on 8443, and the user must be
-/// able to pick either of them.
+/// times, and `unifi` and `unifi.local` can resolve to one address. The port
+/// is part of the rule: a console and a Network application on one host
+/// answer on 443 and on 8443, and the user must be able to pick either of
+/// them.
 ///
 /// # Arguments
 ///
@@ -173,7 +171,6 @@ async fn discover_via_mdns() -> Result<Vec<DiscoveredController>> {
                     let controller = DiscoveredController {
                         ip: addr.to_string(),
                         port: info.get_port(),
-                        name: Some(info.get_fullname().to_string()),
                         is_verified: false,
                     };
                     controllers.push(controller);
@@ -232,7 +229,6 @@ pub async fn validate_controller(host: &str, port: u16) -> Result<DiscoveredCont
         ProbeVerdict::Controller => Ok(DiscoveredController {
             ip: resolve_address(host, port).await,
             port,
-            name: None,
             is_verified: true,
         }),
     }
@@ -834,7 +830,6 @@ mod origin_tests {
         DiscoveredController {
             ip: address.to_string(),
             port: 443,
-            name: None,
             is_verified: true,
         }
     }
@@ -964,13 +959,12 @@ mod stop_on_drop_tests {
 mod duplicate_tests {
     use super::*;
 
-    /// A controller at `ip` and `port`, with the name that mDNS gives, if any.
-    fn found(ip: &str, port: u16, name: Option<&str>) -> DiscoveredController {
+    /// A controller at `ip` and `port`, as a probe of discovery gives it.
+    fn found(ip: &str, port: u16, is_verified: bool) -> DiscoveredController {
         DiscoveredController {
             ip: ip.to_string(),
             port,
-            name: name.map(str::to_string),
-            is_verified: true,
+            is_verified,
         }
     }
 
@@ -988,8 +982,8 @@ mod duplicate_tests {
     #[test]
     fn two_ports_of_one_address_are_two_controllers() {
         let kept = without_duplicates(vec![
-            found("192.168.1.1", 443, None),
-            found("192.168.1.1", 8443, None),
+            found("192.168.1.1", 443, true),
+            found("192.168.1.1", 8443, true),
         ]);
 
         assert_eq!(
@@ -1003,20 +997,20 @@ mod duplicate_tests {
     }
 
     /// mDNS and the probe of the common addresses can find one controller two
-    /// times. The first one stays, because the one from mDNS has a name.
+    /// times. The first one stays. The second copy is not verified only so
+    /// that the test can tell the two copies apart.
     #[test]
     fn one_address_and_port_found_two_times_is_one_controller() {
         let kept = without_duplicates(vec![
-            found("192.168.1.1", 443, Some("UDM Pro._unifi._tcp.local.")),
-            found("192.168.1.1", 443, None),
+            found("192.168.1.1", 443, true),
+            found("192.168.1.1", 443, false),
         ]);
 
         assert_eq!(kept.len(), 1, "one address and port is one controller");
-        assert_eq!(
+        assert!(
             kept.first()
-                .and_then(|controller| controller.name.as_deref()),
-            Some("UDM Pro._unifi._tcp.local."),
-            "the first controller stays, with its name"
+                .is_some_and(|controller| controller.is_verified),
+            "the first controller stays"
         );
     }
 }
