@@ -18,9 +18,22 @@ pub enum ExportProgress {
     },
 }
 
+/// The text that starts a frame line of `beta`.
+const FRAME_LINE_PREFIX: &str = "Processed frame ";
+/// The text between the two numbers of a frame line of `beta`.
+const FRAME_LINE_SEPARATOR: &str = " / ";
+
 /// Read one line of the stdout of `beta`.
-pub(crate) fn parse_progress_line(_line: &str) -> Option<ExportProgress> {
-    None
+///
+/// `Processed frame N / M` gives `Frames { done: N, total: M }` when both
+/// numbers are whole, `M` is above zero, and `N` is not above `M`. Trailing
+/// white space, such as a `\r`, is ignored. Any other line gives `None`.
+pub(crate) fn parse_progress_line(line: &str) -> Option<ExportProgress> {
+    let numbers = line.trim_end().strip_prefix(FRAME_LINE_PREFIX)?;
+    let (done, total) = numbers.split_once(FRAME_LINE_SEPARATOR)?;
+    let done: u64 = done.parse().ok()?;
+    let total: u64 = total.parse().ok()?;
+    (total > 0 && done <= total).then_some(ExportProgress::Frames { done, total })
 }
 
 #[cfg(test)]
