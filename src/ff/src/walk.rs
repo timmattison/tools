@@ -82,6 +82,16 @@ impl Report {
     }
 }
 
+/// Tells if `error` says that an entry went away, or changed its type, after
+/// the walk read its name. Such an entry is not part of the tree any more, thus
+/// its loss is not a failure.
+fn vanished(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    ) || error.raw_os_error() == Some(libc::ELOOP)
+}
+
 /// Tells if the directory `name` in `parent` is a File Provider directory.
 ///
 /// macOS keeps a File Provider directory at `~/Library/CloudStorage/<name>`
@@ -159,6 +169,14 @@ where
     fn walk_root<'s>(&'s self, scope: &rayon::Scope<'s>, root: &'s WalkRoot) {
         let dir = match self.fs.open_dir(&root.path, Link::Follow) {
             Ok(dir) => dir,
+            Err(error) if error.kind() == io::ErrorKind::NotADirectory => {
+                self.match_file_root(&root.path, error);
+                return;
+            }
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                self.denied(root.path.clone());
+                return;
+            }
             Err(error) => {
                 self.incomplete(root.path.clone(), error);
                 return;
@@ -191,6 +209,11 @@ where
         }
         let dir = match self.fs.open_dir(&path, Link::NoFollow) {
             Ok(dir) => dir,
+            Err(error) if vanished(&error) => return,
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                self.denied(path);
+                return;
+            }
             Err(error) => {
                 self.incomplete(path, error);
                 return;
@@ -245,6 +268,7 @@ where
                 EntryKind::Other => false,
                 EntryKind::Unknown => match self.fs.is_directory(&dir, &entry.name) {
                     Ok(is_directory) => is_directory,
+                    Err(error) if vanished(&error) => false,
                     Err(error) => {
                         self.incomplete(child, error);
                         continue;
@@ -256,6 +280,29 @@ where
             }
             scope.spawn(move |scope| self.enter(scope, root, device, child));
         }
+    }
+
+    /// Matches a root that is not a directory by its name, as `find` does.
+    /// `error` is the `ENOTDIR` of the open. A component above the last one
+    /// can give that error too, thus the root must exist.
+    fn match_file_root(&self, path: &Path, error: io::Error) {
+        if std::fs::metadata(path).is_err() {
+            self.incomplete(path.to_path_buf(), error);
+            return;
+        }
+        let Some(name) = path.file_name() else {
+            return;
+        };
+        if self.matcher.is_match(name) {
+            self.matches.fetch_add(1, Ordering::Relaxed);
+            if let Err(error) = (self.sink)(path) {
+                self.stop_on_output_error(error);
+            }
+        }
+    }
+
+    fn denied(&self, path: PathBuf) {
+        self.findings().denied.push(path);
     }
 
     fn incomplete(&self, path: PathBuf, error: io::Error) {
