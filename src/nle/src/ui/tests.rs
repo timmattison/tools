@@ -1238,3 +1238,125 @@ async fn a_field_that_the_mode_does_not_read_does_not_block_it() {
     );
     assert!(!page.contains("role=\"alert\""), "{page}");
 }
+
+/// A recording of 20 output lines, one for each second from 1 to 20, in a
+/// recording of 30 seconds.
+fn line_recording() -> LoadedRecording {
+    let mut loaded = fixture();
+    loaded.recording.duration = 30.0;
+    loaded.metadata.duration = 30.0;
+    loaded.recording.events = (1..=20)
+        .map(|line| Event {
+            time: f64::from(line),
+            event_type: EventType::Output,
+            data: format!("line{line}\r\n"),
+        })
+        .collect();
+    loaded.metadata.event_count = 20;
+    loaded
+}
+
+#[tokio::test]
+async fn summarize_adds_a_row_and_removes_the_time_of_the_dropped_lines() {
+    let mut window = open_loaded(line_recording()).await;
+    window.fast_forward(FastForwardButton::Summarize, "0", "30");
+    let page = window.html();
+    assert!(
+        page.contains(&fast_forward_row(
+            "0 s to 30 s: summary of the first 3 and the last 3 lines"
+        )),
+        "{page}"
+    );
+    // The summary keeps lines 1 to 3 and lines 18 to 20. It drops lines 4 to
+    // 17, which start at 4 s and end at 17 s. The 13 s between those two
+    // times go away, thus the recording of 30 s becomes one of 17 s.
+    assert!(page.contains(&edited_row(&format_duration(17.0))), "{page}");
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn removing_a_fast_forward_row_restores_the_duration() {
+    let mut window = open_recording().await;
+    window.fast_forward(FastForwardButton::SkipToEnd, "10", "20");
+    assert!(window.html().contains(": skip to end"), "{}", window.html());
+    window.click(window.remove_button());
+    let page = window.html();
+    assert!(!page.contains(": skip to end"), "{page}");
+    assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn removing_a_fast_forward_row_keeps_the_speed_row_before_it() {
+    let mut window = open_recording().await;
+    window.apply_speed("10", "20", "2");
+    window.fast_forward(FastForwardButton::SkipToEnd, "30", "40");
+    window.click(window.remove_button());
+    let page = window.html();
+    assert!(!page.contains(": skip to end"), "{page}");
+    assert!(page.contains(&speed_row("10 s to 20 s", "2")), "{page}");
+    assert!(page.contains(&edited_row("1m 0.3s")), "{page}");
+}
+
+#[tokio::test]
+async fn a_bad_fast_forward_shows_the_reason_and_adds_no_row() {
+    use FastForwardButton::{Accelerate, SkipToEnd, Summarize};
+    // Each case: the button, the fields to type (start, end, speed, first,
+    // last), and the reason.
+    let cases = [
+        (
+            SkipToEnd,
+            ["abc", "20", "20", "3", "3"],
+            "the start is not a number",
+        ),
+        (
+            SkipToEnd,
+            ["10", "xyz", "20", "3", "3"],
+            "the end is not a number",
+        ),
+        (
+            SkipToEnd,
+            ["20", "10", "20", "3", "3"],
+            "the end must come after the start",
+        ),
+        (
+            Accelerate,
+            ["10", "20", "abc", "3", "3"],
+            "the speed is not a number",
+        ),
+        (
+            Accelerate,
+            ["10", "20", "1", "3", "3"],
+            "Invalid acceleration: 1",
+        ),
+        (
+            Summarize,
+            ["10", "20", "20", "-1", "3"],
+            "the first lines are not a whole number of 0 or more",
+        ),
+        (
+            Summarize,
+            ["10", "20", "20", "x", "3"],
+            "the first lines are not a whole number of 0 or more",
+        ),
+        (
+            Summarize,
+            ["10", "20", "20", "3", "1.5"],
+            "the last lines are not a whole number of 0 or more",
+        ),
+    ];
+    for (button, texts, reason) in cases {
+        let mut window = open_recording().await;
+        for (field, text) in window.fast_forward_fields().into_iter().zip(texts) {
+            window.type_into(field, text);
+        }
+        window.click(window.fast_forward_button(button));
+        let page = window.html();
+        let banner = format!("Failed to fast-forward: {reason}");
+        assert!(page.contains(&banner), "{banner} missing in {page}");
+        assert!(!page.contains(": skip to end"), "{page}");
+        assert!(!page.contains(": accelerate at"), "{page}");
+        assert!(!page.contains(": summary of"), "{page}");
+        assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
+    }
+}
