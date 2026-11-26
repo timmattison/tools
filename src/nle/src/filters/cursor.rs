@@ -19,8 +19,9 @@
 
 use serde::Deserialize;
 
+use crate::ansi::{Scanner, Sequence, Step};
 use crate::pipeline::{FilterRegistry, RegionView};
-use crate::types::{Event, FilterKind, FilterOptions, Seconds};
+use crate::types::{Event, EventType, FilterKind, FilterOptions, Seconds};
 
 /// The kind of the filter that sets how the cursor looks.
 pub const CURSOR: &str = "cursor";
@@ -34,14 +35,36 @@ pub fn register(registry: &mut FilterRegistry) {
     registry.register_in_place(FilterKind::new(CURSOR), filter);
 }
 
+/// The DECTCEM sequence that shows the cursor.
+const SHOW: &str = "\x1b[?25h";
+/// The DECTCEM sequence that hides the cursor.
+const HIDE: &str = "\x1b[?25l";
+/// The DEC private mode of DECTCEM, the visibility of the cursor.
+const DECTCEM: u32 = 25;
+
 /// The cursor filter.
+///
+/// It sets the cursor at the start of its region, and then it reads the
+/// output events with one `Scanner`. It drops each sequence of the recording
+/// that sets a part of the cursor that the options set. Each such sequence
+/// is rewritten in the event where it completes. Each other byte stays in
+/// its event. At the end of a region that is not open, it sets the state of
+/// the recording back: the state that the last sequence of the region gave,
+/// or else the default of a terminal.
+///
+/// The filter sees only its region. A sequence that the start of the region
+/// splits is not seen, and the state of the recording before the region is
+/// taken to be the default of a terminal.
 fn filter(
     events: &[Event],
-    _region: RegionView,
+    region: RegionView,
     options: &FilterOptions,
 ) -> Result<Vec<Event>, String> {
-    let _cursor = Cursor::parse(options)?;
-    Ok(events.to_vec())
+    let cursor = Cursor::parse(options)?;
+    if cursor.show == Show::Honor {
+        return Ok(events.to_vec());
+    }
+    Ok(Rewriter::new(&cursor).run(events, region))
 }
 
 /// The visibility in the project file.
@@ -155,6 +178,278 @@ impl Cursor {
         let value = serde_json::to_value(options).map_err(|error| error.to_string())?;
         let file: CursorFile = serde_json::from_value(value).map_err(|error| error.to_string())?;
         Self::try_from(file)
+    }
+}
+
+/// The state of the cursor that a stream of output sets.
+#[derive(Debug, Clone, PartialEq)]
+struct CursorState {
+    visible: bool,
+}
+
+impl Default for CursorState {
+    /// The state of a terminal after a reset.
+    fn default() -> Self {
+        Self { visible: true }
+    }
+}
+
+/// The state that the filter brings the stream to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    /// The state that the options ask for.
+    Wanted,
+    /// The state of the recording.
+    Recording,
+}
+
+/// The rewrite of the events of one region.
+struct Rewriter<'a> {
+    cursor: &'a Cursor,
+    scanner: Scanner,
+    /// The state that the recording sets.
+    recording: CursorState,
+    /// The visibility that the answer set last, or `None` when it is not
+    /// known.
+    shown_visible: Option<bool>,
+    /// The answer.
+    out: Vec<Event>,
+    /// Where each piece of the open sequence starts: the index of its event
+    /// in `out`, and the byte offset in the data of that event. Each piece
+    /// runs to the end of that data.
+    pieces: Vec<(usize, usize)>,
+    /// Where the last character went, as a piece.
+    last: (usize, usize),
+}
+
+impl<'a> Rewriter<'a> {
+    fn new(cursor: &'a Cursor) -> Self {
+        Self {
+            cursor,
+            scanner: Scanner::new(),
+            recording: CursorState::default(),
+            shown_visible: None,
+            out: Vec::new(),
+            pieces: Vec::new(),
+            last: (0, 0),
+        }
+    }
+
+    /// The answer of the filter for `events`.
+    fn run(mut self, events: &[Event], region: RegionView) -> Vec<Event> {
+        // An event at the start of such a region sets nothing that a frame
+        // shows.
+        if events.is_empty() && (region.open || region.length <= 0.0) {
+            return Vec::new();
+        }
+        let start = self.emissions(Target::Wanted);
+        for event in events {
+            match event.event_type {
+                EventType::Input => self.out.push(event.clone()),
+                EventType::Output => self.output(event),
+            }
+        }
+
+        if let Some(&(index, offset)) = self.pieces.first() {
+            // A sequence is open at the end, so nothing could go after it.
+            // Put the rest before it.
+            let mut rest = self.emissions(Target::Wanted);
+            if !region.open {
+                rest.push_str(&self.emissions(Target::Recording));
+            }
+            if let Some(event) = self.out.get_mut(index) {
+                event.data.insert_str(offset, &rest);
+            }
+        } else if !region.open {
+            let restore = self.emissions(Target::Recording);
+            if !restore.is_empty() {
+                self.out.push(output_event(region.length, restore));
+            }
+        }
+        if !start.is_empty() {
+            self.out.insert(0, output_event(0.0, start));
+        }
+        self.out
+    }
+
+    /// Rewrite one output event into `out`.
+    fn output(&mut self, event: &Event) {
+        let index = self.out.len();
+        self.out.push(output_event(event.time, String::new()));
+        for c in event.data.chars() {
+            let step = self.scanner.feed(c);
+            self.take(step, c, index);
+        }
+    }
+
+    /// Put `c` into the event at `index` of `out`, by its `step`.
+    fn take(&mut self, step: Step, c: char, index: usize) {
+        match step {
+            Step::Text => self.push(index, c),
+            Step::Pending => {
+                self.mark(index);
+                self.push(index, c);
+            }
+            Step::Done(sequence) => {
+                self.mark(index);
+                self.push(index, c);
+                self.finish(&sequence, index);
+            }
+            Step::Ignored => {
+                self.push(index, c);
+                self.pieces.clear();
+            }
+            Step::Aborted => {
+                self.pieces.clear();
+                self.push(index, c);
+            }
+            Step::Restarted => {
+                self.pieces.clear();
+                self.mark(index);
+                self.push(index, c);
+            }
+            Step::EscapeBreak(inner) => {
+                // The ESC before `c` starts the new sequence.
+                self.pieces.clear();
+                self.pieces.push(self.last);
+                self.take(*inner, c, index);
+            }
+        }
+    }
+
+    /// The data of the event at `index` of `out`.
+    fn data(&mut self, index: usize) -> Option<&mut String> {
+        self.out.get_mut(index).map(|event| &mut event.data)
+    }
+
+    /// Append `c` to the event at `index`.
+    fn push(&mut self, index: usize, c: char) {
+        if let Some(event) = self.out.get_mut(index) {
+            self.last = (index, event.data.len());
+            event.data.push(c);
+        }
+    }
+
+    /// Start a piece of the open sequence in the event at `index`, when the
+    /// sequence has no piece there yet.
+    fn mark(&mut self, index: usize) {
+        if self.pieces.last().map(|piece| piece.0) != Some(index) {
+            let offset = self.data(index).map_or(0, |data| data.len());
+            self.pieces.push((index, offset));
+        }
+    }
+
+    /// The sequence that completed in the event at `index`: rewrite it when
+    /// it sets a part of the cursor that the filter owns, and then bring the
+    /// stream to the wanted state.
+    fn finish(&mut self, sequence: &Sequence, index: usize) {
+        let pieces = std::mem::take(&mut self.pieces);
+        if let Some(replacement) = self.rewrite(sequence) {
+            for (piece, offset) in pieces {
+                if let Some(data) = self.data(piece) {
+                    data.truncate(offset);
+                }
+            }
+            if let Some(data) = self.data(index) {
+                data.push_str(&replacement);
+            }
+        }
+        let wanted = self.emissions(Target::Wanted);
+        if let Some(data) = self.data(index) {
+            data.push_str(&wanted);
+        }
+    }
+
+    /// Follow the state that `sequence` sets in the recording. Returns the
+    /// text that replaces the sequence, or `None` when it stays.
+    fn rewrite(&mut self, sequence: &Sequence) -> Option<String> {
+        match sequence {
+            Sequence::Csi {
+                params,
+                intermediates,
+                final_char: final_char @ ('h' | 'l'),
+                controls,
+            } if intermediates.is_empty() => {
+                let modes = params.strip_prefix('?')?;
+                self.dec_modes(modes, *final_char, controls)
+            }
+            // DECSTR, the soft reset, shows the cursor.
+            Sequence::Csi {
+                params,
+                intermediates,
+                final_char: 'p',
+                ..
+            } if params.is_empty() && intermediates == "!" => {
+                self.recording.visible = true;
+                self.shown_visible = Some(true);
+                None
+            }
+            // RIS, the full reset.
+            Sequence::Escape('c') => {
+                self.recording = CursorState::default();
+                self.shown_visible = Some(true);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Drop the modes of a DEC private mode set (`h`) or reset (`l`) that the
+    /// filter owns. Returns the rest of the sequence after the controls in
+    /// it, or `None` when the filter owns no mode of it.
+    fn dec_modes(&mut self, modes: &str, final_char: char, controls: &str) -> Option<String> {
+        let set = final_char == 'h';
+        let mut kept = Vec::new();
+        let mut dropped = false;
+        for mode in modes.split(';') {
+            if mode.parse() == Ok(DECTCEM) {
+                self.recording.visible = set;
+                dropped = true;
+            } else {
+                kept.push(mode);
+            }
+        }
+        if !dropped {
+            return None;
+        }
+        let mut text = controls.to_string();
+        if !kept.is_empty() {
+            text.push_str(&format!("\x1b[?{}{final_char}", kept.join(";")));
+        }
+        Some(text)
+    }
+
+    /// The sequences that bring the answer to `target`, for each part that
+    /// the filter owns. The caller puts them where no sequence is open.
+    fn emissions(&mut self, target: Target) -> String {
+        let mut text = String::new();
+        if let Some(visible) = self.wanted_visible(target) {
+            if self.shown_visible != Some(visible) {
+                text.push_str(if visible { SHOW } else { HIDE });
+                self.shown_visible = Some(visible);
+            }
+        }
+        text
+    }
+
+    /// The visibility that `target` asks for, or `None` when the filter does
+    /// not own it.
+    fn wanted_visible(&self, target: Target) -> Option<bool> {
+        match (self.cursor.show, target) {
+            (Show::Honor, _) => None,
+            (_, Target::Recording) => Some(self.recording.visible),
+            (Show::Always(visible), Target::Wanted) => Some(visible),
+            (Show::Smart { .. }, Target::Wanted) => Some(self.recording.visible),
+        }
+    }
+}
+
+/// An output event at `time` with `data`.
+fn output_event(time: f64, data: String) -> Event {
+    Event {
+        time,
+        event_type: EventType::Output,
+        data,
     }
 }
 

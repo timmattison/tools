@@ -192,7 +192,7 @@ fn the_cursor_gets_the_state_of_the_recording_back_at_the_end_of_a_range() {
     ];
 
     let got = run(
-        events.clone(),
+        events,
         json!({ "visibility": "always-visible" }),
         range(0.5, 2.0),
     )
