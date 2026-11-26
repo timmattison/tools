@@ -636,14 +636,27 @@ fn chapter_metadata(chapters: &[Chapter], duration: f64) -> Option<ChapterMetada
     (count > 0).then_some(ChapterMetadata { text, count })
 }
 
+/// Why an MP4 export drops a chapter: the rules of `chapter_metadata`.
+const DROPPED_CHAPTER_RULE: &str = "a chapter must start at 0 s or later, and at least 1 ms before the next chapter and before the end";
+
 /// The lines that an MP4 export prints about the chapters of a recording that
 /// has `total` chapters, of which the MP4 holds `kept`.
-fn chapter_report(_total: usize, kept: usize) -> Vec<String> {
-    if kept == 0 {
-        Vec::new()
-    } else {
-        vec![format!("Chapters: {kept}")]
+///
+/// A recording with no chapter gives no line. Else the first line gives the
+/// count in the MP4, and a second line says how many chapters the export
+/// dropped, when it dropped any.
+fn chapter_report(total: usize, kept: usize) -> Vec<String> {
+    if total == 0 {
+        return Vec::new();
     }
+    let mut lines = vec![format!("Chapters: {kept}")];
+    let dropped = total.saturating_sub(kept);
+    if dropped > 0 {
+        lines.push(format!(
+            "{dropped} of {total} chapter(s) are not in the MP4: {DROPPED_CHAPTER_RULE}."
+        ));
+    }
+    lines
 }
 
 /// Converts a finite, non-negative number of seconds to whole milliseconds.

@@ -109,8 +109,10 @@ A recording can hold chapters (see [Recording Format](#recording-format)). The
 HTML player shows one marker for each chapter on its progress bar, and a click
 on a marker moves the player to that chapter. An MP4 gets the chapters as
 chapter metadata, which video players show as a chapter list. Both exports skip
-a chapter whose time is below 0 or after the duration. A GIF has no chapters,
-and the export says so.
+a chapter whose time is below 0 or after the duration. The MP4 also skips a
+chapter that starts less than 1 ms before the next one or before the end, and
+the export says how many chapters it skipped. A GIF has no chapters, and the
+export says so.
 
 ### Playback Controls
 
