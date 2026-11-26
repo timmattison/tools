@@ -156,16 +156,25 @@ impl FilterRegistry {
             }
         }
 
-        let answer = match filter {
-            Registered::Events(filter) => filter(&inside, &applied.options),
+        // The answer, and how far the events after the region move.
+        let (answer, shift) = match filter {
+            Registered::Events(filter) => {
+                let answer = filter(&inside, &applied.options);
+                let shift = last_time(&answer) - last_time(&inside);
+                (answer, shift)
+            }
             Registered::Span(filter) => {
+                let length = (region_end.min(*end) - start).max(0.0);
                 let span = Span {
-                    events: inside.clone(),
-                    length: 0.0,
+                    events: inside,
+                    length,
                 };
-                filter(span, &applied.options)
-                    .map(|span| span.events)
-                    .unwrap_or_default()
+                let answer = filter(span, &applied.options).unwrap_or(Span {
+                    events: Vec::new(),
+                    length,
+                });
+                let shift = answer.length - length;
+                (answer.events, shift)
             }
         };
         for event in &answer {
@@ -177,7 +186,6 @@ impl FilterRegistry {
                 )));
             }
         }
-        let shift = last_time(&answer) - last_time(&inside);
 
         let mut result = before;
         result.extend(answer.into_iter().map(|event| Event {
