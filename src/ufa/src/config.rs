@@ -1652,6 +1652,36 @@ mod tests {
         );
     }
 
+    /// The mode of a file that was already on disk is narrow before the write,
+    /// not only after it. The test keeps the file open and unwritten, which is
+    /// the moment before the keys go in.
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_wider_config_file_is_narrowed_before_the_write() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempConfigDir::new("narrowed-before-write");
+        create_directory(&temp.dir);
+        let path = temp.config_file();
+        write_file(&path, "url = \"https://192.168.1.1\"\n");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
+            .expect("the existing file must be settable to a wider mode");
+
+        let _open_and_unwritten =
+            create_config_file(&path).expect("creating the config file must succeed");
+
+        let mode = fs::metadata(&path)
+            .expect("the config file must exist")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the keys are written next, and a file that is still readable by \
+             others at this moment leaks them, got {mode:o}"
+        );
+    }
+
     /// A 1Password reference names the item that holds the key. It is not the
     /// key, and a dump that hides it says nothing a reader can act on.
     const OP_REFERENCE: &str = "op://Private/ufa/key - 192.168.1.1 port 443";
