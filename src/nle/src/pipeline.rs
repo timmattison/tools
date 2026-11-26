@@ -189,6 +189,7 @@ impl FilterRegistry {
     /// Flatten `project` into one recording.
     ///
     /// The rules:
+    /// 0. A project that breaks a rule of `EditProject::validate` is refused.
     /// 1. A project with no clip fails with `NleError::RenderError`.
     /// 2. The events are the events of each clip on the timeline, track by
     ///    track and clip by clip, in a stable time order. Events at one time
@@ -205,9 +206,11 @@ impl FilterRegistry {
     /// recording equal to its source.
     ///
     /// # Errors
-    /// Returns `NleError::RenderError` for an empty project, and the errors of
-    /// `FilterRegistry::run`.
+    /// Returns `NleError::InvalidProject` when the project breaks a rule of
+    /// `EditProject::validate`, `NleError::RenderError` for an empty project,
+    /// and the errors of `FilterRegistry::run`.
     pub fn render(&self, project: &EditProject) -> Result<Recording, NleError> {
+        project.validate()?;
         // The clips in track order, then in the order on their track.
         let ordered: Vec<&Clip> = project
             .timeline
