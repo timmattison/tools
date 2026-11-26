@@ -28,7 +28,57 @@ pub(crate) enum ExportKind {
     Gif,
 }
 
+/// What the save dialog of an export shows.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SaveDialog {
+    /// The name that the dialog offers first.
+    pub(crate) file_name: String,
+    /// The folder that the dialog opens in. `None` leaves it to the system.
+    pub(crate) directory: Option<PathBuf>,
+    /// The name of the file filter.
+    pub(crate) filter_name: &'static str,
+    /// The extensions that the filter accepts, without a dot.
+    pub(crate) extensions: &'static [&'static str],
+}
+
 impl ExportKind {
+    /// Each kind, in the order of the menu.
+    pub(crate) const ALL: [ExportKind; 5] = [
+        Self::Recording,
+        Self::CompressedRecording,
+        Self::Web,
+        Self::Mp4,
+        Self::Gif,
+    ];
+
+    /// The `value` of the menu entry of this kind.
+    pub(crate) fn key(self) -> &'static str {
+        ""
+    }
+
+    /// The kind with the menu `value` `key`, or `None`.
+    pub(crate) fn from_key(key: &str) -> Option<Self> {
+        let _ = key;
+        None
+    }
+
+    /// The text of the menu entry of this kind.
+    pub(crate) fn label(self) -> &'static str {
+        ""
+    }
+
+    /// What the save dialog shows for this kind, when the open recording
+    /// comes from `source_path`.
+    pub(crate) fn save_dialog(self, source_path: &str) -> SaveDialog {
+        let _ = source_path;
+        SaveDialog {
+            file_name: String::new(),
+            directory: None,
+            filter_name: "",
+            extensions: &[],
+        }
+    }
+
     /// The ending of the file name of this kind.
     pub(crate) fn ending(self) -> &'static str {
         match self {
