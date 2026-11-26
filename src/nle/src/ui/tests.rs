@@ -681,7 +681,7 @@ async fn the_speed_panel_shows_its_fields_and_the_edited_duration() {
     let page = window.html();
     for text in [
         "Speed",
-        "Times are in seconds, on the timeline after the speed changes above.",
+        "Times are in seconds, on the timeline after the speed changes and fast-forwards that you applied before.",
         "Start (s)",
         "End (s)",
         "Apply Speed",
@@ -690,6 +690,7 @@ async fn the_speed_panel_shows_its_fields_and_the_edited_duration() {
     }
     assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
     assert_eq!(window.speed_fields().len(), 3);
+    assert_eq!(page.matches("Edited duration").count(), 1, "{page}");
     assert!(!page.contains("role=\"alert\""), "{page}");
 }
 
