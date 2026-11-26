@@ -309,5 +309,7 @@ fn metadata_rows(metadata: &RecordingMetadata) -> Element {
     }
 }
 
+mod export;
+
 #[cfg(test)]
 mod tests;
