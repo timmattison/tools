@@ -2,7 +2,8 @@
 //!
 //! This module holds the window settings, the root component, and the four
 //! regions of the window: the menu bar, the preview pane, the timeline, and
-//! the properties panel. The open document lives in the state of `App`: the
+//! the properties panel. The properties panel holds the speed panel and the
+//! fast-forward panel. The open document lives in the state of `App`: the
 //! `Editor` of its project, and the metadata of the recording file that it
 //! came from.
 
@@ -51,6 +52,24 @@ const EDIT_TIMES_HINT: &str = "Times are in seconds, on the timeline after the s
 const START_LABEL: &str = "Start (s)";
 /// The label of the field for the end of a region.
 const END_LABEL: &str = "End (s)";
+/// The heading of the fast-forward panel.
+const FAST_FORWARD_HEADING: &str = "Fast-Forward";
+/// The label of the field for the acceleration of Accelerate.
+const ACCELERATION_LABEL: &str = "Speed (Accelerate)";
+/// The label of the field for the first lines of Summarize.
+const FIRST_LINES_LABEL: &str = "First lines (Summarize)";
+/// The label of the field for the last lines of Summarize.
+const LAST_LINES_LABEL: &str = "Last lines (Summarize)";
+/// The text of the button that skips to the end of a region.
+const SKIP_TO_END_LABEL: &str = "Skip to End";
+/// The text of the button that accelerates a region.
+const ACCELERATE_LABEL: &str = "Accelerate";
+/// The text of the button that summarizes a region.
+const SUMMARIZE_LABEL: &str = "Summarize";
+/// The first text of the field for the acceleration.
+const DEFAULT_ACCELERATION: &str = "20";
+/// The first text of each field for a line count.
+const DEFAULT_SUMMARY_LINES: &str = "3";
 /// The label of the field for the speed.
 const SPEED_LABEL: &str = "Speed";
 /// The text of the button that applies the speed.
@@ -58,7 +77,9 @@ const APPLY_SPEED_LABEL: &str = "Apply Speed";
 /// The label of the row for the duration after the edits.
 const EDITED_DURATION_LABEL: &str = "Edited duration";
 
-/// The text of the button that removes a speed change.
+/// The start of the message for a fast-forward that does not apply.
+const FAST_FORWARD_FAILED_PREFIX: &str = "Failed to fast-forward";
+/// The text of the button that removes a speed change or a fast-forward.
 const REMOVE_LABEL: &str = "Remove";
 /// The text for a speed change that covers the whole timeline.
 const WHOLE_TIMELINE: &str = "the whole timeline";
@@ -303,8 +324,8 @@ fn summary(open: &Document) -> String {
     )
 }
 
-/// The metadata of the open recording, the speed panel, and the duration after
-/// all edits. `on_result` gets the outcome of each edit: `Ok`, or the message
+/// The metadata of the open recording, the speed panel, the fast-forward panel,
+/// and the duration after all edits. `on_result` gets the outcome of each edit: `Ok`, or the message
 /// of the banner.
 #[component]
 fn PropertiesPanel(
@@ -320,6 +341,7 @@ fn PropertiesPanel(
             if let Some(metadata) = metadata {
                 {metadata_rows(&metadata)}
                 SpeedPanel { loaded, on_result }
+                FastForwardPanel { loaded, on_result }
                 div { class: "metadata-item",
                     span { class: "metadata-label", {EDITED_DURATION_LABEL} }
                     span { class: "metadata-value", "{edited}" }
@@ -397,6 +419,116 @@ fn SpeedPanel(
                         onclick: move |_| {
                             let outcome = edit_document(loaded, |_| Edit::RemoveFilter { index });
                             report(on_result, SPEED_FAILED_PREFIX, outcome);
+                        },
+                        {REMOVE_LABEL}
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The fast-forward panel: five fields for a region and the settings of the
+/// three modes, one button for each mode, and the fast-forward filters of the
+/// project. A button reads only the fields that its mode uses. `on_result`
+/// gets the outcome of each button and each Remove.
+#[component]
+fn FastForwardPanel(
+    loaded: Signal<Option<Document>>,
+    on_result: EventHandler<Result<(), String>>,
+) -> Element {
+    let mut start = use_signal(String::new);
+    let mut end = use_signal(String::new);
+    let mut acceleration = use_signal(|| DEFAULT_ACCELERATION.to_owned());
+    let mut first = use_signal(|| DEFAULT_SUMMARY_LINES.to_owned());
+    let mut last = use_signal(|| DEFAULT_SUMMARY_LINES.to_owned());
+    let rows = fast_forward_rows(&loaded.read());
+    // Reads the fields and adds the filter of `button` at the end of the list.
+    let add = move |button: FastForwardButton| {
+        let change = fast_forward_change(
+            button,
+            &FastForwardFields {
+                start: &start.read(),
+                end: &end.read(),
+                speed: &acceleration.read(),
+                first: &first.read(),
+                last: &last.read(),
+            },
+        );
+        let outcome = change.and_then(|filter| {
+            edit_document(loaded, |project| Edit::AddFilter {
+                index: project.filters.len(),
+                filter,
+            })
+        });
+        report(on_result, FAST_FORWARD_FAILED_PREFIX, outcome);
+    };
+    rsx! {
+        div { class: "edit-panel",
+            h3 { {FAST_FORWARD_HEADING} }
+            p { class: "edit-hint", {EDIT_TIMES_HINT} }
+            label { class: "edit-field",
+                {START_LABEL}
+                input {
+                    r#type: "number",
+                    step: "any",
+                    min: "0",
+                    value: "{start}",
+                    oninput: move |event| start.set(event.value()),
+                }
+            }
+            label { class: "edit-field",
+                {END_LABEL}
+                input {
+                    r#type: "number",
+                    step: "any",
+                    min: "0",
+                    value: "{end}",
+                    oninput: move |event| end.set(event.value()),
+                }
+            }
+            label { class: "edit-field",
+                {ACCELERATION_LABEL}
+                input {
+                    r#type: "number",
+                    step: "any",
+                    min: "0",
+                    value: "{acceleration}",
+                    oninput: move |event| acceleration.set(event.value()),
+                }
+            }
+            label { class: "edit-field",
+                {FIRST_LINES_LABEL}
+                input {
+                    r#type: "number",
+                    step: "1",
+                    min: "0",
+                    value: "{first}",
+                    oninput: move |event| first.set(event.value()),
+                }
+            }
+            label { class: "edit-field",
+                {LAST_LINES_LABEL}
+                input {
+                    r#type: "number",
+                    step: "1",
+                    min: "0",
+                    value: "{last}",
+                    oninput: move |event| last.set(event.value()),
+                }
+            }
+            div { class: "edit-buttons",
+                button { onclick: move |_| add(FastForwardButton::SkipToEnd), {SKIP_TO_END_LABEL} }
+                button { onclick: move |_| add(FastForwardButton::Accelerate), {ACCELERATE_LABEL} }
+                button { onclick: move |_| add(FastForwardButton::Summarize), {SUMMARIZE_LABEL} }
+            }
+            for (index, text) in rows {
+                div { class: "edit-row", key: "{index}",
+                    span { "{text}" }
+                    button {
+                        onclick: move |_| {
+                            let outcome = edit_document(loaded, |_| Edit::RemoveFilter { index });
+                            report(on_result, FAST_FORWARD_FAILED_PREFIX, outcome);
                         },
                         {REMOVE_LABEL}
                     }
