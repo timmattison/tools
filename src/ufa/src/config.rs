@@ -1358,17 +1358,54 @@ async fn get_manual_controller_url() -> Result<String> {
         print!("Validating controller...");
         std::io::stdout().flush()?;
 
-        match validate_user_url(&url).await {
-            Ok(url_to_save) => {
-                println!(" ✓");
-                return Ok(url_to_save);
-            }
-            Err(e) => {
-                println!(" ✗");
-                println!("Failed to validate controller: {e}");
-                if prompt::confirm(&mut Stdio, "Use this URL anyway?")? {
-                    return Ok(url);
-                }
+        let validated = validate_user_url(&url).await;
+        if let Some(url_to_save) =
+            url_after_validation(validated, url, &mut std::io::stdout(), &mut Stdio)?
+        {
+            return Ok(url_to_save);
+        }
+    }
+}
+
+/// The question that the wizard asks when a typed URL failed validation.
+const USE_URL_ANYWAY: &str = "Use this URL anyway?";
+
+/// The URL that the setup wizard keeps after it validated a typed URL, after
+/// it tells the user what the validation found.
+///
+/// # Arguments
+///
+/// * `validated` - The answer of [`validate_user_url`] for `typed`.
+/// * `typed` - The URL the user typed, with its scheme.
+/// * `out` - Where the wizard writes. The wizard gives standard output.
+/// * `console` - Where the question goes.
+///
+/// # Returns
+///
+/// The URL to save, or `None` when the user asks to type a new URL.
+///
+/// # Errors
+///
+/// Returns an error if the result cannot be written, or if the question
+/// cannot be answered.
+fn url_after_validation(
+    validated: Result<String>,
+    typed: String,
+    out: &mut impl Write,
+    console: &mut impl Console,
+) -> Result<Option<String>> {
+    match validated {
+        Ok(url_to_save) => {
+            writeln!(out, " ✓")?;
+            Ok(Some(url_to_save))
+        }
+        Err(e) => {
+            writeln!(out, " ✗")?;
+            writeln!(out, "Failed to validate controller: {e}")?;
+            if prompt::confirm(console, USE_URL_ANYWAY)? {
+                Ok(Some(typed))
+            } else {
+                Ok(None)
             }
         }
     }
@@ -2545,6 +2582,34 @@ mod connection_test_tests {
         assert!(
             offered.is_empty(),
             "no controller to offer, got {offered:?}"
+        );
+        assert!(
+            text.contains(CONTEXT),
+            "the context is missing from {text:?}"
+        );
+        assert!(text.contains(CAUSE), "the cause is missing from {text:?}");
+    }
+
+    /// The wizard shows the cause of a failed validation of a typed URL, not
+    /// only the outer context that `validate_user_url` adds.
+    #[test]
+    fn a_failed_validation_of_a_typed_url_shows_its_cause() {
+        const CAUSE: &str = "Connection refused (os error 61)";
+        const CONTEXT: &str = "error sending request for url (https://192.168.1.1/)";
+        const TYPED: &str = "https://192.168.1.1";
+        let validated: Result<String> = Err(anyhow::anyhow!(CAUSE)).context(CONTEXT);
+        let mut out = Vec::new();
+        let mut console = Scripted::terminal(&["n\n"]);
+
+        let kept =
+            url_after_validation(validated, TYPED.to_string(), &mut out, &mut console).unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(kept, None, "a refused URL must not be kept");
+        assert!(
+            console.asked().contains(USE_URL_ANYWAY),
+            "the wizard must ask whether to keep the URL, asked {:?}",
+            console.asked()
         );
         assert!(
             text.contains(CONTEXT),
