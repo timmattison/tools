@@ -7,6 +7,7 @@ use wdid::catalog::{PathState, Tool};
 use wdid::render::{json, table_width, text, unparsed};
 use wdid::tally::{Classification, Summary, Tally, ToolUsage, Unparsed, Window};
 use wdid::tool::ToolName;
+use wdid::workspace::{Commit, FoundBy, Workspace};
 
 /// Makes a date.
 fn date(year: i32, month: u32, day: u32) -> NaiveDate {
@@ -20,6 +21,15 @@ fn window() -> Window {
         since: None,
         new_days: 90,
         idle_days: 180,
+    }
+}
+
+/// Makes the workspace of every test that does not test the workspace: the
+/// git work tree of the current directory.
+fn workspace() -> Workspace {
+    Workspace {
+        root: PathBuf::from("/repo"),
+        found_by: FoundBy::WorkTree,
     }
 }
 
@@ -163,7 +173,7 @@ fn table_of(report: &str) -> &str {
 /// date, and a note for each state of the PATH.
 #[test]
 fn the_table_shows_one_row_for_each_tool() {
-    let report = text(&fixture(), &window(), Some(200));
+    let report = text(&fixture(), &window(), &workspace(), Some(200));
 
     assert_eq!(table_of(&report), TABLE_200);
 }
@@ -200,7 +210,7 @@ fn assert_whole_values(table: &str) {
 /// stays whole, and no line is longer than the width.
 #[test]
 fn a_narrow_table_wraps_only_the_text_columns() {
-    let report = text(&fixture(), &window(), Some(120));
+    let report = text(&fixture(), &window(), &workspace(), Some(120));
     let table = table_of(&report);
 
     assert!(table.lines().count() > 8, "the text cells wrap:\n{table}");
@@ -217,7 +227,7 @@ fn a_narrow_table_wraps_only_the_text_columns() {
 /// table that is wider than the width. Each value stays whole.
 #[test]
 fn a_table_too_narrow_for_its_dates_keeps_each_date_whole() {
-    let report = text(&fixture(), &window(), Some(60));
+    let report = text(&fixture(), &window(), &workspace(), Some(60));
     assert_whole_values(table_of(&report));
 }
 
@@ -226,7 +236,7 @@ fn a_table_too_narrow_for_its_dates_keeps_each_date_whole() {
 /// the header `Through an alias or a function` filled 30 lines.
 #[test]
 fn a_text_column_keeps_a_width_that_a_person_can_read() {
-    let report = text(&fixture(), &window(), Some(60));
+    let report = text(&fixture(), &window(), &workspace(), Some(60));
     let table = table_of(&report);
     for value in ["wtm 3,061, wt 3,029", "not installed", "Through an alias"] {
         assert!(
@@ -271,13 +281,14 @@ Idle (no use in the last 180 days):
 
 History: 1,234 rows. 12 not counted (exit 127). 3 did not parse (wdid --unparsed prints them).
 Shell: 5 aliases, 4 functions (1 did not parse).
+Workspace: /repo (the git work tree of the current directory)
 "#;
 
 /// The whole report: the table, a blank line, the three group lines, a blank
-/// line, the two summary lines, and a final newline.
+/// line, the three summary lines, and a final newline.
 #[test]
 fn the_report_holds_the_table_the_groups_and_the_summary() {
-    let report = text(&fixture(), &window(), Some(200));
+    let report = text(&fixture(), &window(), &workspace(), Some(200));
 
     assert_eq!(report, format!("{TABLE_200}\n\n{TAIL}"));
 }
@@ -314,7 +325,7 @@ fn idle(name: &str, typed: u64, last_use: NaiveDate) -> ToolUsage {
 
 /// Gives the three group lines of `tally`.
 fn group_lines(tally: &Tally) -> Vec<String> {
-    let report = text(tally, &window(), None);
+    let report = text(tally, &window(), &workspace(), None);
     let groups = report.split("\n\n").nth(1).unwrap_or_default();
     groups.lines().map(str::to_string).collect()
 }
@@ -369,7 +380,7 @@ fn the_group_lines_name_the_limits_of_the_window() {
         ..window()
     };
 
-    let report = text(&fixture(), &window, None);
+    let report = text(&fixture(), &window, &workspace(), None);
 
     assert!(report.contains("Never used, old (added 30 or more days ago):\n  goup\n"));
     assert!(report.contains("Never used, new (added less than 30 days ago):\n  faulte"));
@@ -403,9 +414,56 @@ fn summary_lines(summary: Summary) -> Vec<String> {
         tools: vec![never_used("a", None, Classification::NeverUsedOld)],
         summary,
     };
-    let report = text(&tally, &window(), None);
+    let report = text(&tally, &window(), &workspace(), None);
     let lines = report.split("\n\n").nth(2).unwrap_or_default();
     lines.lines().map(str::to_string).collect()
+}
+
+/// The last summary line names the workspace and the step that found it.
+#[test]
+fn the_workspace_line_names_the_workspace_and_the_step_that_found_it() {
+    let commit = Commit::parse("12baa4168146b6018d38dbe4f8cace7ed5b4081b").unwrap();
+    let checkout = "/u/.cargo/git/checkouts/tools-dda63c64534664e9/12baa41";
+    let cases = [
+        (
+            Workspace {
+                root: PathBuf::from("/code/tools"),
+                found_by: FoundBy::RepoFlag,
+            },
+            "Workspace: /code/tools (--repo)",
+        ),
+        (
+            Workspace {
+                root: PathBuf::from("/code/tools"),
+                found_by: FoundBy::WorkTree,
+            },
+            "Workspace: /code/tools (the git work tree of the current directory)",
+        ),
+        (
+            Workspace {
+                root: PathBuf::from(checkout),
+                found_by: FoundBy::InstalledGit {
+                    url: "https://github.com/timmattison/tools".to_string(),
+                    commit,
+                },
+            },
+            "Workspace: /u/.cargo/git/checkouts/tools-dda63c64534664e9/12baa41 (the source of the installed wdid, commit 12baa41)",
+        ),
+        (
+            Workspace {
+                root: PathBuf::from("/code/日本語 tools"),
+                found_by: FoundBy::InstalledPath {
+                    crate_dir: PathBuf::from("/code/日本語 tools/src/wdid"),
+                },
+            },
+            "Workspace: /code/日本語 tools (the source of the installed wdid, cargo install --path '/code/日本語 tools/src/wdid')",
+        ),
+    ];
+    for (workspace, line) in cases {
+        let report = text(&fixture(), &window(), &workspace, None);
+        let summary = report.split("\n\n").nth(2).unwrap_or_default();
+        assert_eq!(summary.lines().last(), Some(line), "{report}");
+    }
 }
 
 /// With a `since` date, the history line says how many rows came before it.
@@ -423,7 +481,7 @@ fn the_history_line_names_the_rows_before_the_since_date() {
         ..fixture()
     };
 
-    let report = text(&tally, &window, None);
+    let report = text(&tally, &window, &workspace(), None);
 
     assert!(report.contains(
         "History: 1,234 rows, 1,040 before 2026-01-01. 12 not counted (exit 127). 3 did not parse (wdid --unparsed prints them).\n"
@@ -488,8 +546,8 @@ fn the_history_line_says_one_row() {
         ..fixture()
     };
 
-    let plain = text(&one_row, &window(), None);
-    let since = text(&one_row_one_before, &window_since, None);
+    let plain = text(&one_row, &window(), &workspace(), None);
+    let since = text(&one_row_one_before, &window_since, &workspace(), None);
 
     assert!(plain.contains("History: 1 row. 12 not counted"));
     assert!(since.contains("History: 1 row, 1 before 2026-01-01. 12 not counted"));
@@ -523,7 +581,7 @@ fn the_group_headings_say_one_day() {
         ..window()
     };
 
-    let report = text(&fixture(), &window, None);
+    let report = text(&fixture(), &window, &workspace(), None);
 
     assert!(report.contains("Never used, old (added 1 or more days ago):"));
     assert!(report.contains("Never used, new (added less than 1 day ago):"));
@@ -533,7 +591,7 @@ fn the_group_headings_say_one_day() {
 /// Parses the JSON of `tally`. The test fails when the text is not one pretty
 /// JSON document with a final newline.
 fn document(tally: &Tally, window: &Window) -> serde_json::Value {
-    let raw = json(tally, window);
+    let raw = json(tally, window, &workspace());
     assert!(raw.ends_with("}\n"), "no final newline: {raw:?}");
     assert!(raw.contains("\n  \"today\""), "not pretty-printed: {raw:?}");
     serde_json::from_str(&raw).expect("the report is JSON")
@@ -560,7 +618,8 @@ fn the_json_document_has_the_keys_of_the_design() {
             "shell",
             "since",
             "today",
-            "tools"
+            "tools",
+            "workspace"
         ]
     );
     assert_eq!(value["today"], "2026-10-14");
@@ -570,6 +629,59 @@ fn the_json_document_has_the_keys_of_the_design() {
     assert_eq!(value["never_used_old"], serde_json::json!(["goup"]));
     assert_eq!(value["never_used_new"], serde_json::json!(["faulte"]));
     assert_eq!(value["idle"], serde_json::json!(["aa"]));
+}
+
+/// The `workspace` block names the root and the step that found it. The
+/// steps of the installed source add the facts of the record.
+#[test]
+fn the_json_workspace_block_names_the_root_and_the_step() {
+    let full = "12baa4168146b6018d38dbe4f8cace7ed5b4081b";
+    let cases = [
+        (
+            Workspace {
+                root: PathBuf::from("/code/tools"),
+                found_by: FoundBy::RepoFlag,
+            },
+            serde_json::json!({ "root": "/code/tools", "found_by": "repo_flag" }),
+        ),
+        (
+            workspace(),
+            serde_json::json!({ "root": "/repo", "found_by": "work_tree" }),
+        ),
+        (
+            Workspace {
+                root: PathBuf::from("/u/.cargo/git/checkouts/tools-dda63c64534664e9/12baa41"),
+                found_by: FoundBy::InstalledGit {
+                    url: "https://github.com/timmattison/tools".to_string(),
+                    commit: Commit::parse(full).unwrap(),
+                },
+            },
+            serde_json::json!({
+                "root": "/u/.cargo/git/checkouts/tools-dda63c64534664e9/12baa41",
+                "found_by": "installed_git",
+                "url": "https://github.com/timmattison/tools",
+                "commit": full,
+            }),
+        ),
+        (
+            Workspace {
+                root: PathBuf::from("/code/日本語"),
+                found_by: FoundBy::InstalledPath {
+                    crate_dir: PathBuf::from("/code/日本語/src/wdid"),
+                },
+            },
+            serde_json::json!({
+                "root": "/code/日本語",
+                "found_by": "installed_path",
+                "crate_dir": "/code/日本語/src/wdid",
+            }),
+        ),
+    ];
+    for (workspace, expected) in cases {
+        let raw = json(&fixture(), &window(), &workspace);
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["workspace"], expected, "{raw}");
+    }
 }
 
 /// A `since` date is a date text.

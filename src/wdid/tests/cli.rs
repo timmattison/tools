@@ -5,6 +5,8 @@
 //! that runs the real git. The fixture workspace has two tools,
 //! `wdid-fixture-one` and `wdid-fixture-two`.
 
+mod support;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -366,6 +368,7 @@ fn json_gives_the_counts_and_the_catalog_facts() {
     assert_eq!(two["installed"], false);
     assert_eq!(two["added"], "2026-03-04");
     assert_eq!(document["never_used_old"], serde_json::json!([TOOL_TWO]));
+    assert_eq!(document["workspace"]["found_by"], "repo_flag", "{document}");
 }
 
 #[test]
@@ -400,7 +403,7 @@ fn an_empty_history_stops_the_run() {
 }
 
 #[test]
-fn a_repo_that_is_not_a_workspace_stops_the_run_and_names_the_flag() {
+fn a_repo_that_is_not_a_workspace_stops_the_run_and_says_why() {
     let setup = Setup::new(&Atuin::Rows(&[row(1, "ls")]));
     let empty = tempfile::tempdir().unwrap();
     let output = setup
@@ -414,7 +417,8 @@ fn a_repo_that_is_not_a_workspace_stops_the_run_and_names_the_flag() {
     assert!(stdout(&output).is_empty());
     let message = stderr(&output);
     assert!(message.starts_with("wdid: "), "{message}");
-    assert!(message.contains("--repo"), "{message}");
+    assert!(message.contains("is not a cargo workspace"), "{message}");
+    assert!(!message.contains("--repo"), "{message}");
 }
 
 #[test]
@@ -529,5 +533,95 @@ fn a_use_through_an_alias_of_the_real_zsh_counts_for_the_tool() {
     assert!(
         document["shell"]["aliases"].as_u64().unwrap() >= 1,
         "{document}"
+    );
+}
+
+/// Says that the `workspace` block of `document` names the checkout of
+/// `installed`, found by step 3.
+fn assert_installed_workspace(document: &Value, installed: &support::Installed) {
+    let workspace = &document["workspace"];
+    assert_eq!(workspace["found_by"], "installed_git", "{document}");
+    assert_eq!(workspace["url"], support::REPOSITORY_URL, "{document}");
+    assert_eq!(workspace["commit"], installed.commit.as_str(), "{document}");
+    let root = PathBuf::from(workspace["root"].as_str().unwrap());
+    assert_eq!(
+        root.canonicalize().unwrap(),
+        installed.checkout.canonicalize().unwrap()
+    );
+}
+
+/// Runs `wdid --no-shell --json` in `cwd`, with `home` as the cargo home.
+fn run_in(setup: &Setup, home: &support::CargoHome, cwd: &Path) -> Output {
+    setup
+        .command()
+        .env("CARGO_HOME", home.path())
+        .arg("--no-shell")
+        .arg("--json")
+        .current_dir(cwd)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn outside_each_work_tree_the_report_is_on_the_source_of_the_installed_wdid() {
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "wdid-fixture-one a")]));
+    let installed = support::Installed::new();
+    let cwd = gitscratch::testing::not_a_repository();
+
+    let document = json(&run_in(&setup, &installed.home, cwd.path()));
+
+    assert_eq!(tool(&document, TOOL_ONE)["uses"], 1, "{document}");
+    assert!(tool(&document, TOOL_TWO)["added"].is_string(), "{document}");
+    assert_installed_workspace(&document, &installed);
+}
+
+#[test]
+fn in_a_work_tree_without_a_cargo_toml_the_report_is_on_the_source_of_the_installed_wdid() {
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "wdid-fixture-one a")]));
+    let installed = support::Installed::new();
+    let work_tree = gitscratch::testing::TestRepo::init();
+    work_tree.commit_file("README.md", "not a workspace\n", "add a readme");
+
+    let document = json(&run_in(&setup, &installed.home, work_tree.path()));
+
+    assert_eq!(tool(&document, TOOL_ONE)["uses"], 1, "{document}");
+    assert!(tool(&document, TOOL_TWO)["added"].is_string(), "{document}");
+    assert_installed_workspace(&document, &installed);
+}
+
+/// In a cargo workspace, the report is on that workspace also when the
+/// installed `wdid` came from another one.
+#[test]
+fn in_a_cargo_workspace_the_report_is_on_that_workspace() {
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "wdid-fixture-one a")]));
+    let installed = support::Installed::new();
+
+    let document = json(&run_in(&setup, &installed.home, setup.workspace.path()));
+
+    let workspace = &document["workspace"];
+    assert_eq!(workspace["found_by"], "work_tree", "{document}");
+    let root = PathBuf::from(workspace["root"].as_str().unwrap());
+    assert_eq!(
+        root.canonicalize().unwrap(),
+        setup.workspace.path().canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn outside_each_work_tree_without_a_record_the_error_names_repo_and_the_reason() {
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "wdid-fixture-one a")]));
+    let home = support::CargoHome::new();
+    let cwd = gitscratch::testing::not_a_repository();
+
+    let output = run_in(&setup, &home, cwd.path());
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(stdout(&output).is_empty());
+    let message = stderr(&output);
+    assert!(message.starts_with("wdid: "), "{message}");
+    assert!(message.contains("--repo <path>"), "{message}");
+    assert!(
+        message.contains("there is no record of the install"),
+        "{message}"
     );
 }
