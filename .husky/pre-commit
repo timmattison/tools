@@ -36,7 +36,7 @@ set -euo pipefail
 # move as a deletion of the old path and an addition of the new path, so a
 # block that matches the old path sees a move out of it. The Rust block, the
 # index block, the msgs block, the plugin block and the ic-inline block below
-# read this list.
+# read this list, each through staged_path_matches.
 staged_paths_with_deletions() {
     git diff --cached --name-only --no-renames
 }
@@ -144,7 +144,7 @@ fi
 # staged_paths_with_deletions, because the test names the old paths, so a
 # deletion or a move of a file of the plugin breaks it as an edit can.
 if [ "${rust_gate_ran:-}" != yes ] &&
-    staged_paths_with_deletions | grep -qE '^plugins/ic-inline/'; then
+    staged_path_matches '^plugins/ic-inline/'; then
     echo "pre-commit: running cargo test -p ic --test emit-rgba"
     without_git_environment cargo test -p ic --test emit-rgba
 fi
