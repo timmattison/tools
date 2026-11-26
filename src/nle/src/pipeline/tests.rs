@@ -674,3 +674,116 @@ fn render_of_a_clip_whose_end_overflows_the_timeline_fails() {
         "{result:?}"
     );
 }
+
+// Tests of the end of the timeline in a typed filter.
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoOptions {}
+
+/// A typed filter under the kind "set-end" that keeps its events and answers
+/// `end`.
+fn end_registry(end: Option<f64>) -> FilterRegistry {
+    let mut registry = FilterRegistry::new();
+    registry.register_typed(kind("set-end"), move |span: Span, _: &NoOptions| Span {
+        events: span.events,
+        end,
+    });
+    registry
+}
+
+fn assert_render_names(result: Result<Recording, NleError>, name: &str) {
+    assert_render_error_names(result.map(|recording| recording.events), name);
+}
+
+#[test]
+fn a_typed_filter_sees_the_end_only_when_the_end_is_inside_its_region() {
+    let seen = TestArc::new(Mutex::new(Vec::new()));
+    let captured = TestArc::clone(&seen);
+    let mut registry = FilterRegistry::new();
+    registry.register_typed(kind("spy"), move |span: Span, _: &NoOptions| {
+        captured.lock().unwrap().push(span.end);
+        Span {
+            events: span.events,
+            end: None,
+        }
+    });
+
+    // The end of the timeline starts at the last event, 4.0.
+    let cases = [
+        (all("spy"), Some(4.0)),
+        (range("spy", 1.0, 5.0), Some(3.0)),
+        // A range holds its start and not its end, so an end of the timeline
+        // at the end of the range is after the range.
+        (range("spy", 0.0, 4.0), None),
+        (range("spy", 5.0, 6.0), None),
+    ];
+    for (filter, expected) in cases {
+        registry.run(events(&[1.0, 4.0]), &[filter]).unwrap();
+
+        assert_eq!(seen.lock().unwrap().pop(), Some(expected));
+    }
+}
+
+#[test]
+fn a_typed_filter_that_answers_an_end_sets_the_end_of_the_timeline() {
+    // The project ends at 10, and its last event is at 8.
+    let rendered = end_registry(Some(8.5))
+        .render(&one_clip_project(vec![all("set-end")]))
+        .unwrap();
+    assert_eq!(rendered.duration, 8.5);
+
+    // The answered end is relative to the start of the range.
+    let rendered = end_registry(Some(4.0))
+        .render(&one_clip_project(vec![range("set-end", 5.0, 20.0)]))
+        .unwrap();
+    assert_eq!(rendered.duration, 9.0);
+
+    // The end is never before the last event.
+    let rendered = end_registry(Some(1.0))
+        .render(&one_clip_project(vec![all("set-end")]))
+        .unwrap();
+    assert_eq!(rendered.duration, 8.0);
+
+    // No answered end leaves the end to the shift: 10 moves by 8.5 - 8.
+    let rendered = typed_registry()
+        .render(&one_clip_project(vec![all_with(
+            "shift",
+            FilterOptions::new().with("seconds", 0.5),
+        )]))
+        .unwrap();
+    assert_eq!(rendered.duration, 10.5);
+}
+
+#[test]
+fn a_typed_filter_that_answers_an_end_outside_its_region_fails_and_names_the_kind() {
+    // The range starts after the end of the project at 10, so the filter
+    // does not see the end, and it cannot set it.
+    let result = end_registry(Some(1.0)).render(&one_clip_project(vec![range(
+        "set-end", 20.0, 30.0,
+    )]));
+
+    assert_render_names(result, "\"set-end\"");
+}
+
+#[test]
+fn a_typed_filter_that_answers_an_end_that_is_not_finite_or_is_below_zero_fails() {
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+        let result = end_registry(Some(bad)).render(&one_clip_project(vec![all("set-end")]));
+
+        assert_render_names(result, "\"set-end\"");
+    }
+
+    // Relative -6 on a range that starts at 5 is -1 on the timeline.
+    let result = end_registry(Some(-6.0)).render(&one_clip_project(vec![range(
+        "set-end", 5.0, 20.0,
+    )]));
+    assert_render_names(result, "\"set-end\"");
+
+    // Relative -1 on a range that starts at 5 is 4 on the timeline, which is
+    // fine. The last event at 8 then keeps the end at 8.
+    let rendered = end_registry(Some(-1.0))
+        .render(&one_clip_project(vec![range("set-end", 5.0, 20.0)]))
+        .unwrap();
+    assert_eq!(rendered.duration, 8.0);
+}
