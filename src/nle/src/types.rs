@@ -91,7 +91,11 @@ impl Seconds {
     /// # Errors
     /// Returns `NleError::InvalidTime` when `value` is NaN, infinite, or below zero.
     pub fn new(value: f64) -> Result<Self, NleError> {
-        Ok(Seconds(value))
+        if value.is_finite() && value >= 0.0 {
+            Ok(Seconds(value))
+        } else {
+            Err(NleError::InvalidTime(value))
+        }
     }
 
     /// The number of seconds.
