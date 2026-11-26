@@ -302,3 +302,46 @@ fn events_at_one_time_keep_the_order_the_filter_gave() {
     let data: Vec<&str> = out.iter().map(|e| e.data.as_str()).collect();
     assert_eq!(data, vec!["first", "second", "third", "late"]);
 }
+
+// Group 7: render of one clip.
+
+use std::collections::BTreeMap;
+
+fn source(title: &str, event_times: &[f64], duration: f64) -> Recording {
+    let mut env = BTreeMap::new();
+    env.insert("SHELL".to_string(), format!("/bin/{title}"));
+    Recording {
+        version: 2,
+        width: 100,
+        height: 30,
+        timestamp: 1_700_000_000.0,
+        duration,
+        command: format!("run-{title}"),
+        title: title.to_string(),
+        env,
+        events: event_times.iter().copied().map(ev).collect(),
+    }
+}
+
+#[test]
+fn render_of_an_empty_project_fails() {
+    let registry = FilterRegistry::new();
+
+    let result = registry.render(&EditProject::default());
+
+    assert!(
+        matches!(result, Err(NleError::RenderError(_))),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn render_of_a_whole_recording_with_no_filter_equals_its_source() {
+    let mut recording = source("whole", &[0.0, 0.5, 1.25, 3.0], 3.0);
+    recording.events[1] = data_event(0.5, "日本語🎉");
+    let project = EditProject::from_recording(Arc::new(recording.clone())).unwrap();
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    assert_eq!(rendered, recording);
+}
