@@ -747,3 +747,14 @@ fn the_hostname_preset_keeps_file_names_and_single_labels() {
         assert_unchanged(Preset::Hostname, text);
     }
 }
+
+#[test]
+fn the_key_of_a_preset_is_its_serde_name_and_finds_the_preset_again() {
+    for preset in Preset::ALL {
+        let name = serde_json::to_value(preset).unwrap();
+        assert_eq!(name, preset.key());
+        assert_eq!(Preset::from_key(preset.key()), Some(preset));
+    }
+    assert_eq!(Preset::from_key("nope"), None);
+    assert_eq!(Preset::from_key(""), None);
+}

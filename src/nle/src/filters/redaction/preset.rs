@@ -129,4 +129,17 @@ impl Preset {
             Preset::Hostname => HOSTNAME,
         }
     }
+
+    /// The name of the preset in a saved project and in a menu. It is the
+    /// name that `serde` gives the preset.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        ""
+    }
+
+    /// The preset that has the name `key`, or `None` when no preset has it.
+    #[must_use]
+    pub fn from_key(_key: &str) -> Option<Preset> {
+        None
+    }
 }
