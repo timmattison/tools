@@ -232,7 +232,10 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                 if (!(duration > 0)) return;
                 const container = document.getElementById('chapter-markers');
                 for (const chapter of chapters) {
-                    const percent = Math.min(100, Math.max(0, chapter.time / duration * 100));
+                    // Like the video export, keep only a chapter inside the recording.
+                    const time = chapter.time;
+                    if (!(Number.isFinite(time) && time >= 0 && time <= duration)) continue;
+                    const percent = time / duration * 100;
                     const label = `${chapter.label} (${formatTime(chapter.time)})`;
                     const marker = document.createElement('button');
                     marker.type = 'button';

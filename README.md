@@ -1060,8 +1060,8 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
   - Terminal session recorder and player — because Betamax was always better than VHS. Captures
     terminal I/O with microsecond timestamps, replays with speed control / pause / rewind, and can
     export recordings to self-contained HTML players or MP4/GIF videos with multiple themes.
-  - A recording with chapters gets one marker for each chapter on the progress bar of the HTML
-    player, and chapter metadata in an MP4. A GIF has no chapters.
+  - A recording with chapters gets one marker for each chapter inside the recording on the
+    progress bar of the HTML player, and chapter metadata in an MP4. A GIF has no chapters.
   - To install: `cargo install --git https://github.com/timmattison/tools beta`
 - vpn-tunnel
   - Generates Docker-based VPN tunnels using gluetun + ProtonVPN + WireGuard. Produces a ready-to-run

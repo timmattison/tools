@@ -108,8 +108,9 @@ beta export video session.json -o session.gif --fps 15 --optimize-web
 A recording can hold chapters (see [Recording Format](#recording-format)). The
 HTML player shows one marker for each chapter on its progress bar, and a click
 on a marker moves the player to that chapter. An MP4 gets the chapters as
-chapter metadata, which video players show as a chapter list. A GIF has no
-chapters, and the export says so.
+chapter metadata, which video players show as a chapter list. Both exports skip
+a chapter whose time is below 0 or after the duration. A GIF has no chapters,
+and the export says so.
 
 ### Playback Controls
 
