@@ -251,8 +251,8 @@ ufa sites --limit 50 --offset 50
 # Read every page
 ufa sites --all
 
-# Filter
-ufa sites --filter "name.like('main*')"
+# Filter (a site name takes eq, ne, in and notIn)
+ufa sites --filter "name.eq('Default')"
 ```
 
 ### Devices
