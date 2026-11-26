@@ -158,7 +158,7 @@ pub(crate) fn App() -> Element {
                         loaded.set(Some(document));
                         error.set(None);
                     }
-                    Err(_) => {}
+                    Err(failure) => error.set(Some(format!("{OPEN_FAILED_PREFIX}: {failure}"))),
                 },
                 on_error: move |message| error.set(Some(message)),
             }

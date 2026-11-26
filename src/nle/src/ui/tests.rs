@@ -565,9 +565,7 @@ async fn a_failed_load_keeps_the_open_recording() {
 async fn a_recording_that_cannot_become_a_project_shows_the_banner() {
     let mut loaded = fixture();
     loaded.recording.duration = -1.0;
-    let fakes = Fakes::new()
-        .pick(picked())
-        .load(Answer::Ready(Ok(loaded)));
+    let fakes = Fakes::new().pick(picked()).load(Answer::Ready(Ok(loaded)));
     let mut window = Window::open(&fakes);
     window.click(window.open_button());
     window.settle().await;
