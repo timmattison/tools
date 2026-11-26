@@ -168,3 +168,22 @@ fn test_resolve_cell_colors_with_unmodified_palette() {
     assert_eq!(fg, (255, 255, 255));
     assert_eq!(bg, (0, 0, 0));
 }
+
+#[test]
+fn the_replay_buffer_holds_only_an_unfinished_sequence() {
+    let feed = |text: &str| {
+        let mut state = TerminalState::new(8, 4, TerminalTheme::auto());
+        state.process_output(text).unwrap();
+        state
+    };
+
+    assert!(feed("plain\x1b[31mred\x1b[0m\r\n").pending.is_empty());
+    assert!(feed("日本語").pending.is_empty());
+    assert!(feed("\x1b]0;title\x07\n").pending.is_empty());
+    assert!(feed("\x1bP1$qm\x1b\\").pending.is_empty());
+
+    let mut state = feed("\x1b[3");
+    assert_eq!(state.pending, b"\x1b[3");
+    state.process_output("1mX").unwrap();
+    assert!(state.pending.is_empty());
+}
