@@ -228,24 +228,23 @@ fn export_video_writes_the_golden_frame() {
     }
 }
 
+/// `beta export video` reads the `--font` file before it starts `ffmpeg`.
+/// The `PATH` of the run holds no `ffmpeg`, so a font error that comes after
+/// the start of `ffmpeg` names `ffmpeg` and not the font file.
 #[test]
-fn export_video_names_a_font_file_it_cannot_read() {
+fn export_video_names_a_font_file_it_cannot_read_before_it_starts_ffmpeg() {
     let tmp = TempDir::new().expect("temp dir");
-    let bin = install_fake_ffmpeg(tmp.path());
+    let empty_bin = tmp.path().join("empty-bin");
+    std::fs::create_dir_all(&empty_bin).expect("make the empty bin directory");
     let missing = tmp.path().join("no-such-font.ttf");
-    let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_beta"));
-    let inherited = std::env::var_os("PATH").unwrap_or_default();
-    let joined =
-        std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
-            .expect("a path prefix has no separator");
-    let output = command
+    let output = childenv::fixture_command(env!("CARGO_BIN_EXE_beta"))
         .args(["export", "video"])
         .arg(recording_path())
         .arg("-o")
         .arg(tmp.path().join("frame.raw"))
         .args(["--fps", "1", "--font"])
         .arg(&missing)
-        .env("PATH", joined)
+        .env("PATH", &empty_bin)
         .output()
         .expect("beta starts");
     assert!(!output.status.success(), "beta must fail on a missing font");
@@ -254,5 +253,9 @@ fn export_video_names_a_font_file_it_cannot_read() {
         stderr.contains(&missing.display().to_string()),
         "stderr must name {}, but it says:\n{stderr}",
         missing.display()
+    );
+    assert!(
+        !stderr.to_lowercase().contains("ffmpeg"),
+        "beta must not start ffmpeg before it reads the font, but stderr says:\n{stderr}"
     );
 }
