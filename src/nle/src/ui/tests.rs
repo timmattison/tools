@@ -872,3 +872,38 @@ async fn a_video_export_shows_its_progress_and_blocks_a_second_click() {
         }
     );
 }
+
+/// The first export outcome that fails.
+fn boom() -> Answer<ExportOutcome> {
+    Answer::Ready(Err(NleError::ExportError("beta export failed: boom".into())))
+}
+
+#[tokio::test]
+async fn a_failed_export_shows_the_banner_until_an_export_works() {
+    let fakes = fakes_with_recording()
+        .dialog(Answer::Ready(Some(PathBuf::from(EXPORT_PICKED))))
+        .export(Vec::new(), boom())
+        .dialog(Answer::Ready(Some(PathBuf::from(EXPORT_PICKED))))
+        .export(
+            Vec::new(),
+            Answer::Ready(Ok(PathBuf::from(EXPORT_WRITTEN))),
+        );
+    let mut window = window_with_recording(&fakes).await;
+    let button = window.export_button();
+    window.click(button);
+    window.settle().await;
+    let page = window.html();
+    assert!(page.contains("role=\"alert\""), "{page}");
+    assert!(
+        page.contains("Export failed: beta export failed: boom"),
+        "{page}"
+    );
+    assert!(!page.contains("role=\"status\""), "{page}");
+    assert!(!window.export_is_disabled(), "{page}");
+    assert!(!page.contains("<progress"), "{page}");
+    window.click(button);
+    window.settle().await;
+    let page = window.html();
+    assert!(!page.contains("role=\"alert\""), "{page}");
+    assert!(page.contains("Exported to /tmp/out.json"), "{page}");
+}
