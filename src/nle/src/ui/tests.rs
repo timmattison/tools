@@ -399,7 +399,7 @@ impl Window {
     /// made: the first is the Open Recording button, and the export bar
     /// appears with the first document, before any banner.
     fn export_button(&self) -> ElementId {
-        assert!(self.html().contains("export-bar"), "no export bar");
+        assert!(self.html().contains(EXPORT_BAR_TAG), "no export bar");
         let clicks = &self.listeners["click"];
         assert!(clicks.len() >= 2, "{clicks:?}");
         clicks[1]
@@ -409,7 +409,7 @@ impl Window {
     /// the app ever made, because the export bar starts with it, and the other
     /// controls of the bar come after it.
     fn kind_select(&self) -> ElementId {
-        assert!(self.html().contains("export-bar"), "no export bar");
+        assert!(self.html().contains(EXPORT_BAR_TAG), "no export bar");
         let changes = self.listeners.get("change");
         assert!(changes.is_some(), "no kind select in {}", self.html());
         changes.map_or_else(|| unreachable!("asserted above"), |ids| ids[0])
@@ -765,6 +765,9 @@ async fn a_load_after_an_error_removes_the_banner() {
     assert!(page.contains("Demo Recording"), "{page}");
 }
 
+/// The `class` attribute of the export bar. The style sheet in the page names
+/// the class too, so the bare class name proves nothing.
+const EXPORT_BAR_TAG: &str = "class=\"export-bar\"";
 /// The path that the fake save dialog picks.
 const EXPORT_PICKED: &str = "/tmp/out";
 /// The file that the fake export writes.
@@ -825,7 +828,7 @@ async fn an_export_with_the_default_settings_writes_a_recording() {
 #[test]
 fn app_with_no_recording_has_no_export_bar() {
     let page = render_empty_app();
-    assert!(!page.contains("export-bar"), "{page}");
+    assert!(!page.contains(EXPORT_BAR_TAG), "{page}");
 }
 
 #[tokio::test]
