@@ -743,6 +743,39 @@ mod typed_url_tests {
             "a redirect that does not keep the probe path names no URL to type, got: {error3}"
         );
     }
+
+    /// A redirect back to the URL of the probe, as a redirect that only sets a
+    /// cookie does, names no URL to type. The controller it points at is the
+    /// URL that just failed, and that URL fails the same way on the next try.
+    /// A change of the query or the fragment alone points at the same
+    /// controller.
+    #[tokio::test]
+    async fn a_redirect_to_the_probe_url_itself_names_no_url_to_type() {
+        let cases = [
+            ("", "/proxy/network/integration/v1/info"),
+            ("", "/proxy/network/integration/v1/info?session=1"),
+            ("", "/proxy/network/integration/v1/info#top"),
+            ("/unifi", "/unifi/proxy/network/integration/v1/info"),
+        ];
+        for (prefix, location) in cases {
+            let redirecting = TestServer::replying(&redirect_to(location)).await;
+            let typed = format!("{}{prefix}", redirecting.origin());
+            let error = format!(
+                "{:#}",
+                validate_user_url(&typed)
+                    .await
+                    .expect_err("a URL that answers with a redirect must not validate")
+            );
+            assert!(
+                error.contains(location),
+                "the error must name where the redirect goes, got: {error}"
+            );
+            assert!(
+                !error.contains("Type "),
+                "a redirect to the probe URL itself names no URL to type, got: {error}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
