@@ -503,3 +503,31 @@ fn a_new_edit_after_an_undo_clears_the_redo_history() {
     assert!(!editor.can_redo());
     assert!(!editor.redo().unwrap());
 }
+
+// Group 5: a refused edit changes nothing.
+
+#[test]
+fn a_refused_edit_changes_neither_the_project_nor_the_history() {
+    let mut editor = editor();
+    add_track(&mut editor, 7);
+    add_track(&mut editor, 8);
+    assert!(editor.undo());
+    let project_before = editor.project().clone();
+
+    // An EditError and an InvalidProject.
+    assert_edit_error(editor.apply(Edit::RemoveClip { id: ClipId(50) }));
+    assert_invalid_project(editor.apply(Edit::TrimClip {
+        id: ClipId(1),
+        in_point: secs(0.0),
+        out_point: secs(9.0),
+    }));
+
+    assert_eq!(editor.project(), &project_before);
+    assert!(editor.can_undo());
+    assert!(editor.can_redo());
+    assert!(editor.redo().unwrap());
+    assert_eq!(
+        editor.project().timeline.last().map(|t| t.id),
+        Some(TrackId(8))
+    );
+}
