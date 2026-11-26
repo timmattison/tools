@@ -778,15 +778,99 @@ fn a_restore_of_a_saved_mode_sets_the_state_that_comes_back_after_a_range() {
     )
     .unwrap();
 
-    // The restore gives back the hidden cursor and the mode 12 of no value,
-    // so the restore at the end hides the cursor and sets no mode 12.
+    // The XTSAVE saves the blink that DECSCUSR 0 gives, thus the restore at the
+    // end hides the cursor, writes DECSCUSR 0, and starts the blink with mode 12.
     assert_eq!(
         got,
         vec![
             out(0.5, "\x1b[?25h\x1b[1 q"),
             out(1.0, "bc"),
-            out(2.0, "\x1b[?25l\x1b[0 q"),
+            out(2.0, "\x1b[?25l\x1b[0 q\x1b[?12h"),
             out(3.0, "d"),
+        ]
+    );
+}
+
+// Mode 12 resets the blink, then a DECSCUSR sets it. The last one wins, thus
+// the restore writes the DECSCUSR of the recording after mode 12.
+#[test]
+fn the_restore_keeps_a_decscusr_that_comes_after_mode_12() {
+    let events = vec![out(1.0, "\x1b[?12lb\x1b[1 qc"), out(3.0, "d")];
+
+    let got = run(
+        events,
+        json!({ "shape": "bar", "blink": true }),
+        range(0.5, 2.0),
+    )
+    .unwrap();
+
+    assert_eq!(
+        got,
+        vec![
+            out(0.5, "\x1b[5 q"),
+            out(1.0, "bc"),
+            out(2.0, "\x1b[1 q"),
+            out(3.0, "d"),
+        ]
+    );
+}
+
+// A shape alone lets mode 12 pass. The restore writes DECSCUSR 0, then mode 12
+// of the recording, so the cursor stays steady.
+#[test]
+fn a_shape_alone_sets_mode_12_of_the_recording_again_after_the_restore() {
+    let events = vec![out(1.0, "\x1b[?12lb"), out(3.0, "d")];
+
+    let got = run(events, json!({ "shape": "bar" }), range(0.5, 2.0)).unwrap();
+
+    assert_eq!(
+        got,
+        vec![
+            out(0.5, "\x1b[5 q"),
+            out(1.0, "\x1b[?12lb"),
+            out(2.0, "\x1b[0 q\x1b[?12l"),
+            out(3.0, "d"),
+        ]
+    );
+}
+
+// Mode 12 resets the blink, then a DECSCUSR sets it. A shape alone keeps the
+// blink of the DECSCUSR, thus the answer needs no second DECSCUSR.
+#[test]
+fn a_shape_alone_follows_a_decscusr_after_mode_12_of_the_recording() {
+    let events = vec![out(0.0, "\x1b[?12la\x1b[5 qb")];
+
+    let got = run(events, json!({ "shape": "bar" }), FilterRegion::All).unwrap();
+
+    assert_eq!(
+        got,
+        vec![out(0.0, "\x1b[5 q"), out(0.0, "\x1b[?12la\x1b[5 qb")]
+    );
+}
+
+// A DECSCUSR 1 blinks, so the XTSAVE saves a blink. The restore of mode 12
+// brings it back after the DECSCUSR 2 and shows in the end state.
+#[test]
+fn an_xtsave_of_mode_12_saves_the_blink_that_a_decscusr_set() {
+    let events = vec![
+        out(1.0, "\x1b[1 qb\x1b[?12s\x1b[2 qc\x1b[?12rd"),
+        out(3.0, "e"),
+    ];
+
+    let got = run(
+        events,
+        json!({ "shape": "bar", "blink": true }),
+        range(0.5, 2.0),
+    )
+    .unwrap();
+
+    assert_eq!(
+        got,
+        vec![
+            out(0.5, "\x1b[5 q"),
+            out(1.0, "bcd"),
+            out(2.0, "\x1b[2 q\x1b[?12h"),
+            out(3.0, "e"),
         ]
     );
 }
