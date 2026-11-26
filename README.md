@@ -6222,9 +6222,9 @@ cargo tauri build --no-bundle   # the binary is target/release/msgs
 ## nle (non-linear editor)
 
 A desktop application for the terminal recordings that `beta` writes. It opens
-a `.json` or `.json.gz` recording, makes an edit project of it, and shows its
-metadata. The timeline (issue #150) and the preview pane (issue #151) are
-placeholders, thus the window cannot edit yet.
+a `.json` or `.json.gz` recording, makes an edit project of it, shows its
+metadata, and exports the edited recording. The timeline (issue #150) and the
+preview pane (issue #151) are placeholders, thus the window cannot edit yet.
 
 The application is one Rust crate on Dioxus 0.7, with the desktop (webview)
 renderer. Its components call the Rust code directly, and the open project is
@@ -6246,12 +6246,43 @@ The editing engine of the crate has four parts:
   editor refuses an edit that breaks a rule of the project, and it keeps an
   undo and redo history.
 
-The crate also has functions that save the rendered recording
-(`Editor::save_recording`), list the recordings in a directory, and export a
-recording through the `beta` CLI as a video or a web player. The window does
-not call them yet.
+### Export
 
-The export functions run `beta` with the PATH of the app, then
+The export bar in the menu bar writes the edited recording. The editor first
+renders the project into one `beta` recording, with each filter, clip, and time
+change applied. Then it writes that recording in the format that you pick:
+
+| Format | File | How |
+| ------ | ---- | --- |
+| Beta recording | `.json` or `.json.gz` | The editor writes it. `beta play` plays it, and the editor opens it again. |
+| Web page | `.html` | `beta export web`, with a theme and an option to compress the embedded recording. |
+| MP4 video or GIF | `.mp4` or `.gif` | `beta export video`, with a theme, the frame rate (FPS), the resolution (`WIDTHxHEIGHT`), and an option to optimize for the web. An empty field leaves the value to `beta`. |
+
+To export:
+
+1. Open a recording.
+2. Select the format and the settings in the export bar.
+3. Click **Export**, then select the file in the save dialog.
+
+The save dialog offers `<name>-edited` with the ending of the format, in the
+folder of the recording. If the file name that you type has a different
+ending, the editor replaces it with the ending of the format.
+
+For a web page or a video, the editor writes the rendered recording to a
+temporary file and runs `beta export` on it. The editor deletes the temporary
+file when `beta` stops. During a video export, the bar shows the frame count
+that `beta` reports (`Processed frame N / M`). When the export ends, the bar
+shows the path of the file. If the export fails, the error banner shows the
+reason.
+
+In code, `Editor::export` does the render and the export, and reports each
+stage through an `ExportProgress` callback. `Editor::save_recording` writes the
+rendered recording only.
+
+The crate also has functions that list the recordings in a directory, and
+export a recording file through the `beta` CLI as a video or a web player.
+
+The export runs `beta` with the PATH of the app, then
 `$CARGO_HOME/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.
 A macOS app that starts from Finder or the Dock gets only the system PATH.
 `beta` runs `ffmpeg` through the same PATH.

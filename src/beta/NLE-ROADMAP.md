@@ -52,7 +52,7 @@ At the end of this phase: load a recording, apply filters, preview the result, e
 | Issue | Description | Notes |
 |-------|-------------|-------|
 | #151 | xterm.js preview pane | Reference code already exists in `web.rs` (the `TerminalPlayer` JavaScript class). Consider snapshotting terminal state at intervals for efficient seeking. |
-| #158 | Export edited recordings | Flatten timeline to Beta JSON, pipe to existing Rust exporter. |
+| #158 | Export edited recordings | Done. `Editor::export` renders the project into one recording, then writes it as a `beta` recording file, or runs `beta export web` or `beta export video` on it. The export bar in the menu bar picks the format and its settings, and shows the `Processed frame N / M` lines of `beta` as a progress bar. Issue #160 can replace that text with structured progress. |
 | #164 | Chapter index | Manual markers first. Auto-detect commands is a future enhancement. |
 
 ### Phase 3: Timeline UI (2-3 weeks)

@@ -1,5 +1,5 @@
 //! The editing state of the app: the edit operations, the project with its
-//! undo and redo history, and the save of the rendered recording.
+//! undo and redo history, and the export of the rendered recording.
 
 use std::path::PathBuf;
 use std::sync::Arc;
