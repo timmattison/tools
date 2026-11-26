@@ -340,6 +340,11 @@ const MISSING_URL_MESSAGE: &str = "UniFi URL not provided. Set it via --url, UNI
 /// `supplied` is what clap parsed for `--url`, which already falls back to
 /// `UNIFI_URL`.
 ///
+/// A value that holds only blank space names no URL, as a blank key names no
+/// key in [`resolve_credential`]. So `export UNIFI_URL=` and `--url ""` fall
+/// through to the configuration file, and a blank `url` field falls through
+/// to the advice.
+///
 /// # Arguments
 ///
 /// * `supplied` - What the command line and the environment supplied.
@@ -353,8 +358,10 @@ const MISSING_URL_MESSAGE: &str = "UniFi URL not provided. Set it via --url, UNI
 ///
 /// Returns the advice of [`MISSING_URL_MESSAGE`] if no source names a URL.
 fn resolve_url(supplied: Option<String>, config: Option<&Config>) -> Result<String> {
+    let names_a_url = |url: &String| !config::is_blank(url);
     supplied
-        .or_else(|| config.and_then(|config| config.url.clone()))
+        .filter(names_a_url)
+        .or_else(|| config.and_then(|config| config.url.clone().filter(names_a_url)))
         .context(MISSING_URL_MESSAGE)
 }
 
