@@ -119,11 +119,29 @@ pub async fn discover_controllers() -> Result<Vec<DiscoveredController>> {
 
     spinner.finish_and_clear();
 
-    // Deduplicate by IP
-    let mut seen = HashSet::new();
-    controllers.retain(|c| seen.insert(c.ip.clone()));
+    Ok(without_duplicates(controllers))
+}
 
-    Ok(controllers)
+/// Keep the first controller at each IP address, and remove each later one.
+///
+/// mDNS and the probe of the common addresses can find one controller two
+/// times, and `unifi` and `unifi.local` can resolve to one address. The
+/// controllers from mDNS come first, so the controller that stays is the one
+/// that has a name.
+///
+/// # Arguments
+///
+/// * `controllers` - The controllers in the order that discovery found them.
+///
+/// # Returns
+///
+/// The controllers, with each repeated IP address removed.
+fn without_duplicates(controllers: Vec<DiscoveredController>) -> Vec<DiscoveredController> {
+    let mut seen = HashSet::new();
+    controllers
+        .into_iter()
+        .filter(|controller| seen.insert(controller.ip.clone()))
+        .collect()
 }
 
 /// Discover controllers via mDNS.
