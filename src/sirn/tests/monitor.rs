@@ -8,6 +8,7 @@
 mod common;
 use common::{http_get, stop};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
@@ -61,4 +62,54 @@ fn monitor_joins_promptly_after_shutdown_signal() {
     done_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("monitor did not stop within 5 seconds of the stop signal");
+}
+
+/// Workers for the pool in the failure test: at least two, so one release
+/// with nothing behind it leaves the others to the pool's own release.
+const WORKERS: usize = 3;
+/// Bounds the wait for the run to end.
+const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Mirrors the end of `main`: the monitor lives in a local, and the pool's
+/// error leaves through `?`.
+fn serve_until_the_pool_ends(
+    server: Arc<tiny_http::Server>,
+    routes: Arc<BTreeMap<String, PathBuf>>,
+) -> std::io::Result<()> {
+    let _monitor = sirn::spawn_monitor(Arc::clone(&routes));
+    sirn::serve(server, sirn::ServeMode::Files(routes), WORKERS).join()?;
+    Ok(())
+}
+
+#[test]
+fn a_pool_that_ends_on_a_failure_still_stops_and_joins_the_monitor() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join("a.txt");
+    std::fs::write(&path, b"alpha").expect("write a.txt");
+
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut map = BTreeMap::new();
+        map.insert("/a.txt".to_string(), path);
+        let routes = Arc::new(map);
+        let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port"));
+        // One release with no shutdown behind it is the event shape of a dead
+        // accept thread (see `tests/pool.rs`). tiny_http queues the release, so
+        // a worker sees it when it reaches `recv()`.
+        server.unblock();
+        let result = serve_until_the_pool_ends(server, Arc::clone(&routes));
+        // Read the count on this thread, at once after the run returns. A
+        // monitor thread that is still alive holds a clone of `routes`.
+        let _ = sender.send((result, Arc::strong_count(&routes)));
+    });
+
+    let (result, count) = receiver
+        .recv_timeout(JOIN_TIMEOUT)
+        .unwrap_or_else(|_| panic!("the run did not end within {JOIN_TIMEOUT:?}"));
+    assert!(
+        result.is_err(),
+        "the failure did not reach the caller, got {result:?}"
+    );
+    assert_eq!(count, 1, "the monitor thread outlived the end of the pool");
+    drop(dir);
 }
