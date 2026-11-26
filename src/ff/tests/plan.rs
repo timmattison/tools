@@ -229,6 +229,43 @@ fn a_walk_of_the_plan_finds_each_file_once_and_each_file_without_a_firmlink() {
     assert!(report.is_complete(), "{report:?}");
 }
 
+/// A firmlinked directory is one directory, thus the walk of the plan
+/// prints it one time, through its firmlink.
+#[test]
+fn a_walk_of_the_plan_prints_a_firmlinked_directory_once() {
+    let tree = Tree::new("plan-firmlinked-name");
+    let system = tree.root();
+    tree.file("Users/me/120.mp4");
+    tree.file("System/Library/Caches/120.mp4");
+    tree.file("System/Volumes/Data/Users/me/120.mp4");
+    tree.file("System/Volumes/Data/System/Library/Caches/120.mp4");
+    let table = [
+        Mount::new(system, "apfs"),
+        Mount::new(system.join("System/Volumes/Data"), "apfs"),
+    ];
+    let firmlinks =
+        Firmlinks::parse("/Users\tUsers\n/System/Library/Caches\tSystem/Library/Caches\n");
+    let plan = plan_machine(system, &table, &firmlinks);
+
+    let found = Found::default();
+    let report = walk(
+        &RealFs,
+        &plan.roots,
+        Options::default(),
+        &Matcher::regex("^(Users|Caches)$", Case::Sensitive).expect("a valid regex"),
+        found.sink(),
+    );
+
+    assert_eq!(
+        found.sorted(),
+        sorted(vec![
+            system.join("Users"),
+            system.join("System/Library/Caches"),
+        ])
+    );
+    assert!(report.is_complete(), "{report:?}");
+}
+
 #[test]
 fn a_named_root_crosses_each_mount_point_without_one_file_system() {
     let table = [Mount::new("/data/sub/mnt", "apfs")];
