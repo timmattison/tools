@@ -45,8 +45,9 @@ use crate::types::{
 /// the end of the timeline is not finite, because a shift can overflow.
 ///
 /// A filter of `FilterRegistry::register_typed` gets these steps too, with
-/// more: its options are parsed first, it sees and can set the end of the
-/// timeline, and it can set the shift (see `Span`).
+/// more: its options are parsed first, it sees the length of its region, it
+/// sees and can set the end of the timeline, it can set the shift, and it can
+/// refuse its options (see `Span`).
 pub type FilterFn = dyn Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync;
 
 /// The events of a region, the end of the timeline, and the shift of the
@@ -76,11 +77,20 @@ pub type FilterFn = dyn Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync
 ///    when it moves an event after the region below zero. The error is a
 ///    render error that names the kind.
 ///
+/// These steps apply to `length`:
+///
+/// 1. The filter sees the length of its region: its end minus its start. The
+///    length of `All` is infinite. The length does not stop at the end of the
+///    timeline, because `end` gives that.
+/// 2. The pipeline does not read the length of the answer.
+///
 /// Thus a filter that cuts the time after its last event answers that time
 /// as the end. A plain filter cannot do this, because step 8 on `FilterFn`
 /// keeps the gap between the last event and the end. And a filter that adds
 /// time to its region answers that time as the shift, so the events after the
-/// region move also when no event of the region moves.
+/// region move also when no event of the region moves. And a filter whose
+/// options do not fit its region answers an error, for example a pause at a
+/// point past the end of its range.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Span {
     /// The events, with times relative to the region start.
@@ -90,6 +100,8 @@ pub struct Span {
     pub end: Option<f64>,
     /// The shift of the events after the region, by the steps above.
     pub shift: Option<f64>,
+    /// The length of the region, by the steps above.
+    pub length: f64,
 }
 
 /// The one form in which the registry keeps a filter: a function from a span
@@ -136,6 +148,7 @@ impl FilterRegistry {
                     events: filter(&span.events, options),
                     end: None,
                     shift: None,
+                    length: span.length,
                 })
             }),
         );
@@ -148,17 +161,20 @@ impl FilterRegistry {
     /// render error that names the kind and the reason. Thus `O` holds the
     /// rules of the options: a missing key, a value of the wrong type, and,
     /// with `#[serde(deny_unknown_fields)]`, a key that `O` does not know.
+    /// The filter answers `Ok` with a span, or `Err` with a reason when its
+    /// options do not fit its region. An `Err` is a render error that names
+    /// the kind, says that the options are invalid, and holds the reason.
     /// A filter that is already under `kind` is replaced.
     pub fn register_typed<O, F>(&mut self, kind: FilterKind, filter: F)
     where
         O: DeserializeOwned + 'static,
-        F: Fn(Span, &O) -> Span + Send + Sync + 'static,
+        F: Fn(Span, &O) -> Result<Span, String> + Send + Sync + 'static,
     {
         self.filters.insert(
             kind,
             Arc::new(move |span: Span, options: &FilterOptions| {
                 let options = options.parse::<O>().map_err(|error| error.to_string())?;
-                Ok(filter(span, &options))
+                filter(span, &options)
             }),
         );
     }
@@ -215,11 +231,13 @@ impl FilterRegistry {
             events: inside,
             end: end_inside.then_some(*end - start),
             shift: None,
+            length: region_end - start,
         };
         let Span {
             events: answer,
             end: answered_end,
             shift: answered_shift,
+            length: _,
         } = filter(span, &applied.options).map_err(|reason| {
             NleError::RenderError(format!("filter \"{name}\" has invalid options: {reason}"))
         })?;
@@ -293,7 +311,8 @@ impl FilterRegistry {
     ///
     /// # Errors
     /// Returns `NleError::RenderError` when a filter kind is not registered,
-    /// when the options of a typed filter do not parse, when a filter answers
+    /// when the options of a typed filter do not parse or the filter refuses them,
+    /// when a filter answers
     /// a time or an end that is not finite or is below zero on the timeline,
     /// when a filter answers an end that it did not see, when a filter answers
     /// a shift that is not finite or moves an event below zero, or when an

@@ -26,7 +26,10 @@ pub const PAUSE_REMOVAL: &str = "pause-removal";
 /// pause at the time of a key comes before that key. The end of the timeline
 /// moves later too when it is at or after `at`, also when no event moves.
 /// The normal region is `All`. In a range, each event after the range moves
-/// later by `duration`, also when no event of the range moves.
+/// later by `duration`, also when no event of the range moves. Thus `at` must
+/// not be past the end of a range. The events between the end of the range and
+/// such a point are before the point, but they move, so the render refuses the
+/// point.
 pub const PAUSE_INSERTION: &str = "pause-insertion";
 
 /// The kind of the filter that cuts the silence at the start and at the end.
@@ -47,9 +50,13 @@ pub const AUTO_TRIM: &str = "auto-trim";
 #[must_use]
 pub fn builtin() -> FilterRegistry {
     let mut registry = FilterRegistry::new();
-    registry.register_typed(FilterKind::new(PAUSE_REMOVAL), remove_pauses);
+    registry.register_typed(FilterKind::new(PAUSE_REMOVAL), |span, options| {
+        Ok(remove_pauses(span, options))
+    });
     registry.register_typed(FilterKind::new(PAUSE_INSERTION), insert_pause);
-    registry.register_typed(FilterKind::new(AUTO_TRIM), trim_silence);
+    registry.register_typed(FilterKind::new(AUTO_TRIM), |span, options| {
+        Ok(trim_silence(span, options))
+    });
     registry
 }
 
@@ -94,6 +101,7 @@ impl TryFrom<PauseRemovalFile> for PauseRemoval {
 /// The answer sets no end, so the end moves by the shift, and the time after
 /// the last event stays.
 fn remove_pauses(span: Span, options: &PauseRemoval) -> Span {
+    let length = span.length;
     let mut events = span.events;
     // A stable sort: events at one time keep their order.
     events.sort_by(|a, b| a.time.total_cmp(&b.time));
@@ -121,6 +129,7 @@ fn remove_pauses(span: Span, options: &PauseRemoval) -> Span {
         events,
         end: None,
         shift: None,
+        length,
     }
 }
 
@@ -139,11 +148,19 @@ struct PauseInsertion {
 /// point, the answer sets the end later by the duration. Else the end stays,
 /// or it moves by the shift when the filter does not see it. The answer sets
 /// the shift to the duration, so each event after the region moves later by
-/// it, also when no event of the region moves.
-fn insert_pause(span: Span, options: &PauseInsertion) -> Span {
+/// it, also when no event of the region moves. A point past the length of the
+/// region is an error, because the shift also moves the events after the region
+/// that are before the point.
+fn insert_pause(span: Span, options: &PauseInsertion) -> Result<Span, String> {
     let (at, duration) = (options.at.get(), options.duration.get());
+    if at > span.length {
+        return Err(format!(
+            "at {at} s is past the end of the region, which is {} s long",
+            span.length
+        ));
+    }
     let later = |time: f64| if time >= at { time + duration } else { time };
-    Span {
+    Ok(Span {
         events: span
             .events
             .into_iter()
@@ -154,7 +171,8 @@ fn insert_pause(span: Span, options: &PauseInsertion) -> Span {
             .collect(),
         end: span.end.map(later),
         shift: Some(duration),
-    }
+        length: span.length,
+    })
 }
 
 /// The options of auto-trim.
@@ -190,6 +208,7 @@ fn trim_silence(span: Span, options: &AutoTrim) -> Span {
         mut events,
         mut end,
         shift: _,
+        length,
     } = span;
     if options.leading {
         if let Some(first_input) = times_of(&events, &EventType::Input).min_by(f64::total_cmp) {
@@ -211,6 +230,7 @@ fn trim_silence(span: Span, options: &AutoTrim) -> Span {
         events,
         end,
         shift: None,
+        length,
     }
 }
 

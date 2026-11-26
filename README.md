@@ -6243,13 +6243,15 @@ The editing engine of the crate has four parts:
   A filter that `register_typed` registers gets its options as a Rust type, and
   the render refuses options that break a rule of that type. Such a filter can
   also set the end of the timeline, and the shift of the events after its
-  range. Three filters ship (`filters::builtin`), and each option is a number
-  of seconds or a boolean:
+  range. It also sees the length of its region, and it can refuse options that
+  do not fit that region. Three filters ship (`filters::builtin`), and each
+  option is a number of seconds or a boolean:
   - `pause-removal` (`threshold`, `max_pause`): each gap between two events that
     is longer than `threshold` becomes `max_pause` long.
   - `pause-insertion` (`at`, `duration`): each event at or after `at` moves
     later by `duration`, and so does the end of the timeline. On a range, each
-    event after the range moves later by `duration` too.
+    event after the range moves later by `duration` too, and an `at` past the end
+    of the range is an error.
   - `auto-trim` (`leading`, `trailing`, both on when not set): removes the time
     before the first input event and the time after the last output event.
 

@@ -373,8 +373,8 @@ struct ShiftBy {
 
 /// Moves each event later by `options.seconds`, and leaves the end to the
 /// shift.
-fn shift_by(span: Span, options: &ShiftBy) -> Span {
-    Span {
+fn shift_by(span: Span, options: &ShiftBy) -> Result<Span, String> {
+    Ok(Span {
         events: span
             .events
             .into_iter()
@@ -385,7 +385,8 @@ fn shift_by(span: Span, options: &ShiftBy) -> Span {
             .collect(),
         end: None,
         shift: None,
-    }
+        length: span.length,
+    })
 }
 
 fn typed_registry() -> FilterRegistry {
@@ -686,10 +687,13 @@ struct NoOptions {}
 /// `end`.
 fn end_registry(end: Option<f64>) -> FilterRegistry {
     let mut registry = FilterRegistry::new();
-    registry.register_typed(kind("set-end"), move |span: Span, _: &NoOptions| Span {
-        events: span.events,
-        end,
-        shift: None,
+    registry.register_typed(kind("set-end"), move |span: Span, _: &NoOptions| {
+        Ok(Span {
+            events: span.events,
+            end,
+            shift: None,
+            length: span.length,
+        })
     });
     registry
 }
@@ -705,11 +709,12 @@ fn a_typed_filter_sees_the_end_only_when_the_end_is_inside_its_region() {
     let mut registry = FilterRegistry::new();
     registry.register_typed(kind("spy"), move |span: Span, _: &NoOptions| {
         captured.lock().unwrap().push(span.end);
-        Span {
+        Ok(Span {
             events: span.events,
             end: None,
             shift: None,
-        }
+            length: span.length,
+        })
     });
 
     // The end of the timeline starts at the last event, 4.0.
@@ -789,16 +794,66 @@ fn a_typed_filter_that_answers_an_end_that_is_not_finite_or_is_below_zero_fails(
     assert_eq!(rendered.duration, 8.0);
 }
 
+#[test]
+fn a_typed_filter_sees_the_length_of_its_region() {
+    let seen = TestArc::new(Mutex::new(Vec::new()));
+    let captured = TestArc::clone(&seen);
+    let mut registry = FilterRegistry::new();
+    registry.register_typed(kind("spy"), move |span: Span, _: &NoOptions| {
+        captured.lock().unwrap().push(span.length);
+        Ok(Span {
+            events: span.events,
+            end: None,
+            shift: None,
+            length: span.length,
+        })
+    });
+
+    // The events end at 4. The length of a range does not stop there.
+    let cases = [
+        (all("spy"), f64::INFINITY),
+        (range("spy", 1.0, 5.0), 4.0),
+        (range("spy", 1.0, 50.0), 49.0),
+    ];
+    for (filter, expected) in cases {
+        registry.run(events(&[1.0, 4.0]), &[filter]).unwrap();
+
+        assert_eq!(seen.lock().unwrap().pop(), Some(expected));
+    }
+}
+
+#[test]
+fn a_typed_filter_that_answers_an_error_fails() {
+    let mut registry = FilterRegistry::new();
+    registry.register_typed(kind("refuse"), |_: Span, _: &NoOptions| {
+        Err("no fit".to_string())
+    });
+
+    let result = registry.run(events(&[1.0, 4.0]), &[all("refuse")]);
+
+    match result {
+        Err(NleError::RenderError(message)) => {
+            assert!(message.contains("\"refuse\""), "{message}");
+            assert!(message.contains("invalid options"), "{message}");
+            assert!(message.contains("no fit"), "{message}");
+        }
+        other => panic!("expected a RenderError, got {other:?}"),
+    }
+}
+
 // Tests of the shift in a typed filter.
 
 /// A typed filter under the kind "set-shift" that keeps its events and
 /// answers `shift`.
 fn shift_registry(shift: f64) -> FilterRegistry {
     let mut registry = FilterRegistry::new();
-    registry.register_typed(kind("set-shift"), move |span: Span, _: &NoOptions| Span {
-        events: span.events,
-        end: None,
-        shift: Some(shift),
+    registry.register_typed(kind("set-shift"), move |span: Span, _: &NoOptions| {
+        Ok(Span {
+            events: span.events,
+            end: None,
+            shift: Some(shift),
+            length: span.length,
+        })
     });
     registry
 }
