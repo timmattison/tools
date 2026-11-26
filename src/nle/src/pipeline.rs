@@ -138,6 +138,8 @@ impl FilterRegistry {
             time: event.time + shift,
             ..event
         }));
+        // A stable sort: events at one time keep the order that they had.
+        result.sort_by(|a, b| a.time.total_cmp(&b.time));
         Ok(result)
     }
 
