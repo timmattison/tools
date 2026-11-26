@@ -233,6 +233,34 @@ fn an_alias_that_calls_a_function_counts_the_function() {
     assert_eq!(myf.through, through(&[("g", 1)]));
 }
 
+/// An alias that starts a function walk is the name of each use through it,
+/// also at depth two.
+#[test]
+fn an_alias_that_starts_a_function_walk_names_the_alias() {
+    let defs = definitions(&[("g", "a")], &[], &[], &[("a", "\tb"), ("b", "\techo")]);
+    let result = run(&[row("g")], &defs);
+    let a = usage(&result, "a", Kind::Function);
+    assert_eq!((a.uses, a.typed), (1, 0));
+    assert_eq!(a.through, through(&[("g", 1)]));
+    let b = usage(&result, "b", Kind::Function);
+    assert_eq!((b.uses, b.typed), (1, 0));
+    assert_eq!(b.through, through(&[("g", 1)]));
+}
+
+/// An alias whose value calls the function of the same name is a typed use of
+/// the alias and a use of the function through the alias.
+#[test]
+fn an_alias_that_calls_the_function_of_its_name_counts_both() {
+    let defs = definitions(&[("x", "x --flag")], &[], &[], &[("x", "\techo")]);
+    let result = run(&[row("x")], &defs);
+    let alias = usage(&result, "x", Kind::Alias);
+    assert_eq!((alias.uses, alias.typed), (1, 1));
+    assert!(alias.through.is_empty());
+    let function = usage(&result, "x", Kind::Function);
+    assert_eq!((function.uses, function.typed), (1, 0));
+    assert_eq!(function.through, through(&[("x", 1)]));
+}
+
 /// An alias in a function body does not count.
 #[test]
 fn an_alias_in_a_function_body_does_not_count() {
