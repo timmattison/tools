@@ -629,8 +629,8 @@ controller, which evaluates it.
 # Boolean values
 --filter "expired.eq(true)"
 
-# Date/time comparisons
---filter "createdAt.gt('2024-01-01')"
+# Date/time comparisons (a timestamp takes no quotes, a string takes single quotes)
+--filter "createdAt.gt(2024-01-01)"
 ```
 
 ### Advanced examples
