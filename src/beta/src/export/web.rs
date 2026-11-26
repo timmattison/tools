@@ -394,6 +394,14 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
 </body>
 </html>"#;
 
+/// The name of the page template.
+///
+/// minijinja turns on its HTML escape only for a name that ends in `.html`,
+/// `.htm`, or `.xml`. Thus the title of a recording cannot add markup to the
+/// page. `recording_data` goes into the script with `| safe`, and the other
+/// values are numbers and theme colors, which the escape does not change.
+const TEMPLATE_NAME: &str = "main.html";
+
 /// Build the HTML page of a recording.
 ///
 /// # Errors
@@ -443,8 +451,8 @@ fn render_page(recording: &Recording, theme: &str, compress: bool) -> Result<Str
 
     // Create template environment
     let mut env = Environment::new();
-    env.add_template("main", HTML_TEMPLATE)?;
-    let template = env.get_template("main")?;
+    env.add_template(TEMPLATE_NAME, HTML_TEMPLATE)?;
+    let template = env.get_template(TEMPLATE_NAME)?;
 
     // Render HTML
     template
