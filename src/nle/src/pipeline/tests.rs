@@ -260,3 +260,45 @@ fn a_relative_time_below_zero_is_fine_when_the_timeline_time_is_not() {
 
     assert_eq!(times(&out), vec![0.5]);
 }
+
+// Group 6: the order of the result.
+
+fn data_event(time: f64, data: &str) -> Event {
+    Event {
+        time,
+        event_type: EventType::Output,
+        data: data.to_string(),
+    }
+}
+
+#[test]
+fn a_filter_that_answers_out_of_order_gives_a_result_in_time_order() {
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("reverse"), |events, _| {
+        events.iter().rev().cloned().collect()
+    });
+
+    let out = registry
+        .run(events(&[0.5, 1.0, 1.5, 2.0]), &[all("reverse")])
+        .unwrap();
+
+    assert_eq!(times(&out), vec![0.5, 1.0, 1.5, 2.0]);
+}
+
+#[test]
+fn events_at_one_time_keep_the_order_the_filter_gave() {
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("tie"), |_, _| {
+        vec![
+            data_event(2.0, "late"),
+            data_event(1.0, "first"),
+            data_event(1.0, "second"),
+            data_event(1.0, "third"),
+        ]
+    });
+
+    let out = registry.run(events(&[0.0]), &[all("tie")]).unwrap();
+
+    let data: Vec<&str> = out.iter().map(|e| e.data.as_str()).collect();
+    assert_eq!(data, vec!["first", "second", "third", "late"]);
+}
