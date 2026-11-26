@@ -43,15 +43,37 @@ use crate::types::{
 /// The region of a later filter is in the time that the earlier filters leave.
 /// After the last filter, `FilterRegistry::run` fails when an event time or
 /// the end of the timeline is not finite, because a shift can overflow.
+///
+/// A filter of `FilterRegistry::register_typed` gets these steps too, with
+/// three more: its options are parsed first, and it sees and can set the end
+/// of the timeline (see `Span`).
 pub type FilterFn = dyn Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync;
 
 /// The events of a region and the end of the timeline, as a filter of
 /// `FilterRegistry::register_typed` sees them and answers them.
+///
+/// The steps on `FilterFn` apply to `events`. These steps apply to `end`:
+///
+/// 1. The filter sees the end of the timeline, relative to the region start,
+///    when the end is inside the region: at or after its start, and before its
+///    end. The region `All` holds every end. Else the filter sees `None`.
+/// 2. An answer of `None` leaves the end to step 8 on `FilterFn`: the end
+///    moves by the shift.
+/// 3. An answer of `Some(end)` sets the end of the timeline to `end` plus the
+///    region start. It is an error when the filter saw `None`, and when `end`
+///    is not finite or is below zero on the timeline. Each error is a render
+///    error that names the kind.
+/// 4. The end is never less than the time of the last event.
+///
+/// Thus a filter that cuts the time after its last event answers that time
+/// as the end. A plain filter cannot do this, because step 6 on `FilterFn`
+/// keeps the gap between the last event and the end.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Span {
     /// The events, with times relative to the region start.
     pub events: Vec<Event>,
-    /// The end of the timeline, relative to the region start.
+    /// The end of the timeline, relative to the region start, by the steps
+    /// above.
     pub end: Option<f64>,
 }
 
@@ -141,7 +163,7 @@ impl FilterRegistry {
         })
     }
 
-    /// One filter step: the steps on `FilterFn`.
+    /// One filter step: the steps on `FilterFn` and on `Span`.
     fn apply(
         &self,
         events: Vec<Event>,
@@ -149,6 +171,7 @@ impl FilterRegistry {
         end: &mut f64,
     ) -> Result<Vec<Event>, NleError> {
         let filter = self.lookup(&applied.kind)?;
+        let name = applied.kind.as_str();
         let (start, region_end) = match &applied.region {
             FilterRegion::All => (0.0, f64::INFINITY),
             FilterRegion::Range { start, end } => (start.get(), end.get()),
@@ -171,27 +194,42 @@ impl FilterRegistry {
         }
 
         let inside_last = last_time(&inside);
+        let end_inside = start <= *end && *end < region_end;
         let span = Span {
             events: inside,
-            end: None,
+            end: end_inside.then(|| *end - start),
         };
-        let answer = filter(span, &applied.options)
-            .map_err(|reason| {
-                NleError::RenderError(format!(
-                    "filter \"{}\" has invalid options: {reason}",
-                    applied.kind.as_str()
-                ))
-            })?
-            .events;
+        let Span {
+            events: answer,
+            end: answered_end,
+        } = filter(span, &applied.options).map_err(|reason| {
+            NleError::RenderError(format!("filter \"{name}\" has invalid options: {reason}"))
+        })?;
         for event in &answer {
             let time = event.time + start;
             if !(time.is_finite() && time >= 0.0) {
                 return Err(NleError::RenderError(format!(
-                    "filter \"{}\" answered the time {time} s, which is not finite or is below zero",
-                    applied.kind.as_str()
+                    "filter \"{name}\" answered the time {time} s, which is not finite or is below zero"
                 )));
             }
         }
+        let answered_end = match answered_end {
+            None => None,
+            Some(_) if !end_inside => {
+                return Err(NleError::RenderError(format!(
+                    "filter \"{name}\" answered an end of the timeline, but the end is not inside its region"
+                )));
+            }
+            Some(relative) => {
+                let time = relative + start;
+                if !(time.is_finite() && time >= 0.0) {
+                    return Err(NleError::RenderError(format!(
+                        "filter \"{name}\" answered the end {time} s, which is not finite or is below zero"
+                    )));
+                }
+                Some(time)
+            }
+        };
         let shift = last_time(&answer) - inside_last;
 
         let mut result = before;
@@ -206,21 +244,25 @@ impl FilterRegistry {
         // A stable sort: events at one time keep the order that they had.
         result.sort_by(|a, b| a.time.total_cmp(&b.time));
 
-        if *end >= start {
-            *end += shift;
+        match answered_end {
+            Some(time) => *end = time,
+            None if *end >= start => *end += shift,
+            None => {}
         }
         *end = end.max(last_time(&result)).max(0.0);
         Ok(result)
     }
 
-    /// Run `filters` in order over `events`, by the steps on `FilterFn`. The
-    /// end of the timeline starts at the time of the last event.
+    /// Run `filters` in order over `events`, by the steps on `FilterFn` and
+    /// on `Span`. The end of the timeline starts at the time of the last
+    /// event.
     ///
     /// # Errors
     /// Returns `NleError::RenderError` when a filter kind is not registered,
-    /// when a filter answers a time that is not finite or is below zero on
-    /// the timeline, or when an event time or the end of the timeline that the
-    /// filters give is not finite.
+    /// when the options of a typed filter do not parse, when a filter answers
+    /// a time or an end that is not finite or is below zero on the timeline,
+    /// when a filter answers an end that it did not see, or when an event time
+    /// or the end of the timeline that the filters give is not finite.
     pub fn run(
         &self,
         events: Vec<Event>,
@@ -273,8 +315,9 @@ impl FilterRegistry {
     /// 2. The events are the events of each clip on the timeline, track by
     ///    track and clip by clip, in a stable time order. Events at one time
     ///    keep track order, then clip order.
-    /// 3. The filters of the project run on them by the steps on `FilterFn`,
-    ///    with the end of the timeline starting at `EditProject::duration`.
+    /// 3. The filters of the project run on them by the steps on `FilterFn`
+    ///    and on `Span`, with the end of the timeline starting at
+    ///    `EditProject::duration`.
     /// 4. The header (`version`, `width`, `height`, `timestamp`, `command`,
     ///    `title`, `env`) is the header of the source of the clip that starts
     ///    first on the timeline. A tie goes to the clip that comes first in
