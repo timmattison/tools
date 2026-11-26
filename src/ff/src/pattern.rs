@@ -2,6 +2,10 @@
 
 use std::ffi::OsStr;
 use std::fmt;
+use std::path::Path;
+
+use globset::{GlobBuilder, GlobMatcher};
+use regex::bytes::{Regex, RegexBuilder};
 
 /// How a pattern treats the case of a letter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10,6 +14,12 @@ pub enum Case {
     Insensitive,
     /// `a` matches `a` only. The `-s` flag selects it.
     Sensitive,
+}
+
+impl Case {
+    fn is_insensitive(self) -> bool {
+        self == Self::Insensitive
+    }
 }
 
 /// A pattern that `ff` cannot use.
@@ -26,16 +36,34 @@ impl std::error::Error for PatternError {}
 
 /// A compiled pattern. It matches the name of one entry, never a path.
 #[derive(Debug)]
-pub struct Matcher;
+pub struct Matcher(Kind);
+
+#[derive(Debug)]
+enum Kind {
+    Glob(GlobMatcher),
+    Regex(Regex),
+}
 
 impl Matcher {
-    /// Compiles a glob, for example `*.mp4` or `120.mp4`.
+    /// Compiles a glob, for example `*.mp4` or `120.mp4`. The glob must match
+    /// the whole name.
     ///
     /// # Errors
     ///
-    /// Returns [`PatternError`] when the glob is not valid.
-    pub fn glob(_pattern: &str, _case: Case) -> Result<Self, PatternError> {
-        Ok(Self)
+    /// Returns [`PatternError`] when the glob is not valid, or when it holds a
+    /// `/`. A name never holds a `/`, thus such a glob can never match.
+    pub fn glob(pattern: &str, case: Case) -> Result<Self, PatternError> {
+        if pattern.contains('/') {
+            return Err(PatternError(format!(
+                "the glob {pattern:?} holds a '/', but it matches a file name, and a file name holds no '/'"
+            )));
+        }
+        let glob = GlobBuilder::new(pattern)
+            .case_insensitive(case.is_insensitive())
+            .literal_separator(true)
+            .build()
+            .map_err(|error| PatternError(format!("the glob {pattern:?} is not valid: {error}")))?;
+        Ok(Self(Kind::Glob(glob.compile_matcher())))
     }
 
     /// Compiles a regular expression. It matches when it finds a match
@@ -44,14 +72,25 @@ impl Matcher {
     /// # Errors
     ///
     /// Returns [`PatternError`] when the regular expression is not valid.
-    pub fn regex(_pattern: &str, _case: Case) -> Result<Self, PatternError> {
-        Ok(Self)
+    pub fn regex(pattern: &str, case: Case) -> Result<Self, PatternError> {
+        let regex = RegexBuilder::new(pattern)
+            .case_insensitive(case.is_insensitive())
+            .build()
+            .map_err(|error| {
+                PatternError(format!(
+                    "the regular expression {pattern:?} is not valid: {error}"
+                ))
+            })?;
+        Ok(Self(Kind::Regex(regex)))
     }
 
     /// Tells if `name`, the last component of a path, matches the pattern.
     #[must_use]
-    pub fn is_match(&self, _name: &OsStr) -> bool {
-        false
+    pub fn is_match(&self, name: &OsStr) -> bool {
+        match &self.0 {
+            Kind::Glob(glob) => glob.is_match(Path::new(name)),
+            Kind::Regex(regex) => regex.is_match(name.as_encoded_bytes()),
+        }
     }
 }
 
