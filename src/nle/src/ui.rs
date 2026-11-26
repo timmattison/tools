@@ -395,8 +395,9 @@ fn SpeedPanel(
 }
 
 /// Applies the edit that `make` builds from the project to the editor of the
-/// open document. The answer is the text of the error of a refused edit. With
-/// no open document, nothing changes and the answer is `Ok`.
+/// open document. The answer is the text of the error of a refused edit. An
+/// edit after which the project does not render is refused too. With no open
+/// document, nothing changes and the answer is `Ok`.
 fn edit_document(
     mut loaded: Signal<Option<Document>>,
     make: impl FnOnce(&EditProject) -> Edit,
@@ -406,7 +407,7 @@ fn edit_document(
         document.as_mut().map_or(Ok(()), |open| {
             let edit = make(open.editor.project());
             open.editor
-                .apply(edit)
+                .apply_renderable(edit)
                 .map_err(|failure| failure.to_string())
         })
     })

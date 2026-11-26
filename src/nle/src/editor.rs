@@ -278,18 +278,42 @@ impl Editor {
     /// the result breaks a rule of `EditProject::validate`. A refused edit
     /// changes nothing.
     pub fn apply(&mut self, edit: Edit) -> Result<(), NleError> {
-        self.commit(edit)?;
+        self.commit(edit, EditProject::validate)?;
         self.redo.clear();
         Ok(())
     }
 
-    /// Apply `edit` to a copy of the project, check the copy, and only then
-    /// make it the project and put the edit on the undo history. It leaves
-    /// the redo history alone.
-    fn commit(&mut self, edit: Edit) -> Result<(), NleError> {
+    /// Apply `edit` like `apply`, and also refuse it when the project after
+    /// the edit does not render. A project with no clip does not render, so
+    /// use `apply` for an edit that may leave the project empty.
+    ///
+    /// A refused edit changes nothing: the project, the undo history, and the
+    /// redo history stay as they were.
+    ///
+    /// # Errors
+    /// Returns the errors of `apply`, and the errors of
+    /// `FilterRegistry::render` for the project after the edit, for example
+    /// `NleError::RenderError` when a filter answers a length that is not
+    /// finite.
+    pub fn apply_renderable(&mut self, edit: Edit) -> Result<(), NleError> {
+        let filters = Arc::clone(&self.filters);
+        self.commit(edit, move |next| filters.render(next).map(drop))?;
+        self.redo.clear();
+        Ok(())
+    }
+
+    /// Apply `edit` to a copy of the project, run `check` on the copy, and
+    /// only then make it the project and put the edit on the undo history.
+    /// A failure of the edit or of `check` changes nothing. It leaves the
+    /// redo history alone.
+    fn commit(
+        &mut self,
+        edit: Edit,
+        check: impl FnOnce(&EditProject) -> Result<(), NleError>,
+    ) -> Result<(), NleError> {
         let mut next = self.project.clone();
         edit.apply_to(&mut next)?;
-        next.validate()?;
+        check(&next)?;
         let before = std::mem::replace(&mut self.project, next);
         self.undo.push(Applied { edit, before });
         Ok(())
@@ -315,7 +339,7 @@ impl Editor {
             return Ok(false);
         };
         // A refused edit stays on the redo history, and nothing changes.
-        self.commit(edit)?;
+        self.commit(edit, EditProject::validate)?;
         self.redo.pop();
         Ok(true)
     }
