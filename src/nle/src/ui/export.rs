@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use dioxus::prelude::*;
 
-use super::Document;
+use super::{Document, Services};
 use crate::error::NleError;
 use crate::export::{ExportProgress, ExportRequest, ExportTarget, Resolution, Theme};
 use crate::format::file_name;
@@ -275,14 +275,80 @@ impl ExportSettings {
     }
 }
 
+/// The text of the Export button.
+const EXPORT_LABEL: &str = "Export";
+/// The start of the text that names the file that an export wrote.
+const EXPORTED_PREFIX: &str = "Exported to";
+
 /// The export bar of the menu bar. With no open document, it shows nothing.
+///
+/// A click on Export asks for a file, exports the open project there, and
+/// shows the written file. `on_result` gets the end of each export.
 #[component]
 pub(super) fn ExportBar(
     loaded: ReadSignal<Option<Document>>,
     on_result: EventHandler<Result<(), String>>,
 ) -> Element {
-    let _ = (loaded, on_result);
-    rsx! {}
+    let services = use_context::<Services>();
+    let settings = use_signal(ExportSettings::default);
+    // True from the click until the dialog and the export end.
+    let mut busy = use_signal(|| false);
+    let mut status = use_signal(|| None::<String>);
+    if loaded.read().is_none() {
+        return rsx! {};
+    }
+    rsx! {
+        span { class: "export-bar",
+            button {
+                disabled: busy(),
+                onclick: move |_| {
+                    // A click that arrives during a dialog or an export starts nothing.
+                    if busy() {
+                        return;
+                    }
+                    let settings = settings();
+                    let Some(source) = loaded
+                        .read()
+                        .as_ref()
+                        .map(|document| document.metadata.file_path.clone())
+                    else {
+                        return;
+                    };
+                    status.set(None);
+                    busy.set(true);
+                    let services = services.clone();
+                    spawn(async move {
+                        let dialog = settings.kind.save_dialog(&source);
+                        if let Some(picked) = services.pick_export_path(dialog).await {
+                            if let Ok(request) = settings.request(picked) {
+                                let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+                                let export = {
+                                    let guard = loaded.read();
+                                    guard.as_ref().map(|document| {
+                                        services.export(&document.editor, request, sender)
+                                    })
+                                };
+                                if let Some(export) = export {
+                                    if let Ok(path) = export.await {
+                                        status.set(Some(format!(
+                                            "{EXPORTED_PREFIX} {}",
+                                            path.display()
+                                        )));
+                                        on_result.call(Ok(()));
+                                    }
+                                }
+                            }
+                        }
+                        busy.set(false);
+                    });
+                },
+                "{EXPORT_LABEL}"
+            }
+            if let Some(text) = status() {
+                span { class: "export-status", role: "status", "{text}" }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
