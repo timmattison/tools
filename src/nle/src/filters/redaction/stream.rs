@@ -10,7 +10,7 @@ use std::ops::Range;
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::filters::redaction::{ASTERISK, BLOCK, REDACT_GROUP, Redaction, Replacement};
+use crate::filters::redaction::{Redaction, Replacement, ASTERISK, BLOCK, REDACT_GROUP};
 use crate::types::{Event, EventType};
 
 /// The error text for a range that is not a character boundary. It cannot
@@ -149,7 +149,10 @@ fn escape_sequence(bytes: &[u8], at: usize) -> (Option<Range<usize>>, usize) {
         Some(b'[') => {
             let mut end = at + 2;
             end = skip_while(bytes, end, |byte| (0x20..=0x3F).contains(&byte));
-            if bytes.get(end).is_some_and(|byte| (0x40..=0x7E).contains(byte)) {
+            if bytes
+                .get(end)
+                .is_some_and(|byte| (0x40..=0x7E).contains(byte))
+            {
                 end += 1;
             }
             (None, end)
@@ -178,7 +181,10 @@ fn escape_sequence(bytes: &[u8], at: usize) -> (Option<Range<usize>>, usize) {
         }
         Some(_) => {
             let mut end = skip_while(bytes, at + 1, |byte| (0x20..=0x2F).contains(&byte));
-            if bytes.get(end).is_some_and(|byte| (0x30..=0x7E).contains(byte)) {
+            if bytes
+                .get(end)
+                .is_some_and(|byte| (0x30..=0x7E).contains(byte))
+            {
                 end += 1;
             }
             (None, end)
@@ -214,7 +220,9 @@ fn build_segments(
         };
         let mut at = run.range.start;
         while at < run.range.end {
-            let position = starts.partition_point(|&start| start <= at).saturating_sub(1);
+            let position = starts
+                .partition_point(|&start| start <= at)
+                .saturating_sub(1);
             let event_end = starts.get(position + 1).copied().unwrap_or(run.range.end);
             let event_start = starts.get(position).copied().unwrap_or(0);
             let take = run.range.end.min(event_end);

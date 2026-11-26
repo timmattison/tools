@@ -202,7 +202,7 @@ fn blocks_take_one_column_for_each_column_of_the_match() {
         Replacement::Blocks,
         vec![out(1.0, "hunter2")],
     );
-    assert_eq!(datas(&got), vec![&BLOCK.to_string().repeat(7)[..]]);
+    assert_eq!(datas(&got), vec![BLOCK.to_string().repeat(7)]);
 }
 
 #[test]
@@ -264,7 +264,11 @@ fn a_mask_skips_the_escape_codes_inside_a_match() {
     );
     assert_eq!(
         datas(&got),
-        vec![format!("{}\x1b[1m{}", "\u{2588}".repeat(3), "\u{2588}".repeat(4))]
+        vec![format!(
+            "{}\x1b[1m{}",
+            "\u{2588}".repeat(3),
+            "\u{2588}".repeat(4)
+        )]
     );
 }
 
@@ -400,4 +404,139 @@ fn the_accessors_give_back_the_arguments() {
     assert_eq!(redaction.find(), &find_text("a"));
     assert_eq!(redaction.replacement(), &Replacement::Blocks);
     assert!(redaction.includes_input());
+}
+
+fn options_json(filter: &AppliedFilter) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    for key in [FIND_OPTION, REPLACE_OPTION, INPUT_OPTION] {
+        if let Some(value) = filter.options.get(key) {
+            map.insert(key.to_string(), value.clone());
+        }
+    }
+    serde_json::Value::Object(map)
+}
+
+fn filter_with(options: FilterOptions) -> AppliedFilter {
+    AppliedFilter {
+        kind: kind(),
+        region: FilterRegion::All,
+        options,
+    }
+}
+
+#[test]
+fn the_options_have_the_shape_that_project_files_store() {
+    let cases = [
+        (
+            Redaction::new(find_text("hunter2"), Replacement::Asterisks, false).unwrap(),
+            serde_json::json!({"find":{"kind":"text","value":"hunter2"},"replace":{"kind":"asterisks"},"input":false}),
+        ),
+        (
+            Redaction::new(Find::Regex("a+".to_string()), Replacement::Blocks, true).unwrap(),
+            serde_json::json!({"find":{"kind":"regex","value":"a+"},"replace":{"kind":"blocks"},"input":true}),
+        ),
+        (
+            text("a", "[REDACTED]"),
+            serde_json::json!({"find":{"kind":"text","value":"a"},"replace":{"kind":"text","value":"[REDACTED]"},"input":false}),
+        ),
+    ];
+    for (redaction, expected) in cases {
+        let filter = applied(FilterRegion::All, &redaction);
+        assert_eq!(filter.kind, kind());
+        assert_eq!(options_json(&filter), expected);
+    }
+}
+
+#[test]
+fn redaction_of_reads_back_an_applied_filter() {
+    let redaction = Redaction::new(
+        Find::Regex("日本+".to_string()),
+        Replacement::Text("🎉".to_string()),
+        true,
+    )
+    .unwrap();
+    let filter = applied(FilterRegion::All, &redaction);
+    assert_eq!(redaction_of(&filter), Some(redaction));
+}
+
+#[test]
+fn redaction_of_is_none_for_another_kind_or_bad_options() {
+    let other = AppliedFilter {
+        kind: FilterKind::new("time-dilation"),
+        ..applied(FilterRegion::All, &text("a", "b"))
+    };
+    assert_eq!(redaction_of(&other), None);
+    assert_eq!(redaction_of(&filter_with(FilterOptions::new())), None);
+}
+
+#[test]
+fn a_missing_input_option_means_false() {
+    let options = FilterOptions::new()
+        .with(FIND_OPTION, serde_json::json!({"kind":"text","value":"a"}))
+        .with(REPLACE_OPTION, serde_json::json!({"kind":"asterisks"}));
+    let redaction = redaction_of(&filter_with(options)).unwrap();
+    assert!(!redaction.includes_input());
+}
+
+#[test]
+fn a_render_with_a_missing_or_bad_option_fails() {
+    let good_find = serde_json::json!({"kind":"text","value":"a"});
+    let good_replace = serde_json::json!({"kind":"asterisks"});
+    let cases = [
+        FilterOptions::new().with(REPLACE_OPTION, good_replace.clone()),
+        FilterOptions::new().with(FIND_OPTION, good_find.clone()),
+        FilterOptions::new()
+            .with(FIND_OPTION, "a")
+            .with(REPLACE_OPTION, good_replace.clone()),
+        FilterOptions::new()
+            .with(FIND_OPTION, good_find)
+            .with(REPLACE_OPTION, good_replace)
+            .with(INPUT_OPTION, "yes"),
+    ];
+    for options in cases {
+        let result = filters::registry().run(vec![out(1.0, "a")], &[filter_with(options)]);
+        match result {
+            Err(NleError::RenderError(message)) => {
+                assert!(message.contains("filter \"redaction\" failed"), "{message}");
+                assert!(message.contains("is missing or is not valid"), "{message}");
+            }
+            other => panic!("expected a render error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn an_invalid_redaction_in_the_options_fails_the_render() {
+    let options = FilterOptions::new()
+        .with(FIND_OPTION, serde_json::json!({"kind":"text","value":""}))
+        .with(REPLACE_OPTION, serde_json::json!({"kind":"asterisks"}));
+    let result = filters::registry().run(vec![out(1.0, "a")], &[filter_with(options)]);
+    match result {
+        Err(NleError::RenderError(message)) => {
+            assert!(message.contains("the text to find is empty"), "{message}");
+        }
+        other => panic!("expected a render error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_range_redacts_only_inside_the_range() {
+    use crate::types::Seconds;
+    let region = FilterRegion::Range {
+        start: Seconds::new(2.0).unwrap(),
+        end: Seconds::new(4.0).unwrap(),
+    };
+    let events = vec![
+        out(1.0, "hunter2"),
+        out(3.0, "hunter2"),
+        out(5.0, "hunter2"),
+    ];
+    let got = filters::registry()
+        .run(events, &[applied(region, &text("hunter2", "X"))])
+        .unwrap();
+    assert_eq!(datas(&got), vec!["hunter2", "X", "hunter2"]);
+    assert_eq!(
+        got.iter().map(|e| e.time).collect::<Vec<_>>(),
+        vec![1.0, 3.0, 5.0]
+    );
 }

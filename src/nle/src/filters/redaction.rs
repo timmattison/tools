@@ -1,4 +1,61 @@
 //! The redaction filter: it finds text in the data of events and replaces it.
+//!
+//! The filter changes only the `data` of events. The number of events, their
+//! order, their times, their types, and the length of the region stay the
+//! same. An event whose data becomes empty stays in the list.
+//!
+//! # What the filter reads
+//!
+//! The filter reads output events always. It reads input events only when its
+//! `input` option is true. The two kinds are two streams. A match never mixes
+//! them, and an input event between two output events does not break an output
+//! match.
+//!
+//! The terminal can split a word across events. Thus the filter joins the data
+//! of the events of one stream, in order, and searches the joined text.
+//!
+//! # What the filter does not read
+//!
+//! The filter knows escape sequences, and it does not search them. It cuts the
+//! joined data with these rules:
+//!
+//! - `ESC [` starts a CSI sequence. Parameter bytes (0x20 to 0x3F) follow, and
+//!   one final byte (0x40 to 0x7E) ends it.
+//! - `ESC ]` starts an OSC sequence, for example a window title. Its payload
+//!   runs up to the first BEL or `ESC \`, or to the end of the stream. The
+//!   introducer and the terminator are escape bytes. The payload is text, and
+//!   it is a segment of its own.
+//! - `ESC P`, `ESC X`, `ESC ^`, and `ESC _` start a DCS, SOS, PM, or APC
+//!   string. It runs up to and including the next `ESC \`, or to the end of the
+//!   stream. Nothing in it is text, because it can hold image data.
+//! - Another `ESC` takes intermediate bytes (0x20 to 0x2F) and one final byte
+//!   (0x30 to 0x7E), for example `ESC ( B` or `ESC 7`. If the final byte is
+//!   missing, the sequence ends before the bad byte.
+//! - Each other byte is text. Control characters such as carriage return,
+//!   line feed, tab, and BEL are text.
+//!
+//! A sequence that the terminal split across two events is still one
+//! sequence. The visible text is all text outside OSC payloads, joined across
+//! escape sequences and across events. Thus `hun`, then `ESC [ 1 m`, then
+//! `ter2` reads `hunter2`. Each OSC payload is a segment of its own. A match
+//! never spans two segments. A search for `31` does not match inside
+//! `ESC [ 31 m`.
+//!
+//! # What the filter changes
+//!
+//! A pattern with a capture group named `redact` replaces only the text of
+//! that group. Else the filter replaces the whole match. It skips an empty
+//! match. Escape bytes never change, also when a match crosses them.
+//!
+//! A replacement of the kind `Text` puts its text in the first piece of the
+//! match. It makes each other piece empty. A piece is a part of a match that
+//! lies inside one event and one run of text. The kinds `Asterisks` and
+//! `Blocks` mask each piece. A control character stays as it is. Each run of
+//! other characters becomes one mark for each terminal column, so a wide
+//! character gives two marks and a combining mark gives none.
+//!
+//! A replacement text with a control character is not valid, because it
+//! would change the state of the terminal.
 
 use serde::{Deserialize, Serialize};
 
