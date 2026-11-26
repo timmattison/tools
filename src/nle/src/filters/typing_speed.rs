@@ -18,6 +18,9 @@ pub const PAUSE_OPTION: &str = "pause";
 /// The option that holds the jitter.
 pub const JITTER_OPTION: &str = "jitter";
 
+/// The pause threshold of a filter whose options give none, in seconds.
+pub const DEFAULT_PAUSE: f64 = 2.0;
+
 /// A typing rate in characters per second. It is finite and above zero.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct TypingRate(f64);
@@ -108,22 +111,39 @@ pub fn register(registry: &mut FilterRegistry) {
     registry.register_span(kind(), normalize);
 }
 
-/// Read one number option. It is an error when the option is missing or is
-/// not a number.
-fn number(options: &FilterOptions, key: &str) -> Result<f64, String> {
+/// Read a number option. The answer is `None` when the option is missing, and
+/// an error when it is not a number.
+fn optional_number(options: &FilterOptions, key: &str) -> Result<Option<f64>, String> {
     options
         .get(key)
-        .and_then(serde_json::Value::as_f64)
-        .ok_or_else(|| format!("the option \"{key}\" is missing or is not a number"))
+        .map(|value| {
+            value
+                .as_f64()
+                .ok_or_else(|| format!("the option \"{key}\" is not a number"))
+        })
+        .transpose()
+}
+
+/// The text for an option whose value is not valid.
+fn invalid(key: &str, error: &NleError) -> String {
+    format!("the option \"{key}\" is not valid: {error}")
 }
 
 impl Normalization {
-    /// Read the settings from the options of a filter.
+    /// Read the settings from the options of a filter. The rate is
+    /// necessary. A missing pause threshold is `DEFAULT_PAUSE`, and a missing
+    /// jitter is `Jitter::NONE`.
     fn from_options(options: &FilterOptions) -> Result<Self, String> {
+        let rate = options
+            .get(RATE_OPTION)
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(|| format!("the option \"{RATE_OPTION}\" is missing or is not a number"))?;
+        let pause = optional_number(options, PAUSE_OPTION)?.unwrap_or(DEFAULT_PAUSE);
+        let jitter = optional_number(options, JITTER_OPTION)?.unwrap_or(Jitter::NONE.get());
         Ok(Self {
-            rate: TypingRate::new(number(options, RATE_OPTION)?).map_err(|e| e.to_string())?,
-            pause: Seconds::new(number(options, PAUSE_OPTION)?).map_err(|e| e.to_string())?,
-            jitter: Jitter::new(number(options, JITTER_OPTION)?).map_err(|e| e.to_string())?,
+            rate: TypingRate::new(rate).map_err(|error| invalid(RATE_OPTION, &error))?,
+            pause: Seconds::new(pause).map_err(|error| invalid(PAUSE_OPTION, &error))?,
+            jitter: Jitter::new(jitter).map_err(|error| invalid(JITTER_OPTION, &error))?,
         })
     }
 }
