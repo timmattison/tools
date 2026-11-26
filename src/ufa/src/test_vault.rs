@@ -130,9 +130,6 @@ impl TestVault {
         let directory = TempConfigDir::new(label);
 
         if !cached.is_empty() {
-            fs::create_dir_all(&directory.dir).unwrap_or_else(|error| {
-                panic!("{} must be creatable: {error}", directory.dir.display())
-            });
             let path = op_cache_in(&directory.dir).cache_path().to_path_buf();
             let mut entries = serde_json::Map::new();
             for (reference, key) in cached {
@@ -255,12 +252,17 @@ fn put_entry(
     );
 }
 
-/// Write the entries to the cache file.
+/// Write the entries to the cache file, and make its directory first, as
+/// op-cache does.
 ///
 /// # Panics
 ///
-/// Panics if the file cannot be written.
+/// Panics if the directory cannot be made, or if the file cannot be written.
 fn write_entries(path: &std::path::Path, entries: serde_json::Map<String, serde_json::Value>) {
+    if let Some(directory) = path.parent() {
+        fs::create_dir_all(directory)
+            .unwrap_or_else(|error| panic!("{} must be creatable: {error}", directory.display()));
+    }
     fs::write(path, serde_json::Value::Object(entries).to_string())
         .unwrap_or_else(|error| panic!("{} must be writable: {error}", path.display()));
 }
