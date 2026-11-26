@@ -89,7 +89,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Print the mode-appropriate banner and, in files mode only, spawn the
     // background availability monitor (it stats the served files).
-    let monitor = match &mode {
+    // The binding keeps the monitor alive until `main` returns. Its `Drop`
+    // stops and joins the thread on every path, including an early `?`.
+    let _monitor = match &mode {
         sirn::ServeMode::Files(routes) => {
             println!(
                 "{}",
@@ -118,13 +120,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // The pool ends in one of two ways: a deliberate shutdown (`Ok`) or a dead
-    // accept thread (`Err`). Stop and join the monitor on both paths, before
-    // the error leaves `main`.
-    let served = sirn::serve(server, mode, WORKER_THREADS).join();
-    if let Some(monitor) = monitor {
-        monitor.stop();
-    }
-    served.map_err(|e| format!("sirn stopped accepting connections on {bind}:{port}: {e}"))?;
+    // A deliberate shutdown ends the pool with `Ok`, and a dead accept thread
+    // ends it with `Err`. `_monitor` drops on both paths when `main` returns.
+    sirn::serve(server, mode, WORKER_THREADS)
+        .join()
+        .map_err(|e| format!("sirn stopped accepting connections on {bind}:{port}: {e}"))?;
     Ok(())
 }

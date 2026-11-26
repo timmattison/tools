@@ -348,17 +348,23 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The running files-mode availability monitor: its thread and the signal that
 /// stops it.
+///
+/// Dropping a `Monitor` stops the thread and waits for it. This happens on
+/// every path: a normal return, an early `?`, or a panic that unwinds. The
+/// caller cannot forget the teardown. The wait is short, because the thread
+/// stops at once when the signal arrives (at most it finishes the current
+/// poll). A panic in the thread is ignored.
 pub struct Monitor {
-    shutdown: std::sync::mpsc::Sender<()>,
-    handle: JoinHandle<()>,
+    shutdown: Option<std::sync::mpsc::Sender<()>>,
+    handle: Option<JoinHandle<()>>,
 }
 
-impl Monitor {
-    /// Signals the thread to stop and waits for it to exit. A panic in the
-    /// thread is ignored.
-    pub fn stop(self) {
-        drop(self.shutdown);
-        let _ = self.handle.join();
+impl Drop for Monitor {
+    fn drop(&mut self) {
+        drop(self.shutdown.take());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -367,8 +373,8 @@ impl Monitor {
 /// Polls every served file once per [`POLL_INTERVAL`] and prints a line for each
 /// availability transition (`Ready to serve <name>` / `Warning!  File <name> not
 /// found...`), mirroring the original Java tool. The thread exits promptly when
-/// the returned [`Monitor`] sends its stop signal, so it never delays process
-/// teardown by up to a full poll interval.
+/// the returned [`Monitor`] is dropped, and the drop waits for the thread, so
+/// the thread never delays process teardown by up to a full poll interval.
 #[must_use]
 pub fn spawn_monitor(routes: Arc<BTreeMap<String, PathBuf>>) -> Monitor {
     let (shutdown, receiver) = std::sync::mpsc::channel();
@@ -386,7 +392,10 @@ pub fn spawn_monitor(routes: Arc<BTreeMap<String, PathBuf>>) -> Monitor {
             }
         }
     });
-    Monitor { shutdown, handle }
+    Monitor {
+        shutdown: Some(shutdown),
+        handle: Some(handle),
+    }
 }
 
 /// Dispatches one request to the handler for the active [`ServeMode`].

@@ -44,7 +44,7 @@ fn file_created_then_deleted_is_reflected_in_fetches() {
     assert_eq!(status, 404, "deleted file should 404");
 
     // Clean teardown: stop the monitor and the server.
-    monitor.stop();
+    drop(monitor);
     stop(pool);
 }
 
@@ -56,7 +56,7 @@ fn monitor_joins_promptly_after_shutdown_signal() {
     let monitor = sirn::spawn_monitor(routes);
     let (done_tx, done_rx) = mpsc::channel();
     std::thread::spawn(move || {
-        monitor.stop();
+        drop(monitor);
         let _ = done_tx.send(());
     });
     done_rx
