@@ -7,7 +7,7 @@ use wdid::catalog::{PathState, Tool};
 use wdid::render::{json, table_width, text, unparsed};
 use wdid::tally::{Classification, Summary, Tally, ToolUsage, Unparsed, Window};
 use wdid::tool::ToolName;
-use wdid::workspace::{FoundBy, Workspace};
+use wdid::workspace::{Commit, FoundBy, Workspace};
 
 /// Makes a date.
 fn date(year: i32, month: u32, day: u32) -> NaiveDate {
@@ -281,10 +281,11 @@ Idle (no use in the last 180 days):
 
 History: 1,234 rows. 12 not counted (exit 127). 3 did not parse (wdid --unparsed prints them).
 Shell: 5 aliases, 4 functions (1 did not parse).
+Workspace: /repo (the git work tree of the current directory)
 "#;
 
 /// The whole report: the table, a blank line, the three group lines, a blank
-/// line, the two summary lines, and a final newline.
+/// line, the three summary lines, and a final newline.
 #[test]
 fn the_report_holds_the_table_the_groups_and_the_summary() {
     let report = text(&fixture(), &window(), &workspace(), Some(200));
@@ -416,6 +417,53 @@ fn summary_lines(summary: Summary) -> Vec<String> {
     let report = text(&tally, &window(), &workspace(), None);
     let lines = report.split("\n\n").nth(2).unwrap_or_default();
     lines.lines().map(str::to_string).collect()
+}
+
+/// The last summary line names the workspace and the step that found it.
+#[test]
+fn the_workspace_line_names_the_workspace_and_the_step_that_found_it() {
+    let commit = Commit::parse("12baa4168146b6018d38dbe4f8cace7ed5b4081b").unwrap();
+    let checkout = "/u/.cargo/git/checkouts/tools-dda63c64534664e9/12baa41";
+    let cases = [
+        (
+            Workspace {
+                root: PathBuf::from("/code/tools"),
+                found_by: FoundBy::RepoFlag,
+            },
+            "Workspace: /code/tools (--repo)",
+        ),
+        (
+            Workspace {
+                root: PathBuf::from("/code/tools"),
+                found_by: FoundBy::WorkTree,
+            },
+            "Workspace: /code/tools (the git work tree of the current directory)",
+        ),
+        (
+            Workspace {
+                root: PathBuf::from(checkout),
+                found_by: FoundBy::InstalledGit {
+                    url: "https://github.com/timmattison/tools".to_string(),
+                    commit,
+                },
+            },
+            "Workspace: /u/.cargo/git/checkouts/tools-dda63c64534664e9/12baa41 (the source of the installed wdid, commit 12baa41)",
+        ),
+        (
+            Workspace {
+                root: PathBuf::from("/code/日本語 tools"),
+                found_by: FoundBy::InstalledPath {
+                    crate_dir: PathBuf::from("/code/日本語 tools/src/wdid"),
+                },
+            },
+            "Workspace: /code/日本語 tools (the source of the installed wdid, cargo install --path /code/日本語 tools/src/wdid)",
+        ),
+    ];
+    for (workspace, line) in cases {
+        let report = text(&fixture(), &window(), &workspace, None);
+        let summary = report.split("\n\n").nth(2).unwrap_or_default();
+        assert_eq!(summary.lines().last(), Some(line), "{report}");
+    }
 }
 
 /// With a `since` date, the history line says how many rows came before it.
