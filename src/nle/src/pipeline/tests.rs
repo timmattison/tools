@@ -1,7 +1,7 @@
 //! Tests for the filter pipeline and the render.
 
 use super::*;
-use crate::types::{EventType, FilterRegion, Seconds};
+use crate::types::{Clip, ClipId, EventType, FilterRegion, Seconds, TimelineTrack, TrackId};
 
 fn ev(time: f64) -> Event {
     Event {
@@ -344,4 +344,81 @@ fn render_of_a_whole_recording_with_no_filter_equals_its_source() {
     let rendered = FilterRegistry::new().render(&project).unwrap();
 
     assert_eq!(rendered, recording);
+}
+
+// Group 8: render of two clips on two tracks.
+
+fn clip_of(id: u64, source: Recording, offset: f64) -> Clip {
+    let duration = source.duration;
+    Clip {
+        id: ClipId(id),
+        source: Arc::new(source),
+        in_point: Seconds::ZERO,
+        out_point: Seconds::new(duration).unwrap(),
+        timeline_offset: Seconds::new(offset).unwrap(),
+    }
+}
+
+fn track_of(id: u64, clip: u64) -> TimelineTrack {
+    TimelineTrack {
+        id: TrackId(id),
+        clips: vec![ClipId(clip)],
+    }
+}
+
+/// Clip 1 is on track 1 and starts at 2.0. Clip 2 is on track 2 and starts at
+/// 0.0, so it starts first, although it is second in `clips`.
+fn two_clip_project() -> EditProject {
+    let mut late = source("late", &[], 1.0);
+    late.events = vec![data_event(0.0, "late0"), data_event(1.0, "late1")];
+    let mut early = source("early", &[], 2.0);
+    early.events = vec![
+        data_event(0.0, "early0"),
+        data_event(1.0, "early1"),
+        data_event(2.0, "early2"),
+    ];
+    EditProject {
+        clips: vec![clip_of(1, late, 2.0), clip_of(2, early, 0.0)],
+        timeline: vec![track_of(1, 1), track_of(2, 2)],
+        filters: Vec::new(),
+    }
+}
+
+#[test]
+fn render_merges_two_clips_in_time_order_and_keeps_track_order_on_a_tie() {
+    let rendered = FilterRegistry::new().render(&two_clip_project()).unwrap();
+
+    let got: Vec<(f64, &str)> = rendered
+        .events
+        .iter()
+        .map(|e| (e.time, e.data.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (0.0, "early0"),
+            (1.0, "early1"),
+            (2.0, "late0"),
+            (2.0, "early2"),
+            (3.0, "late1"),
+        ]
+    );
+}
+
+#[test]
+fn render_takes_the_header_from_the_clip_that_starts_first() {
+    let project = two_clip_project();
+    let early = Arc::clone(&project.clips[1].source);
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    assert_eq!(rendered.version, early.version);
+    assert_eq!(rendered.width, early.width);
+    assert_eq!(rendered.height, early.height);
+    assert_eq!(rendered.timestamp, early.timestamp);
+    assert_eq!(rendered.command, "run-early");
+    assert_eq!(rendered.title, "early");
+    assert_eq!(rendered.env, early.env);
+    assert_eq!(rendered.duration, project.duration());
+    assert_eq!(rendered.duration, 3.0);
 }
