@@ -279,26 +279,129 @@ impl ExportSettings {
 const EXPORT_LABEL: &str = "Export";
 /// The start of the text that names the file that an export wrote.
 const EXPORTED_PREFIX: &str = "Exported to";
+/// The `title` of the kind menu.
+const KIND_TITLE: &str = "Export format";
+/// The name of the theme menu.
+const THEME_LABEL: &str = "Theme";
+/// The name of the frame rate field.
+const FPS_LABEL: &str = "FPS";
+/// The hint of the frame rate field.
+const FPS_PLACEHOLDER: &str = "60";
+/// The name of the resolution field.
+const RESOLUTION_LABEL: &str = "Resolution";
+/// The hint of the resolution field.
+const RESOLUTION_PLACEHOLDER: &str = "auto";
+/// The `title` of the resolution field.
+const RESOLUTION_TITLE: &str = "WIDTHxHEIGHT, or empty for the size of the recording";
+/// The name of the check box for a video that `beta` optimizes for the web.
+const OPTIMIZE_LABEL: &str = "Optimize for web";
+/// The name of the check box for a web page that `beta` compresses.
+const COMPRESS_LABEL: &str = "Compress";
 
 /// The export bar of the menu bar. With no open document, it shows nothing.
 ///
-/// A click on Export asks for a file, exports the open project there, and
-/// shows the written file. `on_result` gets the end of each export.
+/// The bar holds the controls for the kind of file and its settings, and the
+/// Export button. A click on Export asks for a file, exports the open project
+/// there, and shows the progress and then the written file. `on_result` gets
+/// the end of each export.
 #[component]
 pub(super) fn ExportBar(
     loaded: ReadSignal<Option<Document>>,
     on_result: EventHandler<Result<(), String>>,
 ) -> Element {
     let services = use_context::<Services>();
-    let settings = use_signal(ExportSettings::default);
+    let mut settings = use_signal(ExportSettings::default);
     // True from the click until the dialog and the export end.
     let mut busy = use_signal(|| false);
+    // True while the export runs, and the newest stage that it reported.
+    let mut exporting = use_signal(|| false);
+    let mut progress = use_signal(|| None::<ExportProgress>);
     let mut status = use_signal(|| None::<String>);
     if loaded.read().is_none() {
         return rsx! {};
     }
+    let current = settings();
+    let kind = current.kind;
+    let is_video = matches!(kind, ExportKind::Mp4 | ExportKind::Gif);
+    let has_theme = is_video || kind == ExportKind::Web;
+    let frames = match progress() {
+        Some(ExportProgress::Frames { done, total }) => Some((done.to_string(), total.to_string())),
+        _ => None,
+    };
     rsx! {
         span { class: "export-bar",
+            select {
+                title: KIND_TITLE,
+                onchange: move |event| {
+                    if let Some(kind) = ExportKind::from_key(&event.value()) {
+                        settings.write().kind = kind;
+                    }
+                },
+                for option_kind in ExportKind::ALL {
+                    option {
+                        key: "{option_kind.key()}",
+                        value: option_kind.key(),
+                        selected: option_kind == kind,
+                        "{option_kind.label()}"
+                    }
+                }
+            }
+            if has_theme {
+                label { "{THEME_LABEL}"
+                    select {
+                        onchange: move |event| {
+                            if let Ok(theme) = event.value().parse::<Theme>() {
+                                settings.write().theme = theme;
+                            }
+                        },
+                        for theme in Theme::ALL {
+                            option {
+                                key: "{theme.as_str()}",
+                                value: theme.as_str(),
+                                selected: theme == current.theme,
+                                "{theme.as_str()}"
+                            }
+                        }
+                    }
+                }
+            }
+            if is_video {
+                label { "{FPS_LABEL}"
+                    input {
+                        r#type: "text",
+                        placeholder: FPS_PLACEHOLDER,
+                        value: "{current.fps}",
+                        oninput: move |event| settings.write().fps = event.value(),
+                    }
+                }
+                label { "{RESOLUTION_LABEL}"
+                    input {
+                        r#type: "text",
+                        placeholder: RESOLUTION_PLACEHOLDER,
+                        title: RESOLUTION_TITLE,
+                        value: "{current.resolution}",
+                        oninput: move |event| settings.write().resolution = event.value(),
+                    }
+                }
+                label {
+                    input {
+                        r#type: "checkbox",
+                        checked: current.optimize_web,
+                        onchange: move |event| settings.write().optimize_web = event.checked(),
+                    }
+                    "{OPTIMIZE_LABEL}"
+                }
+            }
+            if kind == ExportKind::Web {
+                label {
+                    input {
+                        r#type: "checkbox",
+                        checked: current.compress_web,
+                        onchange: move |event| settings.write().compress_web = event.checked(),
+                    }
+                    "{COMPRESS_LABEL}"
+                }
+            }
             button {
                 disabled: busy(),
                 onclick: move |_| {
@@ -321,21 +424,31 @@ pub(super) fn ExportBar(
                         let dialog = settings.kind.save_dialog(&source);
                         if let Some(picked) = services.pick_export_path(dialog).await {
                             if let Ok(request) = settings.request(picked) {
-                                let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+                                let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
                                 let export = {
                                     let guard = loaded.read();
                                     guard.as_ref().map(|document| {
                                         services.export(&document.editor, request, sender)
                                     })
                                 };
-                                if let Some(export) = export {
-                                    if let Ok(path) = export.await {
+                                if let Some(mut export) = export {
+                                    progress.set(None);
+                                    exporting.set(true);
+                                    let result = loop {
+                                        tokio::select! {
+                                            biased;
+                                            Some(stage) = receiver.recv() => progress.set(Some(stage)),
+                                            result = &mut export => break result,
+                                        }
+                                    };
+                                    if let Ok(path) = result {
                                         status.set(Some(format!(
                                             "{EXPORTED_PREFIX} {}",
                                             path.display()
                                         )));
                                         on_result.call(Ok(()));
                                     }
+                                    exporting.set(false);
                                 }
                             }
                         }
@@ -343,6 +456,15 @@ pub(super) fn ExportBar(
                     });
                 },
                 "{EXPORT_LABEL}"
+            }
+            if exporting() {
+                span { class: "export-progress",
+                    progress {
+                        value: frames.as_ref().map(|(done, _)| done.clone()),
+                        max: frames.as_ref().map(|(_, total)| total.clone()),
+                    }
+                    "{progress_text(progress())}"
+                }
             }
             if let Some(text) = status() {
                 span { class: "export-status", role: "status", "{text}" }
