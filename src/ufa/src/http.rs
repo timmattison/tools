@@ -409,6 +409,28 @@ where
     read_json_response_within(api, response, MAX_RESPONSE_BYTES).await
 }
 
+/// Read `response` for its status, and keep no document from its body.
+///
+/// The integration API documents the success answer of the actions of a
+/// device and of a port with no content. A controller can thus send no body,
+/// and an empty body is not JSON. A failure is reported as
+/// [`read_json_response`] reports it.
+///
+/// # Arguments
+///
+/// * `api` - Which API answered, which decides how errors name it.
+/// * `response` - The response to read.
+///
+/// # Errors
+///
+/// Returns an error if the body cannot be read, or if the status is not a
+/// success.
+pub async fn read_response_without_document(api: Api, response: reqwest::Response) -> Result<()> {
+    read_success_body(api, response, MAX_RESPONSE_BYTES)
+        .await
+        .map(|_| ())
+}
+
 /// Read `response` as `T`, reading no more than `limit` bytes of its body.
 ///
 /// The bound is a parameter rather than the constant itself, because a test
@@ -439,6 +461,33 @@ async fn read_json_response_within<T>(
 where
     T: DeserializeOwned,
 {
+    let (status, body) = read_success_body(api, response, limit).await?;
+
+    parse_body(api, status, &body)
+}
+
+/// Read the body of `response`, up to `limit` bytes, and refuse a status that
+/// is not a success.
+///
+/// # Arguments
+///
+/// * `api` - Which API answered, which decides how errors name it.
+/// * `response` - The response to read.
+/// * `limit` - The most of the body to read, in bytes.
+///
+/// # Returns
+///
+/// The success status and the whole body, as text.
+///
+/// # Errors
+///
+/// Returns an error if the body is larger than `limit`, if the body cannot be
+/// read, or if the status is not a success.
+async fn read_success_body(
+    api: Api,
+    response: reqwest::Response,
+    limit: u64,
+) -> Result<(StatusCode, String)> {
     let status = response.status();
     let body = read_body(api, response, limit).await?;
 
@@ -446,7 +495,7 @@ where
         return Err(response_error(api, status, &body));
     }
 
-    parse_body(api, status, &body)
+    Ok((status, body))
 }
 
 /// Read the whole body of `response`, up to `limit` bytes of it.

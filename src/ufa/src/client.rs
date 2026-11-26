@@ -1,4 +1,6 @@
-use crate::http::{build_client, read_json_response, Api, Timeouts};
+use crate::http::{
+    build_client, read_json_response, read_response_without_document, Api, Timeouts,
+};
 use anyhow::{Context, Result};
 use reqwest::{Client, Url};
 use serde::de::DeserializeOwned;
@@ -124,20 +126,64 @@ impl UnifiClient {
         T: DeserializeOwned,
         B: serde::Serialize,
     {
+        let response = self.send_post(path, body).await?;
+
+        read_json_response(Api::Controller, response).await
+    }
+
+    /// Send `body` to `path` as a POST, and read no document from the answer.
+    ///
+    /// The integration API documents the success answer of the actions of a
+    /// device and of a port with no content, so the body of the answer is not
+    /// read as JSON.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path of the request, relative to the integration API.
+    /// * `body` - The document to send as JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails, or if the status of the answer
+    /// is not a success.
+    pub async fn post_action<B>(&self, path: &str, body: &B) -> Result<()>
+    where
+        B: serde::Serialize,
+    {
+        let response = self.send_post(path, body).await?;
+
+        read_response_without_document(Api::Controller, response).await
+    }
+
+    /// Send `body` to `path` as a POST.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path of the request, relative to the integration API.
+    /// * `body` - The document to send as JSON.
+    ///
+    /// # Returns
+    ///
+    /// The answer, with its body not read yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the URL cannot be built, or if the request fails.
+    async fn send_post<B>(&self, path: &str, body: &B) -> Result<reqwest::Response>
+    where
+        B: serde::Serialize,
+    {
         let url = self
             .base_url
             .join(path)
             .context("Failed to construct request URL")?;
 
-        let response = self
-            .client
+        self.client
             .post(url)
             .json(body)
             .send()
             .await
-            .map_err(|e| self.handle_request_error(e, "POST"))?;
-
-        read_json_response(Api::Controller, response).await
+            .map_err(|e| self.handle_request_error(e, "POST"))
     }
 
     pub async fn delete<T>(&self, path: &str) -> Result<T>

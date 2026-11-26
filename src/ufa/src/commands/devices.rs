@@ -618,7 +618,7 @@ async fn restart_device(
     let path = format!("sites/{}/devices/{}/actions", site_id, device_id);
     let action = DeviceAction::Restart;
 
-    let _: serde_json::Value = client.post(&path, &action).await?;
+    client.post_action(&path, &action).await?;
     Ok(Report::of_note("Device restart initiated successfully"))
 }
 
@@ -651,7 +651,7 @@ async fn power_cycle_port(
     );
     let action = PortAction::PowerCycle;
 
-    let _: serde_json::Value = client.post(&path, &action).await?;
+    client.post_action(&path, &action).await?;
     Ok(Report::of_note("Port power cycle initiated successfully"))
 }
 
