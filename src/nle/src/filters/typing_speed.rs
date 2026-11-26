@@ -104,21 +104,27 @@ fn normalize(span: Span, options: &FilterOptions) -> Result<Span, String> {
         .ok_or_else(|| format!("the option \"{RATE_OPTION}\" is missing or is not a number"))?;
     let interval = 1.0 / rate;
     let mut previous: Option<f64> = None;
+    // The change of the time of the last key so far.
+    let mut shift = 0.0;
     let events = span
         .events
         .into_iter()
         .map(|event| {
             if event.event_type != EventType::Input {
-                return event;
+                return Event {
+                    time: event.time + shift,
+                    ..event
+                };
             }
             let time = previous.map_or(event.time, |before| before + interval);
             previous = Some(time);
+            shift = time - event.time;
             Event { time, ..event }
         })
         .collect();
     Ok(Span {
         events,
-        length: span.length,
+        length: span.length + shift,
     })
 }
 
