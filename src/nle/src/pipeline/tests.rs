@@ -208,6 +208,32 @@ fn an_empty_region_still_calls_the_filter_with_an_empty_slice() {
     assert_eq!(times(&out), vec![0.5, 3.5]);
 }
 
+#[test]
+fn an_event_at_the_end_of_a_range_is_after_the_range_and_moves_by_the_shift() {
+    let (registry, seen) = spy_registry(|events| {
+        events
+            .iter()
+            .map(|e| Event {
+                time: e.time * 2.0,
+                ..e.clone()
+            })
+            .collect()
+    });
+
+    let out = registry
+        .run(
+            events(&[0.5, 1.0, 1.5, 2.0, 3.0]),
+            &[range("spy", 1.0, 2.0)],
+        )
+        .unwrap();
+
+    // The filter sees 1.0 and 1.5, and not the event at the end 2.0.
+    let calls = seen.lock().unwrap();
+    assert_eq!(times(&calls[0]), vec![0.0, 0.5]);
+    // The shift is 1.0 - 0.5, so 2.0 and 3.0 both move to 2.5 and 3.5.
+    assert_eq!(times(&out), vec![0.5, 1.0, 2.0, 2.5, 3.5]);
+}
+
 // Tests of the checks on the answer of a filter.
 
 fn registry_answering(time: f64) -> FilterRegistry {
