@@ -139,7 +139,7 @@ fn export_web_writes_the_golden_html_for_each_theme() {
 fn install_fake_ffmpeg(dir: &Path) -> PathBuf {
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).expect("make the bin directory");
-    write_executable(&bin.join("ffmpeg"), FAKE_FFMPEG).expect("write the fake ffmpeg");
+    write_executable(bin.join("ffmpeg"), FAKE_FFMPEG).expect("write the fake ffmpeg");
     bin
 }
 

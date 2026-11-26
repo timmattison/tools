@@ -36,11 +36,14 @@ impl FontManager {
         let mut fonts = Vec::new();
 
         if let Some(path) = font {
-            let font_data = std::fs::read(path)?;
-            fonts.push(
-                FontVec::try_from_vec(font_data)
-                    .map_err(|_| anyhow::anyhow!("Failed to parse font"))?,
-            );
+            let font_data = std::fs::read(path)
+                .with_context(|| format!("Failed to load font {}", path.display()))?;
+            fonts.push(FontVec::try_from_vec(font_data).map_err(|_| {
+                anyhow::anyhow!(
+                    "Failed to load font {}: not a TTF or OTF file",
+                    path.display()
+                )
+            })?);
         } else {
             let font_paths = get_font_paths();
 
