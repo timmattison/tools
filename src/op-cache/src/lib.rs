@@ -553,8 +553,9 @@ impl OpCache {
 ///
 /// Returns [`Error::OpCliNotFound`] if `op` is not in `PATH`,
 /// [`Error::OpReadFailed`] if `op` refuses the item on every attempt, and
-/// [`Error::Json`] if what `op` printed is not a 1Password item — which covers
-/// output that is not JSON at all, and JSON that carries no `fields` array.
+/// [`Error::ItemJsonParse`] if what `op` printed is not a 1Password item —
+/// which covers output that is not JSON at all, and JSON that carries no
+/// `fields` array.
 pub fn field_labels(item: &OpItem) -> Result<Vec<String>> {
     let reference = item.reference()?;
     let mut run = OpRun::new(
@@ -618,12 +619,17 @@ fn field_labels_from(
 
 /// The label of every field of the item `printed` holds.
 ///
+/// The error gives the class, the line, and the column of the fault only.
+/// The text of `serde_json` can quote a string of the input, and the input
+/// holds the value of each concealed field.
+///
 /// # Errors
 ///
-/// Returns [`Error::Json`] if `printed` is not JSON, and if it is JSON that
-/// carries no `fields` array.
+/// Returns [`Error::ItemJsonParse`] if `printed` is not JSON, and if it is
+/// JSON that carries no `fields` array.
 fn labels_of(printed: &[u8]) -> Result<Vec<String>> {
-    let item: PrintedItem = serde_json::from_slice(printed)?;
+    let item: PrintedItem = serde_json::from_slice(printed)
+        .map_err(|error| Error::ItemJsonParse(describe_json_error(&error)))?;
 
     Ok(item
         .fields
