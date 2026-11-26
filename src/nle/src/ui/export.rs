@@ -441,12 +441,15 @@ pub(super) fn ExportBar(
                                             result = &mut export => break result,
                                         }
                                     };
-                                    if let Ok(path) = result {
-                                        status.set(Some(format!(
-                                            "{EXPORTED_PREFIX} {}",
-                                            path.display()
-                                        )));
-                                        on_result.call(Ok(()));
+                                    match result {
+                                        Ok(path) => {
+                                            status.set(Some(format!(
+                                                "{EXPORTED_PREFIX} {}",
+                                                path.display()
+                                            )));
+                                            on_result.call(Ok(()));
+                                        }
+                                        Err(error) => on_result.call(Err(error.to_string())),
                                     }
                                     exporting.set(false);
                                 }
