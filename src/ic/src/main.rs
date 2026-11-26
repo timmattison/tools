@@ -5493,4 +5493,31 @@ mod tests {
         let lines = header_lines(&["abc"]);
         assert_eq!(header_rows(&lines, 0).0, 3);
     }
+
+    // =========================================================================
+    // Tests for the help of --diff-mode
+    // =========================================================================
+
+    #[test]
+    fn diff_mode_help_names_the_default_mode() {
+        // The help states the default by hand, thus it must name the mode
+        // that `#[default]` puts on `diff::Mode`.
+        use clap::{CommandFactory, ValueEnum};
+
+        let default_mode = diff::Mode::default()
+            .to_possible_value()
+            .expect("each diff mode has a name on the command line");
+        let expected = format!("(default: {})", default_mode.get_name());
+        let command = Args::command();
+        let help = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "diff_mode")
+            .and_then(clap::Arg::get_help)
+            .expect("--diff-mode has a help text")
+            .to_string();
+        assert!(
+            help.contains(&expected),
+            "the help of --diff-mode is {help:?}, and it must hold {expected:?}"
+        );
+    }
 }
