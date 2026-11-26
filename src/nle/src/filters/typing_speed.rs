@@ -133,16 +133,22 @@ fn normalize(span: Span, options: &FilterOptions) -> Result<Span, String> {
     Ok(Span { events, length })
 }
 
-/// A key of the region: its time in the recording, and its new time.
+/// A key of the region: its time in the recording, its new time, and whether
+/// it holds a line end.
 #[derive(Debug, Clone, Copy)]
 struct Key {
     old: f64,
     new: f64,
+    ends_line: bool,
 }
 
+/// The characters that end a line: Enter sends a carriage return in raw
+/// mode, and a line feed in other modes.
+const LINE_ENDS: [char; 2] = ['\r', '\n'];
+
 /// The keys of `events`, in order. The first key keeps its time. A gap
-/// longer than `pause` keeps its length. Each other key comes `interval`
-/// after the key before it.
+/// longer than `pause`, and the gap after a key that holds a line end, keep
+/// their length. Each other key comes `interval` after the key before it.
 fn new_keys(events: &[Event], interval: f64, pause: f64) -> Vec<Key> {
     let mut keys: Vec<Key> = Vec::new();
     for event in events {
@@ -151,11 +157,17 @@ fn new_keys(events: &[Event], interval: f64, pause: f64) -> Vec<Key> {
         }
         let new = keys.last().map_or(event.time, |before| {
             let gap = event.time - before.old;
-            before.new + if gap > pause { gap } else { interval }
+            before.new
+                + if before.ends_line || gap > pause {
+                    gap
+                } else {
+                    interval
+                }
         });
         keys.push(Key {
             old: event.time,
             new,
+            ends_line: event.data.contains(LINE_ENDS),
         });
     }
     keys
