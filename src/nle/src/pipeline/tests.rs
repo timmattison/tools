@@ -905,3 +905,57 @@ fn two_markers_at_one_time_keep_the_order_of_their_ids() {
     let labels: Vec<&str> = rendered.chapters.iter().map(|c| c.label.as_str()).collect();
     assert_eq!(labels, vec!["three", "nine"]);
 }
+
+#[test]
+fn when_a_filter_returns_no_event_a_marker_up_to_the_last_seen_event_goes_to_the_region_start() {
+    // The range 2..7 holds the events 3 and 5, at 1 and 3 from its start. The
+    // filter returns no event, thus the shift is 0 - 3 = -3. The markers 4 and
+    // 5 go to the region start. The marker 6 is after the last seen event and
+    // moves by the shift, as do the marker 7 at the range end and the marker 9.
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("drop-all"), |_, _| Vec::new());
+    let project = chapter_project(
+        &[1.0, 3.0, 5.0, 8.0],
+        10.0,
+        vec![
+            marker(1, 1.5, "before"),
+            marker(2, 4.0, "inside"),
+            marker(3, 5.0, "at last seen"),
+            marker(4, 6.0, "after last seen"),
+            marker(5, 7.0, "at range end"),
+            marker(6, 9.0, "after"),
+        ],
+        vec![range("drop-all", 2.0, 7.0)],
+    );
+
+    let rendered = registry.render(&project).unwrap();
+
+    assert_close(&chapter_times(&rendered), &[1.5, 2.0, 2.0, 3.0, 4.0, 6.0]);
+    assert_close(&[rendered.duration], &[7.0]);
+}
+
+#[test]
+fn in_a_range_that_holds_no_event_a_marker_after_the_region_start_moves_by_the_shift() {
+    // The range 2..6 holds no event. The filter adds one event 1 s after the
+    // region start, thus the shift is 1 - 0 = 1. A marker at the region start
+    // stays. The marker 4 is after it and moves by the shift, as does the
+    // marker 7 after the range.
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("insert"), |_, _| vec![ev(1.0)]);
+    let project = chapter_project(
+        &[1.0, 7.0],
+        10.0,
+        vec![
+            marker(1, 1.5, "before"),
+            marker(2, 2.0, "at range start"),
+            marker(3, 4.0, "inside"),
+            marker(4, 7.0, "after"),
+        ],
+        vec![range("insert", 2.0, 6.0)],
+    );
+
+    let rendered = registry.render(&project).unwrap();
+
+    assert_close(&chapter_times(&rendered), &[1.5, 2.0, 5.0, 8.0]);
+    assert_close(&[rendered.duration], &[11.0]);
+}
