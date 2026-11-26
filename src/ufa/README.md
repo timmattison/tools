@@ -145,7 +145,8 @@ because it can hold a key in cleartext. Windows has no mode bits to tighten; the
 per-user ACL of `%APPDATA%`.
 
 `ufa` never rewrites a field it did not ask about. `ufa config cloud` changes only the Site Manager
-credential and leaves the controller URL, key and TLS choice exactly as they were.
+credential and leaves the controller URL, key and TLS choice exactly as they were. A save writes
+each field in place, so your comments, and a key that `ufa` does not know, stay as you wrote them.
 
 ### `ufa config setup`
 

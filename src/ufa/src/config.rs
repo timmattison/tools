@@ -556,7 +556,92 @@ impl Config {
             || names_a_secret(self.site_manager_api_key.as_ref().map(Secret::expose))
     }
 
+    /// The text of the config file after a save of `self` over `existing`.
+    ///
+    /// Each field of `Config` that holds a value is written in place, with the
+    /// comment that the person wrote beside it. Each field that holds nothing
+    /// leaves the file. Each other comment, and each key that `Config` does
+    /// not name, stays as the person wrote it.
+    ///
+    /// # Arguments
+    ///
+    /// * `existing` - The text of the config file before the save. An empty
+    ///   text stands for a file that does not exist.
+    ///
+    /// # Returns
+    ///
+    /// The text to write.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `existing` is not TOML, or if `self` cannot be
+    /// serialized.
+    fn written_over(&self, existing: &str) -> Result<String> {
+        let mut document: toml_edit::DocumentMut = existing
+            .parse()
+            .context("Failed to parse the config file")?;
+        let fields: toml_edit::DocumentMut = toml::to_string_pretty(self)
+            .context("Failed to serialize configuration")?
+            .parse()
+            .context("Failed to read the serialized configuration")?;
+
+        for name in Self::field_names()? {
+            match fields.get(&name).and_then(toml_edit::Item::as_value) {
+                Some(value) => match document
+                    .get_mut(&name)
+                    .and_then(toml_edit::Item::as_value_mut)
+                {
+                    Some(old) => {
+                        let decor = old.decor().clone();
+                        *old = value.clone();
+                        *old.decor_mut() = decor;
+                    }
+                    None => {
+                        document.insert(&name, toml_edit::Item::Value(value.clone()));
+                    }
+                },
+                None => {
+                    document.remove(&name);
+                }
+            }
+        }
+
+        Ok(document.to_string())
+    }
+
+    /// The key of each field of `Config` in the config file.
+    ///
+    /// The struct literal names each field, so a field that a later change adds
+    /// fails to compile here until it holds a value, and the save then writes
+    /// it in place and removes it when it holds nothing.
+    ///
+    /// # Returns
+    ///
+    /// The keys, in the order that the serializer writes them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the configuration cannot be serialized.
+    fn field_names() -> Result<Vec<String>> {
+        let every_field = Config {
+            url: Some(String::new()),
+            api_key: Some(Secret::from("")),
+            insecure: Some(false),
+            site_manager_api_key: Some(Secret::from("")),
+            op_path: Some(String::new()),
+            sm_op_path: Some(String::new()),
+        };
+        let table =
+            toml::Table::try_from(&every_field).context("Failed to serialize configuration")?;
+
+        Ok(table.keys().cloned().collect())
+    }
+
     /// Save configuration to an explicit path, creating parent directories.
+    ///
+    /// The save writes each field of `Config` over the file that is there, as
+    /// [`Config::written_over`] says, so a comment and a key that `Config`
+    /// does not name stay.
     ///
     /// Private on purpose: callers go through [`Config::edit`], which reads
     /// what is already on disk first, so no command can blank out a field it
@@ -575,7 +660,18 @@ impl Config {
             })?;
         }
 
-        let contents = toml::to_string_pretty(self).context("Failed to serialize configuration")?;
+        let existing = match fs::read_to_string(config_path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("Failed to read config file: {}", config_path.display())
+                })
+            }
+        };
+        let contents = self
+            .written_over(&existing)
+            .with_context(|| format!("Failed to update config file: {}", config_path.display()))?;
 
         replace_config_file(config_path, |file| file.write_all(contents.as_bytes()))
             .with_context(|| format!("Failed to write config file: {}", config_path.display()))?;
