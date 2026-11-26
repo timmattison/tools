@@ -20,7 +20,8 @@ library, and do not use a canvas for the first version.
    vis-timeline, keeps its own copy of the clips, and issue #149 makes the Rust
    `Editor` the one source of truth.
 2. **Draw the clips as RSX elements.** Each clip is one `div` with an absolute
-   position. A drag changes only its `transform: translate3d(...)`.
+   position and `overflow: hidden`. A move changes only its
+   `transform: translate3d(...)`. A trim also changes its width (see rule 7).
 3. **Divide each clip into tiles of 512 px, and render only the tiles in the
    window and in an overscan of 600 px.** A `Tile` component takes only the
    clip, the tile index, and the pixels per second as props. Thus Dioxus skips
@@ -48,19 +49,24 @@ library, and do not use a canvas for the first version.
    1,200 px holds at most 75 ticks, thus RSX elements are sufficient.
 7. **Keep the hit test and the drag state in Rust, and apply one edit when the
    drag ends.** Use the pointer events of Dioxus. During the drag, a signal
-   holds the preview position, and only the transform of the clip changes. On
-   `pointerup`, call `Editor::apply` one time. Each call of `Editor::apply`
-   adds one step to the undo history, thus one edit for each pointer move
-   gives one undo step for each move. Escape cancels the drag and applies no
-   edit. The Animations panel of Chrome DevTools uses the same rule: a move
-   only draws, and the release changes the model. A drag that must continue
-   outside the timeline needs one `document::eval` for `setPointerCapture` or
-   for listeners on `window`, because Dioxus 0.7 gives no method for pointer
-   capture. Each kind of drag gives one edit:
-   - A move of a clip is one `MoveClip`.
-   - A drag of the end edge is one `TrimClip`. It changes `out_point`, and
-     the start of the clip stays.
-   - A drag of the start edge by d adds d to `in_point` and to
+   holds the preview, and only the style of the clip changes. The props of
+   each tile stay the same. On `pointerup`, call `Editor::apply` one time.
+   Each call of `Editor::apply` adds one step to the undo history, thus one
+   edit for each pointer move gives one undo step for each pointer move.
+   Escape cancels the drag and applies no edit. The Animations panel of Chrome
+   DevTools uses the same rule: a pointer move only draws, and the release
+   changes the model. A drag that must continue outside the timeline needs
+   one `document::eval` for `setPointerCapture` or for listeners on `window`,
+   because Dioxus 0.7 gives no method for pointer capture. Each kind of drag
+   gives one preview and one edit:
+   - A move of a clip changes only the transform of the clip. Its edit is one
+     `MoveClip`.
+   - A drag of the end edge changes only the width of the clip. Its edit is
+     one `TrimClip`, which changes `out_point`, and the start of the clip
+     stays.
+   - A drag of the start edge by d moves the clip by d and makes it d
+     narrower. The tiles move by -d inside the clip, thus each event stays at
+     its time on the timeline. The edit adds d to `in_point` and to
      `timeline_offset`, thus the end edge stays. Remotion Studio does the
      same (`getTimelineSequenceLeftEdgeDragValues`). The `Edit` of
      `src/nle/src/editor.rs` has no variant for this drag. `TrimClip` keeps
@@ -103,7 +109,7 @@ recommendation for these reasons:
   times when the recording loaded.
 
 Issue #150 also needs a playhead that moves during playback. In each RSX way,
-the drag of a clip changes one transform in each frame, and it held 60 frames
+the move of a clip changes one transform in each frame, and it held 60 frames
 each second, also with 100,000 DOM nodes. Thus a playhead `div` that moves
 with a `transform` is sufficient.
 
@@ -375,9 +381,9 @@ A frame of more than 20 ms missed the budget of 16.7 ms at 60 Hz. In WebKit,
 What the results show:
 
 - **A drag held 60 frames each second in each way.** Each way missed at most
-  1 of 240 frames, also with 100,000 DOM nodes. A drag changes only the
-  transform of one clip, and Dioxus skips each tile, because the props of the
-  tile do not change.
+  1 of 240 frames, also with 100,000 DOM nodes. The measured drag is a move.
+  It changes only the transform of one clip, and Dioxus skips each tile,
+  because the props of the tile do not change.
 - **A pan held 60 frames each second in each way but `dom`.** `dom` missed 102
   of 240 frames at 100,000 events at `fit`.
 - **The zoom separates the ways.** `dom` missed 68 of 120 frames at 10,000
@@ -404,6 +410,9 @@ What the results show:
   load. The two rounds agree within a few frames.
 - The driver sends synthetic DOM events. A real mouse adds the input latency
   of the system, which is the same for each way.
+- The driver moves a clip, and it trims no clip. A trim also changes the
+  width of the clip, and a trim of the start edge also moves the tiles inside
+  the clip. No frame time of a trim was measured.
 - The prototype draws no ruler, no handles, no playhead, and no text. The
   recommendation makes these RSX elements in each way, thus they add the same
   cost to each way.
