@@ -1,4 +1,7 @@
-use super::terminal_renderer::{TerminalState, TerminalTheme};
+use super::tmux::{
+    adjust_coordinates_for_tmux, debug_status_bar, detect_tmux_layout, is_status_bar_row,
+    is_valid_cursor_position, protect_status_bar_area,
+};
 use crate::{EventType, Recording};
 use ab_glyph::{Font, FontVec, PxScale};
 use anyhow::{Context, Result};
@@ -9,6 +12,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use termstate::{TerminalState, TerminalTheme};
 
 // Helper functions for color analysis
 fn color_similarity(color1: (u8, u8, u8), color2: (u8, u8, u8)) -> u32 {
@@ -270,11 +274,11 @@ fn generate_and_encode_video(
         }
 
         // Protect status bar from overlap before rendering
-        terminal_state.protect_status_bar_area();
+        protect_status_bar_area(&mut terminal_state);
 
         // Debug status bar content (only for first frame)
         if frame_num == 0 && std::env::var("BETA_DEBUG").is_ok() {
-            terminal_state.debug_status_bar();
+            debug_status_bar(&terminal_state);
         }
 
         // Render frame
@@ -392,7 +396,7 @@ fn render_terminal_to_image(
     let grid = terminal_state.get_grid();
 
     // Detect tmux layout for color correction and cursor validation
-    let tmux_layout = terminal_state.detect_tmux_layout();
+    let tmux_layout = detect_tmux_layout(terminal_state);
 
     // Pass 1: Render all cell backgrounds first (including status bar)
     for (y, row) in grid.iter().enumerate() {
@@ -431,7 +435,7 @@ fn render_terminal_to_image(
                 let (mut fg_color, bg_color) = terminal_state.resolve_cell_colors(cell);
 
                 // Special handling for status bar rows to ensure text visibility
-                if terminal_state.is_status_bar_row(y) {
+                if is_status_bar_row(terminal_state, y) {
                     // Force visible text color if fg and bg are too similar
                     if fg_color == bg_color || color_similarity(fg_color, bg_color) < 100 {
                         fg_color = if is_light_color(bg_color) {
@@ -490,13 +494,10 @@ fn render_terminal_to_image(
         let (cursor_x, cursor_y) = terminal_state.get_cursor_position();
 
         // Check if cursor is in valid position for tmux layout
-        if terminal_state.is_valid_cursor_position(tmux_layout.as_ref()) {
+        if is_valid_cursor_position(terminal_state, tmux_layout.as_ref()) {
             // Adjust cursor coordinates for tmux layout
-            let (adj_cursor_x, adj_cursor_y) = terminal_state.adjust_coordinates_for_tmux(
-                cursor_x,
-                cursor_y,
-                tmux_layout.as_ref(),
-            );
+            let (adj_cursor_x, adj_cursor_y) =
+                adjust_coordinates_for_tmux(cursor_x, cursor_y, tmux_layout.as_ref());
 
             // Calculate cursor pixel position - align with text rendering
             let cursor_pixel_x = cell_offset(adj_cursor_x, char_width, padding_x);

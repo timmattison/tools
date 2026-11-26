@@ -1,3 +1,12 @@
+//! The VT100/ANSI terminal emulator of `beta`.
+//!
+//! This crate holds the emulator and the five theme palettes that `beta` uses
+//! for its video and web exports. It is shared, so that `nle` uses the same
+//! copy.
+//!
+//! It does not draw pixels. `beta` keeps the drawing, the fonts, the tmux
+//! layout, and the ffmpeg pipe.
+
 use anyhow::Result;
 use vte::{Parser, Perform};
 
@@ -28,10 +37,15 @@ const fn sgr_color_byte(param: u16) -> u8 {
     param as u8
 }
 
+/// The colors of one terminal theme: the default background and foreground,
+/// and the 16 base ANSI colors.
 #[derive(Debug, Clone)]
 pub struct TerminalTheme {
+    /// The default background color.
     pub background: (u8, u8, u8),
+    /// The default foreground color.
     pub foreground: (u8, u8, u8),
+    // The 16 base ANSI colors, normal and bright.
     pub black: (u8, u8, u8),
     pub red: (u8, u8, u8),
     pub green: (u8, u8, u8),
@@ -51,10 +65,12 @@ pub struct TerminalTheme {
 }
 
 impl TerminalTheme {
+    /// The theme that `from_name` gives for an unknown name. It is `black`.
     pub fn auto() -> Self {
         Self::black()
     }
 
+    /// A black background with white text.
     pub fn black() -> Self {
         Self {
             background: (0, 0, 0),
@@ -78,6 +94,7 @@ impl TerminalTheme {
         }
     }
 
+    /// The Dracula palette.
     pub fn dracula() -> Self {
         Self {
             background: (40, 42, 54),
@@ -101,6 +118,7 @@ impl TerminalTheme {
         }
     }
 
+    /// The Monokai palette.
     pub fn monokai() -> Self {
         Self {
             background: (39, 40, 34),
@@ -124,6 +142,7 @@ impl TerminalTheme {
         }
     }
 
+    /// The Solarized Dark palette.
     pub fn solarized_dark() -> Self {
         Self {
             background: (0, 43, 54),
@@ -147,6 +166,7 @@ impl TerminalTheme {
         }
     }
 
+    /// The Solarized Light palette.
     pub fn solarized_light() -> Self {
         Self {
             background: (253, 246, 227),
@@ -170,6 +190,7 @@ impl TerminalTheme {
         }
     }
 
+    /// Returns the theme that has this name, or `auto` for an unknown name.
     pub fn from_name(name: &str) -> Self {
         match name.to_lowercase().as_str() {
             "black" => Self::black(),
@@ -181,6 +202,8 @@ impl TerminalTheme {
         }
     }
 
+    /// Returns the RGB color of a palette index: the 16 base colors come from the
+    /// theme, and the other 240 from the standard 256-color table.
     pub fn get_color(&self, index: u8) -> (u8, u8, u8) {
         match index {
             0 => self.black,
@@ -203,6 +226,7 @@ impl TerminalTheme {
         }
     }
 
+    /// Returns the RGB color of an index in the standard xterm 256-color table.
     pub fn get_256_color(index: u8) -> (u8, u8, u8) {
         match index {
             // Standard 16 colors (0-15)
@@ -251,17 +275,21 @@ impl TerminalTheme {
     }
 }
 
+/// One character cell of the screen grid, with its colors and attributes.
 #[derive(Debug, Clone)]
 pub struct Cell {
+    /// The character of the cell.
     pub ch: char,
+    /// The foreground color.
     pub fg_color: (u8, u8, u8),
+    /// The background color.
     pub bg_color: (u8, u8, u8),
+    /// Whether the character is bold.
     pub bold: bool,
-    #[expect(
-        dead_code,
-        reason = "tracked by SGR processing; rendering support planned"
-    )]
+    /// Whether the character is italic. The emulator tracks it, and `beta` does
+    /// not draw it yet.
     pub italic: bool,
+    /// Whether the character is underlined.
     pub underline: bool,
 }
 
@@ -278,17 +306,30 @@ impl Default for Cell {
     }
 }
 
+/// The state of a virtual terminal: the screen grid, the cursor, the current
+/// text attributes, and the VT100/ANSI parser that feeds them.
 pub struct TerminalState {
+    /// The screen grid, one `Vec` of cells for each row.
     pub grid: Vec<Vec<Cell>>,
+    /// The cursor column, counted from zero.
     pub cursor_x: usize,
+    /// The cursor row, counted from zero.
     pub cursor_y: usize,
+    /// The number of columns.
     pub width: usize,
+    /// The number of rows.
     pub height: usize,
+    /// The theme that gives the default and the base colors.
     pub theme: TerminalTheme,
+    /// The foreground color that the next printed character gets.
     pub current_fg: (u8, u8, u8),
+    /// The background color that the next printed character gets.
     pub current_bg: (u8, u8, u8),
+    /// Whether the next printed character is bold.
     pub bold: bool,
+    /// Whether the next printed character is italic.
     pub italic: bool,
+    /// Whether the next printed character is underlined.
     pub underline: bool,
     parser: Parser,
     // Saved cursor position for ESC 7/8
@@ -313,6 +354,7 @@ pub struct TerminalState {
 }
 
 impl TerminalState {
+    /// Creates a blank terminal of `width` columns and `height` rows.
     pub fn new(width: usize, height: usize, theme: TerminalTheme) -> Self {
         let mut grid = Vec::new();
         for _ in 0..height {
@@ -361,6 +403,13 @@ impl TerminalState {
         }
     }
 
+    /// Feeds terminal output to the emulator and updates the grid, the cursor, and
+    /// the attributes.
+    ///
+    /// # Errors
+    ///
+    /// This function never returns an error today. It returns `Result` so that a
+    /// future parser failure does not change the signature.
     pub fn process_output(&mut self, data: &str) -> Result<()> {
         let bytes: Vec<u8> = data.bytes().collect();
         // The VTE parser expects a slice of bytes
@@ -374,10 +423,12 @@ impl TerminalState {
         Ok(())
     }
 
+    /// Returns the screen grid, one `Vec` of cells for each row.
     pub fn get_grid(&self) -> &Vec<Vec<Cell>> {
         &self.grid
     }
 
+    /// Returns the theme of this terminal.
     pub fn get_theme(&self) -> &TerminalTheme {
         &self.theme
     }
@@ -392,14 +443,19 @@ impl TerminalState {
         self.height
     }
 
+    /// Returns the cursor position as `(column, row)`, counted from zero.
     pub fn get_cursor_position(&self) -> (usize, usize) {
         (self.cursor_x, self.cursor_y)
     }
 
+    /// Returns whether the application has the cursor visible.
     pub fn is_cursor_visible(&self) -> bool {
         self.cursor_visible
     }
 
+    /// Returns the `(foreground, background)` colors that a cell is drawn with.
+    /// This applies the dynamic palette, the OSC color overrides, and the tmux
+    /// color corrections.
     pub fn resolve_cell_colors(&self, cell: &Cell) -> ((u8, u8, u8), (u8, u8, u8)) {
         let mut fg = cell.fg_color;
         let mut bg = cell.bg_color;
@@ -481,158 +537,7 @@ impl TerminalState {
 
         (final_fg, final_bg)
     }
-
-    pub fn is_status_bar_row(&self, row_index: usize) -> bool {
-        // Check if this row index is the tmux status bar
-        if let Some(layout) = self.detect_tmux_layout() {
-            row_index == layout.status_bar_row
-        } else {
-            false
-        }
-    }
-
-    pub fn detect_tmux_layout(&self) -> Option<TmuxLayout> {
-        let grid = &self.grid;
-        if grid.is_empty() {
-            return None;
-        }
-
-        // Check for tmux status bar - usually at the bottom
-        let last_row = grid.len() - 1;
-        if last_row > 0 {
-            let status_row = &grid[last_row];
-
-            // Check if this row has characteristics of a tmux status bar.
-            // Only match on specific known tmux status bar colors, not any non-default color.
-            let has_tmux_green_bg = status_row.iter().any(|cell| {
-                matches!(
-                    cell.bg_color,
-                    (0, 255, 0) | (85, 255, 85) | (0, 128, 0) | (80, 250, 123)
-                )
-            });
-
-            // Also check for full-width inverted row (white bg / black fg) with bracket chars
-            let has_inverted_status = {
-                let inverted_count = status_row
-                    .iter()
-                    .filter(|cell| cell.bg_color == (255, 255, 255) && cell.fg_color == (0, 0, 0))
-                    .count();
-                let has_brackets = status_row.iter().any(|cell| matches!(cell.ch, '[' | ']'));
-                inverted_count > status_row.len() / 2 && has_brackets
-            };
-
-            if has_tmux_green_bg || has_inverted_status {
-                return Some(TmuxLayout {
-                    status_bar_row: last_row,
-                    content_height: last_row,
-                });
-            }
-        }
-
-        None
-    }
-
-    pub fn is_valid_cursor_position(&self, tmux_layout: Option<&TmuxLayout>) -> bool {
-        // Check if cursor is within valid content area considering tmux layout
-        let max_row = if let Some(layout) = tmux_layout {
-            layout.content_height
-        } else {
-            self.height
-        };
-
-        self.cursor_y < max_row && self.cursor_x < self.width
-    }
-
-    pub fn adjust_coordinates_for_tmux(
-        &self,
-        x: usize,
-        y: usize,
-        tmux_layout: Option<&TmuxLayout>,
-    ) -> (usize, usize) {
-        // Adjust coordinates to account for tmux layout
-        if let Some(layout) = tmux_layout {
-            // Ensure we don't render outside the content area
-            let adjusted_y = if y >= layout.content_height {
-                layout.content_height - 1
-            } else {
-                y
-            };
-            (x, adjusted_y)
-        } else {
-            (x, y)
-        }
-    }
-
-    pub fn protect_status_bar_area(&mut self) {
-        // Ensure status bar area is protected from application content
-        if let Some(layout) = self.detect_tmux_layout() {
-            let status_row = layout.status_bar_row;
-
-            // Clear any non-status content that might have been written to the status bar
-            if status_row < self.grid.len() {
-                let row = &mut self.grid[status_row];
-
-                // Check if this looks like application content rather than status bar
-                let non_status_chars = row
-                    .iter()
-                    .filter(|cell| {
-                        // Look for patterns that suggest this is application content
-                        matches!(cell.ch, 'A'..='Z' | 'a'..='z' | '0'..='9') &&
-                    cell.bg_color == (0, 0, 0) && // Default background
-                    cell.fg_color == (255, 255, 255) // Default foreground
-                    })
-                    .count();
-
-                // If more than 20% of the status bar looks like application content, clear it
-                if non_status_chars > row.len() / 5 {
-                    for cell in row {
-                        if cell.bg_color == (0, 0, 0) && cell.fg_color == (255, 255, 255) {
-                            // Only clear cells that look like application content
-                            cell.ch = ' ';
-                            cell.bg_color = (0, 128, 0); // Set to status bar green
-                            cell.fg_color = (0, 0, 0); // Black text
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn debug_status_bar(&self) {
-        // Debug function to analyze status bar content
-        if let Some(layout) = self.detect_tmux_layout() {
-            let status_row = layout.status_bar_row;
-            if status_row < self.grid.len() {
-                eprintln!("Status bar analysis (row {}):", status_row);
-                let row = &self.grid[status_row];
-
-                for (i, cell) in row.iter().enumerate().take(20) {
-                    // Show first 20 chars
-                    if cell.ch != ' ' || cell.bg_color != (0, 0, 0) {
-                        eprintln!(
-                            "  [{}] char='{}' fg=({},{},{}) bg=({},{},{})",
-                            i,
-                            cell.ch,
-                            cell.fg_color.0,
-                            cell.fg_color.1,
-                            cell.fg_color.2,
-                            cell.bg_color.0,
-                            cell.bg_color.1,
-                            cell.bg_color.2
-                        );
-                    }
-                }
-            }
-        }
-    }
 }
-
-#[derive(Debug, Clone)]
-pub struct TmuxLayout {
-    pub status_bar_row: usize,
-    pub content_height: usize,
-}
-
 // Helper function for color analysis in terminal renderer
 fn is_light_color_terminal(color: (u8, u8, u8)) -> bool {
     let luminance = 0.299 * color.0 as f32 + 0.587 * color.1 as f32 + 0.114 * color.2 as f32;
@@ -1469,3 +1374,6 @@ impl Perform for TerminalState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

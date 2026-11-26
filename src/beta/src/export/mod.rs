@@ -1,7 +1,7 @@
 use crate::ExportFormat;
 use anyhow::Result;
 
-pub mod terminal_renderer;
+pub mod tmux;
 pub mod video;
 pub mod web;
 
