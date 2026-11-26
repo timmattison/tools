@@ -34,9 +34,10 @@ pub const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// Panics when `run` does not end within [`JOIN_TIMEOUT`]. The thread of
 /// `run` stays blocked, but the test fails at once.
-pub fn within_timeout<F>(run: F) -> std::io::Result<()>
+pub fn within_timeout<T, F>(run: F) -> T
 where
-    F: FnOnce() -> std::io::Result<()> + Send + 'static,
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
 {
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {

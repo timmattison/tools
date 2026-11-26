@@ -92,6 +92,30 @@ fn a_deliberate_shutdown_ends_every_worker_cleanly() {
     );
 }
 
+/// A worker that panics stops the pool, but the accept thread still runs.
+/// Thus the message that `sirn` prints must be true for that cause too: it
+/// must not say that `sirn` stopped accepting connections.
+#[test]
+fn the_stop_message_is_true_when_a_worker_panicked() {
+    let server = bind();
+    let addr = server.server_addr().to_ip().expect("ip addr");
+    let pool = httpfile::Pool::spawn(server, 1, |request| {
+        request.respond(tiny_http::Response::empty(200))?;
+        panic!("deliberate panic of the test handler, after the response");
+    });
+
+    let (status, _headers, _body) = http_get_with_timeout(addr, "/", READ_TIMEOUT);
+    assert_eq!(status, 200, "the response did not go out");
+
+    let result = within_timeout(move || sirn::wait_until_stopped(pool, "127.0.0.1", 1234));
+
+    let message = result.expect_err("a worker that panicked must stop the pool with an error");
+    assert!(
+        message.starts_with("sirn stopped serving on 127.0.0.1:1234: "),
+        "the message must name the address and no single cause, got {message:?}"
+    );
+}
+
 /// The regression guard: a client that leaves mid-response must not end the
 /// worker. The pool has one worker, so the same worker serves the next request.
 /// `tiny_http` itself turns a closed-connection error into `Ok`, so this test

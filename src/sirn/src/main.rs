@@ -123,8 +123,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A deliberate shutdown ends the pool with `Ok`. A dead accept thread, or
     // workers that all panicked, end it with `Err`. `_monitor` drops on both
     // paths when `main` returns.
-    sirn::serve(server, mode, WORKER_THREADS)
-        .join()
-        .map_err(|e| format!("sirn stopped accepting connections on {bind}:{port}: {e}"))?;
+    sirn::wait_until_stopped(sirn::serve(server, mode, WORKER_THREADS), &bind, port)?;
     Ok(())
 }

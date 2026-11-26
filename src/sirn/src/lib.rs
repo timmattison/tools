@@ -343,6 +343,21 @@ pub fn serve(server: Arc<tiny_http::Server>, mode: ServeMode, workers: usize) ->
     Pool::spawn(server, workers, move |request| respond(&mode, request))
 }
 
+/// Blocks until every worker of `pool` stops, and gives the message that
+/// `sirn` prints when the pool stops with an error.
+///
+/// `bind` and `port` are the address that the server listens on. The message
+/// names that address, then the error of [`Pool::join`].
+///
+/// # Errors
+///
+/// Returns the message when [`Pool::join`] returns an error: a dead accept
+/// thread, or a worker that panicked.
+pub fn wait_until_stopped(pool: Pool, bind: &str, port: u16) -> Result<(), String> {
+    pool.join()
+        .map_err(|e| format!("sirn stopped accepting connections on {bind}:{port}: {e}"))
+}
+
 /// How often the availability monitor restats the served files.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
