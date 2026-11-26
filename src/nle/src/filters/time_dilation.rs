@@ -9,7 +9,7 @@
 
 use crate::error::NleError;
 use crate::pipeline::{FilterRegistry, Span};
-use crate::types::{AppliedFilter, FilterKind, FilterOptions, FilterRegion};
+use crate::types::{AppliedFilter, Event, FilterKind, FilterOptions, FilterRegion};
 
 /// The kind of the time dilation filter.
 pub const KIND: &str = "time-dilation";
@@ -29,7 +29,11 @@ impl Speed {
     /// Returns `NleError::InvalidSpeed` when `value` is NaN, infinite, zero,
     /// or below zero.
     pub fn new(value: f64) -> Result<Self, NleError> {
-        Ok(Self(value))
+        if value.is_finite() && value > 0.0 {
+            Ok(Self(value))
+        } else {
+            Err(NleError::InvalidSpeed(value))
+        }
     }
 
     /// The speed as a number.
@@ -75,9 +79,25 @@ pub fn register(registry: &mut FilterRegistry) {
     registry.register_span(kind(), dilate);
 }
 
-/// Scale the times and the length of a span by the speed option.
-fn dilate(span: Span, _options: &FilterOptions) -> Result<Span, String> {
-    Ok(span)
+/// Divide the times and the length of a span by the speed option. Each event
+/// keeps its data, its type, and its place in the list.
+fn dilate(span: Span, options: &FilterOptions) -> Result<Span, String> {
+    let value = options
+        .get(SPEED_OPTION)
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| format!("the option \"{SPEED_OPTION}\" is missing or is not a number"))?;
+    let speed = Speed::new(value).map_err(|error| error.to_string())?.get();
+    Ok(Span {
+        events: span
+            .events
+            .into_iter()
+            .map(|event| Event {
+                time: event.time / speed,
+                ..event
+            })
+            .collect(),
+        length: span.length / speed,
+    })
 }
 
 #[cfg(test)]
