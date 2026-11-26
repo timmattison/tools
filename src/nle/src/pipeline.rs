@@ -43,10 +43,30 @@ use crate::types::{
 /// the end of the timeline is not finite, because a shift can overflow.
 pub type FilterFn = dyn Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync;
 
+/// A region of the timeline as a span filter sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Span {
+    /// The events of the region, with times relative to its start.
+    pub events: Vec<Event>,
+    /// The length of the region in seconds.
+    pub length: f64,
+}
+
+/// A span filter: a pure function from a region and its length to new events
+/// and a new length, or an error message.
+pub type SpanFilterFn = dyn Fn(Span, &FilterOptions) -> Result<Span, String> + Send + Sync;
+
+/// A filter in one of its two forms.
+#[derive(Clone)]
+enum Registered {
+    Events(Arc<FilterFn>),
+    Span(Arc<SpanFilterFn>),
+}
+
 /// The filters that a project can use, by kind.
 #[derive(Clone, Default)]
 pub struct FilterRegistry {
-    filters: BTreeMap<FilterKind, Arc<FilterFn>>,
+    filters: BTreeMap<FilterKind, Registered>,
 }
 
 impl fmt::Debug for FilterRegistry {
@@ -76,7 +96,19 @@ impl FilterRegistry {
         kind: FilterKind,
         filter: impl Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync + 'static,
     ) {
-        self.filters.insert(kind, Arc::new(filter));
+        self.filters
+            .insert(kind, Registered::Events(Arc::new(filter)));
+    }
+
+    /// Register `filter` as a span filter under `kind`. A filter of either
+    /// form that is already under `kind` is replaced.
+    pub fn register_span(
+        &mut self,
+        kind: FilterKind,
+        filter: impl Fn(Span, &FilterOptions) -> Result<Span, String> + Send + Sync + 'static,
+    ) {
+        self.filters
+            .insert(kind, Registered::Span(Arc::new(filter)));
     }
 
     /// Whether a filter is registered under `kind`.
@@ -86,7 +118,7 @@ impl FilterRegistry {
     }
 
     /// The filter under `kind`, or a render error that names the kind.
-    fn lookup(&self, kind: &FilterKind) -> Result<&Arc<FilterFn>, NleError> {
+    fn lookup(&self, kind: &FilterKind) -> Result<&Registered, NleError> {
         self.filters.get(kind).ok_or_else(|| {
             NleError::RenderError(format!(
                 "no filter is registered for kind \"{}\"",
@@ -124,7 +156,18 @@ impl FilterRegistry {
             }
         }
 
-        let answer = filter(&inside, &applied.options);
+        let answer = match filter {
+            Registered::Events(filter) => filter(&inside, &applied.options),
+            Registered::Span(filter) => {
+                let span = Span {
+                    events: inside.clone(),
+                    length: 0.0,
+                };
+                filter(span, &applied.options)
+                    .map(|span| span.events)
+                    .unwrap_or_default()
+            }
+        };
         for event in &answer {
             let time = event.time + start;
             if !(time.is_finite() && time >= 0.0) {
