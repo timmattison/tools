@@ -32,9 +32,10 @@ their slices make them final.
    next, and the same input always gives the same output.
 5. **The sandbox gives a plugin no file, no network, no environment, no real
    clock, and no real random source.** Limits bound its memory and its time.
-6. **`FilterFn` returns a `Result`.** A plugin can fail, and the pipeline must
-   report that failure. This change comes first, before the built-in filters of
-   issues #152 thru #168 exist.
+6. **The event form `FilterFn` returns a `Result`, like the span form.** A
+   plugin can fail, and the pipeline must report that failure. Both forms
+   carry the error as a `String`. This change comes before the first built-in
+   filter of the event form.
 7. **The options are typed.** The manifest declares each option, the host makes
    sure of each value before the call, and typed values cross the boundary.
 8. **The filter kind of a plugin is `plugin:<name>`.** A built-in kind never
@@ -54,17 +55,25 @@ their slices make them final.
 
 ## The current state
 
-The design starts from the code on `main` at commit `439a28f67`.
+The design starts from the code on `main` at commit `2ce7472ba`.
 
-- `src/nle/src/pipeline.rs` defines `FilterFn` as
-  `dyn Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync`.
-  `FilterRegistry` keeps one `Arc<FilterFn>` for each `FilterKind`. Its doc
-  comment states the eight steps of one filter call: the region split, the
-  relative times, the shift, and the sort.
-- A filter cannot report an error. The pipeline refuses an answered time that
-  is not finite or is below zero, but a filter that fails has no way to say so.
-- `App` in `src/nle/src/ui.rs` starts with `FilterRegistry::new()`. No filter is
-  registered yet. The filters of issues #152 thru #168 are open.
+- `src/nle/src/pipeline.rs` defines two forms of a filter. The event form,
+  `FilterFn`, is `dyn Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync`.
+  The span form, `SpanFilterFn`, is
+  `dyn Fn(Span, &FilterOptions) -> Result<Span, String> + Send + Sync`, and
+  `Span` holds the events and the length of a region. `FilterRegistry` keeps
+  one filter of either form for each `FilterKind`, from `register` or
+  `register_span`. The doc comments state the steps of one filter call: the
+  region split, the relative times, the shift, and the sort.
+- A filter of the event form cannot report an error. A span filter answers
+  `Err` with a message, and the pipeline then fails with
+  `NleError::RenderError`, whose text names the kind and holds the message.
+  For both forms, the pipeline refuses an answered time that is not finite or
+  is below zero.
+- `App` in `src/nle/src/ui.rs` starts with `filters::registry()` of
+  `src/nle/src/filters.rs`. It registers one built-in filter: time dilation
+  (issue #153), a span filter. No built-in filter of the event form exists
+  yet. The other filters of issues #152 thru #168 are open.
 - `FilterKind` is a string, and `FilterOptions` is a JSON object. The project
   file keeps both in `AppliedFilter`. The project file has no version field.
 - `src/nle` has no terminal state, no frame, and no analysis type.
@@ -674,16 +683,18 @@ check now. This slice belongs to the whole workspace, not to the editor.
 
 ### Slice 0: `FilterFn` returns a `Result`
 
-- `FilterFn` is `dyn Fn(&[Event], &FilterOptions) -> Result<Vec<Event>, FilterError> + Send + Sync`.
-  `FilterError` holds a message.
-- A `FilterError` fails `FilterRegistry::run` and `FilterRegistry::render` with
-  `NleError::RenderError`, and the message names the kind and the message of
-  the filter.
+- `FilterFn` is `dyn Fn(&[Event], &FilterOptions) -> Result<Vec<Event>, String> + Send + Sync`,
+  and `FilterRegistry::register` takes a closure of that signature. The error
+  type is the one of `SpanFilterFn`.
+- An `Err` fails `FilterRegistry::run` and `FilterRegistry::render` as step 3
+  of `SpanFilterFn` does: with `NleError::RenderError`, whose text names the
+  kind and holds the message.
 - The steps on `FilterFn` state the error step.
 
-This slice is small, and it must land before the first built-in filter. Each
-built-in filter that lands after it uses the new signature, and no filter needs
-a second change.
+This slice is small, and it must land before the first built-in filter of the
+event form. Each event filter that lands after it uses the new signature, and
+no filter needs a second change. The time dilation filter is a span filter,
+and this slice does not change it.
 
 ### Slice 1: The manifest and the options schema
 
