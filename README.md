@@ -6258,7 +6258,18 @@ cargo tauri build --no-bundle   # the binary is target/release/msgs
 A desktop application for the terminal recordings that `beta` writes. It opens
 a `.json` or `.json.gz` recording, makes an edit project of it, and shows its
 metadata. The timeline (issue #150) and the preview pane (issue #151) are
-placeholders, thus the window cannot edit yet.
+placeholders.
+
+The speed panel under the metadata changes the speed of a region. Type the
+start and the end of the region in seconds and a speed, then click
+**Apply Speed**. A speed of 2 plays the region twice as fast, and 0.5 plays it
+at half speed. Each later event moves by the change in the length of the
+region, also when the region holds no event, for example a silent build step.
+Each region gets a row with a **Remove** button, and different regions can have
+different speeds. The times of a new region are on the timeline after the
+speed changes above it. The panel shows the duration of the edited recording.
+The panel refuses a change after which the recording does not render, and it
+shows the reason in the banner.
 
 The application is one Rust crate on Dioxus 0.7, with the desktop (webview)
 renderer. Its components call the Rust code directly, and the open project is
@@ -6271,10 +6282,16 @@ The editing engine of the crate has four parts:
   never changes a source recording. A project saves to JSON, plain or gzip, and
   loads back. A save writes each source recording once, also when several clips
   cut it.
-- **Filter pipeline** (`FilterRegistry`): a filter is a pure function
-  `Fn(&[Event], &FilterOptions) -> Vec<Event>`, registered by kind. The filters
-  of a project run in order, each on the whole timeline or on a range of it.
-  No filter ships yet. Issues #152 to #168 add them.
+- **Filter pipeline** (`FilterRegistry`): a filter is a pure function,
+  registered by kind. The filters of a project run in order, each on the whole
+  timeline or on a range of it. An event filter,
+  `Fn(&[Event], &FilterOptions) -> Vec<Event>`, gets the events of its region,
+  and the later events move by the change in the time of its last event. A
+  span filter (`register_span`) also gets the length of its region and answers
+  a new length, and the later events move by the change in the length.
+  `filters::registry()` holds the filters that ship: time dilation
+  (`time-dilation`, issue #153) is a span filter. Issues #152 to #168 add the
+  others.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
