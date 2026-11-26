@@ -340,7 +340,7 @@ impl Editor {
     /// # Errors
     /// Returns the errors of `FilterRegistry::render`.
     pub fn render(&self) -> Result<Recording, NleError> {
-        todo!()
+        self.filters.render(&self.project)
     }
 
     /// Write the rendered recording of this state to `path`.
