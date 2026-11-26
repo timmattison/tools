@@ -24,13 +24,14 @@ comfy-table.workspace = true
 num-format.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+shellquote.workspace = true
 termsize.workspace = true
 thiserror.workspace = true
+url.workspace = true
 wait-timeout.workspace = true
 
 [dev-dependencies]
 gitscratch = { workspace = true, features = ["testing"] }
-shellquote.workspace = true
 tempfile.workspace = true
 
 [lints]

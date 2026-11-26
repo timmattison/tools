@@ -1,15 +1,17 @@
 //! The filters that ship with the app.
 
 pub mod cursor;
+pub mod time_dilation;
 
 use crate::pipeline::FilterRegistry;
 
-/// A registry that holds each filter that ships with the app, under its
+/// A registry that holds every filter that ships with the app, under its
 /// kind.
 #[must_use]
-pub fn builtin() -> FilterRegistry {
+pub fn registry() -> FilterRegistry {
     let mut registry = FilterRegistry::new();
     cursor::register(&mut registry);
+    time_dilation::register(&mut registry);
     registry
 }
 

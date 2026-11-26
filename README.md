@@ -5593,11 +5593,12 @@ wdid --json
 wdid --since 2026-01-01
 wdid --unparsed
 wdid --repo ~/code/tools --no-shell
+cd ~ && wdid   # the workspace that the installed wdid came from
 ```
 
 ### Options
 
-- `--repo <PATH>`: The cargo workspace to report on. Without it, `wdid` uses the git work tree that holds the current directory. The workspace must have a `Cargo.toml`.
+- `--repo <PATH>`: The cargo workspace to report on. The workspace must have a `Cargo.toml`. Without this option, `wdid` uses the git work tree of the current directory when that work tree has a `Cargo.toml`, else the workspace that the installed `wdid` came from. See [The workspace](#the-workspace).
 - `--since <YYYY-MM-DD>`: Count only the rows from this date on. A row on this date counts. The report says how many rows it left out.
 - `--json`: Print the whole report as one JSON document. It conflicts with `--unparsed`.
 - `--unparsed`: Print the commands that `wdid` could not parse, one line for each (`<rows>`, a tab, the command), the functions that it could not parse, and the alias lines that it could not parse, one line for each. Print no report. In the `--json` document, `shell.unparsed_aliases` is a list of those alias lines.
@@ -5608,6 +5609,39 @@ wdid --repo ~/code/tools --no-shell
 - `-h`, `--help`: Print the usage.
 
 The table fits `COLUMNS` when that variable is set, else the width of the terminal. An error prints `wdid: <reason>` on standard error and exits 1. A usage error exits 2.
+
+### The workspace
+
+`wdid` finds the cargo workspace to report on in this order:
+
+1. `--repo <path>`. If the path is not a cargo workspace, `wdid` stops with an error.
+2. The git work tree of the current directory, when its top has a `Cargo.toml`. In a worktree of a different cargo workspace, `wdid` reports on that workspace.
+3. The workspace that the installed `wdid` came from. Thus `wdid` runs in any directory, for example `~`.
+4. An error. It says why step 2 failed, it gives the reason that step 3 failed, and it names `--repo`.
+
+For step 3, `wdid` reads the record of its own install in `.crates2.json`. `cargo install` keeps that file in its install root: `$CARGO_INSTALL_ROOT`, else `$CARGO_HOME`, else `~/.cargo`.
+
+- A `git+` record comes from `cargo install --git`. It names the repository and the full commit: `wdid 0.1.0 (git+https://github.com/timmattison/tools#12baa4168146b6018d38dbe4f8cace7ed5b4081b)`. cargo keeps a checkout of that commit in `$CARGO_HOME/git/checkouts/<repository name>-<hash>/<short commit>`. The hash is internal to cargo, thus `wdid` looks in each directory under `checkouts` whose name starts with the repository name and `-`. It uses a checkout only when `git rev-parse HEAD` in that checkout gives the full commit of the record. The checkout holds the full history, thus the added dates of the tools are correct.
+- A `path+file` record comes from `cargo install --path`. It names the crate directory. `wdid` uses the cargo workspace that holds that directory, as `cargo locate-project --workspace` gives it.
+
+Step 3 fails when there is no record, when the record names another source (for example the registry), when no checkout of the commit exists, when the checkout is at a different commit, or when the crate directory of a `path+file` record no longer exists. `cargo cache --autoclean` removes the checkouts. To get the checkout back, install `wdid` again. Or name the workspace with `--repo`.
+
+The report names the workspace and the step that found it. The text report ends with a line such as this one:
+
+```text
+Workspace: /Users/me/.cargo/git/checkouts/tools-dda63c64534664e9/12baa41 (the source of the installed wdid, commit 12baa41)
+```
+
+The `--json` document ends with a `workspace` block. `found_by` is `repo_flag`, `work_tree`, `installed_git`, or `installed_path`. An `installed_git` block also holds `url` and `commit`. An `installed_path` block also holds `crate_dir`.
+
+```json
+"workspace": {
+  "root": "/Users/me/.cargo/git/checkouts/tools-dda63c64534664e9/12baa41",
+  "found_by": "installed_git",
+  "url": "https://github.com/timmattison/tools",
+  "commit": "12baa4168146b6018d38dbe4f8cace7ed5b4081b"
+}
+```
 
 ### The three groups
 
@@ -5661,7 +5695,7 @@ History: 347,212 rows. 4,385 not counted (exit 127). 13 did not parse (wdid --un
 Shell: 276 aliases, 1,267 functions (24 did not parse).
 ```
 
-The excerpt leaves out rows of the table and entries of the groups. `si` is a shell function that runs `nwt -b <branch>`, so each `si` is a use of `nwt`.
+The excerpt leaves out rows of the table and entries of the groups. The run was before `wdid` named its workspace, thus it has no `Workspace:` line. `si` is a shell function that runs `nwt -b <branch>`, so each `si` is a use of `nwt`.
 
 ### Install
 
@@ -6224,7 +6258,18 @@ cargo tauri build --no-bundle   # the binary is target/release/msgs
 A desktop application for the terminal recordings that `beta` writes. It opens
 a `.json` or `.json.gz` recording, makes an edit project of it, and shows its
 metadata. The timeline (issue #150) and the preview pane (issue #151) are
-placeholders, thus the window cannot edit yet.
+placeholders.
+
+The speed panel under the metadata changes the speed of a region. Type the
+start and the end of the region in seconds and a speed, then click
+**Apply Speed**. A speed of 2 plays the region twice as fast, and 0.5 plays it
+at half speed. Each later event moves by the change in the length of the
+region, also when the region holds no event, for example a silent build step.
+Each region gets a row with a **Remove** button, and different regions can have
+different speeds. The times of a new region are on the timeline after the
+speed changes above it. The panel shows the duration of the edited recording.
+The panel refuses a change after which the recording does not render, and it
+shows the reason in the banner.
 
 The application is one Rust crate on Dioxus 0.7, with the desktop (webview)
 renderer. Its components call the Rust code directly, and the open project is
@@ -6243,9 +6288,12 @@ The editing engine of the crate has four parts:
   `Fn(&[Event], &FilterOptions) -> Vec<Event>`, gets the events of its region,
   and the later events move by the change in the time of its last event. An
   in-place filter (`register_in_place`) also gets the length of its region and
-  whether anything comes after it. It rewrites its region and moves nothing.
-  `filters::builtin()` holds the filters that ship: the cursor filter
-  (`cursor`, issue #168) is an in-place filter. Issues #152 to #167 add the
+  whether anything comes after it. It rewrites its region and moves nothing. A
+  span filter (`register_span`) also gets the length of its region and answers
+  a new length, and the later events move by the change in the length.
+  `filters::registry()` holds the filters that ship: the cursor filter
+  (`cursor`, issue #168) is an in-place filter, and time dilation
+  (`time-dilation`, issue #153) is a span filter. Issues #152 to #167 add the
   others.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The

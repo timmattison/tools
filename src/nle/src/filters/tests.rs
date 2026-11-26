@@ -10,12 +10,12 @@ use crate::types::{
 };
 
 #[test]
-fn the_builtin_registry_holds_the_cursor_filter() {
-    assert!(builtin().contains(&FilterKind::new(cursor::CURSOR)));
+fn the_app_registry_holds_the_cursor_filter() {
+    assert!(registry().contains(&FilterKind::new(cursor::CURSOR)));
 }
 
 #[test]
-fn a_project_with_the_cursor_filter_renders_through_the_builtin_registry() {
+fn a_project_with_the_cursor_filter_renders_through_the_app_registry() {
     let mut source = Recording::test_fixture();
     source.events = vec![Event {
         time: 1.0,
@@ -29,7 +29,7 @@ fn a_project_with_the_cursor_filter_renders_through_the_builtin_registry() {
         options: serde_json::from_value(json!({ "visibility": "always-hidden" })).unwrap(),
     });
 
-    let rendered = builtin().render(&project).unwrap();
+    let rendered = registry().render(&project).unwrap();
 
     let data: Vec<(f64, &str)> = rendered
         .events
