@@ -251,9 +251,23 @@ fn strictly_below(path: &Path, ancestor: &Path) -> bool {
 #[must_use]
 pub fn named_root(
     path: &Path,
-    _canonical: &Path,
-    _one_file_system: bool,
-    _mounts: &[Mount],
+    canonical: &Path,
+    one_file_system: bool,
+    mounts: &[Mount],
 ) -> WalkRoot {
-    WalkRoot::new(path)
+    if !one_file_system {
+        return WalkRoot::new(path);
+    }
+    let prune = mounts
+        .iter()
+        .filter_map(|mount| {
+            let below = mount.mount_point.strip_prefix(canonical).ok()?;
+            (!below.as_os_str().is_empty()).then(|| path.join(below))
+        })
+        .collect();
+    WalkRoot {
+        path: path.to_path_buf(),
+        prune,
+        stay_on_device: true,
+    }
 }
