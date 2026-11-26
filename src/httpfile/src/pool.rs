@@ -37,8 +37,12 @@ impl Pool {
     ///
     /// `handler` answers one request. Each worker holds a shared reference to
     /// it, so it runs on many threads at the same time. An `Err` from
-    /// `handler` is swallowed, because a request or mid-response IO error (a
-    /// client that hung up, say) must never end a worker or the pool. Only an
+    /// `handler` is swallowed, because the failure of one request must never
+    /// end a worker or the pool. A served file that fails to read part way
+    /// through the response is an example. A client that hangs up is not:
+    /// `tiny_http` 0.12's `Request::respond` turns `BrokenPipe`,
+    /// `ConnectionReset`, `ConnectionAborted` and `ConnectionRefused` into
+    /// `Ok`, so a hang-up never reaches the pool as an `Err`. Only an
     /// unexplained `recv()` error ends the pool — see the docs of [`Pool`]
     /// for how a real accept failure is told apart from a deliberate shutdown.
     #[must_use]
@@ -60,10 +64,11 @@ impl Pool {
                 std::thread::spawn(move || loop {
                     match server.recv() {
                         Ok(request) => {
-                            // A request or mid-response IO error (a client
-                            // that hung up, say) is swallowed so a single bad
-                            // request can never panic a worker and poison the
-                            // pool.
+                            // The failure of one request (a served file
+                            // that fails to read part way through, for
+                            // example) is swallowed, so it cannot end a
+                            // worker or the pool. `tiny_http` itself turns a
+                            // client that hangs up into `Ok`.
                             let _ = handler(request);
                         }
                         Err(e) => {

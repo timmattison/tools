@@ -325,8 +325,10 @@ fn parse_range(header: &str, len: u64) -> RangeOutcome {
 /// # Errors
 ///
 /// Returns an error when reading the file's metadata fails, when seeking
-/// within it fails, or when writing the HTTP response itself fails (e.g. the
-/// client disconnected mid-response).
+/// within it fails, or when reading the file or writing the HTTP response
+/// fails part way through. A client that disconnects is not an error:
+/// `tiny_http` 0.12's `Request::respond` turns `BrokenPipe`,
+/// `ConnectionReset`, `ConnectionAborted` and `ConnectionRefused` into `Ok`.
 ///
 /// # Panics
 ///
