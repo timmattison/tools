@@ -29,6 +29,9 @@ pub const PAUSE_REMOVAL: &str = "pause-removal";
 /// the shift, thus they move only when an event of the range moves.
 pub const PAUSE_INSERTION: &str = "pause-insertion";
 
+/// The kind of the filter that cuts the silence at the start and at the end.
+pub const AUTO_TRIM: &str = "auto-trim";
+
 /// A registry that holds each built-in filter under its kind.
 #[must_use]
 pub fn builtin() -> FilterRegistry {

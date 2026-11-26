@@ -269,3 +269,130 @@ fn pause_insertion_refuses_invalid_options() {
         assert_invalid_options(result, PAUSE_INSERTION, reason);
     }
 }
+
+// Tests of auto-trim.
+
+fn trim(leading: bool, trailing: bool) -> FilterOptions {
+    FilterOptions::new()
+        .with("leading", leading)
+        .with("trailing", trailing)
+}
+
+fn data(events: &[Event]) -> Vec<&str> {
+    events.iter().map(|e| e.data.as_str()).collect()
+}
+
+#[test]
+fn auto_trim_removes_the_time_before_the_first_input_event() {
+    let events = vec![
+        output(0.5),
+        output(2.0),
+        input(5.0),
+        output(5.25),
+        input(6.0),
+        output(6.5),
+    ];
+
+    let rendered = render(events, 6.5, all(AUTO_TRIM, trim(true, false)));
+
+    // The output before the first input moves to the start, in its order,
+    // so the screen that the user saw before the first key is still there.
+    assert_eq!(
+        times(&rendered.events),
+        vec![0.0, 0.0, 0.0, 0.25, 1.0, 1.5]
+    );
+    assert_eq!(
+        data(&rendered.events),
+        vec!["o0.5", "o2", "i5", "o5.25", "i6", "o6.5"]
+    );
+    assert_eq!(rendered.duration, 1.5);
+}
+
+#[test]
+fn auto_trim_removes_the_time_after_the_last_output_event() {
+    let events = vec![output(0.0), input(1.0), output(2.0), input(3.0), input(4.0)];
+
+    let rendered = render(events, 5.0, all(AUTO_TRIM, trim(false, true)));
+
+    // The input after the last output moves to the last output, in its order.
+    assert_eq!(times(&rendered.events), vec![0.0, 1.0, 2.0, 2.0, 2.0]);
+    assert_eq!(data(&rendered.events), vec!["o0", "i1", "o2", "i3", "i4"]);
+    assert_eq!(rendered.duration, 2.0);
+}
+
+#[test]
+fn auto_trim_removes_the_time_after_the_last_event_too() {
+    // The time from the last event at 2 to the end at 5 is after the last
+    // output, so it goes.
+    let rendered = render(outputs(&[0.0, 2.0]), 5.0, all(AUTO_TRIM, trim(false, true)));
+
+    assert_eq!(times(&rendered.events), vec![0.0, 2.0]);
+    assert_eq!(rendered.duration, 2.0);
+}
+
+#[test]
+fn auto_trim_trims_both_ends_when_the_options_are_empty() {
+    let events = vec![output(0.5), input(2.0), output(3.0), input(4.0)];
+
+    let rendered = render(events, 6.0, all(AUTO_TRIM, FilterOptions::new()));
+
+    assert_eq!(times(&rendered.events), vec![0.0, 0.0, 1.0, 1.0]);
+    assert_eq!(rendered.duration, 1.0);
+}
+
+#[test]
+fn auto_trim_keeps_the_start_with_no_input_and_the_end_with_no_output() {
+    let rendered = render(outputs(&[1.0, 2.0]), 4.0, all(AUTO_TRIM, FilterOptions::new()));
+    assert_eq!(times(&rendered.events), vec![1.0, 2.0]);
+    assert_eq!(rendered.duration, 2.0);
+
+    let rendered = render(
+        vec![input(1.0), input(2.0)],
+        4.0,
+        all(AUTO_TRIM, FilterOptions::new()),
+    );
+    assert_eq!(times(&rendered.events), vec![0.0, 1.0]);
+    assert_eq!(rendered.duration, 3.0);
+}
+
+#[test]
+fn auto_trim_with_both_ends_off_changes_nothing() {
+    let events = vec![output(1.0), input(2.0)];
+
+    let rendered = render(events.clone(), 3.0, all(AUTO_TRIM, trim(false, false)));
+
+    assert_eq!(rendered.events, events);
+    assert_eq!(rendered.duration, 3.0);
+}
+
+#[test]
+fn auto_trim_on_a_range_trims_the_ends_of_the_range() {
+    let events = vec![
+        output(0.0),
+        output(4.0),
+        input(6.0),
+        output(7.0),
+        input(9.0),
+        output(12.0),
+    ];
+
+    let out = run(events, range(AUTO_TRIM, 3.0, 10.0, FilterOptions::new())).unwrap();
+
+    // In the range, the start of the range comes up to the input at 6, and the
+    // input at 9 comes back to the output at 7. The event after the range
+    // keeps its gap from the last event of the range.
+    assert_eq!(times(&out), vec![0.0, 3.0, 3.0, 4.0, 4.0, 7.0]);
+}
+
+#[test]
+fn auto_trim_refuses_invalid_options() {
+    let cases = [
+        (FilterOptions::new().with("leading", "yes"), "invalid type"),
+        (FilterOptions::new().with("trim", true), "trim"),
+    ];
+    for (options, reason) in cases {
+        let result = run(outputs(&[0.0, 5.0]), all(AUTO_TRIM, options));
+
+        assert_invalid_options(result, AUTO_TRIM, reason);
+    }
+}
