@@ -72,18 +72,32 @@ impl Redaction {
     /// Make a redaction.
     ///
     /// # Errors
-    /// Returns `NleError::InvalidRedaction` when the pattern does not compile.
+    /// Returns `NleError::InvalidRedaction` when the text to find is empty,
+    /// when a regular expression does not compile, or when a replacement text
+    /// holds a control character.
     pub fn new(
         find: Find,
         replacement: Replacement,
         include_input: bool,
     ) -> Result<Self, NleError> {
+        let invalid = |message: String| NleError::InvalidRedaction(message);
         let pattern = match &find {
+            Find::Text(text) | Find::Regex(text) if text.is_empty() => {
+                return Err(invalid("the text to find is empty".to_string()));
+            }
             Find::Text(text) => regex::escape(text),
             Find::Regex(pattern) => pattern.clone(),
         };
-        let matcher = regex::Regex::new(&pattern)
-            .map_err(|error| NleError::InvalidRedaction(error.to_string()))?;
+        if let Replacement::Text(text) = &replacement {
+            if text.chars().any(char::is_control) {
+                return Err(invalid(
+                    "the replacement holds a control character".to_string(),
+                ));
+            }
+        }
+        let matcher = regex::Regex::new(&pattern).map_err(|error| {
+            invalid(format!("the regular expression does not compile: {error}"))
+        })?;
         Ok(Self {
             find,
             replacement,
