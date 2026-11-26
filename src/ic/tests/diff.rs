@@ -98,12 +98,11 @@ fn emit_diff(test: &str, extra: &[&str]) -> (Emitted, RgbaImage) {
     (emitted(&outcome), pattern(SIDE, SIDE))
 }
 
-/// With no mode, the picture is the second image with a red outline around the
-/// region. The picture keeps the size of the images, and the box limits only
-/// the fit.
+/// `boxes` shows the second image, with a red outline around the region. The
+/// picture keeps the size of the images, and the box limits only the fit.
 #[test]
-fn diff_boxes_is_the_default_picture() {
-    let (picture, first) = emit_diff("default-picture", &[]);
+fn diff_boxes_outlines_the_region_on_the_second_image() {
+    let (picture, first) = emit_diff("boxes", &["--diff-mode", "boxes"]);
 
     assert_eq!((picture.width, picture.height), (40, 40));
     assert_eq!(pixel(&picture, 20, 20), CHANGED_PIXEL);
@@ -132,10 +131,10 @@ fn diff_mask_marks_the_pixel_on_black() {
     assert_eq!(pixel(&picture, 10, 10), [0, 0, 0, 255]);
 }
 
-/// `boxes` is the mode that a run with no `--diff-mode` takes.
+/// `highlight` is the mode that a run with no `--diff-mode` takes.
 #[test]
-fn diff_mode_boxes_is_the_default() {
-    let (named, _) = emit_diff("default-mode", &["--diff-mode", "boxes"]);
+fn diff_mode_highlight_is_the_default() {
+    let (named, _) = emit_diff("default-mode", &["--diff-mode", "highlight"]);
     let (unnamed, _) = emit_diff("default-mode", &[]);
 
     assert_eq!(named, unnamed);
