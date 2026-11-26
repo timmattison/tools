@@ -1,6 +1,6 @@
 {
   "name": "ic-inline",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Shows images, and the differences between two images, inline in the Claude Code transcript, decoded by ic: /ic <file> and /ic diff for you, show_image and show_diff for Claude",
   "author": { "name": "Tim Mattison" },
   "repository": "https://github.com/timmattison/tools",

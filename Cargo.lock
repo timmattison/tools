@@ -3333,6 +3333,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "drun"
+version = "0.1.0"
+dependencies = [
+ "buildinfo",
+ "childenv",
+ "gitscratch",
+ "names",
+ "runlimit",
+ "serde",
+ "serde_json",
+ "shellquote",
+ "tempfile",
+ "thiserror 2.0.21",
+ "toml 0.8.23",
+ "unicode-width",
+]
+
+[[package]]
 name = "dtoa"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
