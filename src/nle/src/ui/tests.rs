@@ -792,6 +792,39 @@ async fn a_remove_after_a_failed_speed_change_removes_the_banner() {
     assert!(!page.contains("role=\"alert\""), "{page}");
 }
 
+#[tokio::test]
+async fn a_speed_change_after_which_the_render_fails_is_refused() {
+    let mut window = open_recording().await;
+    window.apply_speed("0", "10", "1e-320");
+    let page = window.html();
+    assert!(page.contains("Failed to change the speed: "), "{page}");
+    assert!(page.contains("answered the length inf s"), "{page}");
+    assert!(!page.contains(" at "), "{page}");
+    assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
+}
+
+#[tokio::test]
+async fn a_remove_after_which_the_render_fails_is_refused() {
+    let mut window = open_recording().await;
+    window.apply_speed("0", "100", "1e300");
+    let first_remove = window.remove_button();
+    window.apply_speed("0", "10", "1e-308");
+    let page = window.html();
+    assert!(!page.contains("role=\"alert\""), "{page}");
+    window.click(first_remove);
+    let page = window.html();
+    assert!(page.contains("role=\"alert\""), "{page}");
+    assert!(page.contains("answered the length inf s"), "{page}");
+    assert!(
+        page.contains(&speed_row("0 s to 100 s", &1e300_f64.to_string())),
+        "{page}"
+    );
+    assert!(
+        page.contains(&speed_row("0 s to 10 s", &1e-308_f64.to_string())),
+        "{page}"
+    );
+}
+
 #[test]
 fn a_whole_timeline_filter_shows_a_row_and_the_edited_duration() {
     use crate::filters::time_dilation::{self, Speed};
