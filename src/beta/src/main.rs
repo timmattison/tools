@@ -93,6 +93,7 @@ pub struct Recording {
     pub env: std::collections::HashMap<String, String>,
     pub events: Vec<Event>,
     /// The chapters in time order. `beta record` writes none; the `nle` editor writes them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chapters: Vec<Chapter>,
 }
 

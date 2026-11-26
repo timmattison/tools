@@ -72,13 +72,30 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             background-color: #333;
             border-radius: 2px;
             margin: 10px 0;
-            overflow: hidden;
+            position: relative;
+            overflow: visible;
         }
         .progress-fill {
             height: 100%;
+            border-radius: 2px;
             background-color: #007acc;
             width: 0%;
             transition: width 0.1s ease;
+        }
+        .chapter-marker {
+            position: absolute;
+            top: -4px;
+            width: 4px;
+            height: 12px;
+            margin-left: -2px;
+            padding: 0;
+            border: none;
+            border-radius: 1px;
+            background-color: #f9e2af;
+            cursor: pointer;
+        }
+        .chapter-marker:hover, .chapter-marker:focus-visible {
+            background-color: #ffffff;
         }
         .time-display {
             text-align: center;
@@ -141,6 +158,12 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
     </div>
 
     <script>
+        function formatTime(seconds) {
+            const minutes = Math.floor(seconds / 60);
+            const rest = Math.floor(seconds % 60);
+            return `${minutes}:${rest.toString().padStart(2, '0')}`;
+        }
+
         class TerminalPlayer {
             constructor(recording) {
                 this.recording = recording;
@@ -203,7 +226,24 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                 this.updateDisplay();
             }
 
-            renderChapterMarkers() {}
+            renderChapterMarkers() {
+                const chapters = Array.isArray(this.recording.chapters) ? this.recording.chapters : [];
+                const duration = this.recording.duration;
+                if (!(duration > 0)) return;
+                const container = document.getElementById('chapter-markers');
+                for (const chapter of chapters) {
+                    const percent = Math.min(100, Math.max(0, chapter.time / duration * 100));
+                    const label = `${chapter.label} (${formatTime(chapter.time)})`;
+                    const marker = document.createElement('button');
+                    marker.type = 'button';
+                    marker.className = 'chapter-marker';
+                    marker.style.left = `${percent}%`;
+                    marker.title = label;
+                    marker.setAttribute('aria-label', label);
+                    marker.addEventListener('click', () => this.seekTo(chapter.time));
+                    container.appendChild(marker);
+                }
+            }
             
             bindEvents() {
                 this.playPauseBtn.addEventListener('click', () => this.togglePlayPause());
@@ -341,9 +381,7 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                 const progress = (currentTime / this.recording.duration) * 100;
                 this.progressBar.style.width = `${Math.min(100, progress)}%`;
                 
-                const minutes = Math.floor(currentTime / 60);
-                const seconds = Math.floor(currentTime % 60);
-                this.currentTimeDisplay.textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+                this.currentTimeDisplay.textContent = formatTime(currentTime);
             }
         }
         
@@ -694,11 +732,13 @@ console.log(String(player.pausedAt));
     /// Give the text of the last `<script>` element that has no `src`.
     fn inline_script(page: &str) -> &str {
         let open = "<script>";
-        let start = page.rfind(open).expect("the page has an inline script") + open.len();
-        let end = page[start..]
-            .find("</script>")
+        let (_, after) = page
+            .rsplit_once(open)
+            .expect("the page has an inline script");
+        let (script, _) = after
+            .split_once("</script>")
             .expect("the inline script ends");
-        &page[start..start + end]
+        script
     }
 
     #[test]
@@ -712,10 +752,10 @@ console.log(String(player.pausedAt));
     #[test]
     fn a_compressed_page_embeds_the_chapters_too() {
         let html = page(&recording(two_chapters()), true);
-        let start = html.find("atob('").expect("atob call") + "atob('".len();
-        let end = start + html[start..].find("')").expect("end of base64");
+        let (_, after) = html.split_once("atob('").expect("atob call");
+        let (encoded, _) = after.split_once("')").expect("end of base64");
         let packed = general_purpose::STANDARD
-            .decode(&html[start..end])
+            .decode(encoded)
             .expect("valid base64");
         let mut json = String::new();
         flate2::read::GzDecoder::new(packed.as_slice())
