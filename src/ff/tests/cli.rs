@@ -153,6 +153,36 @@ fn a_denied_directory_is_counted_and_named_only_with_show_skipped() {
 }
 
 #[test]
+fn a_named_path_that_the_system_refuses_exits_one() {
+    // SAFETY: `geteuid` reads the effective user id, and it cannot fail.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("root opens a directory with mode 000, thus this test proves nothing as root");
+        return;
+    }
+    let tree = Tree::new("cli-refused-root");
+    tree.file("locked/120.mp4");
+    let locked = tree.root().join("locked");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+        .expect("lock the directory");
+
+    let output = run(&["--show-skipped", "120.mp4"], &[&locked]);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+        .expect("unlock the directory");
+
+    let summary = stderr(&output);
+    assert_eq!(output.status.code(), Some(1), "{summary}");
+    assert!(
+        summary.contains("ff: incomplete subtrees: 1\n"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains(&format!("ff: incomplete: {}: ", locked.display())),
+        "{summary}"
+    );
+    assert!(!summary.contains("ff: denied"), "{summary}");
+}
+
+#[test]
 fn a_glob_with_a_slash_is_refused_with_exit_two() {
     let tree = Tree::new("cli-slash");
 

@@ -83,6 +83,47 @@ fn a_root_that_does_not_exist_is_incomplete() {
 }
 
 #[test]
+fn a_named_root_that_the_system_refuses_is_incomplete() {
+    let tree = Tree::new("errors-refused-root");
+    tree.file("eacces/120.mp4");
+    tree.file("eperm/120.mp4");
+    let eacces = tree.root().join("eacces");
+    let eperm = tree.root().join("eperm");
+    let faulty = Faulty::new(RealFs, |call, path: &Path| {
+        if call != Call::Open {
+            None
+        } else if path == eacces {
+            Some(errno(libc::EACCES))
+        } else if path == eperm {
+            Some(errno(libc::EPERM))
+        } else {
+            None
+        }
+    });
+
+    let found = Found::default();
+    let report = walk(
+        &faulty,
+        &[WalkRoot::new(&eacces), WalkRoot::new(&eperm)],
+        Options::default(),
+        &glob("120.mp4"),
+        found.sink(),
+    );
+
+    let paths: Vec<&Path> = report
+        .incomplete
+        .iter()
+        .map(|incomplete| incomplete.path.as_path())
+        .collect();
+    assert_eq!(paths, vec![eacces.as_path(), eperm.as_path()], "{report:?}");
+    for incomplete in &report.incomplete {
+        assert_eq!(incomplete.error.kind(), io::ErrorKind::PermissionDenied);
+    }
+    assert!(report.denied.is_empty(), "{report:?}");
+    assert!(found.sorted().is_empty());
+}
+
+#[test]
 fn a_root_that_is_a_file_matches_by_its_name() {
     let tree = Tree::new("errors-file-root");
     let file = tree.file("120.mp4");
