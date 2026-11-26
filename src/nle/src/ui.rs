@@ -16,6 +16,7 @@ use dioxus::prelude::*;
 
 use crate::editor::{Edit, Editor};
 use crate::error::NleError;
+use crate::filters::redaction::Preset;
 use crate::filters::time_dilation::{self, Speed};
 use crate::pipeline::FilterRegistry;
 use crate::types::{AppliedFilter, EditProject, FilterRegion, Seconds};
@@ -69,6 +70,54 @@ const END_NOT_A_NUMBER: &str = "the end is not a number";
 const SPEED_NOT_A_NUMBER: &str = "the speed is not a number";
 /// The reason for an end that is not above the start.
 const END_BEFORE_START: &str = "the end must come after the start";
+
+/// The heading of the redaction panel.
+const REDACTION_HEADING: &str = "Redaction";
+/// The hint of the redaction panel.
+const REDACTION_HINT: &str =
+    "Each redaction covers the whole timeline. Escape sequences do not change.";
+/// The label of the menu for what to find.
+const FIND_LABEL: &str = "Find";
+/// The value of the menu entry that finds an exact text.
+const FIND_TEXT: &str = "text";
+/// The text of the menu entry that finds an exact text.
+const FIND_TEXT_LABEL: &str = "Text";
+/// The value of the menu entry that finds a regular expression.
+const FIND_REGEX: &str = "regex";
+/// The text of the menu entry that finds a regular expression.
+const FIND_REGEX_LABEL: &str = "Regular expression";
+/// The label of the field for the text or the regular expression.
+const PATTERN_LABEL: &str = "Pattern";
+/// The label of the menu for what to put in place of a match.
+const REPLACE_LABEL: &str = "Replace with";
+/// The value of the menu entry for asterisks.
+const REPLACE_ASTERISKS: &str = "asterisks";
+/// The text of the menu entry for asterisks.
+const REPLACE_ASTERISKS_LABEL: &str = "Asterisks";
+/// The value of the menu entry for blocks.
+const REPLACE_BLOCKS: &str = "blocks";
+/// The text of the menu entry for blocks.
+const REPLACE_BLOCKS_LABEL: &str = "Blocks";
+/// The value of the menu entry for a replacement text.
+const REPLACE_TEXT: &str = "text";
+/// The text of the menu entry for a replacement text.
+const REPLACE_TEXT_LABEL: &str = "Text";
+/// The label of the field for the replacement text.
+const REPLACEMENT_LABEL: &str = "Replacement text";
+/// The label of the menu for the events that a redaction changes.
+const EVENTS_LABEL: &str = "Events";
+/// The value of the menu entry for the output events.
+const EVENTS_OUTPUT: &str = "output";
+/// The text of the menu entry for the output events.
+const EVENTS_OUTPUT_LABEL: &str = "Output";
+/// The value of the menu entry for the output and the input events.
+const EVENTS_OUTPUT_AND_INPUT: &str = "output-and-input";
+/// The text of the menu entry for the output and the input events.
+const EVENTS_OUTPUT_AND_INPUT_LABEL: &str = "Output and input";
+/// The text of the button that applies the redaction.
+const APPLY_REDACTION_LABEL: &str = "Apply Redaction";
+/// The start of the message for a redaction that does not apply.
+const REDACTION_FAILED_PREFIX: &str = "Failed to redact";
 
 /// The title of the application window.
 const WINDOW_TITLE: &str = "NLE - Terminal Recording Editor";
@@ -395,21 +444,70 @@ fn SpeedPanel(
     }
 }
 
-/// The redaction panel. It has no text and no action yet.
+/// The redaction panel: the fields for what to find and what to put in its
+/// place, and the button that applies them. `on_result` gets the outcome of
+/// each Apply Redaction and each Remove.
 #[component]
 fn RedactionPanel(
     loaded: Signal<Option<Document>>,
     on_result: EventHandler<Result<(), String>>,
 ) -> Element {
     let _ = (loaded, on_result);
+    let mut find = use_signal(|| FIND_TEXT.to_owned());
+    let mut pattern = use_signal(String::new);
+    let mut replace = use_signal(|| REPLACE_ASTERISKS.to_owned());
+    let mut replacement = use_signal(String::new);
+    let mut events = use_signal(|| EVENTS_OUTPUT.to_owned());
     rsx! {
         div { class: "redaction-panel",
-            select { oninput: move |_| {} }
-            input { r#type: "text", oninput: move |_| {} }
-            select { oninput: move |_| {} }
-            input { r#type: "text", oninput: move |_| {} }
-            select { oninput: move |_| {} }
-            button { onclick: move |_| {} }
+            h3 { {REDACTION_HEADING} }
+            p { class: "redaction-hint", {REDACTION_HINT} }
+            label { class: "redaction-field",
+                {FIND_LABEL}
+                select { value: "{find}", oninput: move |event| find.set(event.value()),
+                    option { value: FIND_TEXT, {FIND_TEXT_LABEL} }
+                    option { value: FIND_REGEX, {FIND_REGEX_LABEL} }
+                    for preset in Preset::ALL {
+                        option { key: "{preset.key()}", value: preset.key(), {preset.label()} }
+                    }
+                }
+            }
+            label { class: "redaction-field",
+                {PATTERN_LABEL}
+                input {
+                    r#type: "text",
+                    value: "{pattern}",
+                    oninput: move |event| pattern.set(event.value()),
+                }
+            }
+            label { class: "redaction-field",
+                {REPLACE_LABEL}
+                select {
+                    value: "{replace}",
+                    oninput: move |event| replace.set(event.value()),
+                    option { value: REPLACE_ASTERISKS, {REPLACE_ASTERISKS_LABEL} }
+                    option { value: REPLACE_BLOCKS, {REPLACE_BLOCKS_LABEL} }
+                    option { value: REPLACE_TEXT, {REPLACE_TEXT_LABEL} }
+                }
+            }
+            label { class: "redaction-field",
+                {REPLACEMENT_LABEL}
+                input {
+                    r#type: "text",
+                    value: "{replacement}",
+                    oninput: move |event| replacement.set(event.value()),
+                }
+            }
+            label { class: "redaction-field",
+                {EVENTS_LABEL}
+                select {
+                    value: "{events}",
+                    oninput: move |event| events.set(event.value()),
+                    option { value: EVENTS_OUTPUT, {EVENTS_OUTPUT_LABEL} }
+                    option { value: EVENTS_OUTPUT_AND_INPUT, {EVENTS_OUTPUT_AND_INPUT_LABEL} }
+                }
+            }
+            button { onclick: move |_| {}, {APPLY_REDACTION_LABEL} }
         }
     }
 }
