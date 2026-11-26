@@ -39,6 +39,8 @@ use crate::types::{
 ///    region start. It is never less than the time of the last event.
 ///
 /// The region of a later filter is in the time that the earlier filters leave.
+/// After the last filter, `FilterRegistry::run` fails when an event time or
+/// the end of the timeline is not finite, because a shift can overflow.
 pub type FilterFn = dyn Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync;
 
 /// The filters that a project can use, by kind.
@@ -158,8 +160,9 @@ impl FilterRegistry {
     ///
     /// # Errors
     /// Returns `NleError::RenderError` when a filter kind is not registered,
-    /// or when a filter answers a time that is not finite or is below zero on
-    /// the timeline.
+    /// when a filter answers a time that is not finite or is below zero on
+    /// the timeline, or when an event time or the end of the timeline that the
+    /// filters give is not finite.
     pub fn run(
         &self,
         events: Vec<Event>,
@@ -172,6 +175,10 @@ impl FilterRegistry {
 
     /// Run `filters` in order, and follow the end of the timeline, which
     /// starts at `end`. Returns the events and the final end.
+    ///
+    /// # Errors
+    /// Returns `NleError::RenderError` when a filter fails, or when an event
+    /// time or the final end is not finite.
     fn run_with_end(
         &self,
         events: Vec<Event>,
@@ -182,6 +189,20 @@ impl FilterRegistry {
         let mut end = end;
         for applied in filters {
             events = self.apply(events, applied, &mut end)?;
+        }
+        // A shift or the arithmetic of a clip can still overflow to infinity.
+        for event in &events {
+            if !event.time.is_finite() {
+                return Err(NleError::RenderError(format!(
+                    "the render gives the time {} s, which is not finite",
+                    event.time
+                )));
+            }
+        }
+        if !end.is_finite() {
+            return Err(NleError::RenderError(format!(
+                "the render gives the end {end} s, which is not finite"
+            )));
         }
         Ok((events, end))
     }
@@ -201,6 +222,8 @@ impl FilterRegistry {
     ///    first on the timeline. A tie goes to the clip that comes first in
     ///    track order, then in clip order.
     /// 5. `duration` is the end of the timeline after the filters.
+    /// 6. Each event time and the duration must be finite. Else the render
+    ///    fails with `NleError::RenderError`.
     ///
     /// A project of one whole-recording clip and no filter renders a
     /// recording equal to its source.
