@@ -434,9 +434,14 @@ Each of these failures stops the call, and the render fails with a
 - The component does not export the interface of its manifest `type`, or it
   exports a version that the host does not know.
 
-The `log` lines and the standard error of the plugin go to the plugin log of
-the editor. The host keeps at most 64 KiB of log for each call, thus a plugin
-cannot fill the memory of the editor with its log.
+A full log is not a failure. The `log` lines, the standard output, and the
+standard error of the plugin go to one log buffer of 64 KiB for each call.
+When the buffer is full, the host drops each later byte, and the call
+continues. After the call, the host copies the buffer to the plugin log of the
+editor with `String::from_utf8_lossy`, thus a character that the limit cuts
+becomes U+FFFD. If the host dropped bytes, it adds one line that gives their
+count. Thus a plugin cannot fill the memory of the editor with its log, and a
+long log does not fail the render.
 
 ## The host
 
@@ -473,9 +478,14 @@ is off by default.
   clock functions again, with `Linker::allow_shadowing` on for those
   definitions only. Each new function returns at once: a pollable that it
   gives is ready at once, because the clock of a plugin does not move.
-  Standard input is closed. Standard output and standard error go to one
-  `MemoryOutputPipe` with the 64 KiB limit of the log. A full pipe closes and
-  does not wait. After the call, the host copies the pipe to the plugin log.
+  Standard input is closed. Standard output and standard error go to the log
+  buffer of [the failures](#failures), through one `StdoutStream` of the
+  host. The host does not use `MemoryOutputPipe`. When its buffer is full, its
+  `check_write` answers `StreamError::Closed`, and the `print!` of Rust std
+  panics on that error. Its `poll_write` for WASI 0.3 then writes no byte. The
+  stream of the host accepts each write and never waits. Its `check_write`
+  always gives a permit, its `write` never fails, and its `poll_write` for
+  WASI 0.3 always answers the full length.
 - **Limits.** A `StoreLimits` bounds the memory of each instance. Fuel bounds
   the work of each call. Fuel counts the WASM instructions of the call, and
   that count does not depend on the speed or the load of the machine. Thus a
@@ -759,6 +769,10 @@ A new library crate, `src/nle-plugins`, with no WASM runtime yet.
   - A trap, an endless loop, and a memory bomb each fail with an error that
     names the cause. The endless loop fails at the fuel limit, not at the
     deadline.
+  - A plugin that writes 1 MiB to standard output, to standard error, and
+    through the `write` function of `log` gives the same answer as with no
+    log. Its log holds the first 64 KiB and the line that gives the count of
+    the dropped bytes.
 - An author guide tells a plugin author how to build, test, and install a
   filter plugin of each form in Rust.
 
