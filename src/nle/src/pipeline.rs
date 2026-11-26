@@ -271,6 +271,7 @@ impl FilterRegistry {
             title: header.title.clone(),
             env: header.env.clone(),
             events,
+            chapters: Vec::new(),
         })
     }
 }

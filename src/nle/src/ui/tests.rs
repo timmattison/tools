@@ -47,6 +47,7 @@ fn fixture() -> LoadedRecording {
                     data: "x".into(),
                 })
                 .collect(),
+            chapters: Vec::new(),
         },
         metadata: RecordingMetadata {
             file_path: FIXTURE_PATH.into(),

@@ -380,6 +380,7 @@ fn source(title: &str, event_times: &[f64], duration: f64) -> Recording {
         title: title.to_string(),
         env,
         events: event_times.iter().copied().map(ev).collect(),
+        chapters: Vec::new(),
     }
 }
 
@@ -602,4 +603,264 @@ fn render_of_a_clip_whose_end_overflows_the_timeline_fails() {
         matches!(result, Err(NleError::RenderError(_))),
         "{result:?}"
     );
+}
+
+// Tests of the chapters in the render.
+
+use crate::types::{Chapter, ChapterId, ChapterMarker};
+
+fn marker(id: u64, time: f64, label: &str) -> ChapterMarker {
+    ChapterMarker {
+        id: ChapterId(id),
+        time: Seconds::new(time).unwrap(),
+        label: label.to_string(),
+    }
+}
+
+/// One clip with events at `event_times`, a duration of `duration`, the
+/// `markers`, and the `filters`.
+fn chapter_project(
+    event_times: &[f64],
+    duration: f64,
+    markers: Vec<ChapterMarker>,
+    filters: Vec<AppliedFilter>,
+) -> EditProject {
+    EditProject {
+        clips: vec![clip_of(1, source("chap", event_times, duration), 0.0)],
+        timeline: vec![track_of(1, 1)],
+        filters,
+        chapters: markers,
+    }
+}
+
+fn chapter_times(recording: &Recording) -> Vec<f64> {
+    recording.chapters.iter().map(|c| c.time).collect()
+}
+
+fn assert_close(actual: &[f64], expected: &[f64]) {
+    assert_eq!(actual.len(), expected.len(), "{actual:?} vs {expected:?}");
+    for (a, e) in actual.iter().zip(expected) {
+        assert!((a - e).abs() < 1e-9, "{actual:?} vs {expected:?}");
+    }
+}
+
+fn doubling_registry() -> FilterRegistry {
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("double"), mapper(|t| t * 2.0));
+    registry
+}
+
+#[test]
+fn with_no_filter_the_chapters_come_out_in_time_order_with_their_labels() {
+    let project = chapter_project(
+        &[0.0, 1.0],
+        5.0,
+        vec![
+            marker(1, 4.0, "café 🎉"),
+            marker(2, 1.0, "first"),
+            marker(3, 2.5, "日本語テスト"),
+        ],
+        Vec::new(),
+    );
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    assert_eq!(
+        rendered.chapters,
+        vec![
+            Chapter {
+                time: 1.0,
+                label: "first".to_string()
+            },
+            Chapter {
+                time: 2.5,
+                label: "日本語テスト".to_string()
+            },
+            Chapter {
+                time: 4.0,
+                label: "café 🎉".to_string()
+            },
+        ]
+    );
+}
+
+#[test]
+fn with_no_marker_the_recording_has_no_chapter() {
+    let project = chapter_project(&[0.0, 1.0], 5.0, Vec::new(), vec![all("double")]);
+
+    let rendered = doubling_registry().render(&project).unwrap();
+
+    assert!(rendered.chapters.is_empty());
+}
+
+#[test]
+fn a_marker_after_the_end_is_dropped_and_a_marker_at_the_end_is_kept() {
+    let project = chapter_project(
+        &[0.0, 1.0],
+        5.0,
+        vec![marker(1, 5.0, "at end"), marker(2, 5.5, "after end")],
+        Vec::new(),
+    );
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    assert_eq!(chapter_times(&rendered), vec![5.0]);
+    assert_eq!(
+        rendered.chapters.first().map(|c| c.label.as_str()),
+        Some("at end")
+    );
+}
+
+#[test]
+fn a_marker_on_an_event_goes_to_the_new_time_of_that_event() {
+    // The events 1, 2, 4 go to 2, 4, 8.
+    let project = chapter_project(
+        &[1.0, 2.0, 4.0],
+        8.0,
+        vec![marker(1, 2.0, "on event")],
+        vec![all("double")],
+    );
+
+    let rendered = doubling_registry().render(&project).unwrap();
+
+    assert_eq!(chapter_times(&rendered), vec![4.0]);
+}
+
+#[test]
+fn a_marker_between_two_events_keeps_its_fraction_of_the_gap() {
+    // 3 is halfway between the events 2 and 4, thus it is halfway between 4 and 8.
+    let project = chapter_project(
+        &[1.0, 2.0, 4.0],
+        8.0,
+        vec![marker(1, 3.0, "between")],
+        vec![all("double")],
+    );
+
+    let rendered = doubling_registry().render(&project).unwrap();
+
+    assert_eq!(chapter_times(&rendered), vec![6.0]);
+}
+
+#[test]
+fn a_marker_before_the_first_event_scales_from_the_region_start() {
+    let project = chapter_project(
+        &[1.0, 2.0, 4.0],
+        8.0,
+        vec![marker(1, 0.5, "before first")],
+        vec![all("double")],
+    );
+
+    let rendered = doubling_registry().render(&project).unwrap();
+
+    assert_eq!(chapter_times(&rendered), vec![1.0]);
+}
+
+#[test]
+fn a_marker_after_the_last_event_keeps_its_gap_to_that_event() {
+    // The last event goes from 4 to 8. The marker is 2 s after it.
+    let project = chapter_project(
+        &[1.0, 2.0, 4.0],
+        8.0,
+        vec![marker(1, 6.0, "after last")],
+        vec![all("double")],
+    );
+
+    let rendered = doubling_registry().render(&project).unwrap();
+
+    assert_eq!(chapter_times(&rendered), vec![10.0]);
+}
+
+#[test]
+fn a_range_filter_moves_the_markers_after_it_and_not_those_before_it() {
+    // The range 2..5 holds the events 2 and 4. They go to 2 and 6, so the shift is 2.
+    let project = chapter_project(
+        &[1.0, 2.0, 4.0, 6.0],
+        8.0,
+        vec![
+            marker(1, 1.0, "before"),
+            marker(2, 5.0, "at range end"),
+            marker(3, 7.0, "after"),
+        ],
+        vec![range("double", 2.0, 5.0)],
+    );
+
+    let rendered = doubling_registry().render(&project).unwrap();
+
+    assert_eq!(chapter_times(&rendered), vec![1.0, 7.0, 9.0]);
+}
+
+fn dropping_registry() -> FilterRegistry {
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("drop-last"), |events, _| {
+        events
+            .split_last()
+            .map(|(_, rest)| rest.to_vec())
+            .unwrap_or_default()
+    });
+    registry
+}
+
+#[test]
+fn when_a_filter_drops_an_event_a_marker_inside_the_span_moves_in_proportion() {
+    // The events 2, 4, 6 become 2, 4. The span 6 becomes 4, so 3 goes to 2 and 6 goes to 4.
+    let project = chapter_project(
+        &[2.0, 4.0, 6.0],
+        10.0,
+        vec![marker(1, 3.0, "inside"), marker(2, 6.0, "at last")],
+        vec![all("drop-last")],
+    );
+
+    let rendered = dropping_registry().render(&project).unwrap();
+
+    assert_close(&chapter_times(&rendered), &[2.0, 4.0]);
+}
+
+#[test]
+fn when_a_filter_drops_an_event_a_marker_after_the_span_moves_by_the_shift() {
+    // The shift is 4 - 6 = -2, and the end goes from 10 to 8.
+    let project = chapter_project(
+        &[2.0, 4.0, 6.0],
+        10.0,
+        vec![marker(1, 8.0, "after")],
+        vec![all("drop-last")],
+    );
+
+    let rendered = dropping_registry().render(&project).unwrap();
+
+    assert_close(&chapter_times(&rendered), &[6.0]);
+    assert_close(&[rendered.duration], &[8.0]);
+}
+
+#[test]
+fn a_marker_moves_through_two_filters_in_a_row() {
+    // The first filter takes the events 1, 2, 4 to 2, 4, 8 and the marker 3 to 6.
+    // The second adds 1 to each time: 3, 5, 9. The marker 6 is halfway
+    // between 4 and 8, thus it goes to halfway between 5 and 9, which is 7.
+    let mut registry = doubling_registry();
+    registry.register(kind("plus-one"), mapper(|t| t + 1.0));
+    let project = chapter_project(
+        &[1.0, 2.0, 4.0],
+        8.0,
+        vec![marker(1, 3.0, "both")],
+        vec![all("double"), all("plus-one")],
+    );
+
+    let rendered = registry.render(&project).unwrap();
+
+    assert_eq!(chapter_times(&rendered), vec![7.0]);
+}
+
+#[test]
+fn two_markers_at_one_time_keep_the_order_of_their_ids() {
+    let project = chapter_project(
+        &[0.0, 1.0],
+        5.0,
+        vec![marker(9, 2.0, "nine"), marker(3, 2.0, "three")],
+        Vec::new(),
+    );
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    let labels: Vec<&str> = rendered.chapters.iter().map(|c| c.label.as_str()).collect();
+    assert_eq!(labels, vec!["three", "nine"]);
 }

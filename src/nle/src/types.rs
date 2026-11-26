@@ -18,6 +18,17 @@ pub struct Recording {
     pub title: String,
     pub env: BTreeMap<String, String>,
     pub events: Vec<Event>,
+    /// The chapters in time order. A recording from `beta record` has none.
+    pub chapters: Vec<Chapter>,
+}
+
+/// A chapter of a recording: a labeled time where a part of the recording starts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Chapter {
+    /// The time in seconds from the start of the recording.
+    pub time: f64,
+    /// The name of the chapter.
+    pub label: String,
 }
 
 /// A single event in a recording (output or input).
@@ -309,6 +320,7 @@ impl Recording {
                     data: "q".to_string(),
                 },
             ],
+            chapters: Vec::new(),
         }
     }
 }
@@ -318,6 +330,51 @@ mod tests {
     use std::io::Write;
 
     use super::*;
+
+    #[test]
+    fn a_recording_with_chapters_serializes_a_chapters_array() {
+        let mut recording = Recording::test_fixture();
+        recording.chapters = vec![
+            Chapter {
+                time: 12.5,
+                label: "Build".to_string(),
+            },
+            Chapter {
+                time: 20.0,
+                label: "日本語".to_string(),
+            },
+        ];
+
+        let value = serde_json::to_value(&recording).unwrap();
+
+        assert_eq!(
+            value.get("chapters"),
+            Some(&serde_json::json!([
+                {"time": 12.5, "label": "Build"},
+                {"time": 20.0, "label": "日本語"},
+            ]))
+        );
+    }
+
+    #[test]
+    fn a_recording_with_no_chapter_has_no_chapters_key_in_its_json() {
+        let value = serde_json::to_value(Recording::test_fixture()).unwrap();
+
+        assert!(value.get("chapters").is_none(), "{value}");
+    }
+
+    #[test]
+    fn json_without_a_chapters_key_loads_with_no_chapters() {
+        let mut value = serde_json::to_value(Recording::test_fixture()).unwrap();
+        if let Some(object) = value.as_object_mut() {
+            object.remove("chapters");
+        }
+
+        let loaded: Result<Recording, _> = serde_json::from_value(value);
+
+        assert!(loaded.is_ok(), "{loaded:?}");
+        assert!(loaded.unwrap().chapters.is_empty());
+    }
 
     #[test]
     fn test_load_plain_json() {
