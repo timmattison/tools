@@ -6,7 +6,7 @@
 //! port, so a concurrent second copy (e.g. a `bacon` loop) can't collide.
 
 mod common;
-use common::{http_get, stop};
+use common::{http_get, stop, JOIN_TIMEOUT};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
@@ -67,8 +67,6 @@ fn monitor_joins_promptly_after_shutdown_signal() {
 /// Workers for the pool in the failure test: at least two, so one release
 /// with nothing behind it leaves the others to the pool's own release.
 const WORKERS: usize = 3;
-/// Bounds the wait for the run to end.
-const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Mirrors the end of `main`: the monitor lives in a local, and the pool's
 /// error leaves through `?`.

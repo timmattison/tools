@@ -20,11 +20,10 @@
 //! `127.0.0.1:0`, and every wait is bounded.
 
 mod common;
-use common::{http_get_with_timeout, stop};
+use common::{http_get_with_timeout, stop, within_timeout};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -32,10 +31,6 @@ use tempfile::TempDir;
 /// Workers for a pool that must show "one released, the rest still blocked".
 /// At least two, so a single release leaves someone parked in `recv()`.
 const WORKERS: usize = 3;
-
-/// Bounds every join below. A pool that never finishes releasing its workers
-/// is the defect under test, so the wait must fail the test, not hang it.
-const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Bounds every HTTP read below.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -50,24 +45,6 @@ const SMALL_BYTES: &[u8] = b"still serving\n";
 /// Binds a server on an ephemeral loopback port.
 fn bind() -> Arc<tiny_http::Server> {
     Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port"))
-}
-
-/// Runs a consuming `Pool` method on its own thread and returns its result
-/// within [`JOIN_TIMEOUT`], or panics. A `Pool` that never finishes ending is
-/// the defect these tests catch, and a test that hangs with it would be worse
-/// than the bug.
-fn within_timeout<F>(run: F) -> std::io::Result<()>
-where
-    F: FnOnce() -> std::io::Result<()> + Send + 'static,
-{
-    let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = sender.send(run());
-    });
-
-    receiver
-        .recv_timeout(JOIN_TIMEOUT)
-        .unwrap_or_else(|_| panic!("did not finish within {JOIN_TIMEOUT:?}"))
 }
 
 /// Writes `small.txt` into `dir` and routes it.
