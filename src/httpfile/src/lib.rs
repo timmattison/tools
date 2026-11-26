@@ -10,7 +10,9 @@
 //!
 //! The fourth shared piece is the worker pool. It ends the duplicated
 //! `recv()` loop, which treated a dead accept thread like a deliberate
-//! shutdown, so one worker exited and the others blocked forever.
+//! shutdown, so one worker exited and the others blocked forever. `sirn` uses
+//! it. `localnext` keeps its own copy of the pool, because issue #419 removes
+//! the whole `localnext` crate.
 
 mod pool;
 pub use pool::Pool;
