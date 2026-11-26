@@ -1,6 +1,12 @@
 //! The export of an edited project: the stages of an export, the settings of
 //! a `beta export` run, and the read of the progress that `beta` reports.
 
+use std::fmt;
+use std::num::NonZeroU32;
+use std::str::FromStr;
+
+use crate::error::NleError;
+
 /// A stage of an export, for a progress display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportProgress {
@@ -16,6 +22,77 @@ pub enum ExportProgress {
         /// The number of frames in the video.
         total: u64,
     },
+}
+
+/// A theme of `beta export`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Theme {
+    /// `beta` picks the colors.
+    #[default]
+    Auto,
+    /// The Dracula colors.
+    Dracula,
+    /// The Monokai colors.
+    Monokai,
+    /// The dark Solarized colors.
+    SolarizedDark,
+    /// The light Solarized colors.
+    SolarizedLight,
+}
+
+impl Theme {
+    /// Each theme, in the order of a menu.
+    pub const ALL: [Theme; 5] = [
+        Theme::Auto,
+        Theme::Dracula,
+        Theme::Monokai,
+        Theme::SolarizedDark,
+        Theme::SolarizedLight,
+    ];
+
+    /// The name that `beta --theme` takes.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        ""
+    }
+}
+
+impl FromStr for Theme {
+    type Err = NleError;
+
+    /// Read a theme from the name that `beta --theme` takes.
+    ///
+    /// # Errors
+    /// Returns `NleError::ExportError` for any other text.
+    fn from_str(_text: &str) -> Result<Self, Self::Err> {
+        Err(NleError::ExportError(String::new()))
+    }
+}
+
+/// A video size in pixels. Both numbers are above zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Resolution {
+    width: NonZeroU32,
+    height: NonZeroU32,
+}
+
+impl FromStr for Resolution {
+    type Err = NleError;
+
+    /// Read `WIDTHxHEIGHT`, with a lowercase `x`, whole numbers above zero,
+    /// and no spaces.
+    ///
+    /// # Errors
+    /// Returns `NleError::ExportError` for any other text.
+    fn from_str(_text: &str) -> Result<Self, Self::Err> {
+        Err(NleError::ExportError(String::new()))
+    }
+}
+
+impl fmt::Display for Resolution {
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Ok(())
+    }
 }
 
 /// The text that starts a frame line of `beta`.
