@@ -64,7 +64,7 @@ impl From<EditProject> for ProjectFile {
             clips,
             timeline: project.timeline,
             filters: project.filters,
-            chapters: Vec::new(),
+            chapters: project.chapters,
         }
     }
 }
@@ -97,7 +97,7 @@ impl TryFrom<ProjectFile> for EditProject {
             clips,
             timeline: file.timeline,
             filters: file.filters,
-            chapters: Vec::new(),
+            chapters: file.chapters,
         })
     }
 }
@@ -145,13 +145,26 @@ impl EditProject {
     /// 1 when there is no marker. The id saturates at `u64::MAX`.
     #[must_use]
     pub fn next_chapter_id(&self) -> ChapterId {
-        ChapterId(0)
+        ChapterId(
+            self.chapters
+                .iter()
+                .map(|c| c.id.0)
+                .max()
+                .map_or(1, |m| m.saturating_add(1)),
+        )
     }
 
     /// The chapter markers sorted by time, then by id.
     #[must_use]
     pub fn chapters_in_order(&self) -> Vec<&ChapterMarker> {
-        self.chapters.iter().collect()
+        let mut ordered: Vec<&ChapterMarker> = self.chapters.iter().collect();
+        ordered.sort_by(|a, b| {
+            a.time
+                .get()
+                .total_cmp(&b.time.get())
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        ordered
     }
 
     /// The id for a new track: one more than the largest id in use, or 1 when
@@ -219,7 +232,8 @@ impl EditProject {
     /// The rules, in order: each clip id and each track id is unique; each clip
     /// has `in_point <= out_point <= source duration`; each clip id on a track
     /// names a clip, and each clip is on exactly one track, exactly once; each
-    /// filter range has `start <= end`.
+    /// filter range has `start <= end`; each chapter id is unique; each chapter
+    /// label holds a character that is not white space.
     ///
     /// # Errors
     /// Returns `NleError::InvalidProject` for the first broken rule.
@@ -290,6 +304,18 @@ impl EditProject {
                         end.get()
                     ));
                 }
+            }
+        }
+
+        let mut chapter_ids = HashSet::new();
+        for chapter in &self.chapters {
+            if !chapter_ids.insert(chapter.id) {
+                return invalid(format!("chapter id {} is used twice", chapter.id.0));
+            }
+        }
+        for chapter in &self.chapters {
+            if chapter.label.trim().is_empty() {
+                return invalid(format!("chapter {} has an empty label", chapter.id.0));
             }
         }
 

@@ -214,7 +214,29 @@ impl Edit {
                 *slot = filter.clone();
                 Ok(())
             }
-            Self::AddChapter { .. } | Self::RemoveChapter { .. } | Self::UpdateChapter { .. } => {
+            Self::AddChapter { chapter } => {
+                if project.chapters.iter().any(|known| known.id == chapter.id) {
+                    return Err(NleError::EditError(format!(
+                        "chapter {} is already in use",
+                        chapter.id.0
+                    )));
+                }
+                project.chapters.push(chapter.clone());
+                Ok(())
+            }
+            Self::RemoveChapter { id } => {
+                let position = chapter_position(project, *id)?;
+                project.chapters.remove(position);
+                Ok(())
+            }
+            Self::UpdateChapter { id, time, label } => {
+                let position = chapter_position(project, *id)?;
+                let chapter = project
+                    .chapters
+                    .get_mut(position)
+                    .ok_or_else(|| missing_chapter(*id))?;
+                chapter.time = *time;
+                chapter.label.clone_from(label);
                 Ok(())
             }
         }
@@ -234,6 +256,20 @@ fn missing_clip(id: ClipId) -> NleError {
 /// The edit error for a track that does not exist.
 fn missing_track(id: TrackId) -> NleError {
     NleError::EditError(format!("track {} does not exist", id.0))
+}
+
+/// The edit error for a chapter marker that does not exist.
+fn missing_chapter(id: ChapterId) -> NleError {
+    NleError::EditError(format!("chapter {} does not exist", id.0))
+}
+
+/// The index of chapter `id` in the chapters of the project, or an edit error.
+fn chapter_position(project: &EditProject, id: ChapterId) -> Result<usize, NleError> {
+    project
+        .chapters
+        .iter()
+        .position(|chapter| chapter.id == id)
+        .ok_or_else(|| missing_chapter(id))
 }
 
 /// The index of clip `id` in the clips of the project, or an edit error.
