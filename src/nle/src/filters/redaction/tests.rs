@@ -310,3 +310,94 @@ fn a_match_across_input_events_is_replaced() {
     );
     assert_eq!(datas(&got), vec!["X", "echo", ""]);
 }
+
+fn refusal(find: Find, replacement: Replacement) -> String {
+    match Redaction::new(find, replacement, false) {
+        Err(NleError::InvalidRedaction(message)) => message,
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_empty_pattern_is_refused() {
+    let none = Replacement::Asterisks;
+    assert_eq!(
+        refusal(find_text(""), none.clone()),
+        "the text to find is empty"
+    );
+    assert_eq!(
+        refusal(Find::Regex(String::new()), none),
+        "the text to find is empty"
+    );
+}
+
+#[test]
+fn a_regular_expression_that_does_not_compile_is_refused() {
+    let message = refusal(Find::Regex("(unclosed".to_string()), Replacement::Asterisks);
+    assert!(
+        message.starts_with("the regular expression does not compile: "),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_replacement_with_a_control_character_is_refused() {
+    for bad in ["a\u{1b}[2J", "a\nb", "\u{7}", "x\u{85}"] {
+        assert_eq!(
+            refusal(find_text("a"), Replacement::Text(bad.to_string())),
+            "the replacement holds a control character",
+            "{bad:?}"
+        );
+    }
+}
+
+#[test]
+fn a_replacement_with_multi_byte_text_is_accepted() {
+    let redaction = text("hunter2", "日本語 🎉");
+    let got = run(vec![out(1.0, "hunter2")], &redaction);
+    assert_eq!(datas(&got), vec!["日本語 🎉"]);
+}
+
+#[test]
+fn a_regular_expression_finds_matches() {
+    let redaction = Redaction::new(
+        Find::Regex(r"\d{3}-\d{4}".to_string()),
+        Replacement::Text("###".to_string()),
+        false,
+    )
+    .unwrap();
+    let got = run(vec![out(1.0, "call 555-1234 or 555-9876")], &redaction);
+    assert_eq!(datas(&got), vec!["call ### or ###"]);
+}
+
+#[test]
+fn only_the_redact_group_is_replaced() {
+    let redaction = Redaction::new(
+        Find::Regex(r"token=(?P<redact>\w+)".to_string()),
+        Replacement::Asterisks,
+        false,
+    )
+    .unwrap();
+    let got = run(vec![out(1.0, "token=abc")], &redaction);
+    assert_eq!(datas(&got), vec!["token=***"]);
+}
+
+#[test]
+fn a_match_that_is_empty_changes_nothing() {
+    let redaction = Redaction::new(
+        Find::Regex("x*".to_string()),
+        Replacement::Text("!".to_string()),
+        false,
+    )
+    .unwrap();
+    let got = run(vec![out(1.0, "abc")], &redaction);
+    assert_eq!(datas(&got), vec!["abc"]);
+}
+
+#[test]
+fn the_accessors_give_back_the_arguments() {
+    let redaction = Redaction::new(find_text("a"), Replacement::Blocks, true).unwrap();
+    assert_eq!(redaction.find(), &find_text("a"));
+    assert_eq!(redaction.replacement(), &Replacement::Blocks);
+    assert!(redaction.includes_input());
+}
