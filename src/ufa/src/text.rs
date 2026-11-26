@@ -1,7 +1,8 @@
 //! Fitting text into a budget without ever splitting a character.
 
-/// Truncate `value` so that it is at most `max_chars` characters long,
-/// appending an ellipsis (`...`) only when truncation actually happened.
+/// Keep at most `max_chars` characters of `value`, and append an ellipsis
+/// (`...`) only when characters were dropped. A cut result is thus
+/// `max_chars + 3` characters long.
 ///
 /// Truncation happens on character boundaries, so multi-byte UTF-8 input
 /// (Japanese, emoji, accented Latin, ...) is never split mid-character.
