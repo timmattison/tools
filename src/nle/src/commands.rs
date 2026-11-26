@@ -83,7 +83,7 @@ const MAX_LINKS: usize = 40;
 /// through `to_error`.
 fn follow_links(path: &Path, to_error: fn(String) -> NleError) -> Result<PathBuf, NleError> {
     let mut current = path.to_path_buf();
-    for _ in 0..MAX_LINKS {
+    for _ in 0..=MAX_LINKS {
         let is_link = std::fs::symlink_metadata(&current)
             .map(|metadata| metadata.file_type().is_symlink())
             .unwrap_or(false);
