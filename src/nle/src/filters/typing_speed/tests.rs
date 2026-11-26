@@ -136,3 +136,29 @@ fn an_output_between_two_keys_keeps_its_delay_when_their_gap_grows() {
     // The echo of "a" comes 0.0625 s after it, as in the recording.
     assert_eq!(times(&got), vec![0.0, 0.0625, 0.25]);
 }
+
+#[test]
+fn a_gap_longer_than_the_pause_threshold_stays() {
+    let input = vec![
+        key(0.0, "a"),
+        key(0.5, "b"),
+        out(1.0, "thinking"),
+        key(3.0, "c"),
+        key(3.5, "d"),
+    ];
+
+    let got = run(input, &[applied(FilterRegion::All, typing(4.0))]);
+
+    // The gap of 2.5 s from "b" to "c" is a pause, so it stays 2.5 s long.
+    // Only the two bursts around it become faster.
+    assert_eq!(times(&got), vec![0.0, 0.25, 0.75, 2.75, 3.0]);
+}
+
+#[test]
+fn a_gap_equal_to_the_pause_threshold_is_typing() {
+    let input = vec![key(0.0, "a"), key(2.0, "b")];
+
+    let got = run(input, &[applied(FilterRegion::All, typing(4.0))]);
+
+    assert_eq!(times(&got), vec![0.0, 0.25]);
+}
