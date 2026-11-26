@@ -7,7 +7,9 @@ use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use crate::commands::{run_beta, run_blocking, video_export_args, web_export_args};
+use crate::commands::{
+    run_beta, run_blocking, save_recording_to, video_export_args, web_export_args,
+};
 use crate::error::NleError;
 use crate::types::{ExportFormat, ExportOptions, Recording};
 
@@ -201,7 +203,7 @@ pub(crate) async fn export_recording_with(
     var: impl Fn(&'static str) -> Option<OsString>,
 ) -> Result<PathBuf, NleError> {
     let Some(mut options) = beta_options(&request) else {
-        return Ok(request.output_path);
+        return write_recording_file(recording, request, progress).await;
     };
     let work_dir = run_blocking(|| {
         tempfile::tempdir()
@@ -226,6 +228,23 @@ pub(crate) async fn export_recording_with(
     run_beta(&args, &options.output_path, var, &mut progress).await?;
     // The work directory goes away here, and also when `?` returns early.
     drop(work_dir);
+    Ok(request.output_path)
+}
+
+/// Write `recording` to the file of `request`, which is a recording target,
+/// and report the `Writing` stage.
+async fn write_recording_file(
+    recording: Recording,
+    request: ExportRequest,
+    mut progress: impl FnMut(ExportProgress),
+) -> Result<PathBuf, NleError> {
+    let compress = match request.target {
+        ExportTarget::Recording { compress } => compress,
+        ExportTarget::Web { .. } | ExportTarget::Video { .. } => None,
+    };
+    progress(ExportProgress::Writing);
+    let path = request.output_path.to_string_lossy().into_owned();
+    run_blocking(move || save_recording_to(&path, &recording, compress)).await?;
     Ok(request.output_path)
 }
 
