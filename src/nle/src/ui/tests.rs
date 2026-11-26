@@ -232,6 +232,8 @@ struct Window {
     inputs: Vec<ElementId>,
     /// The Apply Speed button, when a test noted it.
     apply: Option<ElementId>,
+    /// The Apply Redaction button, when a test noted it.
+    redact: Option<ElementId>,
 }
 
 impl Window {
@@ -250,6 +252,7 @@ impl Window {
             first_render: Vec::new(),
             inputs: Vec::new(),
             apply: None,
+            redact: None,
         };
         window.note_listeners(&edits);
         window.first_render = window.clicks.clone();
@@ -319,12 +322,43 @@ impl Window {
 
     /// The Start, End, and Speed fields, in this order.
     fn speed_fields(&self) -> [ElementId; 3] {
-        let fields: [ElementId; 3] = self
-            .inputs
-            .clone()
+        self.input_fields(0)
+    }
+
+    /// The Find, Pattern, Replace with, Replacement text, and Events fields,
+    /// in this order. They come after the three speed fields.
+    fn redaction_fields(&self) -> [ElementId; 5] {
+        self.input_fields(3)
+    }
+
+    /// The `N` fields that start at `first` in the list of input listeners.
+    /// The page must hold exactly `first + N` of them.
+    fn input_fields<const N: usize>(&self, first: usize) -> [ElementId; N] {
+        assert_eq!(self.inputs.len(), 8, "the page has the inputs {:?}", self.inputs);
+        self.inputs[first..first + N]
             .try_into()
-            .unwrap_or_else(|ids: Vec<ElementId>| panic!("the page has the inputs {ids:?}"));
-        fields
+            .expect("a slice of the right length")
+    }
+
+    /// The Apply Redaction button. `open_recording` noted it.
+    fn redact_button(&self) -> ElementId {
+        self.redact.expect("a window with an open recording")
+    }
+
+    /// Fills the five fields of the redaction panel and clicks Apply Redaction.
+    fn apply_redaction(
+        &mut self,
+        find: &str,
+        pattern: &str,
+        replace: &str,
+        replacement: &str,
+        events: &str,
+    ) {
+        let fields = self.redaction_fields();
+        for (field, text) in fields.into_iter().zip([find, pattern, replace, replacement, events]) {
+            self.type_into(field, text);
+        }
+        self.click(self.redact_button());
     }
 
     /// The Apply Speed button. `open_recording` noted it.
@@ -670,9 +704,15 @@ async fn open_recording() -> Window {
     let mut window = Window::open(&fakes);
     window.click(window.open_button());
     window.settle().await;
-    assert_eq!(window.newest.len(), 1, "{:?}", window.newest);
+    assert_eq!(window.newest.len(), 2, "{:?}", window.newest);
     window.apply = Some(window.newest[0]);
+    window.redact = Some(window.newest[1]);
     window
+}
+
+/// The row text of a redaction as the page shows it.
+fn redaction_row(text: &str) -> String {
+    format!("<span>{text}</span>")
 }
 
 #[tokio::test]
@@ -690,6 +730,26 @@ async fn the_speed_panel_shows_its_fields_and_the_edited_duration() {
     }
     assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
     assert_eq!(window.speed_fields().len(), 3);
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn the_redaction_panel_shows_its_fields_and_its_button() {
+    let window = open_recording().await;
+    let page = window.html();
+    for text in [
+        "Redaction",
+        "Each redaction covers the whole timeline. Escape sequences do not change.",
+        "Find",
+        "Pattern",
+        "Replace with",
+        "Replacement text",
+        "Events",
+        "Apply Redaction",
+    ] {
+        assert!(page.contains(text), "{text} missing in {page}");
+    }
+    assert_eq!(window.redaction_fields().len(), 5);
     assert!(!page.contains("role=\"alert\""), "{page}");
 }
 

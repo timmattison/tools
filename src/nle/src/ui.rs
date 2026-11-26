@@ -307,6 +307,7 @@ fn PropertiesPanel(
             if let Some(metadata) = metadata {
                 {metadata_rows(&metadata)}
                 SpeedPanel { loaded, on_result }
+                RedactionPanel { loaded, on_result }
             } else {
                 div { class: "placeholder", "No recording loaded" }
             }
@@ -390,6 +391,25 @@ fn SpeedPanel(
                 span { class: "metadata-label", {EDITED_DURATION_LABEL} }
                 span { class: "metadata-value", "{edited}" }
             }
+        }
+    }
+}
+
+/// The redaction panel. It has no text and no action yet.
+#[component]
+fn RedactionPanel(
+    loaded: Signal<Option<Document>>,
+    on_result: EventHandler<Result<(), String>>,
+) -> Element {
+    let _ = (loaded, on_result);
+    rsx! {
+        div { class: "redaction-panel",
+            select { oninput: move |_| {} }
+            input { r#type: "text", oninput: move |_| {} }
+            select { oninput: move |_| {} }
+            input { r#type: "text", oninput: move |_| {} }
+            select { oninput: move |_| {} }
+            button { onclick: move |_| {} }
         }
     }
 }
