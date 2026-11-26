@@ -650,3 +650,44 @@ fn the_ip_preset_keeps_text_that_is_not_an_ip_address() {
         assert_unchanged(Preset::IpAddress, text);
     }
 }
+
+const AWS_SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+
+/// Mask `value` inside `before` and `after`. Only `value` changes.
+fn assert_value_masked(preset: Preset, before: &str, value: &str, after: &str) {
+    let got = mask_with(preset, &format!("{before}{value}{after}"));
+    let want = format!("{before}{}{after}", "*".repeat(value.chars().count()));
+    assert_eq!(got, want);
+}
+
+#[test]
+fn the_aws_preset_masks_an_access_key_id() {
+    assert_masked(Preset::AwsKey, "AKIAIOSFODNN7EXAMPLE");
+}
+
+#[test]
+fn the_aws_preset_masks_only_the_value_of_a_secret_key() {
+    assert_value_masked(
+        Preset::AwsKey,
+        "aws_secret_access_key = ",
+        AWS_SECRET,
+        "",
+    );
+    assert_value_masked(
+        Preset::AwsKey,
+        "\"SecretAccessKey\": \"",
+        AWS_SECRET,
+        "\"",
+    );
+    assert_value_masked(
+        Preset::AwsKey,
+        "AWS_SESSION_TOKEN=",
+        "IQoJb3JpZ2luX2VjEXAMPLETOKEN1234567890",
+        "",
+    );
+}
+
+#[test]
+fn the_aws_preset_keeps_a_git_sha() {
+    assert_unchanged(Preset::AwsKey, "9c12c0325a1b2c3d4e5f60718293a4b5c6d7e8f9");
+}
