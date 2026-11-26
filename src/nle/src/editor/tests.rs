@@ -323,3 +323,95 @@ fn move_clip_with_a_missing_clip_or_track_fails() {
         timeline_offset: secs(0.0),
     }));
 }
+
+// Group 4: filter edits.
+
+fn filter_names(project: &EditProject) -> Vec<&str> {
+    project.filters.iter().map(|f| f.kind.as_str()).collect()
+}
+
+fn editor_with_one_filter() -> Editor {
+    let mut editor = editor();
+    editor
+        .apply(Edit::AddFilter {
+            index: 0,
+            filter: filter("a"),
+        })
+        .unwrap();
+    editor
+}
+
+#[test]
+fn add_filter_inserts_at_the_front_and_at_the_end() {
+    let mut editor = editor_with_one_filter();
+
+    editor
+        .apply(Edit::AddFilter {
+            index: 0,
+            filter: filter("front"),
+        })
+        .unwrap();
+    editor
+        .apply(Edit::AddFilter {
+            index: 2,
+            filter: filter("back"),
+        })
+        .unwrap();
+
+    assert_eq!(filter_names(editor.project()), vec!["front", "a", "back"]);
+}
+
+#[test]
+fn add_filter_past_the_end_fails() {
+    let mut editor = editor_with_one_filter();
+
+    assert_edit_error(editor.apply(Edit::AddFilter {
+        index: 2,
+        filter: filter("b"),
+    }));
+}
+
+#[test]
+fn remove_filter_removes_at_a_valid_index_and_fails_past_the_end() {
+    let mut editor = editor_with_one_filter();
+
+    assert_edit_error(editor.apply(Edit::RemoveFilter { index: 1 }));
+    editor.apply(Edit::RemoveFilter { index: 0 }).unwrap();
+
+    assert!(editor.project().filters.is_empty());
+}
+
+#[test]
+fn replace_filter_replaces_at_a_valid_index_and_fails_past_the_end() {
+    let mut editor = editor_with_one_filter();
+
+    assert_edit_error(editor.apply(Edit::ReplaceFilter {
+        index: 1,
+        filter: filter("b"),
+    }));
+    editor
+        .apply(Edit::ReplaceFilter {
+            index: 0,
+            filter: filter("b"),
+        })
+        .unwrap();
+
+    assert_eq!(filter_names(editor.project()), vec!["b"]);
+}
+
+#[test]
+fn add_filter_with_a_backwards_range_fails_as_an_invalid_project() {
+    let mut editor = editor();
+
+    assert_invalid_project(editor.apply(Edit::AddFilter {
+        index: 0,
+        filter: AppliedFilter {
+            kind: FilterKind::new("a"),
+            region: FilterRegion::Range {
+                start: secs(3.0),
+                end: secs(1.0),
+            },
+            options: FilterOptions::new(),
+        },
+    }));
+}
