@@ -295,6 +295,9 @@ struct Rewriter<'a> {
     shown_style: Option<u16>,
     /// The color that the answer set last, or `None` when it is not known.
     shown_color: Option<CursorColor>,
+    /// True from the start of the first event of a burst to the end of its
+    /// last event.
+    in_burst: bool,
     /// The answer.
     out: Vec<Event>,
     /// Where each piece of the open sequence starts: the index of its event
@@ -311,9 +314,15 @@ impl<'a> Rewriter<'a> {
             cursor,
             scanner: Scanner::new(),
             recording: CursorState::default(),
-            shown_visible: None,
+            // Smart starts where the recording is, so it sets nothing at the
+            // start.
+            shown_visible: match cursor.show {
+                Show::Smart { .. } => Some(true),
+                _ => None,
+            },
             shown_style: None,
             shown_color: None,
+            in_burst: false,
             out: Vec::new(),
             pieces: Vec::new(),
             last: (0, 0),
@@ -328,10 +337,11 @@ impl<'a> Rewriter<'a> {
             return Vec::new();
         }
         let start = self.emissions(Target::Wanted);
-        for event in events {
+        let links = burst_links(events, self.cursor.show);
+        for (event, linked) in events.iter().zip(links) {
             match event.event_type {
                 EventType::Input => self.out.push(event.clone()),
-                EventType::Output => self.output(event),
+                EventType::Output => self.output(event, linked),
             }
         }
 
@@ -357,13 +367,36 @@ impl<'a> Rewriter<'a> {
         self.out
     }
 
-    /// Rewrite one output event into `out`.
-    fn output(&mut self, event: &Event) {
+    /// Rewrite one output event into `out`. `linked` is true when the event
+    /// is in a burst with the next output event.
+    fn output(&mut self, event: &Event, linked: bool) {
         let index = self.out.len();
         self.out.push(output_event(event.time, String::new()));
+        if linked && !self.in_burst {
+            self.in_burst = true;
+            self.sync(index);
+        }
         for c in event.data.chars() {
             let step = self.scanner.feed(c);
             self.take(step, c, index);
+        }
+        if !linked && self.in_burst {
+            self.in_burst = false;
+            self.sync(index);
+        }
+    }
+
+    /// Bring the end of the event at `index` to the wanted state. While a
+    /// sequence is open, nothing goes out, because a sequence inside it would
+    /// break it. The change then waits for the end of that sequence, or for
+    /// the end of the region.
+    fn sync(&mut self, index: usize) {
+        if self.scanner.is_pending() {
+            return;
+        }
+        let wanted = self.emissions(Target::Wanted);
+        if let Some(data) = self.data(index) {
+            data.push_str(&wanted);
         }
     }
 
@@ -379,14 +412,17 @@ impl<'a> Rewriter<'a> {
                 self.mark(index);
                 self.push(index, c);
                 self.finish(&sequence, index);
+                self.sync(index);
             }
             Step::Ignored => {
                 self.push(index, c);
                 self.pieces.clear();
+                self.sync(index);
             }
             Step::Aborted => {
                 self.pieces.clear();
                 self.push(index, c);
+                self.sync(index);
             }
             Step::Restarted => {
                 self.pieces.clear();
@@ -425,8 +461,7 @@ impl<'a> Rewriter<'a> {
     }
 
     /// The sequence that completed in the event at `index`: rewrite it when
-    /// it sets a part of the cursor that the filter owns, and then bring the
-    /// stream to the wanted state.
+    /// it sets a part of the cursor that the filter owns.
     fn finish(&mut self, sequence: &Sequence, index: usize) {
         let pieces = std::mem::take(&mut self.pieces);
         if let Some(replacement) = self.rewrite(sequence) {
@@ -438,10 +473,6 @@ impl<'a> Rewriter<'a> {
             if let Some(data) = self.data(index) {
                 data.push_str(&replacement);
             }
-        }
-        let wanted = self.emissions(Target::Wanted);
-        if let Some(data) = self.data(index) {
-            data.push_str(&wanted);
         }
     }
 
@@ -640,9 +671,37 @@ impl<'a> Rewriter<'a> {
             (Show::Honor, _) => None,
             (_, Target::Recording) => Some(self.recording.visible),
             (Show::Always(visible), Target::Wanted) => Some(visible),
-            (Show::Smart { .. }, Target::Wanted) => Some(self.recording.visible),
+            (Show::Smart { .. }, Target::Wanted) => Some(self.recording.visible && !self.in_burst),
         }
     }
+}
+
+/// For each event, true when it is an output event in a burst with the next
+/// output event: that event comes less than the burst gap after it, and no
+/// input event comes between them. All false unless `show` is smart.
+fn burst_links(events: &[Event], show: Show) -> Vec<bool> {
+    let mut links = vec![false; events.len()];
+    let Show::Smart { burst_gap } = show else {
+        return links;
+    };
+    // The last output event, when no input event came after it.
+    let mut previous: Option<(usize, f64)> = None;
+    for (index, event) in events.iter().enumerate() {
+        match event.event_type {
+            EventType::Input => previous = None,
+            EventType::Output => {
+                if let Some((before, time)) = previous {
+                    if event.time - time < burst_gap {
+                        if let Some(link) = links.get_mut(before) {
+                            *link = true;
+                        }
+                    }
+                }
+                previous = Some((index, event.time));
+            }
+        }
+    }
+    links
 }
 
 /// An output event at `time` with `data`.
