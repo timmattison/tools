@@ -102,30 +102,83 @@ fn normalize(span: Span, options: &FilterOptions) -> Result<Span, String> {
         .get(RATE_OPTION)
         .and_then(serde_json::Value::as_f64)
         .ok_or_else(|| format!("the option \"{RATE_OPTION}\" is missing or is not a number"))?;
-    let interval = 1.0 / rate;
-    let mut previous: Option<f64> = None;
-    // The change of the time of the last key so far.
-    let mut shift = 0.0;
+    let keys = new_keys(&span.events, 1.0 / rate);
+    let length = new_time(span.length, keys.last().copied(), None);
+    let mut upcoming = keys.into_iter().peekable();
+    let mut before = None;
     let events = span
         .events
         .into_iter()
         .map(|event| {
-            if event.event_type != EventType::Input {
-                return Event {
-                    time: event.time + shift,
-                    ..event
-                };
-            }
-            let time = previous.map_or(event.time, |before| before + interval);
-            previous = Some(time);
-            shift = time - event.time;
+            // `new_keys` gives one key for each input event, in order.
+            let key = if event.event_type == EventType::Input {
+                upcoming.next()
+            } else {
+                None
+            };
+            let time = match key {
+                Some(key) => {
+                    before = Some(key);
+                    key.new
+                }
+                None => new_time(event.time, before, upcoming.peek().copied()),
+            };
             Event { time, ..event }
         })
         .collect();
-    Ok(Span {
-        events,
-        length: span.length + shift,
-    })
+    Ok(Span { events, length })
+}
+
+/// A key of the region: its time in the recording, and its new time.
+#[derive(Debug, Clone, Copy)]
+struct Key {
+    old: f64,
+    new: f64,
+}
+
+/// The keys of `events`, in order. The first key keeps its time, and each
+/// next key comes `interval` after the key before it.
+fn new_keys(events: &[Event], interval: f64) -> Vec<Key> {
+    let mut keys: Vec<Key> = Vec::new();
+    for event in events {
+        if event.event_type != EventType::Input {
+            continue;
+        }
+        let new = keys
+            .last()
+            .map_or(event.time, |before| before.new + interval);
+        keys.push(Key {
+            old: event.time,
+            new,
+        });
+    }
+    keys
+}
+
+/// The new time of an event at `time` that is not a key. `before` is the last
+/// key before it, and `after` is the first key after it.
+///
+/// An event before the first key keeps its time. Each other event keeps its
+/// delay after the key before it. When the gap between `before` and `after`
+/// becomes shorter, the delay becomes shorter by the same ratio, so the event
+/// stays between the two keys.
+fn new_time(time: f64, before: Option<Key>, after: Option<Key>) -> f64 {
+    let Some(before) = before else {
+        return time;
+    };
+    let delay = time - before.old;
+    let Some(after) = after else {
+        return before.new + delay;
+    };
+    let old_gap = after.old - before.old;
+    let new_gap = after.new - before.new;
+    let ratio = if old_gap > 0.0 && new_gap < old_gap {
+        (new_gap / old_gap).max(0.0)
+    } else {
+        1.0
+    };
+    // `max` and `min`, not `clamp`: `clamp` panics when its bounds cross.
+    (before.new + delay * ratio).max(before.new).min(after.new)
 }
 
 #[cfg(test)]
