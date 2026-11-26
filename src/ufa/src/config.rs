@@ -2618,6 +2618,55 @@ mod connection_test_tests {
         assert!(text.contains(CAUSE), "the cause is missing from {text:?}");
     }
 
+    /// A typed URL that validates is kept, with a mark of success, and the
+    /// wizard asks nothing.
+    #[test]
+    fn a_typed_url_that_validates_is_kept_without_a_question() {
+        const TYPED: &str = "https://192.168.1.1";
+        let mut out = Vec::new();
+        let mut console = Scripted::terminal(&[]);
+
+        let kept = url_after_validation(
+            Ok(TYPED.to_string()),
+            TYPED.to_string(),
+            &mut out,
+            &mut console,
+        )
+        .unwrap();
+
+        assert_eq!(kept.as_deref(), Some(TYPED), "a validated URL must be kept");
+        assert_eq!(String::from_utf8(out).unwrap(), " ✓\n");
+        assert!(
+            !console.was_asked(),
+            "a validated URL needs no question, asked {:?}",
+            console.asked()
+        );
+    }
+
+    /// A yes to the question after a failed validation keeps the typed URL,
+    /// so the wizard does not ask for the URL again.
+    #[test]
+    fn a_yes_after_a_failed_validation_keeps_the_typed_url() {
+        const TYPED: &str = "https://192.168.1.1";
+        let validated: Result<String> = Err(anyhow::anyhow!("Connection refused (os error 61)"));
+        let mut out = Vec::new();
+        let mut console = Scripted::terminal(&["y\n"]);
+
+        let kept =
+            url_after_validation(validated, TYPED.to_string(), &mut out, &mut console).unwrap();
+
+        assert_eq!(
+            kept.as_deref(),
+            Some(TYPED),
+            "a URL the user chose to use anyway must be kept"
+        );
+        assert!(
+            console.asked().contains(USE_URL_ANYWAY),
+            "the wizard must ask whether to keep the URL, asked {:?}",
+            console.asked()
+        );
+    }
+
     /// A controller that does not accept the key.
     fn unauthorized() -> String {
         json_response_with_status("401 Unauthorized", r#"{"message":"Unauthorized"}"#)
