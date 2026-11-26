@@ -183,7 +183,9 @@ fn mode_from(options: &FilterOptions) -> Result<Mode, String> {
                 .ok_or_else(|| {
                     format!("the option \"{SPEED_OPTION}\" is missing or is not a number")
                 })?;
-            let acceleration = Acceleration::new(value).map_err(|error| error.to_string())?;
+            let acceleration = Acceleration::new(value).map_err(|error| {
+                format!("the option \"{SPEED_OPTION}\" is not an acceleration: {error}")
+            })?;
             Ok(Mode::Accelerate(acceleration))
         }
         SUMMARY => Ok(Mode::Summary {
