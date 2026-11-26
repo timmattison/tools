@@ -255,8 +255,8 @@ fn probe_url(controller: &Url) -> Result<Url> {
 /// redirect. The client of each later command refuses a redirect, so a
 /// controller that the probe reaches only through one is of no use. The error
 /// names the status and the `Location` of the redirect. When the redirect
-/// keeps the path of the probe and goes to another URL, the error also names
-/// the URL of the controller to type.
+/// keeps the path of the probe and goes to another controller, the error also
+/// names the URL of the controller to type.
 async fn probe(url: Url) -> Result<ProbeVerdict> {
     // Controllers ship a self-signed certificate out of the box, so discovery
     // -- which runs before any trust decision has been made -- cannot insist
@@ -309,14 +309,11 @@ async fn probe(url: Url) -> Result<ProbeVerdict> {
 ///
 /// The URL of the controller to type, with no probe path, query, fragment or
 /// trailing slash. `None` if the `Location` does not end in the path that the
-/// probe adds, or if it points back at `probed` with only another query or
-/// fragment. Such a redirect, for example one that only sets a cookie, names
-/// the URL that just failed.
+/// probe adds, or if the probe of the named controller is `probed` itself.
+/// Such a redirect, for example one that only sets a cookie or adds an empty
+/// segment, names the URL that just failed.
 fn controller_behind_redirect(probed: &Url, location: &str) -> Option<String> {
     let target = probed.join(location).ok()?;
-    if target[..url::Position::AfterPath] == probed[..url::Position::AfterPath] {
-        return None;
-    }
     let mut root = target.clone();
     root.set_path("/");
     let probe_path = probe_url(&root).ok()?.path().to_string();
@@ -325,6 +322,11 @@ fn controller_behind_redirect(probed: &Url, location: &str) -> Option<String> {
     controller.set_path(prefix);
     controller.set_query(None);
     controller.set_fragment(None);
+    if probe_url(&controller).ok()?[..url::Position::AfterPath]
+        == probed[..url::Position::AfterPath]
+    {
+        return None;
+    }
     Some(controller.as_str().trim_end_matches('/').to_string())
 }
 
