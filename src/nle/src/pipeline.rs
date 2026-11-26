@@ -311,13 +311,12 @@ impl FilterRegistry {
     ///
     /// # Errors
     /// Returns `NleError::RenderError` when a filter kind is not registered,
-    /// when the options of a typed filter do not parse or the filter refuses them,
-    /// when a filter answers
-    /// a time or an end that is not finite or is below zero on the timeline,
-    /// when a filter answers an end that it did not see, when a filter answers
-    /// a shift that is not finite or moves an event below zero, or when an
-    /// event time or the end of the timeline that the filters give is not
-    /// finite.
+    /// when the options of a typed filter do not parse or the filter refuses
+    /// them, when a filter answers a time or an end that is not finite or is
+    /// below zero on the timeline, when a filter answers an end that it did
+    /// not see, when a filter answers a shift that is not finite or moves an
+    /// event below zero, or when an event time or the end of the timeline that
+    /// the filters give is not finite.
     pub fn run(
         &self,
         events: Vec<Event>,
