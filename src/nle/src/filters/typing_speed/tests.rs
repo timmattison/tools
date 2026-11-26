@@ -162,3 +162,27 @@ fn a_gap_equal_to_the_pause_threshold_is_typing() {
 
     assert_eq!(times(&got), vec![0.0, 0.25]);
 }
+
+#[test]
+fn the_gap_after_a_line_end_stays() {
+    for enter in ["\r", "\n", "s\r"] {
+        let input = vec![
+            key(0.0, "l"),
+            key(0.5, "s"),
+            key(1.0, enter),
+            out(1.0625, "Cargo.toml\r\n"),
+            key(1.5, "c"),
+            key(1.75, "d"),
+        ];
+
+        let got = run(input, &[applied(FilterRegion::All, typing(4.0))]);
+
+        // The gap of 0.5 s from the line end to "c" is shorter than the
+        // pause threshold, but it is the gap between two commands.
+        assert_eq!(
+            times(&got),
+            vec![0.0, 0.25, 0.5, 0.5625, 1.0, 1.25],
+            "line end {enter:?}"
+        );
+    }
+}
