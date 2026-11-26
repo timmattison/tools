@@ -356,8 +356,13 @@ impl Editor {
         request: ExportRequest,
         mut progress: impl FnMut(ExportProgress) + Send + 'static,
     ) -> impl std::future::Future<Output = Result<PathBuf, NleError>> + Send + 'static {
-        let _ = &mut progress;
-        async move { Ok(request.output_path) }
+        let project = self.project.clone();
+        let filters = Arc::clone(&self.filters);
+        async move {
+            progress(ExportProgress::Rendering);
+            let recording = crate::commands::run_blocking(move || filters.render(&project)).await?;
+            crate::export::export_recording(recording, request, progress).await
+        }
     }
 
     /// Write the rendered recording of this state to `path`.
