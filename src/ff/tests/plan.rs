@@ -73,6 +73,7 @@ fn the_plan_walks_the_data_volume_once_and_covers_each_directory_without_a_firml
         ["/", "/System/Volumes/Data", "/Volumes/External"].map(PathBuf::from)
     );
     assert!(plan.roots.iter().all(|root| root.stay_on_device));
+    assert!(plan.roots.iter().all(|root| root.canonical == root.path));
 
     let system = &plan.roots[0];
     assert_eq!(
@@ -282,7 +283,13 @@ fn a_named_root_crosses_each_mount_point_without_one_file_system() {
     let table = [Mount::new("/data/sub/mnt", "apfs")];
     let root = ff::plan::named_root(Path::new("./sub"), Path::new("/data/sub"), false, &table);
 
-    assert_eq!(root, ff::walk::WalkRoot::new("./sub"));
+    assert_eq!(
+        root,
+        ff::walk::WalkRoot {
+            canonical: PathBuf::from("/data/sub"),
+            ..ff::walk::WalkRoot::new("./sub")
+        }
+    );
 }
 
 #[test]
@@ -298,6 +305,7 @@ fn a_named_root_with_one_file_system_stays_on_its_device_and_prunes_each_mount_p
     let root = ff::plan::named_root(Path::new("./sub"), Path::new("/data/sub"), true, &table);
 
     assert_eq!(root.path, PathBuf::from("./sub"));
+    assert_eq!(root.canonical, PathBuf::from("/data/sub"));
     assert!(root.stay_on_device);
     assert_eq!(root.prune, paths(&["./sub/deep/er", "./sub/mnt"]));
     assert!(root.hide.is_empty());

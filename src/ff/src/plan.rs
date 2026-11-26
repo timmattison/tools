@@ -191,6 +191,7 @@ pub fn plan_machine(system_root: &Path, mounts: &[Mount], firmlinks: &Firmlinks)
             };
             WalkRoot {
                 path: mount.mount_point.clone(),
+                canonical: mount.mount_point.clone(),
                 prune,
                 hide,
                 stay_on_device: true,
@@ -255,7 +256,9 @@ fn strictly_below(path: &Path, ancestor: &Path) -> bool {
 /// `one_file_system`, the walk crosses each mount point, as `find` does. With
 /// it, the walk stays on the device of `path`, and it prunes each mount point
 /// of `mounts` below `canonical`. A device check alone cannot stop at the data
-/// volume of macOS, because it has the device id of `/`.
+/// volume of macOS, because it has the device id of `/`. The cloud rule reads
+/// `canonical`, so a root such as `.` in `~/Library` skips the File Provider
+/// directories.
 #[must_use]
 pub fn named_root(
     path: &Path,
@@ -264,7 +267,10 @@ pub fn named_root(
     mounts: &[Mount],
 ) -> WalkRoot {
     if !one_file_system {
-        return WalkRoot::new(path);
+        return WalkRoot {
+            canonical: canonical.to_path_buf(),
+            ..WalkRoot::new(path)
+        };
     }
     let prune = mounts
         .iter()
@@ -275,6 +281,7 @@ pub fn named_root(
         .collect();
     WalkRoot {
         path: path.to_path_buf(),
+        canonical: canonical.to_path_buf(),
         prune,
         hide: BTreeSet::new(),
         stay_on_device: true,

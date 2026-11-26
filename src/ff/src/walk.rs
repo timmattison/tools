@@ -1,5 +1,6 @@
 //! The parallel walk of one or more directory trees.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::io;
@@ -24,6 +25,11 @@ pub struct WalkRoot {
     /// directory. Each one is written as the walk writes it: `path` joined
     /// with the names below it.
     pub hide: BTreeSet<PathBuf>,
+    /// The directory `path` with each symbolic link and each `.` and `..`
+    /// resolved. The cloud rule reads the names below it, because `path` as a
+    /// user wrote it, for example `.`, does not show the `Library` above it.
+    /// [`WalkRoot::new`] sets it to `path`.
+    pub canonical: PathBuf,
     /// When true, the walk does not enter a directory on a device that is not
     /// the device of `path`.
     pub stay_on_device: bool,
@@ -33,8 +39,10 @@ impl WalkRoot {
     /// A root that crosses each mount point and prunes nothing.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
         Self {
-            path: path.into(),
+            canonical: path.clone(),
+            path,
             prune: BTreeSet::new(),
             hide: BTreeSet::new(),
             stay_on_device: false,
@@ -112,11 +120,23 @@ fn vanished(error: &io::Error) -> bool {
 /// macOS keeps a File Provider directory at `~/Library/CloudStorage/<name>`
 /// for Google Drive, Proton Drive, Dropbox, and others, and iCloud Drive at
 /// `~/Library/Mobile Documents`. Such a directory answers `readdir` over the
-/// network.
+/// network. `parent` is the canonical path of the directory that holds `name`.
 #[must_use]
 pub fn is_cloud_directory(parent: &Path, name: &OsStr) -> bool {
     parent.ends_with(CLOUD_STORAGE)
         || (name == MOBILE_DOCUMENTS && parent.file_name() == Some(OsStr::new(LIBRARY)))
+}
+
+/// The directory `path` below `root`, with `root.canonical` in place of
+/// `root.path`. The cloud rule reads it.
+fn canonical_dir<'p>(root: &WalkRoot, path: &'p Path) -> Cow<'p, Path> {
+    if root.canonical.as_os_str() == root.path.as_os_str() {
+        return Cow::Borrowed(path);
+    }
+    match path.strip_prefix(&root.path) {
+        Ok(below) => Cow::Owned(root.canonical.join(below)),
+        Err(_) => Cow::Borrowed(path),
+    }
 }
 
 /// The directory of a home that holds the File Provider directories.
@@ -267,6 +287,7 @@ where
         path: PathBuf,
         mut dir: F::Dir,
     ) {
+        let canonical = canonical_dir(root, &path).into_owned();
         loop {
             if self.stop.load(Ordering::Relaxed) {
                 return;
@@ -308,7 +329,7 @@ where
             if !is_directory || root.prune.contains(&child) {
                 continue;
             }
-            if !self.options.include_cloud && is_cloud_directory(&path, &entry.name) {
+            if !self.options.include_cloud && is_cloud_directory(&canonical, &entry.name) {
                 self.findings().cloud_skipped.push(child);
                 continue;
             }

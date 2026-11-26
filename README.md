@@ -6351,7 +6351,8 @@ volume, and it does not enter another mount point.
   and `~/Library/Mobile Documents` (iCloud Drive) answers `readdir` over the
   network. `ff` skips them unless you give `--include-cloud`, and the summary
   gives their count. A path that you name is searched also when it is such a
-  directory. This rule applies to a search of named paths too.
+  directory. This rule applies to a search of named paths too. `ff` decides this rule on
+  the real path, thus `ff x .` in `~/Library` skips them too.
 
 `ff` does not use Spotlight. `mdfind` returns nothing when indexing is off on
 a volume, and it says nothing about that.
