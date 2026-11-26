@@ -101,3 +101,34 @@ fn run_with_an_unregistered_kind_fails_and_names_the_kind() {
         other => panic!("expected a RenderError, got {other:?}"),
     }
 }
+
+// Group 2: the region All.
+
+#[test]
+fn one_filter_on_all_changes_every_event() {
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("double"), double());
+
+    let out = registry
+        .run(events(&[0.5, 1.0, 2.0]), &[all("double")])
+        .unwrap();
+
+    assert_eq!(times(&out), vec![1.0, 2.0, 4.0]);
+}
+
+#[test]
+fn two_filters_chain_in_order() {
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("double"), double());
+    registry.register(kind("add"), add_one());
+
+    let add_then_double = registry
+        .run(events(&[1.0, 2.0]), &[all("add"), all("double")])
+        .unwrap();
+    let double_then_add = registry
+        .run(events(&[1.0, 2.0]), &[all("double"), all("add")])
+        .unwrap();
+
+    assert_eq!(times(&add_then_double), vec![4.0, 6.0]);
+    assert_eq!(times(&double_then_add), vec![3.0, 5.0]);
+}
