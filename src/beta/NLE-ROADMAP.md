@@ -41,7 +41,7 @@ All of these can be built **simultaneously** after Phase 0 types exist.
 | #154 | Pause removal/insertion | Half day | Find gaps > threshold, clamp them, shift subsequent events. Nearly identical pattern to #153. |
 | #155 | Typing speed normalization | Half day | Re-space input event timestamps to a target characters-per-second. |
 | #167 | Idle time compression | Half day | Similar to #154 with additional grid-change heuristic. |
-| #156 | Text replacement/redaction | 1 day | Regex replace on `event.data`. Needs care with ANSI escape sequence boundaries. |
+| #156 | Text replacement/redaction | Done | A span filter (`src/nle/src/filters/redaction.rs`) that replaces text in `event.data` and keeps each time. It joins the events of a stream, so a match can cross events and escape sequences, and it never searches or changes an escape sequence. Presets find emails, IP addresses, AWS keys, tokens, and hostnames. The redaction panel of the properties panel applies it. The timeline marks of the redactions wait for #150. |
 | #168 | Cursor customization | 1 day | Intercept/rewrite DECTCEM and cursor shape escape sequences. |
 | #160 | Rendering pipeline progress | Half day | Add structured progress reporting to existing `beta export video`. |
 
