@@ -6,7 +6,7 @@ use crate::error::NleError;
 use crate::json_file;
 
 /// A terminal recording, compatible with the beta recorder format.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Recording {
     pub version: u32,
     pub width: u16,
@@ -20,7 +20,7 @@ pub struct Recording {
 }
 
 /// A single event in a recording (output or input).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     pub time: f64,
     #[serde(rename = "type")]
@@ -29,7 +29,7 @@ pub struct Event {
 }
 
 /// The type of a recording event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EventType {
     #[serde(rename = "o")]
     Output,
@@ -65,7 +65,7 @@ pub struct LoadedRecording {
 }
 
 /// Summary metadata about a loaded recording.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecordingMetadata {
     pub file_path: String,
     pub title: String,
@@ -75,6 +75,44 @@ pub struct RecordingMetadata {
     pub width: u16,
     pub height: u16,
     pub timestamp: f64,
+}
+
+/// A time in seconds. It is finite and not below zero.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "f64", into = "f64")]
+pub struct Seconds(f64);
+
+impl Seconds {
+    /// The time zero.
+    pub const ZERO: Seconds = Seconds(0.0);
+
+    /// Make a time from a number of seconds.
+    ///
+    /// # Errors
+    /// Returns `NleError::InvalidTime` when `value` is NaN, infinite, or below zero.
+    pub fn new(value: f64) -> Result<Self, NleError> {
+        Ok(Seconds(value))
+    }
+
+    /// The number of seconds.
+    #[must_use]
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl TryFrom<f64> for Seconds {
+    type Error = NleError;
+
+    fn try_from(value: f64) -> Result<Self, NleError> {
+        Seconds::new(value)
+    }
+}
+
+impl From<Seconds> for f64 {
+    fn from(value: Seconds) -> f64 {
+        value.0
+    }
 }
 
 impl Recording {

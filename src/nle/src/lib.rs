@@ -2,6 +2,7 @@ pub mod commands;
 pub mod error;
 mod format;
 mod json_file;
+mod project;
 pub mod types;
 mod ui;
 
