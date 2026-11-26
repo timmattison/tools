@@ -43,6 +43,31 @@ const AWS_KEY: &str = concat!(
     r#"|(?i:secret_?access_?key|session_?token)["']?\s*[:=]\s*["']?(?P<redact>[A-Za-z0-9/+=]{16,})"#,
 );
 
+/// An API token in one of several known formats.
+///
+/// It matches a GitHub token (`ghp_` and its kin, and `github_pat_`), a GitLab
+/// token (`glpat-`), a Slack token (`xox`), an `sk-` key, a Stripe key
+/// (`sk_live_`, `rk_test_`, and their kin), a Google API key (`AIza`), an npm
+/// token (`npm_`), and a JSON web token with three parts. It also matches the
+/// token after the word `Bearer`. Only that token is replaced, because the
+/// group `redact` holds it. Only this branch has the group, because a group
+/// name can occur once in a pattern.
+///
+/// It does not match a word that only looks like a prefix, for example
+/// `risk-assessment-for-the-new-project-x`, or a token that is too short.
+const TOKEN: &str = concat!(
+    r"\bgh[pousr]_[A-Za-z0-9]{36,}\b",
+    r"|\bgithub_pat_[A-Za-z0-9_]{22,}\b",
+    r"|\bglpat-[A-Za-z0-9_-]{20,}",
+    r"|\bxox[abposr]-[A-Za-z0-9-]{10,}",
+    r"|\bsk-[A-Za-z0-9_-]{20,}",
+    r"|\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}",
+    r"|\bAIza[0-9A-Za-z_-]{35}",
+    r"|\bnpm_[A-Za-z0-9]{36}\b",
+    r"|\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
+    r"|(?i:bearer)\s+(?P<redact>[A-Za-z0-9._~+/-]+=*)",
+);
+
 /// A pattern that ships with the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -88,7 +113,8 @@ impl Preset {
             Preset::Email => EMAIL,
             Preset::IpAddress => IP_ADDRESS,
             Preset::AwsKey => AWS_KEY,
-            Preset::Token | Preset::Hostname => NOTHING,
+            Preset::Token => TOKEN,
+            Preset::Hostname => NOTHING,
         }
     }
 }
