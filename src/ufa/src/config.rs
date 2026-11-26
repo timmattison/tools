@@ -2354,6 +2354,29 @@ mod tests {
         );
     }
 
+    /// The wizard shows the cause of a failed read of 1Password, not only the
+    /// outer context that `discover_op_controllers` adds.
+    #[test]
+    fn a_failed_read_of_1password_shows_its_cause() {
+        const CAUSE: &str = "op: command not found";
+        const CONTEXT: &str = "Failed to list the fields of Private/ufa";
+        let found: Result<Vec<OpController>> = Err(anyhow::anyhow!(CAUSE)).context(CONTEXT);
+        let mut out = Vec::new();
+
+        let offered = controllers_to_offer(found, &mut out).unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            offered.is_empty(),
+            "no controller to offer, got {offered:?}"
+        );
+        assert!(
+            text.contains(CONTEXT),
+            "the context is missing from {text:?}"
+        );
+        assert!(text.contains(CAUSE), "the cause is missing from {text:?}");
+    }
+
     /// Configs written before `sm_op_path` existed keep working.
     #[test]
     fn site_manager_key_falls_back_to_the_plaintext_field() {
@@ -2566,29 +2589,6 @@ mod connection_test_tests {
 
     /// The version the answering controller gives.
     const CONTROLLER_VERSION: &str = "9.3.45";
-
-    /// The wizard shows the cause of a failed read of 1Password, not only the
-    /// outer context that `discover_op_controllers` adds.
-    #[test]
-    fn a_failed_read_of_1password_shows_its_cause() {
-        const CAUSE: &str = "op: command not found";
-        const CONTEXT: &str = "Failed to list the fields of Private/ufa";
-        let found: Result<Vec<OpController>> = Err(anyhow::anyhow!(CAUSE)).context(CONTEXT);
-        let mut out = Vec::new();
-
-        let offered = controllers_to_offer(found, &mut out).unwrap();
-
-        let text = String::from_utf8(out).unwrap();
-        assert!(
-            offered.is_empty(),
-            "no controller to offer, got {offered:?}"
-        );
-        assert!(
-            text.contains(CONTEXT),
-            "the context is missing from {text:?}"
-        );
-        assert!(text.contains(CAUSE), "the cause is missing from {text:?}");
-    }
 
     /// The wizard shows the cause of a failed validation of a typed URL, not
     /// only the outer context that `validate_user_url` adds.
