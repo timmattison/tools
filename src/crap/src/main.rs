@@ -299,14 +299,27 @@ fn self_projects(home: &Path) -> UserProjects {
 
 /// A sibling user's `~/.claude/projects` root, resolved as `users_parent/name`.
 ///
-/// `is_self` is set when `name` equals `self_name` (the invoking user), so a
-/// `--user` that names the current account is treated as a same-user hit. Like
-/// [`self_projects`], every input is explicit so the mapping is tempdir-testable.
+/// `is_self` is set when `name` names the tree of `self_name` (the invoking
+/// user), so a `--user` that names the current account is treated as a
+/// same-user hit. One home can answer to several names: a case variant on a
+/// case-insensitive filesystem (`Tim` for `tim` on the macOS default), or a
+/// symlinked alias. A name compare misses both, and sent such a hit down the
+/// cross-user fork path, past the live-session guard of an in-place resume
+/// (issue #314). So when the names differ, the two trees are compared on their
+/// canonical paths (see [`canonical_or_verbatim`]), the same key that
+/// [`enumerate_user_projects`] dedupes on. A tree that does not resolve keeps
+/// its literal path, so the compare then falls back to the plain name test.
+/// Like [`self_projects`], every input is explicit so the mapping is
+/// tempdir-testable.
 fn user_projects(users_parent: &Path, name: &str, self_name: &str) -> UserProjects {
+    let dir = projects_dir(&users_parent.join(name));
+    let is_self = name == self_name
+        || canonical_or_verbatim(&dir)
+            == canonical_or_verbatim(&projects_dir(&users_parent.join(self_name)));
     UserProjects {
         user: name.to_string(),
-        projects_dir: projects_dir(&users_parent.join(name)),
-        is_self: name == self_name,
+        projects_dir: dir,
+        is_self,
     }
 }
 
@@ -374,7 +387,10 @@ fn enumerate_user_projects(users_parent: &Path, self_name: &str) -> Vec<UserProj
 
     let mut roots = Vec::with_capacity(others.len() + 1);
     // Self goes in first and unconditionally, claiming its canonical tree, so it
-    // stays root zero and is the only entry that can ever carry `is_self`.
+    // stays root zero and is the only entry that can ever carry `is_self`. A
+    // sibling alias of self also comes back from `user_projects` with `is_self`
+    // set, but only because its canonical tree is this one, so the dedupe below
+    // drops it.
     let me = user_projects(users_parent, self_name, self_name);
     let mut seen: HashSet<PathBuf> = HashSet::new();
     seen.insert(canonical_or_verbatim(&me.projects_dir));
