@@ -6,7 +6,9 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::error::NleError;
-use crate::types::{AppliedFilter, EditProject, Event, FilterKind, FilterOptions, Recording};
+use crate::types::{
+    AppliedFilter, EditProject, Event, FilterKind, FilterOptions, FilterRegion, Recording,
+};
 
 /// A filter: a pure function from the events of a region to new events.
 ///
@@ -86,6 +88,47 @@ impl FilterRegistry {
         })
     }
 
+    /// One filter step: the steps on `FilterFn`.
+    fn apply(&self, events: Vec<Event>, applied: &AppliedFilter) -> Result<Vec<Event>, NleError> {
+        let filter = self.lookup(&applied.kind)?;
+        let (start, end) = match &applied.region {
+            FilterRegion::All => (0.0, f64::INFINITY),
+            FilterRegion::Range { start, end } => (start.get(), end.get()),
+        };
+
+        let mut before = Vec::new();
+        let mut inside = Vec::new();
+        let mut after = Vec::new();
+        for event in events {
+            if event.time < start {
+                before.push(event);
+            } else if event.time < end {
+                inside.push(Event {
+                    time: event.time - start,
+                    ..event
+                });
+            } else {
+                after.push(event);
+            }
+        }
+
+        let answer = filter(&inside, &applied.options);
+        let shift = answer.last().map_or(0.0, |last| {
+            last.time - inside.last().map_or(0.0, |event| event.time)
+        });
+
+        let mut result = before;
+        result.extend(answer.into_iter().map(|event| Event {
+            time: event.time + start,
+            ..event
+        }));
+        result.extend(after.into_iter().map(|event| Event {
+            time: event.time + shift,
+            ..event
+        }));
+        Ok(result)
+    }
+
     /// Run `filters` in order over `events`, by the steps on `FilterFn`. The
     /// end of the timeline starts at the time of the last event.
     ///
@@ -100,8 +143,7 @@ impl FilterRegistry {
     ) -> Result<Vec<Event>, NleError> {
         let mut events = events;
         for applied in filters {
-            let filter = self.lookup(&applied.kind)?;
-            events = filter(&events, &applied.options);
+            events = self.apply(events, applied)?;
         }
         Ok(events)
     }
