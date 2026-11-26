@@ -327,8 +327,9 @@ impl FilterRegistry {
     ///    time order, and two at one time keep the order of
     ///    `EditProject::chapters_in_order`.
     ///
-    /// A project of one whole-recording clip and no filter renders a
-    /// recording equal to its source.
+    /// A project from `EditProject::from_recording` with no filter renders a
+    /// recording equal to its source, when the chapters of the source are in
+    /// time order and none is after its duration.
     ///
     /// # Errors
     /// Returns `NleError::InvalidProject` when the project breaks a rule of

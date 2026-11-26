@@ -104,12 +104,24 @@ impl TryFrom<ProjectFile> for EditProject {
 
 impl EditProject {
     /// Make a project of one clip that holds the whole `source`, on one track.
+    /// The project has one chapter marker for each chapter of `source`, in the
+    /// order of `source`, with the ids 1, 2, 3, and so on.
     ///
     /// # Errors
-    /// Returns `NleError::InvalidTime` when the duration of `source` is not a
-    /// valid time.
+    /// Returns `NleError::InvalidTime` when the duration of `source` or the
+    /// time of one of its chapters is not a valid time.
     pub fn from_recording(source: Arc<Recording>) -> Result<Self, NleError> {
         let out_point = Seconds::new(source.duration)?;
+        let chapters = (1..)
+            .zip(&source.chapters)
+            .map(|(id, chapter)| {
+                Ok(ChapterMarker {
+                    id: ChapterId(id),
+                    time: Seconds::new(chapter.time)?,
+                    label: chapter.label.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, NleError>>()?;
         let clip = Clip {
             id: ClipId(1),
             source,
@@ -124,7 +136,7 @@ impl EditProject {
                 clips: vec![ClipId(1)],
             }],
             filters: Vec::new(),
-            chapters: Vec::new(),
+            chapters,
         })
     }
 
