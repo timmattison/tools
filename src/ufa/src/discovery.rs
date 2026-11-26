@@ -753,7 +753,8 @@ mod typed_url_tests {
     /// cookie does, names no URL to type. The controller it points at is the
     /// URL that just failed, and that URL fails the same way on the next try.
     /// A change of the query or the fragment alone points at the same
-    /// controller.
+    /// controller. So does an empty segment before the probe path, because
+    /// the client removes the trailing slash of the controller URL.
     #[tokio::test]
     async fn a_redirect_to_the_probe_url_itself_names_no_url_to_type() {
         let cases = [
@@ -761,6 +762,7 @@ mod typed_url_tests {
             ("", "/proxy/network/integration/v1/info?session=1"),
             ("", "/proxy/network/integration/v1/info#top"),
             ("/unifi", "/unifi/proxy/network/integration/v1/info"),
+            ("/unifi", "/unifi//proxy/network/integration/v1/info"),
         ];
         for (prefix, location) in cases {
             let redirecting = TestServer::replying(&redirect_to(location)).await;
@@ -780,6 +782,21 @@ mod typed_url_tests {
                 "a redirect to the probe URL itself names no URL to type, got: {error}"
             );
         }
+    }
+
+    /// An absolute `Location` with an empty segment before the probe path
+    /// names the root of the host that the probe asked. The probe of that
+    /// root is the URL that just failed.
+    #[test]
+    fn an_absolute_redirect_to_the_probed_root_names_no_url_to_type() {
+        let probed = Url::parse("http://host/proxy/network/integration/v1/info")
+            .expect("the probe URL must parse");
+
+        assert_eq!(
+            controller_behind_redirect(&probed, "http://host//proxy/network/integration/v1/info"),
+            None,
+            "a redirect to the probed controller names no URL to type"
+        );
     }
 }
 
