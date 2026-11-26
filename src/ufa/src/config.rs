@@ -1557,9 +1557,10 @@ mod tests {
     ///
     /// The file holds a pasted controller key and a pasted plaintext Site
     /// Manager key, and it is created before either is written. A create at the
-    /// process umask lands on 0644 on a normal machine, so every save hands every other user of that machine a
-    /// window in which the file is readable — and a run interrupted inside the
-    /// window leaves it that way for good.
+    /// process umask lands on 0644 on a normal machine, so every save hands
+    /// every other user of that machine a window in which the file is
+    /// readable — and a run interrupted inside the window leaves it that way
+    /// for good.
     ///
     /// The umask is stated rather than inherited. A developer whose shell sets
     /// `umask 077` would otherwise watch a 0666 create land on 0600 and read
