@@ -5,10 +5,11 @@
 //! need no window.
 
 use std::ffi::OsString;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use crate::error::NleError;
-use crate::export::{ExportRequest, ExportTarget, Theme};
+use crate::export::{ExportRequest, ExportTarget, Resolution, Theme};
 use crate::format::file_name;
 
 /// The stem of a file name that has no stem left after the endings go.
@@ -177,6 +178,28 @@ fn stem_or_default(name: &str) -> &str {
     }
 }
 
+/// Reads the text of the frame rate field. Empty text gives `None`.
+fn parse_fps(text: &str) -> Result<Option<NonZeroU32>, NleError> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    text.parse().map(Some).map_err(|_| {
+        NleError::ExportError(format!(
+            "the frame rate \"{text}\" is not a whole number above zero"
+        ))
+    })
+}
+
+/// Reads the text of the resolution field. Empty text gives `None`.
+fn parse_resolution(text: &str) -> Result<Option<Resolution>, NleError> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    text.parse().map(Some)
+}
+
 /// The settings of the export bar, as the user set them.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct ExportSettings {
@@ -203,7 +226,24 @@ impl ExportSettings {
     /// Returns `NleError::ExportError` when the kind is a video and the frame
     /// rate or the resolution is not valid.
     pub(crate) fn target(&self) -> Result<ExportTarget, NleError> {
-        Ok(ExportTarget::Recording { compress: None })
+        match self.kind {
+            ExportKind::Recording => Ok(ExportTarget::Recording {
+                compress: Some(false),
+            }),
+            ExportKind::CompressedRecording => Ok(ExportTarget::Recording {
+                compress: Some(true),
+            }),
+            ExportKind::Web => Ok(ExportTarget::Web {
+                theme: self.theme,
+                compress: self.compress_web,
+            }),
+            ExportKind::Mp4 | ExportKind::Gif => Ok(ExportTarget::Video {
+                theme: self.theme,
+                fps: parse_fps(&self.fps)?,
+                resolution: parse_resolution(&self.resolution)?,
+                optimize_web: self.optimize_web,
+            }),
+        }
     }
 
     /// The request for a file that the user picked: the path gets the ending
@@ -213,7 +253,7 @@ impl ExportSettings {
     /// Returns the errors of `ExportSettings::target`.
     pub(crate) fn request(&self, picked: PathBuf) -> Result<ExportRequest, NleError> {
         Ok(ExportRequest {
-            output_path: picked,
+            output_path: self.kind.output_path(picked),
             target: self.target()?,
         })
     }
