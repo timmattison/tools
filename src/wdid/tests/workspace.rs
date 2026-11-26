@@ -263,7 +263,13 @@ fn a_repo_that_is_not_a_workspace_is_an_error_also_with_a_record() {
     )
     .unwrap_err();
 
-    assert!(error.to_string().contains("--repo <path>"), "{error}");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "{} is not a cargo workspace (it has no Cargo.toml)",
+            canonical(empty.path()).display()
+        )
+    );
 }
 
 /// Gives the key of a `path+file` record of `package` in `crate_dir`, as cargo
