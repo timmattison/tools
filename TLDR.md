@@ -6,7 +6,7 @@ A one-line description of every program documented in the [README](./README.md),
 | --- | --- |
 | `aa` | Quickly prints your AWS caller identity as JSON, no pager. |
 | `aws2env` | Converts AWS credentials/config into env-var exports (use with `eval $(aws2env)`). |
-| `beta` | Records and replays terminal sessions; exports to HTML players or MP4/GIF. |
+| `beta` | Records and replays terminal sessions; exports to HTML players or MP4/GIF, with chapter markers in the player and chapters in an MP4. |
 | `bibibi` | Finds the commit that caused a regression, with a test from a later commit. |
 | `bm` | Bulk Move — recursively find and move files matching a pattern to a destination. |
 | `cctop` | Claude Code top — one row for each live Claude Code session with its state (working, needs-you, idle, agents, or shells) and a frozen flag when its process is stopped, a log of the changes, a macOS notification when a session needs you, and Enter to bring its Zellij pane and WezTerm window to the front. |
@@ -49,7 +49,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `localnext` | Serves a statically exported Next.js app from its `out` directory, on a port derived from the project and the git branch. |
 | `msgs` | A macOS desktop app to browse, search, and export iMessage conversations. It reads `chat.db` read-only. |
 | `ng` | Navel-Gaze — watches JS/TS files and re-runs `pnpm lint` (or `--typecheck`) on change. |
-| `nle` | Non-Linear Editor — a Dioxus desktop editor for `beta` terminal recordings. It opens a recording into an edit project of clips, tracks, and filters, with undo and redo, and shows its metadata. Run it with `src/nle/scripts/dev.ts` (`dx serve`), and build it with `dx bundle --desktop`. |
+| `nle` | Non-Linear Editor — a Dioxus desktop editor for `beta` terminal recordings. It opens a recording into an edit project of clips, tracks, filters, and chapter markers, with undo and redo, and shows its metadata and a searchable chapter list. Run it with `src/nle/scripts/dev.ts` (`dx serve`), and build it with `dx bundle --desktop`. |
 | `nodenuke` | Removes `node_modules` directories and lock files throughout a repo. |
 | `nodeup` | Updates npm/pnpm/yarn packages across all `package.json` directories. |
 | `nwt` | New Worktree — creates a git worktree with a random Docker-style name, links the child repositories of a container into it, and can leave a heavy tracked directory out of it. |

@@ -53,7 +53,7 @@ At the end of this phase: load a recording, apply filters, preview the result, e
 |-------|-------------|-------|
 | #151 | xterm.js preview pane | Reference code already exists in `web.rs` (the `TerminalPlayer` JavaScript class). Consider snapshotting terminal state at intervals for efficient seeking. |
 | #158 | Export edited recordings | Flatten timeline to Beta JSON, pipe to existing Rust exporter. |
-| #164 | Chapter index | Manual markers first. Auto-detect commands is a future enhancement. |
+| #164 | Chapter index | Manual markers are done. The project holds them, the properties panel adds, edits, removes, and searches them, and the render moves them through the filters. `beta export web` shows them on the progress bar, and `beta export video` writes them into an MP4. Markers on the timeline and a jump to a chapter wait for #150 and #151. Auto-detect commands is a future enhancement. |
 
 ### Phase 3: Timeline UI (2-3 weeks)
 

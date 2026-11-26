@@ -105,6 +105,12 @@ Export to optimized GIF:
 beta export video session.json -o session.gif --fps 15 --optimize-web
 ```
 
+A recording can hold chapters (see [Recording Format](#recording-format)). The
+HTML player shows one marker for each chapter on its progress bar, and a click
+on a marker moves the player to that chapter. An MP4 gets the chapters as
+chapter metadata, which video players show as a chapter list. A GIF has no
+chapters, and the export says so.
+
 ### Playback Controls
 
 During playback, you can use the following keyboard controls:
@@ -134,6 +140,9 @@ The recording format is JSON-based and compatible with asciinema v2 format struc
     {"time": 0.0, "type": "o", "data": "$ "},
     {"time": 1.234, "type": "i", "data": "ls\r"},
     {"time": 1.345, "type": "o", "data": "file1.txt  file2.txt\r\n$ "}
+  ],
+  "chapters": [
+    {"time": 1.234, "label": "List the files"}
   ]
 }
 ```
@@ -141,6 +150,10 @@ The recording format is JSON-based and compatible with asciinema v2 format struc
 Event types:
 - `"o"`: Output from the terminal
 - `"i"`: Input to the terminal
+
+`chapters` is optional. Each chapter has a time in seconds from the start and a
+label. `beta record` writes no chapters. The `nle` editor writes them, in time
+order. A file with no `chapters` key has no chapters.
 
 ## Examples
 

@@ -1060,6 +1060,8 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
   - Terminal session recorder and player — because Betamax was always better than VHS. Captures
     terminal I/O with microsecond timestamps, replays with speed control / pause / rewind, and can
     export recordings to self-contained HTML players or MP4/GIF videos with multiple themes.
+  - A recording with chapters gets one marker for each chapter on the progress bar of the HTML
+    player, and chapter metadata in an MP4. A GIF has no chapters.
   - To install: `cargo install --git https://github.com/timmattison/tools beta`
 - vpn-tunnel
   - Generates Docker-based VPN tunnels using gluetun + ProtonVPN + WireGuard. Produces a ready-to-run
@@ -6223,8 +6225,9 @@ cargo tauri build --no-bundle   # the binary is target/release/msgs
 
 A desktop application for the terminal recordings that `beta` writes. It opens
 a `.json` or `.json.gz` recording, makes an edit project of it, and shows its
-metadata. The timeline (issue #150) and the preview pane (issue #151) are
-placeholders, thus the window cannot edit yet.
+metadata. The window can add, edit, and remove the chapter markers of the
+project. The timeline (issue #150) and the preview pane (issue #151) are
+placeholders.
 
 The application is one Rust crate on Dioxus 0.7, with the desktop (webview)
 renderer. Its components call the Rust code directly, and the open project is
@@ -6233,7 +6236,8 @@ Dioxus state, thus no IPC layer and no frontend package exist.
 The editing engine of the crate has four parts:
 
 - **Edit project** (`EditProject`): clips of source recordings, placed on the
-  tracks of the timeline, and the filters that apply to the result. An edit
+  tracks of the timeline, the filters that apply to the result, and the chapter
+  markers. An edit
   never changes a source recording. A project saves to JSON, plain or gzip, and
   loads back. A save writes each source recording once, also when several clips
   cut it.
@@ -6241,10 +6245,34 @@ The editing engine of the crate has four parts:
   `Fn(&[Event], &FilterOptions) -> Vec<Event>`, registered by kind. The filters
   of a project run in order, each on the whole timeline or on a range of it.
   No filter ships yet. Issues #152 to #168 add them.
-- **Render**: the registry flattens a project into one `beta` recording.
+- **Render**: the registry flattens a project into one `beta` recording. The
+  chapter markers go into the `chapters` list of the recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
   undo and redo history.
+
+### Chapters
+
+The properties panel holds a chapter panel. To add a chapter, type its time and
+its label, then click **Add Chapter**. The time can be seconds (`83.5`),
+`M:SS` (`1:23.5`), or `H:MM:SS` (`1:02:03.5`). **Edit** puts a chapter back in
+the form, and **Remove** deletes it. The search field shows only the chapters
+whose label holds the search text, with no attention to case.
+
+The list shows the chapters in time order. A chapter after the end of the
+timeline gets the note `after the end`. Each change is an edit, thus undo and
+redo include it, and the project file keeps the chapters.
+
+The time of a chapter is on the timeline before the filters. The render moves
+each chapter with the events around it. Thus a filter that changes the timing,
+for example a speed change, keeps the chapter on the same content. A chapter
+after the end of the rendered recording is not in it.
+
+`beta export web` shows the chapters of a rendered recording as markers on the
+progress bar. A click on a marker moves the player to that chapter.
+`beta export video` writes them into an MP4 as chapters. Markers on the
+timeline, and a jump of the preview to a chapter, wait for the timeline
+(issue #150) and the preview pane (issue #151).
 
 The crate also has functions that save the rendered recording
 (`Editor::save_recording`), list the recordings in a directory, and export a
