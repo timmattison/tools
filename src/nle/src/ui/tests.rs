@@ -17,6 +17,7 @@ use tokio::sync::oneshot;
 
 use crate::editor::Edit;
 use crate::error::NleError;
+use crate::filters::fast_forward::{self, Acceleration, Mode};
 use crate::types::{ClipId, Seconds};
 
 const FIXTURE_PATH: &str = "/home/user/recordings/demo.json";
@@ -923,4 +924,164 @@ fn an_edit_after_a_speed_change_shows_the_duration_after_it() {
         edited_duration(&Some(document)),
         format_duration(65.3 / 4.0)
     );
+}
+
+// The pure parts of the fast-forward panel.
+
+/// The text of the fields of a fresh fast-forward panel, with a region.
+fn fields<'a>(start: &'a str, end: &'a str) -> FastForwardFields<'a> {
+    FastForwardFields {
+        start,
+        end,
+        speed: "20",
+        first: "3",
+        last: "3",
+    }
+}
+
+/// The region from `start` to `end` seconds.
+fn range(start: f64, end: f64) -> FilterRegion {
+    FilterRegion::Range {
+        start: Seconds::new(start).expect("a time"),
+        end: Seconds::new(end).expect("a time"),
+    }
+}
+
+#[test]
+fn skip_to_end_reads_the_region_and_nothing_else() {
+    let all_bad = FastForwardFields {
+        speed: "abc",
+        first: "x",
+        last: "-1",
+        ..fields(" 10 ", "20")
+    };
+    let filter = fast_forward_change(FastForwardButton::SkipToEnd, &all_bad).expect("a filter");
+    assert_eq!(
+        filter,
+        fast_forward::applied(range(10.0, 20.0), Mode::SkipToEnd)
+    );
+}
+
+#[test]
+fn accelerate_reads_the_region_and_the_speed_only() {
+    let bad_lines = FastForwardFields {
+        first: "x",
+        last: "y",
+        speed: " 25.5 ",
+        ..fields("10", "30")
+    };
+    let filter = fast_forward_change(FastForwardButton::Accelerate, &bad_lines).expect("a filter");
+    let acceleration = Acceleration::new(25.5).expect("an acceleration");
+    assert_eq!(
+        filter,
+        fast_forward::applied(range(10.0, 30.0), Mode::Accelerate(acceleration))
+    );
+}
+
+#[test]
+fn summarize_reads_the_region_and_the_lines_only() {
+    let bad_speed = FastForwardFields {
+        speed: "abc",
+        first: " 2 ",
+        last: "0",
+        ..fields("1", "5")
+    };
+    let filter = fast_forward_change(FastForwardButton::Summarize, &bad_speed).expect("a filter");
+    assert_eq!(
+        filter,
+        fast_forward::applied(range(1.0, 5.0), Mode::Summary { head: 2, tail: 0 })
+    );
+}
+
+#[test]
+fn each_button_gives_the_reason_of_its_bad_field() {
+    use FastForwardButton::{Accelerate, SkipToEnd, Summarize};
+    let cases = [
+        (SkipToEnd, fields("abc", "20"), "the start is not a number"),
+        (SkipToEnd, fields("10", "xyz"), "the end is not a number"),
+        (
+            SkipToEnd,
+            fields("10", "5"),
+            "the end must come after the start",
+        ),
+        (
+            SkipToEnd,
+            fields("-1", "20"),
+            "Invalid time: -1 (a time must be finite and not below zero)",
+        ),
+        (
+            Accelerate,
+            FastForwardFields {
+                speed: "abc",
+                ..fields("10", "20")
+            },
+            "the speed is not a number",
+        ),
+        (
+            Accelerate,
+            FastForwardFields {
+                speed: "1",
+                ..fields("10", "20")
+            },
+            "Invalid acceleration: 1 (an acceleration must be finite and above 1)",
+        ),
+        (
+            Summarize,
+            FastForwardFields {
+                first: "-1",
+                ..fields("10", "20")
+            },
+            "the first lines are not a whole number of 0 or more",
+        ),
+        (
+            Summarize,
+            FastForwardFields {
+                last: "1.5",
+                ..fields("10", "20")
+            },
+            "the last lines are not a whole number of 0 or more",
+        ),
+    ];
+    for (button, fields, reason) in cases {
+        assert_eq!(
+            fast_forward_change(button, &fields).expect_err("a reason"),
+            reason,
+            "{button:?}"
+        );
+    }
+}
+
+/// A document whose project holds a time dilation filter at index 0, and
+/// two fast-forward filters at the indexes 1 and 2.
+#[test]
+fn fast_forward_rows_keep_the_place_of_each_filter_in_the_project() {
+    let mut document = app_document();
+    document
+        .editor
+        .apply(double_speed())
+        .expect("an edit that applies");
+    let skip = fast_forward::applied(range(10.0, 20.0), Mode::SkipToEnd);
+    let accelerate = fast_forward::applied(
+        FilterRegion::All,
+        Mode::Accelerate(Acceleration::new(20.0).expect("an acceleration")),
+    );
+    let summary = fast_forward::applied(range(1.0, 2.5), Mode::Summary { head: 3, tail: 0 });
+    for (index, filter) in [(1, skip), (2, accelerate), (3, summary)] {
+        document
+            .editor
+            .apply(Edit::AddFilter { index, filter })
+            .expect("an edit that applies");
+    }
+    assert_eq!(
+        fast_forward_rows(&Some(document)),
+        vec![
+            (1, "10 s to 20 s: skip to end".to_owned()),
+            (2, "the whole timeline: accelerate at 20\u{d7}".to_owned()),
+            (
+                3,
+                "1 s to 2.5 s: summary of the first 3 and the last 0 lines".to_owned()
+            ),
+        ]
+    );
+    assert!(fast_forward_rows(&None).is_empty());
 }

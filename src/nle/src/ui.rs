@@ -16,6 +16,7 @@ use dioxus::prelude::*;
 
 use crate::editor::{Edit, Editor};
 use crate::error::NleError;
+use crate::filters::fast_forward::{self, Acceleration, Mode};
 use crate::filters::time_dilation::{self, Speed};
 use crate::pipeline::FilterRegistry;
 use crate::types::{AppliedFilter, EditProject, FilterRegion, Seconds};
@@ -475,6 +476,50 @@ fn speed_change(start: &str, end: &str, speed: &str) -> Result<AppliedFilter, St
     let speed: f64 = speed.trim().parse().map_err(|_| SPEED_NOT_A_NUMBER)?;
     let speed = Speed::new(speed).map_err(|error| error.to_string())?;
     Ok(time_dilation::applied(region, speed))
+}
+
+/// The button of the fast-forward panel that a click pressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FastForwardButton {
+    /// Skip to End.
+    SkipToEnd,
+    /// Accelerate.
+    Accelerate,
+    /// Summarize.
+    Summarize,
+}
+
+/// The text of the five fields of the fast-forward panel.
+#[derive(Debug, Clone, Copy)]
+struct FastForwardFields<'a> {
+    /// The start of the region.
+    start: &'a str,
+    /// The end of the region.
+    end: &'a str,
+    /// The speed of Accelerate.
+    speed: &'a str,
+    /// The number of first lines of Summarize.
+    first: &'a str,
+    /// The number of last lines of Summarize.
+    last: &'a str,
+}
+
+/// Reads the fields that `button` uses. The answer is the filter to add, or
+/// the reason why those fields do not make one.
+fn fast_forward_change(
+    button: FastForwardButton,
+    fields: &FastForwardFields,
+) -> Result<AppliedFilter, String> {
+    let _ = (button, fields);
+    Err(String::new())
+}
+
+/// One row for each fast-forward filter of the project: the index of the
+/// filter in the project, and the text of its row. Filters of other kinds
+/// have no row, but they keep their place in the index.
+fn fast_forward_rows(document: &Option<Document>) -> Vec<(usize, String)> {
+    let _ = document;
+    Vec::new()
 }
 
 /// The duration of the rendered project of the document as text, or the text
