@@ -66,7 +66,7 @@ fn a_walk_that_stays_on_its_device_does_not_enter_another_device() {
 
     let crosses = WalkRoot::new(tree.root());
     let found = Found::default();
-    walk(
+    let report = walk(
         &faulty,
         &[crosses],
         Options::default(),
@@ -74,6 +74,7 @@ fn a_walk_that_stays_on_its_device_does_not_enter_another_device() {
         found.sink(),
     );
     assert_eq!(found.sorted(), sorted(vec![here, there]));
+    assert!(report.is_complete(), "{report:?}");
 }
 
 #[test]
