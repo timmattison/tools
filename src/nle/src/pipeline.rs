@@ -66,7 +66,7 @@ pub type FilterFn = dyn Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync
 /// 4. The end is never less than the time of the last event.
 ///
 /// Thus a filter that cuts the time after its last event answers that time
-/// as the end. A plain filter cannot do this, because step 6 on `FilterFn`
+/// as the end. A plain filter cannot do this, because step 8 on `FilterFn`
 /// keeps the gap between the last event and the end.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Span {
