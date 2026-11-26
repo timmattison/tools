@@ -907,3 +907,23 @@ async fn a_failed_export_shows_the_banner_until_an_export_works() {
     assert!(!page.contains("role=\"alert\""), "{page}");
     assert!(page.contains("Exported to /tmp/out.json"), "{page}");
 }
+
+#[tokio::test]
+async fn a_bad_frame_rate_shows_the_banner_and_asks_no_dialog() {
+    let fakes = fakes_with_recording();
+    let mut window = window_with_recording(&fakes).await;
+    window.change(window.kind_select(), "mp4");
+    window.input(window.fps_input(), "0");
+    window.click(window.export_button());
+    window.settle().await;
+    let page = window.html();
+    assert!(page.contains("role=\"alert\""), "{page}");
+    assert!(
+        page.contains(
+            "Export failed: the frame rate &quot;0&quot; is not a whole number above zero"
+        ) || page.contains("Export failed: the frame rate \"0\" is not a whole number above zero"),
+        "{page}"
+    );
+    assert!(fakes.dialogs().is_empty());
+    assert!(!window.export_is_disabled(), "{page}");
+}
