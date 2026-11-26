@@ -540,3 +540,27 @@ fn a_range_redacts_only_inside_the_range() {
         vec![1.0, 3.0, 5.0]
     );
 }
+
+fn mask_with(preset: Preset, data: &str) -> String {
+    let redaction = Redaction::new(Find::Preset(preset), Replacement::Asterisks, false).unwrap();
+    run(vec![out(1.0, data)], &redaction).remove(0).data
+}
+
+fn assert_masked(preset: Preset, data: &str) {
+    let want = "*".repeat(data.chars().count());
+    assert_eq!(mask_with(preset, data), want, "{data}");
+}
+
+fn assert_unchanged(preset: Preset, data: &str) {
+    assert_eq!(mask_with(preset, data), data);
+}
+
+#[test]
+fn the_email_preset_masks_an_email_address() {
+    assert_masked(Preset::Email, "tim@example.com");
+    assert_masked(Preset::Email, "first.last+tag@mail.example.co.uk");
+    assert_eq!(
+        mask_with(Preset::Email, "mail tim@example.com now"),
+        "mail *************** now"
+    );
+}

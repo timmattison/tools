@@ -59,7 +59,10 @@
 
 use serde::{Deserialize, Serialize};
 
+mod preset;
 mod stream;
+
+pub use preset::Preset;
 
 use crate::error::NleError;
 use crate::pipeline::{FilterRegistry, Span};
@@ -94,6 +97,8 @@ pub enum Find {
     Text(String),
     /// A regular expression in the syntax of the `regex` crate.
     Regex(String),
+    /// A pattern that ships with the app.
+    Preset(Preset),
 }
 
 /// What to put in place of a match.
@@ -144,6 +149,7 @@ impl Redaction {
             }
             Find::Text(text) => regex::escape(text),
             Find::Regex(pattern) => pattern.clone(),
+            Find::Preset(preset) => preset.pattern().to_string(),
         };
         if let Replacement::Text(text) = &replacement {
             if text.chars().any(char::is_control) {
