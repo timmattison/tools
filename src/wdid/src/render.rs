@@ -9,7 +9,7 @@ use serde::Serialize;
 use crate::catalog::PathState;
 use crate::tally::{Classification, Summary, Tally, ToolUsage, Window};
 use crate::tool::ToolName;
-use crate::workspace::Workspace;
+use crate::workspace::{FoundBy, Workspace};
 
 /// The name of each column of the table, in order.
 const COLUMNS: [&str; 9] = [
@@ -299,14 +299,46 @@ fn summary_lines(summary: &Summary, window: &Window) -> String {
     format!("{history}\n{shell}")
 }
 
+/// The text of step 1 in the workspace line, in the parentheses after the
+/// root.
+const FOUND_BY_REPO_FLAG: &str = "--repo";
+
+/// The text of step 2 in the workspace line.
+const FOUND_BY_WORK_TREE: &str = "the git work tree of the current directory";
+
+/// What starts the text of step 3 in the workspace line.
+const FOUND_BY_INSTALLED: &str = "the source of the installed wdid";
+
+/// Gives the line that names the workspace and the step that found it.
+fn workspace_line(workspace: &Workspace) -> String {
+    let found_by = match &workspace.found_by {
+        FoundBy::RepoFlag => FOUND_BY_REPO_FLAG.to_string(),
+        FoundBy::WorkTree => FOUND_BY_WORK_TREE.to_string(),
+        FoundBy::InstalledGit { commit, .. } => {
+            format!("{FOUND_BY_INSTALLED}, commit {}", commit.short())
+        }
+        FoundBy::InstalledPath { crate_dir } => {
+            format!(
+                "{FOUND_BY_INSTALLED}, cargo install --path {}",
+                crate_dir.display()
+            )
+        }
+    };
+    format!("Workspace: {} ({found_by})", workspace.root.display())
+}
+
 /// Gives the text report. `workspace` is the workspace of the report. `width`
 /// is the table width. `None` sets no limit.
 #[must_use]
-pub fn text(tally: &Tally, window: &Window, _workspace: &Workspace, width: Option<u16>) -> String {
+pub fn text(tally: &Tally, window: &Window, workspace: &Workspace, width: Option<u16>) -> String {
     [
         table(tally, width),
         group_lines(tally, window),
-        summary_lines(&tally.summary, window),
+        format!(
+            "{}\n{}",
+            summary_lines(&tally.summary, window),
+            workspace_line(workspace)
+        ),
     ]
     .join(BETWEEN_BLOCKS)
         + "\n"
