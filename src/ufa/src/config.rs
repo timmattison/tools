@@ -905,82 +905,52 @@ fn prompt_for_site_manager_key(console: &mut impl Console) -> Result<String> {
 #[cfg(unix)]
 const OWNER_ONLY: u32 = 0o600;
 
-/// Create the configuration file, emptied and ready to be written, at a mode
-/// no other user can read.
-///
-/// The file holds a controller key and a Site Manager key that the user pasted
-/// during setup, and the mode goes on the open rather than on
-/// the file afterwards. A create asks the kernel for 0666 and the kernel
-/// subtracts the process umask, which lands on 0644 on a normal machine, so a
-/// file narrowed only after the write is readable by every other user of that
-/// machine for as long as the write takes — and stays that way for good when
-/// the run is interrupted inside that window. Nothing in this crate handles a
-/// signal, so nothing tidies up after such a run.
-///
-/// The mode on the open reaches only a file that the open creates. A file that
-/// was already there keeps the mode it had, and a configuration file written by
-/// an earlier version of `ufa` is such a file, at a wider mode. So this call
-/// also sets the mode on the open file handle. The open truncates the file
-/// first, and the mode is narrow before the caller writes a byte, in both
-/// cases.
-///
-/// # Arguments
-///
-/// * `path` - Where the configuration file goes.
-///
-/// # Returns
-///
-/// The open file, truncated to nothing.
-#[cfg(unix)]
-fn create_config_file(path: &Path) -> std::io::Result<fs::File> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-    let file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(OWNER_ONLY)
-        .open(path)?;
-    file.set_permissions(fs::Permissions::from_mode(OWNER_ONLY))?;
-    Ok(file)
-}
-
-/// Create the configuration file, emptied and ready to be written.
-///
-/// Windows has no umask and no mode bits to ask for; the file inherits the
-/// containing directory's ACL, which is already per-user under `%APPDATA%`.
-///
-/// # Arguments
-///
-/// * `path` - Where the configuration file goes.
-///
-/// # Returns
-///
-/// The open file, truncated to nothing.
-#[cfg(not(unix))]
-fn create_config_file(path: &Path) -> std::io::Result<fs::File> {
-    fs::File::create(path)
-}
-
 /// Replace the configuration file at `path` with the bytes that `write` puts
 /// into the file it is given.
 ///
-/// The seam lets a test make a step after the open fail.
+/// The new contents go into a new file in the same directory, at a mode no
+/// other user can read, and a rename then puts that file at `path`. Thus no
+/// other user can read the new keys at any point, a descriptor that is open on
+/// the old file keeps the old file, and a failure before the rename leaves the
+/// old file whole. The mode goes on the creation of the new file, so the
+/// process umask cannot widen it. A `path` that is a symbolic link stays a link,
+/// and the rename replaces the file that the link points at. Windows has no
+/// mode bits to ask for. The new file inherits the ACL of the directory, which
+/// is per-user under `%APPDATA%`.
 ///
 /// # Arguments
 ///
 /// * `path` - Where the configuration file goes.
-/// * `write` - Puts the new contents into the open file.
+/// * `write` - Puts the new contents into the new file.
 ///
 /// # Errors
 ///
-/// Returns the error of the open, or the error that `write` returns.
+/// Returns the error of the creation of the new file, of `write`, of the sync,
+/// or of the rename. The old file is whole after each of them.
 fn replace_config_file(
     path: &Path,
     write: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    let mut file = create_config_file(path)?;
-    write(&mut file)
+    let target = match fs::canonicalize(path) {
+        Ok(real) => real,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
+        Err(error) => return Err(error),
+    };
+    let directory = target.parent().unwrap_or_else(|| Path::new("."));
+
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".config.toml.");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(OWNER_ONLY));
+    }
+    let mut temp = builder.tempfile_in(directory)?;
+
+    write(temp.as_file_mut())?;
+    temp.as_file().sync_all()?;
+    temp.persist(&target).map_err(|error| error.error)?;
+    Ok(())
 }
 
 /// The store that reads the keys that 1Password holds.
@@ -1593,33 +1563,39 @@ mod tests {
         create_directory(&temp.dir);
         let path = temp.config_file();
 
-        let mode = crate::test_support::with_umask(0o000, || {
-            let file = create_config_file(&path).expect("creating the config file must succeed");
-            drop(file);
-
-            fs::metadata(&path)
-                .expect("the created config file must exist")
-                .permissions()
-                .mode()
-                & 0o777
+        let mut mode_during_write = 0;
+        crate::test_support::with_umask(0o000, || {
+            replace_config_file(&path, |file| {
+                mode_during_write = file.metadata()?.permissions().mode() & 0o777;
+                Ok(())
+            })
+            .expect("replacing the config file must succeed");
         });
+        let final_mode = fs::metadata(&path)
+            .expect("the created config file must exist")
+            .permissions()
+            .mode()
+            & 0o777;
 
         assert_eq!(
-            mode, 0o600,
+            mode_during_write, 0o600,
             "the config file holds cleartext keys, so no other user may read it \
-             at any point in its life, got {mode:o}"
+             at any point in its life, got {mode_during_write:o}"
+        );
+        assert_eq!(
+            final_mode, 0o600,
+            "the config file must end at an owner-only mode, got {final_mode:o}"
         );
     }
 
-    /// The mode an open asks for reaches a file that open created, and no
-    /// other. A configuration file written by a version of `ufa` that created
-    /// it at the process umask is already on disk at 0644. The save narrows
-    /// that file, and
-    /// `an_existing_wider_config_file_is_narrowed_before_the_write` shows that
-    /// it happens before the write.
+    /// A configuration file written by a version of `ufa` that created it at the
+    /// process umask is already on disk at 0644. The save puts a new owner-only
+    /// file at its path, and
+    /// `the_keys_go_into_a_new_owner_only_file_when_a_wider_one_exists` shows
+    /// that the keys never go into the old file.
     #[cfg(unix)]
     #[test]
-    fn saving_over_a_file_that_was_already_wider_narrows_it() {
+    fn saving_over_a_file_that_was_already_wider_leaves_an_owner_only_file() {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = TempConfigDir::new("already-wider");
@@ -1644,38 +1620,37 @@ mod tests {
             & 0o777;
         assert_eq!(
             mode, 0o600,
-            "a file that was already readable by others must be narrowed by the \
-             save, got {mode:o}"
+            "a file that was already readable by others must be replaced by an \
+             owner-only file, got {mode:o}"
         );
     }
 
-    /// The mode of a file that was already on disk is narrow before the write,
-    /// not only after it. The test keeps the file open and unwritten, which is
-    /// the moment before the keys go in.
+    /// The mode of the old file does not matter, because the keys go into a new
+    /// file. The test reads the mode of the file that the write step is given,
+    /// which is the moment before the keys go in.
     #[cfg(unix)]
     #[test]
-    fn an_existing_wider_config_file_is_narrowed_before_the_write() {
+    fn the_keys_go_into_a_new_owner_only_file_when_a_wider_one_exists() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp = TempConfigDir::new("narrowed-before-write");
+        let temp = TempConfigDir::new("new-file-for-keys");
         create_directory(&temp.dir);
         let path = temp.config_file();
         write_file(&path, "url = \"https://192.168.1.1\"\n");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
             .expect("the existing file must be settable to a wider mode");
 
-        let _open_and_unwritten =
-            create_config_file(&path).expect("creating the config file must succeed");
+        let mut mode_during_write = 0;
+        replace_config_file(&path, |file| {
+            mode_during_write = file.metadata()?.permissions().mode() & 0o777;
+            Ok(())
+        })
+        .expect("replacing the config file must succeed");
 
-        let mode = fs::metadata(&path)
-            .expect("the config file must exist")
-            .permissions()
-            .mode()
-            & 0o777;
         assert_eq!(
-            mode, 0o600,
-            "the keys are written next, and a file that is still readable by \
-             others at this moment leaks them, got {mode:o}"
+            mode_during_write, 0o600,
+            "the keys are written next, and a file that is readable by others \
+             at this moment leaks them, got {mode_during_write:o}"
         );
     }
 
@@ -1703,7 +1678,11 @@ mod tests {
         );
         let mut names: Vec<_> = fs::read_dir(&temp.dir)
             .expect("the config directory must be readable")
-            .map(|entry| entry.expect("a directory entry must be readable").file_name())
+            .map(|entry| {
+                entry
+                    .expect("a directory entry must be readable")
+                    .file_name()
+            })
             .collect();
         names.sort();
         assert_eq!(
@@ -1753,6 +1732,40 @@ mod tests {
                 .expect("the saved config file must exist")
                 .contains("new-plaintext-controller-key"),
             "the config file at the path must hold the new key"
+        );
+    }
+
+    /// A config file that is a symbolic link stays a link. The rename replaces
+    /// the file that the link points at, and not the link.
+    #[cfg(unix)]
+    #[test]
+    fn saving_through_a_symlinked_config_file_keeps_the_link() {
+        let temp = TempConfigDir::new("symlinked-config");
+        create_directory(&temp.dir);
+        let real = temp.dir.join("real-config.toml");
+        write_file(&real, "url = \"https://192.168.1.1\"\n");
+        let link = temp.config_file();
+        std::os::unix::fs::symlink(&real, &link).expect("the link must be creatable");
+
+        Config {
+            api_key: Some("plaintext-controller-key".into()),
+            ..Config::default()
+        }
+        .save_to(&link)
+        .expect("saving through the link must succeed");
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .expect("the link must exist")
+                .file_type()
+                .is_symlink(),
+            "the save must keep the config file a symbolic link"
+        );
+        assert!(
+            fs::read_to_string(&real)
+                .expect("the real file must exist")
+                .contains("plaintext-controller-key"),
+            "the real file that the link points at must hold the key"
         );
     }
 
