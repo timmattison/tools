@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tokio::io::AsyncBufReadExt;
 
@@ -73,14 +73,53 @@ fn has_ending(name: &str, endings: &[&str]) -> bool {
         .any(|ending| lowercase_name.ends_with(ending))
 }
 
+/// The most symbolic links that `follow_links` follows before it gives up.
+const MAX_LINKS: usize = 40;
+
+/// Follow the chain of symbolic links that starts at `path`. Return the end of
+/// the chain. A relative target resolves against the directory of the link.
+/// A link to a file that does not exist ends at that missing file. It refuses a
+/// chain of more than `MAX_LINKS` links, so a loop ends. Each error goes
+/// through `to_error`.
+fn follow_links(path: &Path, to_error: fn(String) -> NleError) -> Result<PathBuf, NleError> {
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_LINKS {
+        let is_link = std::fs::symlink_metadata(&current)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false);
+        if !is_link {
+            return Ok(current);
+        }
+        let target = std::fs::read_link(&current).map_err(|e| {
+            to_error(format!(
+                "Failed to read the symbolic link {}: {e}",
+                current.display()
+            ))
+        })?;
+        current = match current.parent() {
+            Some(parent) => parent.join(target),
+            None => target,
+        };
+    }
+    Err(to_error(format!(
+        "Refusing to write {}: more than {MAX_LINKS} symbolic links",
+        path.display()
+    )))
+}
+
 /// Resolve an output path that nle writes, or that it asks `beta` to write.
 ///
 /// It refuses a path whose file name, in lowercase, does not end with one of
-/// `endings`. It refuses a path with no file name, or with no parent
-/// directory, or whose parent directory does not exist. Otherwise it returns
-/// the canonical parent directory joined with the file name. It does not
-/// confine the path: a `..` or a symlink in the parent resolves to wherever it
-/// points. Each error goes through `to_error`.
+/// `endings`. It refuses a path with no file name. Then it follows the chain of
+/// symbolic links that starts at the path, so the write changes the file at the
+/// end of the chain and keeps each link. The check of the ending applies to
+/// that file as well, and a link to a file with another ending is refused. A
+/// link to a file that does not exist ends at that file, and the write creates
+/// it. A chain of more than `MAX_LINKS` links is refused. It refuses an end of
+/// the chain with no parent directory, or whose parent directory does not
+/// exist. Otherwise it returns the canonical parent directory joined with the
+/// file name. It does not confine the path: a `..` or a symbolic link in the
+/// parent resolves to wherever it points. Each error goes through `to_error`.
 fn resolve_output_path(
     path: &str,
     endings: &[&str],
@@ -93,6 +132,18 @@ fn resolve_output_path(
     if !has_ending(&file_name.to_string_lossy(), endings) {
         return Err(to_error(format!(
             "Refusing to write {path}: the file name must end in one of {}",
+            endings.join(", ")
+        )));
+    }
+    let file_path = follow_links(&file_path, to_error)?;
+    let file_name = file_path
+        .file_name()
+        .ok_or_else(|| to_error(format!("Invalid path (no filename): {path}")))?
+        .to_os_string();
+    if !has_ending(&file_name.to_string_lossy(), endings) {
+        return Err(to_error(format!(
+            "Refusing to write {path}: it links to {}, and the file name must end in one of {}",
+            file_path.display(),
             endings.join(", ")
         )));
     }
@@ -116,7 +167,8 @@ fn resolve_output_path(
 
 /// Save `recording` to `path`. It refuses a file name that does not end in
 /// `.json` or `.json.gz` in any case, and a parent directory that does not
-/// exist. An absent `compress` falls back to the `.gz` suffix of the file
+/// exist. If `path` is a symbolic link, it writes the file at the end of the
+/// link and keeps the link. That file must have such a name too. An absent `compress` falls back to the `.gz` suffix of the file
 /// name, in any case.
 pub(crate) fn save_recording_to(
     path: &str,
@@ -192,7 +244,9 @@ fn validate_export_input(input_path: &str) -> Result<PathBuf, NleError> {
 
 /// Build the arguments that all `beta export` runs share: the subcommand,
 /// the canonical input path, and the resolved output path.
-/// The output file name must end in one of `output_endings`.
+/// The output file name must end in one of `output_endings`. If the output
+/// path is a symbolic link, `beta` gets the file at the end of the link, and
+/// that file name must end in one of `output_endings` too.
 fn base_export_args(
     subcommand: &str,
     input_path: &str,
@@ -212,8 +266,8 @@ fn base_export_args(
 
 /// Build the full `beta` argument list for a video export.
 /// It fails if the format is not Video, the input file is missing, or the
-/// output file name does not end in `.mp4` or `.gif`, or the output directory
-/// does not exist.
+/// output file name, or the file that it links to, does not end in `.mp4` or
+/// `.gif`, or the output directory does not exist.
 pub(crate) fn video_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
     if !matches!(options.format, ExportFormat::Video) {
         return Err(NleError::ExportError(
@@ -247,8 +301,8 @@ pub(crate) fn video_export_args(options: &ExportOptions) -> Result<Vec<String>, 
 
 /// Build the full `beta` argument list for a web export.
 /// It fails if the format is not Web, the input file is missing, or the
-/// output file name does not end in `.html`, or the output directory does not
-/// exist.
+/// output file name, or the file that it links to, does not end in `.html`, or
+/// the output directory does not exist.
 pub(crate) fn web_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
     if !matches!(options.format, ExportFormat::Web) {
         return Err(NleError::ExportError(
