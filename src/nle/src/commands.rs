@@ -111,23 +111,6 @@ fn resolve_output_path(
     Ok(canonical_parent.join(file_name))
 }
 
-/// Save a recording to a file path.
-/// The file name must end in `.json` or `.json.gz`, in any case, and the parent
-/// directory must exist; any other path is refused.
-/// Uses gzip compression if `compress` is `Some(true)`, plain JSON if `Some(false)`,
-/// or falls back to extension detection (`.gz` suffix, in any case) if `None`.
-///
-/// # Errors
-/// Returns `NleError::SaveError` when the path is refused or the file cannot be
-/// written. A panic in the work becomes `NleError::TaskError`.
-pub async fn save_recording(
-    path: String,
-    recording: Recording,
-    compress: Option<bool>,
-) -> Result<(), NleError> {
-    run_blocking(move || save_recording_to(&path, &recording, compress)).await
-}
-
 /// Save `recording` to `path`. It refuses a file name that does not end in
 /// `.json` or `.json.gz` in any case, and a parent directory that does not
 /// exist. An absent `compress` falls back to the `.gz` suffix of the file
