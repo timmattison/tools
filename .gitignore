@@ -13,8 +13,6 @@ node_modules
 .swt-check
 !src/msgs/icons/
 !pnpm-lock.yaml
-src/nle/frontend/dist/
-src/nle/gen/
 src/msgs/gen/
 # A cdva test plants build output here for one run. A killed run leaves it behind.
 src/cdva/tests/planted-*/

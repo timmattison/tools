@@ -8,31 +8,27 @@ description = "Non-linear editor for terminal recordings"
 
 [lib]
 name = "nle_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
-
-[build-dependencies]
-tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
-tauri-plugin-dialog = "2"
-tauri-plugin-shell = "2"
+dioxus = { version = "0.7", features = ["desktop"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 flate2 = "1.0"
 buildinfo = { workspace = true }
-ts-rs = { version = "10", features = ["serde-compat"] }
 tempfile = { workspace = true }
-
-[dev-dependencies]
-# The `test` feature gives `tauri::test::mock_builder`, a mock app that the
-# tests of `beta_command` build the shell plugin command on.
-tauri = { version = "2", features = ["test"] }
-yaml-rust2 = { workspace = true }
-# The tests start node through childenv::fixture_command, because clippy.toml
+tokio = { workspace = true }
+# Every child process starts through childenv::command, because clippy.toml
 # bans std::process::Command::new.
 childenv = { workspace = true }
+chrono = { workspace = true }
+# The file dialog of the Open Recording button. These are the same features that
+# dioxus-desktop uses, so the build holds one copy of rfd.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+
+[dev-dependencies]
+dioxus-ssr = "0.7"
+toml = { workspace = true }
 # The tests of dev-script.rs and of src/commands/tests.rs write their shims
 # through testing::executable::write_executable. Linux refuses to run a shim
 # that a fork on another test thread holds open for writing (ETXTBSY).

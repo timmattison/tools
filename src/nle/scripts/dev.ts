@@ -1,32 +1,24 @@
 #!/usr/bin/env -S pnpx tsx
 /**
- * Run the NLE (Non-Linear Editor) Tauri application in development mode.
+ * Run the NLE (Non-Linear Editor) Dioxus desktop application in development mode.
  *
  * Usage:
  *   ./src/nle/scripts/dev.ts
  *
- * The script checks that cargo, the Tauri CLI and portplz exist, asks portplz
- * for a free port, checks that the checkout is writable, installs the frontend
- * dependencies, and then starts `cargo tauri dev` with Vite on that port.
- * The checks and the port come before the install on purpose: each is fast, and
- * a missing tool must stop the script before the slow work.
+ * The script checks that dx (the Dioxus CLI) and portplz exist, asks portplz
+ * for a free port, and then starts `dx serve --desktop` on that port.
+ * The checks and the port come first on purpose: each is fast, and a missing
+ * tool must stop the script before the slow build.
  *
- * The Rust toolchain, the Tauri CLI, portplz and pnpm are per-account installs,
- * and the checkout is writable only by the account that owns it. Each message
- * names the account for that reason.
+ * dx and portplz are per-account installs, and one account cannot read
+ * another's. Each message names the account for that reason.
  */
 import { spawn, spawnSync } from "node:child_process";
-import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import {
-  FRONTEND_DIR,
-  buildTauriDevArgs,
-  parsePort,
-  type Port,
-} from "./dev-utils.ts";
+import { buildDxServeArgs, parsePort, type Port } from "./dev-utils.ts";
 
 /** The first words of each message. */
 const PREFIX = "nle dev: ";
@@ -58,24 +50,18 @@ function isMissing(error: Error | undefined): boolean {
   return (error as { code?: unknown } | undefined)?.code === "ENOENT";
 }
 
-const cargoVersion = spawnSync("cargo", ["tauri", "--version"], {
-  stdio: "ignore",
-});
-if (isMissing(cargoVersion.error)) {
+const dxVersion = spawnSync("dx", ["--version"], { stdio: "ignore" });
+if (isMissing(dxVersion.error)) {
   fail([
-    `cargo is not on the PATH of the account '${user}'.`,
-    "  Rust installs per account under ~/.cargo, and one account cannot",
-    "  read another's. Run this from the account that owns the checkout,",
-    `  or install Rust for '${user}' from https://rustup.rs`,
-  ]);
-}
-if (cargoVersion.status !== 0) {
-  fail([
-    `the Tauri CLI is not installed for the account '${user}'.`,
-    "  Install it with:",
-    "    cargo install tauri-cli",
+    `dx is not on the PATH of the account '${user}'.`,
+    "  dx is the Dioxus CLI. It installs per account under ~/.cargo/bin, and one",
+    "  account cannot read another's. Install it with:",
+    "    cargo install dioxus-cli",
     "  Or run this from the account that already has it.",
   ]);
+}
+if (dxVersion.status !== 0) {
+  fail([`dx --version failed with exit status ${String(dxVersion.status)}.`]);
 }
 
 const portplz = spawnSync("portplz", [], {
@@ -100,42 +86,14 @@ if (port === null) {
   ]);
 }
 
-try {
-  fs.accessSync(nleDir, fs.constants.W_OK);
-} catch {
-  fail([
-    `the account '${user}' cannot write to ${nleDir}.`,
-    "  pnpm writes frontend/node_modules/, and the Tauri build writes gen/.",
-    "  Run this from the account that owns the checkout.",
-  ]);
-}
-
-const frontendDir = path.join(nleDir, FRONTEND_DIR);
-const install = spawnSync("pnpm", ["install"], {
-  cwd: frontendDir,
-  stdio: "inherit",
-});
-if (isMissing(install.error)) {
-  fail([
-    `pnpm is not on the PATH of the account '${user}'.`,
-    "  pnpm installs the frontend dependencies. Install it from",
-    "  https://pnpm.io/installation, or run this from the account that has it.",
-  ]);
-}
-if (install.status !== 0) {
-  fail([`pnpm install failed in ${frontendDir}.`], install.status ?? 1);
-}
-
-console.log(
-  `Starting the dev server on port ${String(port)} (chosen by portplz)`,
-);
-const tauri = spawn("cargo", buildTauriDevArgs(port), {
+console.log(`Starting dx serve on port ${String(port)} (chosen by portplz)`);
+const dx = spawn("dx", buildDxServeArgs(port), {
   cwd: nleDir,
   stdio: "inherit",
 });
-tauri.on("error", (error) => {
-  fail([`cannot start cargo tauri dev: ${error.message}`]);
+dx.on("error", (error) => {
+  fail([`cannot start dx serve: ${error.message}`]);
 });
-tauri.on("exit", (code) => {
+dx.on("exit", (code) => {
   process.exit(code ?? 1);
 });

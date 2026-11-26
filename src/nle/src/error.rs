@@ -23,7 +23,7 @@ pub enum NleError {
     TaskError(String),
 }
 
-// Tauri requires errors to implement Serialize
+// An error serializes as its message, so JSON output shows the same text as the Display form.
 impl Serialize for NleError {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
