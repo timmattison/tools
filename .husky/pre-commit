@@ -68,7 +68,7 @@ EOF
 # a move of it to a path that is not Rust, or a link in its place leaves each
 # `mod` item that names the file without its file, and the build of the tree
 # then fails.
-if staged_paths_with_deletions | grep -qE '\.rs$|(^|/)Cargo\.(toml|lock)$|^(rustfmt|rust-toolchain)\.toml$|^scripts/rust-checks\.sh$'; then
+if staged_path_matches '\.rs$|(^|/)Cargo\.(toml|lock)$|^(rustfmt|rust-toolchain)\.toml$|^scripts/rust-checks\.sh$'; then
     echo "pre-commit: running scripts/rust-checks.sh"
     ./scripts/rust-checks.sh
     rust_gate_ran=yes
