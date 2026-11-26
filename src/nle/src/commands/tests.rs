@@ -474,6 +474,49 @@ fn save_recording_to_refuses_a_loop_of_symlinks() {
     assert!(err.to_string().contains("symbolic links"), "got {err}");
 }
 
+/// Make a chain of `count` relative symbolic links in `dir` that ends at
+/// `rec.json`, and return the first link of the chain.
+#[cfg(unix)]
+fn link_chain(dir: &Path, count: usize) -> std::path::PathBuf {
+    for index in 0..count {
+        let target = if index + 1 == count {
+            "rec.json".to_string()
+        } else {
+            format!("link-{}.json", index + 1)
+        };
+        std::os::unix::fs::symlink(target, dir.join(format!("link-{index}.json"))).unwrap();
+    }
+    dir.join("link-0.json")
+}
+
+#[cfg(unix)]
+#[test]
+fn save_recording_to_writes_through_a_chain_of_max_links_symlinks() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("rec.json");
+    fs::write(&target, b"old").unwrap();
+    let first = link_chain(dir.path(), MAX_LINKS);
+    save_recording_to(&first.to_string_lossy(), &Recording::test_fixture(), None).unwrap();
+    assert!(
+        fs::read(&target).unwrap().starts_with(b"{"),
+        "the end of the chain was not written"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn save_recording_to_refuses_a_chain_of_more_than_max_links_symlinks() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("rec.json");
+    fs::write(&target, b"keep").unwrap();
+    let first = link_chain(dir.path(), MAX_LINKS + 1);
+    let err =
+        save_recording_to(&first.to_string_lossy(), &Recording::test_fixture(), None).unwrap_err();
+    assert!(matches!(err, NleError::SaveError(_)), "got {err}");
+    assert!(err.to_string().contains("symbolic links"), "got {err}");
+    assert_eq!(fs::read(&target).unwrap(), b"keep");
+}
+
 #[cfg(unix)]
 #[test]
 fn video_export_args_gives_beta_the_target_of_a_symlink() {
