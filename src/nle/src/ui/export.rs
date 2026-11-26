@@ -9,7 +9,7 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use crate::error::NleError;
-use crate::export::{ExportRequest, ExportTarget, Resolution, Theme};
+use crate::export::{ExportProgress, ExportRequest, ExportTarget, Resolution, Theme};
 use crate::format::file_name;
 
 /// The stem of a file name that has no stem left after the endings go.
@@ -198,6 +198,11 @@ fn parse_resolution(text: &str) -> Result<Option<Resolution>, NleError> {
         return Ok(None);
     }
     text.parse().map(Some)
+}
+
+/// The text of the progress before the first stage.
+pub(crate) fn progress_text(progress: Option<ExportProgress>) -> String {
+    String::new()
 }
 
 /// The settings of the export bar, as the user set them.

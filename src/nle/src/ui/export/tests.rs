@@ -216,3 +216,19 @@ fn the_request_holds_the_path_with_the_ending_of_the_kind() {
     };
     assert!(bad.request(PathBuf::from("/tmp/out")).is_err());
 }
+
+#[test]
+fn the_progress_text_names_the_stage() {
+    let cases = [
+        (None, "Export started"),
+        (Some(ExportProgress::Rendering), "Step 1 of 2: render the edit"),
+        (Some(ExportProgress::Writing), "Step 2 of 2: write the file"),
+        (
+            Some(ExportProgress::Frames { done: 30, total: 300 }),
+            "Step 2 of 2: frame 30 of 300",
+        ),
+    ];
+    for (progress, expected) in cases {
+        assert_eq!(progress_text(progress), expected, "{progress:?}");
+    }
+}
