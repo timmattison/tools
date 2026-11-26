@@ -14,6 +14,7 @@ use chrono::NaiveDate;
 use crate::command_words::{parse_line, AliasKind, CommandWord, Line};
 use crate::history::HistoryEntry;
 use crate::shell::Definitions;
+use crate::tally::days_since;
 
 pub mod render;
 
@@ -291,11 +292,6 @@ impl<'a> Counter<'a> {
             }
         }
     }
-}
-
-/// Gives the number of whole days from `date` to `today`.
-fn days_since(today: NaiveDate, date: NaiveDate) -> i64 {
-    (today - date).num_days()
 }
 
 /// Classifies one definition. A definition with no use never ran. A definition
