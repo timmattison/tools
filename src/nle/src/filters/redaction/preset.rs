@@ -134,12 +134,18 @@ impl Preset {
     /// name that `serde` gives the preset.
     #[must_use]
     pub fn key(self) -> &'static str {
-        ""
+        match self {
+            Preset::Email => "email",
+            Preset::IpAddress => "ip-address",
+            Preset::AwsKey => "aws-key",
+            Preset::Token => "token",
+            Preset::Hostname => "hostname",
+        }
     }
 
     /// The preset that has the name `key`, or `None` when no preset has it.
     #[must_use]
-    pub fn from_key(_key: &str) -> Option<Preset> {
-        None
+    pub fn from_key(key: &str) -> Option<Preset> {
+        Preset::ALL.into_iter().find(|preset| preset.key() == key)
     }
 }
