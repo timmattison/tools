@@ -132,3 +132,57 @@ h3 {
   color: #a6adc8;
   margin-bottom: 8px;
 }
+
+.chapters-panel {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #313244;
+  font-size: 13px;
+}
+
+.chapter-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 6px;
+  color: #6c7086;
+}
+
+.chapters-panel input {
+  background: #45475a;
+  color: #cdd6f4;
+  border: 1px solid #585b70;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.chapters-panel input[type="search"] {
+  display: block;
+  width: 100%;
+  margin: 8px 0;
+}
+
+.chapter-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 0;
+  border-bottom: 1px solid #313244;
+}
+
+.chapter-time {
+  font-family: monospace;
+  color: #a6adc8;
+}
+
+.chapter-label {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.chapter-late {
+  color: #f9e2af;
+  font-size: 12px;
+}

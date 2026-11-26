@@ -252,12 +252,12 @@ fn the_rows_come_in_time_order_with_clock_times_and_labels() {
         row_text("0:50.0", "Build"),
         row_text("1:05.0", "café 🎉"),
     ];
-    let mut from = 0;
+    let mut rest = page.as_str();
     for row in rows {
-        let at = page[from..]
-            .find(&row)
-            .unwrap_or_else(|| panic!("{row} is missing or out of order in {page}"));
-        from += at + row.len();
+        rest = rest
+            .split_once(&row)
+            .unwrap_or_else(|| panic!("{row} is missing or out of order in {page}"))
+            .1;
     }
 }
 
@@ -267,11 +267,10 @@ fn a_marker_after_the_end_of_the_project_says_so() {
     let page = panel.html();
     assert_eq!(page.matches("class=\"chapter-late\"").count(), 1, "{page}");
     assert_eq!(page.matches("after the end").count(), 1, "{page}");
-    let late = page.find("1:10.0").expect("the late row");
-    let on_time = page.find("1:05.0").expect("the row on time");
-    assert!(on_time < late, "{page}");
-    assert!(page[late..].contains("after the end"), "{page}");
-    assert!(!page[on_time..late].contains("after the end"), "{page}");
+    let (before_late, from_late) = page.split_once("1:10.0").expect("the late row");
+    assert!(before_late.contains("1:05.0"), "{page}");
+    assert!(!before_late.contains("after the end"), "{page}");
+    assert!(from_late.contains("after the end"), "{page}");
 }
 
 #[test]

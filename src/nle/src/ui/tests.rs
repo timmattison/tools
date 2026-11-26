@@ -225,6 +225,8 @@ struct Window {
     dom: VirtualDom,
     /// The id of each element that got a click listener, in creation order.
     clicks: Vec<ElementId>,
+    /// The id of each element that got an input listener, in creation order.
+    inputs: Vec<ElementId>,
     /// The ids that the newest render created, when it created any.
     newest: Vec<ElementId>,
     /// The click listeners of the first render.
@@ -243,6 +245,7 @@ impl Window {
         let mut window = Self {
             dom,
             clicks: Vec::new(),
+            inputs: Vec::new(),
             newest: Vec::new(),
             first_render: Vec::new(),
         };
@@ -260,6 +263,11 @@ impl Window {
                 _ => None,
             })
             .collect();
+        self.inputs
+            .extend(edits.iter().filter_map(|edit| match edit {
+                Mutation::NewEventListener { name, id } if name == "input" => Some(*id),
+                _ => None,
+            }));
         if !created.is_empty() {
             self.clicks.extend(&created);
             self.newest = created;
@@ -295,6 +303,15 @@ impl Window {
         let data = Rc::new(PlatformEventData::new(Box::<SerializedMouseData>::default()));
         let event = dioxus::prelude::Event::new(data as Rc<dyn Any>, true);
         self.dom.runtime().handle_event("click", event, id);
+        self.render();
+    }
+
+    /// Sends the text to the input element, as if the user typed it, and renders.
+    fn type_into(&mut self, id: ElementId, text: &str) {
+        let form = dioxus::html::SerializedFormData::new(text.to_owned(), Vec::new());
+        let data = Rc::new(PlatformEventData::new(Box::new(form)));
+        let event = dioxus::prelude::Event::new(data as Rc<dyn Any>, true);
+        self.dom.runtime().handle_event("input", event, id);
         self.render();
     }
 
@@ -613,5 +630,39 @@ fn properties_of_an_open_document_show_the_chapter_panel() {
 #[test]
 fn properties_with_no_recording_show_no_chapter_panel() {
     let page = render_empty_app();
-    assert!(!page.contains("chapters-panel"), "{page}");
+    assert!(!page.contains("class=\"chapters-panel\""), "{page}");
+}
+
+#[tokio::test]
+async fn a_failed_chapter_action_shows_the_banner_and_a_good_one_removes_it() {
+    let fakes = Fakes::new()
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())));
+    let mut window = Window::open(&fakes);
+    window.click(window.open_button());
+    window.settle().await;
+    assert!(
+        !window.html().contains("role=\"alert\""),
+        "{}",
+        window.html()
+    );
+    // The render of the load created the Add Chapter button first.
+    let add = window.newest[0];
+    let (time, label) = (window.inputs[0], window.inputs[1]);
+    window.click(add);
+    let page = window.html();
+    assert!(page.contains("role=\"alert\""), "{page}");
+    assert!(
+        page.contains("Failed to change the chapters: the time is empty"),
+        "{page}"
+    );
+    window.type_into(time, "5");
+    window.type_into(label, "Intro");
+    window.click(add);
+    let page = window.html();
+    assert!(!page.contains("role=\"alert\""), "{page}");
+    assert!(
+        page.contains("<span class=\"chapter-label\">Intro</span>"),
+        "{page}"
+    );
 }
