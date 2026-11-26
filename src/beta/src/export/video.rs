@@ -671,11 +671,13 @@ fn to_millis(seconds: f64) -> u64 {
 
 /// Escapes a text for the FFmpeg metadata format.
 ///
-/// A backslash goes before `=`, `;`, `#`, `\`, and a newline.
+/// A backslash goes before `=`, `;`, `#`, `\`, a newline, and a carriage
+/// return. FFmpeg ends a line at each of the two, but it reads the character
+/// after a backslash as text.
 fn escape_metadata(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for ch in text.chars() {
-        if matches!(ch, '=' | ';' | '#' | '\\' | '\n') {
+        if matches!(ch, '=' | ';' | '#' | '\\' | '\n' | '\r') {
             escaped.push('\\');
         }
         escaped.push(ch);
@@ -947,7 +949,10 @@ mod tests {
 
     #[test]
     fn the_escape_puts_a_backslash_before_each_special_character() {
-        assert_eq!(escape_metadata("a=b;c#d\\e\nf"), "a\\=b\\;c\\#d\\\\e\\\nf");
+        assert_eq!(
+            escape_metadata("a=b;c#d\\e\nf\rg"),
+            "a\\=b\\;c\\#d\\\\e\\\nf\\\rg"
+        );
     }
 
     #[test]
