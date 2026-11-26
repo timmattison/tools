@@ -7,4 +7,5 @@
 
 pub mod fs;
 pub mod pattern;
+pub mod plan;
 pub mod walk;
