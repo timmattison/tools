@@ -33,8 +33,9 @@ const DEFINITION_COLUMN: usize = 7;
 /// right, so the digits of two rows line up.
 const COUNT_COLUMNS: [usize; 2] = [2, 3];
 
-/// The most display columns that the text of the `Through` column takes. A
-/// longer cell wraps inside this width.
+/// The most display columns that the text of the `Through` column takes when
+/// the report has a width. A longer cell then wraps inside this width. With no
+/// width, the cell is one line.
 const THROUGH_MAX: usize = 30;
 
 /// The padding of `comfy_table` in one cell: one space on each side.
@@ -131,9 +132,10 @@ fn fixed_text_width(rows: &[[String; 7]]) -> usize {
 /// Gives the table of the definitions, one row for each entry in tally order.
 ///
 /// `width` limits the table to that many display columns. The definition is
-/// one line, cut to the room that the other columns leave. `None` sets no
-/// limit and no cut. The table never reads the terminal itself, because a read
-/// of the terminal makes the text depend on where the tool runs.
+/// one line, cut to the room that the other columns leave. The `Through` cell
+/// wraps inside [`THROUGH_MAX`] columns. `None` sets no limit, no cut, and no
+/// wrap. The table never reads the terminal itself, because a read of the
+/// terminal makes the text depend on where the tool runs.
 fn table(tally: &Tally, width: Option<u16>) -> String {
     let rows: Vec<[String; 7]> = tally.definitions.iter().map(fixed_cells).collect();
     let available = width.map(|width| {

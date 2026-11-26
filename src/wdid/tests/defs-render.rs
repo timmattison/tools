@@ -215,6 +215,37 @@ fn short_definition_is_not_cut() {
     assert_eq!(row(&report, "wide")[7], "echo hi");
 }
 
+/// A long `Through` cell wraps inside 30 columns when the report has a width,
+/// also when the table has room for the whole cell.
+#[test]
+fn long_through_cell_wraps_inside_thirty_columns() {
+    let mut used = never("wt", Kind::Alias, "cwt");
+    used.through = (1..=6_u64).map(|n| (format!("alias{n}"), 7 - n)).collect();
+    used.uses = 21;
+    used.classification = Classification::Used;
+    let report = text(&tally(vec![used]), &window(), "/bin/zsh", Some(200));
+    assert_fits(&report, 200);
+    let cells: Vec<&str> = table_lines(&report)
+        .into_iter()
+        .filter(|line| line.starts_with('│'))
+        .skip(1)
+        .filter_map(|line| line.split('┆').nth(4))
+        .map(str::trim)
+        .collect();
+    assert!(cells.len() > 1, "the cell wraps: {report}");
+    for cell in &cells {
+        assert!(
+            cell.width() <= 30,
+            "{} > 30: {cell}\n{report}",
+            cell.width()
+        );
+    }
+    assert_eq!(
+        cells.join(" "),
+        "alias1 6, alias2 5, alias3 4, alias4 3, alias5 2, alias6 1"
+    );
+}
+
 /// With no width, the whole definition stays.
 #[test]
 fn no_width_keeps_the_definition() {

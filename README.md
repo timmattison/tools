@@ -5739,7 +5739,7 @@ The table has one row for each definition, the most used first:
 - `Kind`: `alias`, `global alias`, `suffix alias`, or `function`.
 - `Uses`: the typed uses plus the uses through other definitions.
 - `Typed`: the uses where you typed the name.
-- `Through`: the definitions that gave the other uses, each with its count.
+- `Through`: the definitions that gave the other uses, each with its count. When `COLUMNS` or the terminal gives a width, a cell longer than 30 columns wraps. With no width, the cell is one line.
 - `First use` and `Last use`: the dates of the first and the last counted use.
 - `Definition`: the value of an alias, or the first line of a function body. The cell is one line. When `COLUMNS` or the terminal gives a width, `wdid` cuts the cell to fit that width and ends it with `…`.
 
