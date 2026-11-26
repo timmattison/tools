@@ -125,6 +125,13 @@ fn pause_removal_keeps_a_gap_equal_to_the_threshold() {
 }
 
 #[test]
+fn pause_removal_accepts_a_max_pause_equal_to_the_threshold_and_caps_each_pause_at_it() {
+    let out = run(outputs(&[0.0, 5.0]), all(PAUSE_REMOVAL, removal(2.0, 2.0))).unwrap();
+
+    assert_eq!(times(&out), vec![0.0, 2.0]);
+}
+
+#[test]
 fn pause_removal_keeps_the_order_of_events_at_one_time() {
     let events = vec![output(0.0), output(5.0), input(5.0), output(5.0)];
 
