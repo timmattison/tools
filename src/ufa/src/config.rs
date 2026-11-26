@@ -582,13 +582,6 @@ impl Config {
         file.write_all(contents.as_bytes())
             .with_context(|| format!("Failed to write config file: {}", config_path.display()))?;
 
-        restrict_to_owner(config_path).with_context(|| {
-            format!(
-                "Failed to restrict permissions on config file: {}",
-                config_path.display()
-            )
-        })?;
-
         println!("Configuration saved to: {}", config_path.display());
         Ok(())
     }
@@ -926,10 +919,12 @@ const OWNER_ONLY: u32 = 0o600;
 /// the run is interrupted inside that window. Nothing in this crate handles a
 /// signal, so nothing tidies up after such a run.
 ///
-/// The mode reaches a file this call **creates** and no other, which is why
-/// [`restrict_to_owner`] stays: a file that was already there keeps the mode
-/// it already had, and a configuration file written by an earlier version of
-/// `ufa` is exactly such a file.
+/// The mode on the open reaches only a file that the open creates. A file that
+/// was already there keeps the mode it had, and a configuration file written by
+/// an earlier version of `ufa` is such a file, at a wider mode. So this call
+/// also sets the mode on the open file handle. The open truncates the file
+/// first, and the mode is narrow before the caller writes a byte, in both
+/// cases.
 ///
 /// # Arguments
 ///
@@ -940,14 +935,16 @@ const OWNER_ONLY: u32 = 0o600;
 /// The open file, truncated to nothing.
 #[cfg(unix)]
 fn create_config_file(path: &Path) -> std::io::Result<fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-    fs::OpenOptions::new()
+    let file = fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(OWNER_ONLY)
-        .open(path)
+        .open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(OWNER_ONLY))?;
+    Ok(file)
 }
 
 /// Create the configuration file, emptied and ready to be written.
@@ -965,26 +962,6 @@ fn create_config_file(path: &Path) -> std::io::Result<fs::File> {
 #[cfg(not(unix))]
 fn create_config_file(path: &Path) -> std::io::Result<fs::File> {
     fs::File::create(path)
-}
-
-/// Restrict a file that may contain secrets to its owner (mode 0600).
-///
-/// [`create_config_file`] already asks for that mode, and the kernel grants it
-/// only to a file that open **created**. So this covers the other case: a
-/// configuration file that was already on disk at a wider mode, written by a
-/// version of `ufa` that created it at the process umask.
-#[cfg(unix)]
-fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::set_permissions(path, fs::Permissions::from_mode(OWNER_ONLY))
-}
-
-/// Windows has no umask and no mode bits to tighten; the file inherits the
-/// containing directory's ACL, which is already per-user under `%APPDATA%`.
-#[cfg(not(unix))]
-fn restrict_to_owner(_path: &Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 /// The store that reads the keys that 1Password holds.
@@ -1579,9 +1556,8 @@ mod tests {
     /// The mode a file ends at says nothing about the mode it was created at.
     ///
     /// The file holds a pasted controller key and a pasted plaintext Site
-    /// Manager key, and it is created before either is written and before the
-    /// mode is narrowed. A create at the process umask lands on 0644 on a
-    /// normal machine, so every save hands every other user of that machine a
+    /// Manager key, and it is created before either is written. A create at the
+    /// process umask lands on 0644 on a normal machine, so every save hands every other user of that machine a
     /// window in which the file is readable — and a run interrupted inside the
     /// window leaves it that way for good.
     ///
@@ -1617,9 +1593,10 @@ mod tests {
 
     /// The mode an open asks for reaches a file that open created, and no
     /// other. A configuration file written by a version of `ufa` that created
-    /// it at the process umask is already on disk at 0644, and the save that
-    /// tightens it is the pass that runs after the write — so that pass stays,
-    /// and this is what it covers.
+    /// it at the process umask is already on disk at 0644. The save narrows
+    /// that file, and
+    /// `an_existing_wider_config_file_is_narrowed_before_the_write` shows that
+    /// it happens before the write.
     #[cfg(unix)]
     #[test]
     fn saving_over_a_file_that_was_already_wider_narrows_it() {
