@@ -172,3 +172,69 @@ fn an_operating_system_command_that_an_escape_breaks_stays_and_the_escape_starts
     );
     assert_eq!(all.last(), Some(&Step::Text));
 }
+
+#[test]
+fn a_c1_control_that_starts_a_sequence_restarts_an_open_one() {
+    for open in ["\x1b", "\x1b(", "\x1b[1", "\x1b[ 5", "\x1b]0;t", "\x1bPq"] {
+        let all = steps(&[&format!("{open}\u{9b}?25h")]);
+
+        assert_eq!(all[open.chars().count()], Step::Restarted, "{open:?}");
+        assert_eq!(
+            all.last(),
+            Some(&Step::Done(csi("?25", "", 'h', ""))),
+            "{open:?}"
+        );
+    }
+
+    let all = steps(&["\x1b[1\u{9d}12;#fff\x07"]);
+
+    assert_eq!(all[3], Step::Restarted, "{all:?}");
+    assert_eq!(
+        all.last(),
+        Some(&Step::Done(osc("12;#fff", "\x07"))),
+        "{all:?}"
+    );
+}
+
+#[test]
+fn a_c1_control_that_starts_no_sequence_stops_an_open_one() {
+    let mut cases = Vec::new();
+    for open in ["\x1b", "\x1b(", "\x1b[1", "\x1b[ 5"] {
+        for stop in ['\u{9c}', '\u{85}'] {
+            cases.push((open, stop));
+        }
+    }
+    for open in ["\x1b]0;t", "\x1bPq"] {
+        cases.push((open, '\u{85}'));
+    }
+    for (open, stop) in cases {
+        let all = steps(&[&format!("{open}{stop}x")]);
+
+        let at = open.chars().count();
+        assert_eq!(all[at], Step::Aborted, "{open:?} {stop:?}");
+        assert_eq!(all[at + 1], Step::Text, "{open:?} {stop:?}");
+    }
+}
+
+#[test]
+fn an_escape_break_followed_by_a_c1_csi_restarts() {
+    let all = steps(&["\x1b]0;t\x1b\u{9b}?25h"]);
+
+    assert_eq!(
+        all[6],
+        Step::EscapeBreak(Box::new(Step::Restarted)),
+        "{all:?}"
+    );
+    assert_eq!(all.last(), Some(&Step::Done(csi("?25", "", 'h', ""))));
+}
+
+#[test]
+fn a_private_marker_after_a_parameter_makes_the_sequence_ignored() {
+    for text in ["\x1b[?25;1?h", "\x1b[1<h"] {
+        let all = steps(&[text]);
+
+        assert_eq!(all.last(), Some(&Step::Ignored), "{text:?}");
+        assert!(sequences(&[text]).is_empty(), "{text:?}");
+    }
+    assert_eq!(sequences(&["\x1b[>1;2c"]), vec![csi(">1;2", "", 'c', "")]);
+}

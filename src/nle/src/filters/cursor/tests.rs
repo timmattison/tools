@@ -337,7 +337,9 @@ fn a_reset_of_the_terminal_gets_the_forced_cursor_again() {
 
 #[test]
 fn a_sequence_that_an_osc_break_starts_is_rewritten_whole() {
-    // The ESC that breaks the OSC starts the DECTCEM sequence.
+    // The ESC that breaks the OSC starts the DECTCEM sequence. The filter
+    // drops that sequence, and an ST where its ESC was keeps the end of the
+    // OSC.
     let events = vec![out(0.0, "\x1b]0;t"), out(1.0, "\x1b"), out(2.0, "[?25lz")];
 
     let got = run(
@@ -352,10 +354,39 @@ fn a_sequence_that_an_osc_break_starts_is_rewritten_whole() {
         vec![
             out(0.0, SHOW),
             out(0.0, "\x1b]0;t"),
-            out(1.0, ""),
+            out(1.0, "\x1b\\"),
             out(2.0, "z"),
         ]
     );
+}
+
+#[test]
+fn a_c1_csi_inside_an_open_sequence_is_rewritten() {
+    let events = vec![out(0.0, "\x1b[1\u{9b}?25ha")];
+
+    let got = run(
+        events,
+        json!({ "visibility": "always-hidden" }),
+        FilterRegion::All,
+    )
+    .unwrap();
+
+    assert_eq!(got, vec![out(0.0, HIDE), out(0.0, "\x1b[1\x1b\\a")]);
+}
+
+#[test]
+fn a_dropped_sequence_that_restarts_an_open_one_keeps_an_end_for_it() {
+    // Without the ST, the rest reads as CSI 1 a, which moves the cursor.
+    let events = vec![out(0.0, "\x1b[1\x1b[?25ha")];
+
+    let got = run(
+        events,
+        json!({ "visibility": "always-hidden" }),
+        FilterRegion::All,
+    )
+    .unwrap();
+
+    assert_eq!(got, vec![out(0.0, HIDE), out(0.0, "\x1b[1\x1b\\a")]);
 }
 
 // Tests of the shape and the blink.
