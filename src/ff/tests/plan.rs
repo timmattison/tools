@@ -74,7 +74,7 @@ fn the_plan_walks_the_data_volume_once_and_covers_each_directory_without_a_firml
     );
     assert!(plan.roots.iter().all(|root| root.stay_on_device));
     assert!(plan.roots.iter().all(|root| root.canonical == root.path));
-    assert!(plan.roots.iter().all(|root| !root.match_root));
+    assert!(plan.roots.iter().all(|root| !root.named));
 
     let system = &plan.roots[0];
     assert_eq!(
@@ -344,7 +344,7 @@ fn a_named_root_with_one_file_system_stays_on_its_device_and_prunes_each_mount_p
     assert_eq!(root.path, PathBuf::from("./sub"));
     assert_eq!(root.canonical, PathBuf::from("/data/sub"));
     assert!(root.stay_on_device);
-    assert!(root.match_root);
+    assert!(root.named);
     assert_eq!(root.prune, paths(&["./sub/deep/er", "./sub/mnt"]));
     assert!(root.hide.is_empty());
 }

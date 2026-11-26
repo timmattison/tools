@@ -148,7 +148,7 @@ fn a_root_with_no_name_never_matches() {
 }
 
 #[test]
-fn a_root_with_match_root_off_is_not_matched() {
+fn a_root_that_is_not_named_is_not_matched() {
     let tree = Tree::new("walk-root-off");
     let directory = tree.dir("data/120.mp4");
     let inner = tree.file("data/120.mp4/inner/120.mp4");
@@ -159,11 +159,11 @@ fn a_root_with_match_root_off_is_not_matched() {
         &RealFs,
         &[
             WalkRoot {
-                match_root: false,
+                named: false,
                 ..WalkRoot::new(&directory)
             },
             WalkRoot {
-                match_root: false,
+                named: false,
                 ..WalkRoot::new(&file)
             },
         ],

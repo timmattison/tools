@@ -6321,10 +6321,12 @@ completely, and the summary always gives that count.
 - **Exit status 2**: `ff` could not start, for example because of a bad
   pattern, or it could not write a match.
 
-A directory that the system refuses (`EACCES` or `EPERM`) is not incomplete.
-System Integrity Protection and the privacy settings of macOS refuse some
-directories on each Mac, thus `ff` counts them and does not change the exit
-status. A directory that goes away during the walk is not a failure either.
+A directory below a path that the system refuses (`EACCES` or `EPERM`) is not
+incomplete. System Integrity Protection and the privacy settings of macOS
+refuse some directories on each Mac, thus `ff` counts them and does not change
+the exit status. But a path that you name and that the system refuses is
+incomplete, because `ff` read nothing there. A directory that goes away during
+the walk is not a failure either.
 
 A reader that stops early, for example `head`, stops the walk. `ff` then exits
 0 and writes no summary.

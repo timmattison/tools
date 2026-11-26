@@ -30,12 +30,14 @@ pub struct WalkRoot {
     /// user wrote it, for example `.`, does not show the `Library` above it.
     /// [`WalkRoot::new`] sets it to `path`.
     pub canonical: PathBuf,
-    /// When true, the walk matches the name of `path` itself, as `find`
-    /// matches each path that a user names. [`WalkRoot::new`] sets it to
-    /// true. A root of the plan of the whole machine sets it to false,
-    /// because the walk of the volume above it reads its mount point as an
-    /// entry, and matches it there.
-    pub match_root: bool,
+    /// When true, a user named `path`. The walk then matches the name of
+    /// `path` itself, as `find` does, and a refusal to open `path` makes the
+    /// walk incomplete, because the walk read nothing that the user asked
+    /// for. [`WalkRoot::new`] sets it to true. A root of the plan of the whole
+    /// machine sets it to false: the walk of the volume above it reads its
+    /// mount point as an entry and matches it there, and a refusal of such a
+    /// volume is normal, as a refusal of a directory below `/` is.
+    pub named: bool,
     /// When true, the walk does not enter a directory on a device that is not
     /// the device of `path`.
     pub stay_on_device: bool,
@@ -48,7 +50,7 @@ impl WalkRoot {
         let path = path.into();
         Self {
             canonical: path.clone(),
-            match_root: true,
+            named: true,
             path,
             prune: BTreeSet::new(),
             hide: BTreeSet::new(),
@@ -87,8 +89,10 @@ pub struct Report {
     /// The subtrees that the walk could not read completely.
     pub incomplete: Vec<Incomplete>,
     /// The directories that the system refused to open, with `EACCES` or
-    /// `EPERM`. System Integrity Protection and the privacy settings of macOS
-    /// refuse some directories on each machine, thus a refusal is normal.
+    /// `EPERM`: each directory below a root, and each root of the plan of the
+    /// whole machine. System Integrity Protection and the privacy settings of
+    /// macOS refuse some directories on each machine, thus a refusal is
+    /// normal. A named root that the system refuses goes into `incomplete`.
     pub denied: Vec<PathBuf>,
     /// The File Provider directories that the walk did not enter.
     pub cloud_skipped: Vec<PathBuf>,
@@ -156,7 +160,7 @@ const LIBRARY: &str = "Library";
 /// Walks each root in parallel, and gives each matching path to `sink` when
 /// the walk finds it.
 ///
-/// The walk matches the name of each root with `match_root` set, as `find`
+/// The walk matches the name of each named root, as `find`
 /// does. It does not follow a symbolic link below a root. It does an
 /// interrupted call again in place. If `sink` returns an error, the walk stops
 /// and puts the error in [`Report::output_error`].
@@ -232,7 +236,7 @@ where
                 }
                 return;
             }
-            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied && !root.named => {
                 self.denied(root.path.clone());
                 return;
             }
@@ -355,12 +359,12 @@ where
         }
     }
 
-    /// Gives `root.path` to the sink when `root.match_root` is true and the
+    /// Gives `root.path` to the sink when `root.named` is true and the
     /// name of `root.path` matches. A path with no name, for example `/` or
     /// `..`, never matches. Tells if the walk continues: false after an error
     /// of the sink.
     fn match_root(&self, root: &WalkRoot) -> bool {
-        if !root.match_root {
+        if !root.named {
             return true;
         }
         let Some(name) = root.path.file_name() else {

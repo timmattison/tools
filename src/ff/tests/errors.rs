@@ -124,6 +124,30 @@ fn a_named_root_that_the_system_refuses_is_incomplete() {
 }
 
 #[test]
+fn a_root_of_the_whole_machine_that_the_system_refuses_is_denied() {
+    let tree = Tree::new("errors-refused-volume");
+    tree.file("volume/120.mp4");
+    let volume = tree.root().join("volume");
+    let faulty = Faulty::new(RealFs, |call, path: &Path| {
+        (call == Call::Open && path == volume).then(|| errno(libc::EACCES))
+    });
+
+    let report = walk(
+        &faulty,
+        &[WalkRoot {
+            named: false,
+            ..WalkRoot::new(&volume)
+        }],
+        Options::default(),
+        &glob("120.mp4"),
+        Found::default().sink(),
+    );
+
+    assert_eq!(report.denied, vec![volume]);
+    assert!(report.is_complete(), "{report:?}");
+}
+
+#[test]
 fn a_root_that_is_a_file_matches_by_its_name() {
     let tree = Tree::new("errors-file-root");
     let file = tree.file("120.mp4");
