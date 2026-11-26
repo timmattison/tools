@@ -72,6 +72,11 @@
 //! the substitution. The walk keeps the origin of each part of the new text as
 //! a range of character indexes, because the parser counts characters.
 //!
+//! [`parse_line`] also gives each alias expansion of the walk, with the name
+//! of the alias and the alias that the person typed. A person types `wtf` with
+//! `wtf='wt -f'` and `wt=cwt`. That is a use of `wtf`, and a use of `wt`
+//! through `wtf`.
+//!
 //! This module owns the parser. No type of the parser is part of a public
 //! signature, and no other module sees one.
 
@@ -913,6 +918,8 @@ struct Walker<'a> {
     options: ParserOptions,
     /// The command words found so far, in source order.
     words: Vec<CommandWord>,
+    /// The alias expansions found so far, in walk order.
+    uses: Vec<AliasUse>,
 }
 
 impl<'a> Walker<'a> {
@@ -922,7 +929,17 @@ impl<'a> Walker<'a> {
             aliases,
             options: ParserOptions::default(),
             words: Vec::new(),
+            uses: Vec::new(),
         }
+    }
+
+    /// Records one expansion of the alias `name`. `through` is the alias that
+    /// the person typed, when the expansion came from the value of an alias.
+    fn record(&mut self, name: &str, through: Option<String>) {
+        self.uses.push(AliasUse {
+            name: name.to_owned(),
+            through,
+        });
     }
 
     /// Parses the text of `context` as a program and walks it. The global
@@ -942,16 +959,21 @@ impl<'a> Walker<'a> {
     /// of its word, as the lexer of zsh does. A global alias in the chain is
     /// not expanded. The text of a value has the origin of the word that it
     /// replaced. Gives `None` when no word of the text is a global alias.
-    fn expand_globals(&self, context: &TextContext<'_>) -> Result<Option<ExpandedText>, Refused> {
+    fn expand_globals(
+        &mut self,
+        context: &TextContext<'_>,
+    ) -> Result<Option<ExpandedText>, Refused> {
         let found = self.global_words(context.text, |name| !context.in_chain(name));
         if found.is_empty() {
             return Ok(None);
         }
         let mut replacements = Vec::with_capacity(found.len());
         for GlobalWord { range, name, value } in found {
+            let origin = context.replaced_origin(name, Some(range.start));
+            self.record(name, context.origin_at(Some(range.start)));
             replacements.push(Replacement {
-                text: self.global_value(value, &mut vec![name], context)?,
-                origin: context.replaced_origin(name, Some(range.start)),
+                text: self.global_value(value, &mut vec![name], context, &origin)?,
+                origin,
                 range,
             });
         }
@@ -962,12 +984,15 @@ impl<'a> Walker<'a> {
     /// it expanded. `path` holds the names of the global aliases that hold the
     /// value. They are not expanded again, thus a cycle ends. Each name on the
     /// path counts as one level of nesting.
+    /// Each global alias in the value is a use through `through`, the origin
+    /// of the outermost word that the expansion replaced.
     /// Gives `Refused` when the nesting is too deep.
     fn global_value(
-        &self,
+        &mut self,
         value: &'a str,
         path: &mut Vec<&'a str>,
         context: &TextContext<'_>,
+        through: &Option<String>,
     ) -> Result<String, Refused> {
         if context.depth + path.len() > MAX_DEPTH {
             return Err(Refused);
@@ -980,8 +1005,9 @@ impl<'a> Walker<'a> {
         }
         let mut replacements = Vec::with_capacity(found.len());
         for GlobalWord { range, name, value } in found {
+            self.record(name, through.clone());
             path.push(name);
-            let text = self.global_value(value, path, context);
+            let text = self.global_value(value, path, context, through);
             path.pop();
             replacements.push(Replacement {
                 range,
@@ -1184,10 +1210,12 @@ impl<'a> Walker<'a> {
         }
         if let Some(command) = &command {
             if let Some(value) = self.alias_value(&command.raw, context, &[]) {
+                self.record(&command.raw, context.origin_at(command.start));
                 let leading = [(value, context.replaced_origin(&command.raw, command.start))];
                 return self.walk_alias(&leading, vec![command.raw.clone()], &suffix, context);
             }
             if let Some((marker, value)) = self.suffix_alias(command, context) {
+                self.record(&marker, context.origin_at(command.start));
                 let leading = [
                     (value, context.replaced_origin(&marker, command.start)),
                     (command.raw.as_str(), context.origin_at(command.start)),
@@ -1278,6 +1306,7 @@ impl<'a> Walker<'a> {
             let Some(next_value) = self.alias_value(&next.raw, context, &names) else {
                 break;
             };
+            self.record(&next.raw, context.origin_at(next.start));
             expanded.push(next_value, context.replaced_origin(&next.raw, next.start));
             names.push(next.raw.clone());
             last = next_value;
@@ -1482,7 +1511,7 @@ pub fn parse_line(line: &str, aliases: &Aliases) -> Option<Line> {
     match walker.walk_text(&TextContext::line(line)) {
         Ok(()) => Some(Line {
             words: walker.words,
-            aliases: Vec::new(),
+            aliases: walker.uses,
         }),
         Err(Refused) => None,
     }
