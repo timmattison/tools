@@ -490,3 +490,18 @@ fn render_with_an_unknown_filter_kind_fails() {
         other => panic!("expected a RenderError, got {other:?}"),
     }
 }
+
+#[test]
+fn render_refuses_a_project_that_breaks_a_rule() {
+    let mut project = one_clip_project(vec![]);
+    if let Some(track) = project.timeline.first_mut() {
+        track.clips.push(ClipId(99));
+    }
+
+    let result = FilterRegistry::new().render(&project);
+
+    assert!(
+        matches!(result, Err(NleError::InvalidProject(_))),
+        "{result:?}"
+    );
+}
