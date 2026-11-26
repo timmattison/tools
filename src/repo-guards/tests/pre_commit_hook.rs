@@ -1527,3 +1527,25 @@ fn msgs_file_in_a_large_commit_runs_the_msgs_checks() {
     stage_with_large_filler(&dir, &[staged]);
     assert_msgs_checks_ran(&dir, &format!("{staged} in a large commit"));
 }
+
+/// A commit that stages a file of a plugin among some thousand other paths
+/// must run the checks of the claude CLI. The path sorts before the filler, so
+/// a trigger that reads the list from a pipe into `grep -q` runs no check for
+/// it.
+#[test]
+fn plugin_file_in_a_large_commit_runs_the_plugin_checks() {
+    let dir = unique_fixture_dir();
+    write_fixture_plugin(&dir);
+    stage_with_large_filler(&dir, &[FIXTURE_PLUGIN_FILE]);
+    let claude = install_fake_program(&dir, "claude", None);
+
+    let HookRun { passed, output } = run_hook_with_planted_git_variables(&dir, &claude);
+    let calls = read_recording(&claude);
+    cleanup(&dir);
+
+    assert!(passed, "the hook must pass with a fake claude: {output}");
+    assert_eq!(
+        calls.arguments, EXPECTED_CLAUDE_CALLS,
+        "{FIXTURE_PLUGIN_FILE} in a large commit must run each check of the plugin block: {output}"
+    );
+}
