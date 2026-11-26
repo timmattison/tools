@@ -61,6 +61,9 @@ impl Acceleration {
     }
 }
 
+/// The values of the `mode` option that the filter knows.
+const MODES: &[&str] = &[SKIP_TO_END, ACCELERATE];
+
 /// How a fast-forward filter compresses its region.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {
@@ -97,8 +100,11 @@ pub fn applied(region: FilterRegion, mode: Mode) -> AppliedFilter {
 /// The mode of a fast-forward filter. It is `None` when the filter is of
 /// another kind, or when its options do not give a valid mode.
 #[must_use]
-pub fn mode_of(_filter: &AppliedFilter) -> Option<Mode> {
-    None
+pub fn mode_of(filter: &AppliedFilter) -> Option<Mode> {
+    if filter.kind != kind() {
+        return None;
+    }
+    mode_from(&filter.options).ok()
 }
 
 /// Add the fast-forward filter to `registry`.
@@ -108,16 +114,34 @@ pub fn register(registry: &mut FilterRegistry) {
 
 /// Compress a span in the mode of its options.
 fn fast_forward(span: Span, options: &FilterOptions) -> Result<Span, String> {
-    if options.get(MODE_OPTION).and_then(serde_json::Value::as_str) == Some(SKIP_TO_END) {
-        return Ok(skip_to_end(span));
-    }
-    let acceleration = options
-        .get(SPEED_OPTION)
-        .and_then(serde_json::Value::as_f64)
-        .and_then(|value| Acceleration::new(value).ok());
-    match acceleration {
-        Some(acceleration) => Ok(time_dilation::scale(span, acceleration.speed())),
-        None => Ok(span),
+    Ok(match mode_from(options)? {
+        Mode::SkipToEnd => skip_to_end(span),
+        Mode::Accelerate(acceleration) => time_dilation::scale(span, acceleration.speed()),
+    })
+}
+
+/// Read the mode from the options. The error is a message for the pipeline.
+fn mode_from(options: &FilterOptions) -> Result<Mode, String> {
+    let name = options
+        .get(MODE_OPTION)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("the option \"{MODE_OPTION}\" is missing or is not a string"))?;
+    match name {
+        SKIP_TO_END => Ok(Mode::SkipToEnd),
+        ACCELERATE => {
+            let value = options
+                .get(SPEED_OPTION)
+                .and_then(serde_json::Value::as_f64)
+                .ok_or_else(|| {
+                    format!("the option \"{SPEED_OPTION}\" is missing or is not a number")
+                })?;
+            let acceleration = Acceleration::new(value).map_err(|error| error.to_string())?;
+            Ok(Mode::Accelerate(acceleration))
+        }
+        other => Err(format!(
+            "the mode \"{other}\" is not one of {}",
+            MODES.join(", ")
+        )),
     }
 }
 
