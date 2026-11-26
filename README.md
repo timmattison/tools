@@ -6268,7 +6268,8 @@ The save dialog offers `<name>-edited` with the ending of the format, in the
 folder of the recording. If the file name that you type has a different
 ending, the editor replaces it with the ending of the format. If the file that
 you select is a symbolic link, the export writes the file that the link points
-to, and keeps the link.
+to, and keeps the link. That file must have the same ending as the link, so a
+link `out.mp4` to `real.gif` is refused.
 
 Open Recording and Export are disabled while a dialog, a load, or an export
 runs. Thus a new recording cannot open during an export, and an export cannot

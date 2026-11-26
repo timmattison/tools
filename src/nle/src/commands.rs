@@ -64,13 +64,22 @@ const WEB_ENDINGS: &[&str] = &[".html"];
 /// The file name ending of a gzip recording.
 const GZIP_ENDINGS: &[&str] = &[".gz"];
 
-/// Return true when `name`, in lowercase, ends with one of `endings`.
-/// Each ending in `endings` must be lowercase.
-fn has_ending(name: &str, endings: &[&str]) -> bool {
+/// Return the longest of `endings` that `name`, in lowercase, ends with, or
+/// `None` when it ends with none of them. Each ending in `endings` must be
+/// lowercase.
+fn matching_ending<'a>(name: &str, endings: &[&'a str]) -> Option<&'a str> {
     let lowercase_name = name.to_lowercase();
     endings
         .iter()
-        .any(|ending| lowercase_name.ends_with(ending))
+        .copied()
+        .filter(|ending| lowercase_name.ends_with(ending))
+        .max_by_key(|ending| ending.len())
+}
+
+/// Return true when `name`, in lowercase, ends with one of `endings`.
+/// Each ending in `endings` must be lowercase.
+fn has_ending(name: &str, endings: &[&str]) -> bool {
+    matching_ending(name, endings).is_some()
 }
 
 /// The most symbolic links that `follow_links` follows before it gives up.
@@ -112,9 +121,9 @@ fn follow_links(path: &Path, to_error: fn(String) -> NleError) -> Result<PathBuf
 /// It refuses a path whose file name, in lowercase, does not end with one of
 /// `endings`. It refuses a path with no file name. Then it follows the chain of
 /// symbolic links that starts at the path, so the write changes the file at the
-/// end of the chain and keeps each link. The check of the ending applies to
-/// that file as well, and a link to a file with another ending is refused. A
-/// link to a file that does not exist ends at that file, and the write creates
+/// end of the chain and keeps each link. That file must end with the same one
+/// of `endings` as the path, so a link to a file of another format is refused.
+/// A link to a file that does not exist ends at that file, and the write creates
 /// it. A chain of more than `MAX_LINKS` links is refused. It refuses an end of
 /// the chain with no parent directory, or whose parent directory does not
 /// exist. Otherwise it returns the canonical parent directory joined with the
@@ -129,22 +138,21 @@ fn resolve_output_path(
     let file_name = file_path
         .file_name()
         .ok_or_else(|| to_error(format!("Invalid path (no filename): {path}")))?;
-    if !has_ending(&file_name.to_string_lossy(), endings) {
-        return Err(to_error(format!(
+    let ending = matching_ending(&file_name.to_string_lossy(), endings).ok_or_else(|| {
+        to_error(format!(
             "Refusing to write {path}: the file name must end in one of {}",
             endings.join(", ")
-        )));
-    }
+        ))
+    })?;
     let file_path = follow_links(&file_path, to_error)?;
     let file_name = file_path
         .file_name()
         .ok_or_else(|| to_error(format!("Invalid path (no filename): {path}")))?
         .to_os_string();
-    if !has_ending(&file_name.to_string_lossy(), endings) {
+    if !has_ending(&file_name.to_string_lossy(), &[ending]) {
         return Err(to_error(format!(
-            "Refusing to write {path}: it links to {}, and the file name must end in one of {}",
-            file_path.display(),
-            endings.join(", ")
+            "Refusing to write {path}: it links to {}, and the file name must end in {ending}",
+            file_path.display()
         )));
     }
     let parent = file_path
@@ -168,8 +176,9 @@ fn resolve_output_path(
 /// Save `recording` to `path`. It refuses a file name that does not end in
 /// `.json` or `.json.gz` in any case, and a parent directory that does not
 /// exist. If `path` is a symbolic link, it writes the file at the end of the
-/// link and keeps the link. That file must have such a name too. An absent
-/// `compress` falls back to the `.gz` suffix of the file name, in any case.
+/// link and keeps the link. That file must have the same ending as `path`. An
+/// absent `compress` falls back to the `.gz` suffix of the file name, in any
+/// case.
 pub(crate) fn save_recording_to(
     path: &str,
     recording: &Recording,
@@ -246,7 +255,7 @@ fn validate_export_input(input_path: &str) -> Result<PathBuf, NleError> {
 /// the canonical input path, and the resolved output path.
 /// The output file name must end in one of `output_endings`. If the output
 /// path is a symbolic link, `beta` gets the file at the end of the link, and
-/// that file name must end in one of `output_endings` too.
+/// that file name must have the same ending as the output path.
 fn base_export_args(
     subcommand: &str,
     input_path: &str,
@@ -265,9 +274,9 @@ fn base_export_args(
 }
 
 /// Build the full `beta` argument list for a video export.
-/// It fails if the format is not Video, the input file is missing, or the
-/// output file name, or the file that it links to, does not end in `.mp4` or
-/// `.gif`, or the output directory does not exist.
+/// It fails if the format is not Video, the input file is missing, the output
+/// file name does not end in `.mp4` or `.gif`, the file that it links to does
+/// not have the same ending, or the output directory does not exist.
 pub(crate) fn video_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
     if !matches!(options.format, ExportFormat::Video) {
         return Err(NleError::ExportError(
