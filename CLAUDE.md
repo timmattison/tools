@@ -1246,8 +1246,9 @@ repository.
 Each job of the Rust checks does these steps:
 
 1. On Linux only, install the system packages with `apt-get`: the libraries
-   that some crates link against, and the tools that some tests run. `nle` is
-   a Tauri app, and Tauri on Linux links against WebKitGTK 4.1.
+   that some crates link against, and the tools that some tests run. `msgs` is
+   a Tauri app and `nle` is a Dioxus app. On Linux both link against WebKitGTK
+   4.1 and libxdo.
 2. Install Node.js, at the version that `NODE_VERSION` in the workflow names.
    The tests of `nle` run TypeScript under the real `node`, which needs
    Node.js 22.18 or later.
