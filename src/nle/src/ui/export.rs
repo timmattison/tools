@@ -5,10 +5,14 @@
 //! need no window.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use crate::format::file_name;
 
 /// The stem of a file name that has no stem left after the endings go.
 const DEFAULT_STEM: &str = "recording";
+/// The text between the stem and the ending of the name that the dialog offers.
+const EDITED_MARKER: &str = "-edited";
 /// Each ending that some kind uses, in the order that a strip tries them.
 const KIND_ENDINGS: [&str; 5] = [".json", ".gz", ".html", ".mp4", ".gif"];
 
@@ -53,29 +57,58 @@ impl ExportKind {
 
     /// The `value` of the menu entry of this kind.
     pub(crate) fn key(self) -> &'static str {
-        ""
+        match self {
+            Self::Recording => "json",
+            Self::CompressedRecording => "json-gz",
+            Self::Web => "html",
+            Self::Mp4 => "mp4",
+            Self::Gif => "gif",
+        }
     }
 
     /// The kind with the menu `value` `key`, or `None`.
     pub(crate) fn from_key(key: &str) -> Option<Self> {
-        let _ = key;
-        None
+        Self::ALL.into_iter().find(|kind| kind.key() == key)
     }
 
     /// The text of the menu entry of this kind.
     pub(crate) fn label(self) -> &'static str {
-        ""
+        match self {
+            Self::Recording => "Beta recording (.json)",
+            Self::CompressedRecording => "Beta recording, gzip (.json.gz)",
+            Self::Web => "Web page (.html)",
+            Self::Mp4 => "MP4 video (.mp4)",
+            Self::Gif => "GIF animation (.gif)",
+        }
+    }
+
+    /// The name and the extensions of the file filter of the save dialog.
+    fn filter(self) -> (&'static str, &'static [&'static str]) {
+        match self {
+            Self::Recording => ("Beta recording", &["json"]),
+            Self::CompressedRecording => ("Gzip Beta recording", &["gz"]),
+            Self::Web => ("Web page", &["html"]),
+            Self::Mp4 => ("MP4 video", &["mp4"]),
+            Self::Gif => ("GIF animation", &["gif"]),
+        }
     }
 
     /// What the save dialog shows for this kind, when the open recording
-    /// comes from `source_path`.
+    /// comes from `source_path`. The name is the name of the source, with
+    /// `-edited` and the ending of this kind. The folder is the folder of the
+    /// source.
     pub(crate) fn save_dialog(self, source_path: &str) -> SaveDialog {
-        let _ = source_path;
+        let stem = stem_or_default(file_name(source_path));
+        let directory = Path::new(source_path)
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(Path::to_path_buf);
+        let (filter_name, extensions) = self.filter();
         SaveDialog {
-            file_name: String::new(),
-            directory: None,
-            filter_name: "",
-            extensions: &[],
+            file_name: format!("{stem}{EDITED_MARKER}{}", self.ending()),
+            directory,
+            filter_name,
+            extensions,
         }
     }
 
