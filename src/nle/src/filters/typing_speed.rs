@@ -1,4 +1,33 @@
 //! The typing speed filter: it plays each burst of typing at one rate.
+//!
+//! A person types at a rate that changes, and a recording keeps each
+//! hesitation. This filter moves the keys of each burst of typing, so that
+//! they come at one rate in characters per second. The rules:
+//!
+//! 1. A key is an input event. `beta` records one input event for each read
+//!    of the terminal, so a key is one keystroke: one character, a key that
+//!    sends an escape sequence (for example an arrow key), or a paste. Each
+//!    key counts as one character.
+//! 2. A burst is a run of keys. A gap between two keys that is longer than
+//!    the pause threshold ends a burst. A key that holds a line end (Enter)
+//!    also ends its burst. Thus each pause, and each gap between two
+//!    commands, keeps its length.
+//! 3. The first key of a burst moves only by the change of the bursts before
+//!    it. Each other key of the burst comes one interval after the key before
+//!    it. The interval is 1 divided by the rate, changed by the jitter.
+//! 4. The jitter is a fraction of the interval. Each interval changes by up
+//!    to that fraction, up or down. The change comes from the position of the
+//!    key in the region, so each render gives the same times.
+//! 5. An event that is not a key keeps its delay after the key before it, so
+//!    the echo of a key follows the key. When the gap to the next key becomes
+//!    shorter, the delay becomes shorter by the same ratio, so the event stays
+//!    between the two keys.
+//! 6. An event before the first key of the region keeps its time. The events
+//!    after the last key of the region, and the end of the region, move by
+//!    the change of that key. The pipeline then moves each event after the
+//!    region by the same change.
+//!
+//! Each event keeps its data, its type, and its place in the list.
 
 use crate::error::NleError;
 use crate::pipeline::{FilterRegistry, Span};
@@ -21,7 +50,8 @@ pub const JITTER_OPTION: &str = "jitter";
 /// The pause threshold of a filter whose options give none, in seconds.
 pub const DEFAULT_PAUSE: f64 = 2.0;
 
-/// A typing rate in characters per second. It is finite and above zero.
+/// A typing rate in characters per second. It is finite and above zero. Each
+/// key counts as one character.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct TypingRate(f64);
 
@@ -79,11 +109,12 @@ impl Jitter {
 /// The settings of one typing speed filter.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Normalization {
-    /// The rate of the keystrokes of each burst.
+    /// The rate of the keys of each burst.
     pub rate: TypingRate,
-    /// The pause threshold.
+    /// The pause threshold. A gap between two keys that is longer than this
+    /// is a pause, and it keeps its length. A gap equal to it is typing.
     pub pause: Seconds,
-    /// The jitter of each interval.
+    /// The jitter of each interval inside a burst.
     pub jitter: Jitter,
 }
 
@@ -149,7 +180,7 @@ impl Normalization {
 }
 
 /// Put the keys of each burst at the rate, and move the other events with
-/// them.
+/// them, by the rules of the module doc.
 fn normalize(span: Span, options: &FilterOptions) -> Result<Span, String> {
     let settings = Normalization::from_options(options)?;
     let keys = new_keys(&span.events, &settings);
