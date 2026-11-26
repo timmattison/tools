@@ -7,7 +7,7 @@ use imageproc::drawing::{draw_filled_rect_mut, draw_text_mut};
 use imageproc::rect::Rect;
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 // Helper functions for color analysis
@@ -30,15 +30,26 @@ struct FontManager {
 }
 
 impl FontManager {
-    fn new() -> Result<Self> {
+    /// Loads the fonts for the frames. With `Some(path)`, it loads only that
+    /// file and no system font. With `None`, it loads the system fonts.
+    fn new(font: Option<&Path>) -> Result<Self> {
         let mut fonts = Vec::new();
-        let font_paths = get_font_paths();
 
-        for font_path in &font_paths {
-            if let Ok(font) = load_font_from_path(font_path) {
-                fonts.push(font);
-                if fonts.len() >= 5 {
-                    break;
+        if let Some(path) = font {
+            let font_data = std::fs::read(path)?;
+            fonts.push(
+                FontVec::try_from_vec(font_data)
+                    .map_err(|_| anyhow::anyhow!("Failed to parse font"))?,
+            );
+        } else {
+            let font_paths = get_font_paths();
+
+            for font_path in &font_paths {
+                if let Ok(font) = load_font_from_path(font_path) {
+                    fonts.push(font);
+                    if fonts.len() >= 5 {
+                        break;
+                    }
                 }
             }
         }
@@ -138,6 +149,7 @@ pub async fn export_video(
     resolution: Option<String>,
     theme: String,
     optimize_web: bool,
+    font: Option<PathBuf>,
 ) -> Result<()> {
     let recording = Recording::load(&input)?;
 
@@ -158,11 +170,11 @@ pub async fn export_video(
     let total_frames = generate_and_encode_video(
         &recording,
         &output_path,
-        width,
-        height,
+        (width, height),
         fps,
         terminal_theme,
         optimize_web,
+        font.as_deref(),
     )?;
 
     println!("Video export saved to: {}", output_path.display());
@@ -203,12 +215,13 @@ fn parse_resolution(resolution: &Option<String>, recording: &Recording) -> Resul
 fn generate_and_encode_video(
     recording: &Recording,
     output_path: &PathBuf,
-    width: u32,
-    height: u32,
+    size: (u32, u32),
     fps: u32,
     theme: TerminalTheme,
     optimize_web: bool,
+    font: Option<&Path>,
 ) -> Result<usize> {
+    let (width, height) = size;
     let frame_duration = 1.0 / f64::from(fps);
     #[expect(
         clippy::cast_possible_truncation,
@@ -225,7 +238,7 @@ fn generate_and_encode_video(
         .context("Failed to get FFmpeg stdin")?;
 
     // Load font manager once for all frames
-    let mut font_manager = FontManager::new()?;
+    let mut font_manager = FontManager::new(font)?;
     println!(
         "Loaded {} fonts for better Unicode coverage",
         font_manager.fonts.len()
