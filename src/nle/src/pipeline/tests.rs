@@ -728,3 +728,76 @@ fn render_moves_the_duration_by_the_change_of_the_length_of_a_span_filter() {
         .unwrap();
     assert_eq!(part.duration, 9.0);
 }
+
+// Tests of the span filter: errors and registration.
+
+#[test]
+fn a_span_filter_that_answers_an_error_fails_the_run_with_the_kind_and_the_message() {
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("speed"), |_, _| Err("bad speed".to_string()));
+
+    let result = registry.run(events(&[1.0]), &[all("speed")]);
+
+    match result {
+        Err(NleError::RenderError(message)) => {
+            assert!(message.contains("speed"), "{message}");
+            assert!(message.contains("bad speed"), "{message}");
+        }
+        other => panic!("expected a RenderError, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_span_filter_that_answers_a_bad_length_fails_and_names_the_kind() {
+    // The events end at 3 s, so a length below 3 is below the largest time.
+    let bad_lengths = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 2.5];
+    for length in bad_lengths {
+        let mut registry = FilterRegistry::new();
+        registry.register_span(kind("len"), move |span, _| {
+            Ok(Span {
+                events: span.events,
+                length,
+            })
+        });
+
+        let result = registry.run(events(&[1.0, 3.0]), &[all("len")]);
+
+        match result {
+            Err(NleError::RenderError(message)) => {
+                assert!(message.contains("len"), "length {length}: {message}");
+            }
+            other => panic!("length {length}: expected a RenderError, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_span_filter_may_answer_a_length_equal_to_its_largest_time() {
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("len"), |span, _| {
+        Ok(Span {
+            events: span.events,
+            length: 3.0,
+        })
+    });
+
+    let out = registry.run(events(&[1.0, 3.0]), &[all("len")]).unwrap();
+
+    assert_eq!(times(&out), vec![1.0, 3.0]);
+}
+
+#[test]
+fn register_span_and_register_replace_each_other_under_one_kind() {
+    let mut registry = FilterRegistry::new();
+    assert!(!registry.contains(&kind("f")));
+
+    registry.register_span(kind("f"), scale_span(0.5));
+    assert!(registry.contains(&kind("f")));
+    registry.register(kind("f"), add_one());
+    let out = registry.run(events(&[1.0, 2.0]), &[all("f")]).unwrap();
+    assert_eq!(times(&out), vec![2.0, 3.0]);
+
+    registry.register_span(kind("f"), scale_span(2.0));
+    let out = registry.run(events(&[1.0, 2.0]), &[all("f")]).unwrap();
+    assert_eq!(times(&out), vec![2.0, 4.0]);
+}
