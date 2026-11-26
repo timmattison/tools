@@ -474,9 +474,11 @@ fn render_never_ends_before_the_last_event() {
     let mut registry = FilterRegistry::new();
     registry.register(kind("far"), |_, _| vec![ev(50.0)]);
     let rendered = registry
-        .render(&one_clip_project(vec![all("far")]))
+        .render(&one_clip_project(vec![range("far", 20.0, 30.0)]))
         .unwrap();
-    assert_eq!(rendered.duration, 50.0);
+    // The range starts after the end 10, so the end stays, and then it grows
+    // to the new last event at 20 + 50.
+    assert_eq!(rendered.duration, 70.0);
 }
 
 #[test]

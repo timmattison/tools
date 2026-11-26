@@ -94,9 +94,14 @@ impl FilterRegistry {
     }
 
     /// One filter step: the steps on `FilterFn`.
-    fn apply(&self, events: Vec<Event>, applied: &AppliedFilter) -> Result<Vec<Event>, NleError> {
+    fn apply(
+        &self,
+        events: Vec<Event>,
+        applied: &AppliedFilter,
+        end: &mut f64,
+    ) -> Result<Vec<Event>, NleError> {
         let filter = self.lookup(&applied.kind)?;
-        let (start, end) = match &applied.region {
+        let (start, region_end) = match &applied.region {
             FilterRegion::All => (0.0, f64::INFINITY),
             FilterRegion::Range { start, end } => (start.get(), end.get()),
         };
@@ -107,7 +112,7 @@ impl FilterRegistry {
         for event in events {
             if event.time < start {
                 before.push(event);
-            } else if event.time < end {
+            } else if event.time < region_end {
                 inside.push(Event {
                     time: event.time - start,
                     ..event
@@ -140,6 +145,11 @@ impl FilterRegistry {
         }));
         // A stable sort: events at one time keep the order that they had.
         result.sort_by(|a, b| a.time.total_cmp(&b.time));
+
+        if *end >= start {
+            *end += shift;
+        }
+        *end = end.max(last_time(&result)).max(0.0);
         Ok(result)
     }
 
@@ -155,11 +165,25 @@ impl FilterRegistry {
         events: Vec<Event>,
         filters: &[AppliedFilter],
     ) -> Result<Vec<Event>, NleError> {
+        let end = last_time(&events);
+        self.run_with_end(events, filters, end)
+            .map(|(events, _end)| events)
+    }
+
+    /// Run `filters` in order, and follow the end of the timeline, which
+    /// starts at `end`. Returns the events and the final end.
+    fn run_with_end(
+        &self,
+        events: Vec<Event>,
+        filters: &[AppliedFilter],
+        end: f64,
+    ) -> Result<(Vec<Event>, f64), NleError> {
         let mut events = events;
+        let mut end = end;
         for applied in filters {
-            events = self.apply(events, applied)?;
+            events = self.apply(events, applied, &mut end)?;
         }
-        Ok(events)
+        Ok((events, end))
     }
 
     /// Flatten `project` into one recording.
@@ -208,7 +232,7 @@ impl FilterRegistry {
             .collect();
         // A stable sort keeps track order, then clip order, on a tie.
         events.sort_by(|a, b| a.time.total_cmp(&b.time));
-        let events = self.run(events, &project.filters)?;
+        let (events, end) = self.run_with_end(events, &project.filters, project.duration())?;
 
         let header = &first.source;
         Ok(Recording {
@@ -216,7 +240,7 @@ impl FilterRegistry {
             width: header.width,
             height: header.height,
             timestamp: header.timestamp,
-            duration: project.duration(),
+            duration: end,
             command: header.command.clone(),
             title: header.title.clone(),
             env: header.env.clone(),
