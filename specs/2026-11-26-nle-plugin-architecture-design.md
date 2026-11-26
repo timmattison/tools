@@ -560,7 +560,8 @@ it.
 
 ### The plugins directory
 
-The editor loads each folder in `<data dir>/nle/plugins/` when it starts.
+The editor loads each folder in `<data dir>/nle/plugins/` when it starts,
+except a folder whose name starts with `.`.
 `<data dir>` is `dirs::data_dir()`: `~/Library/Application Support` on macOS
 and `$XDG_DATA_HOME` or `~/.local/share` on Linux. A plugin that fails to load
 does not stop the editor. The editor shows each failed folder with its reason.
@@ -579,10 +580,15 @@ A URL installs a plugin. It does not run one from the network.
    install, thus a body with no end does not fill the memory.
 3. The editor shows the name, the version, the type, the description, the
    options, the size, the SHA-256 of the component, and the source URL.
-4. If the user accepts, the editor writes the folder into the plugins
-   directory. A file beside the manifest keeps the source URL and the SHA-256.
-   If the user refuses, the editor writes nothing.
+4. If the user accepts, the editor writes the folder into a temporary folder
+   of the plugins directory, whose name starts with `.`. Then it renames the
+   temporary folder into place in one step, and it loads the plugin. Thus a
+   crash in the middle of an install leaves no half folder that loads. A file
+   beside the manifest keeps the source URL and the SHA-256. If the user
+   refuses, the editor writes nothing.
 5. An update is a new install from the same URL, with the same confirmation.
+   Before the rename, the editor renames the old folder to a name that starts
+   with `.`. After the rename, it deletes the old folder.
 
 The sandbox is the security boundary, not the source of the plugin. The
 confirmation tells the user what they install, and the SHA-256 lets them
@@ -598,8 +604,7 @@ registry to the editor, and it renders the preview again. If the new version fai
 keeps the old version and shows the error.
 
 The editor does not watch the plugins directory. Only the install flow of the
-editor writes there, and a watch of it can load a folder that an install did
-not finish.
+editor writes there, and that flow loads the plugin that it installs.
 
 ## Security
 
@@ -747,7 +752,7 @@ each default feature of wasmtime that the host does not use.
 ### Slice 3: The plugins directory in the editor
 
 - The editor loads each folder of [the plugins directory](#the-plugins-directory)
-  when it starts.
+  when it starts, except a folder whose name starts with `.`.
 - It registers each filter plugin under `plugin:<name>`, through
   `FilterRegistry::register` or `FilterRegistry::register_span` by its `type`.
 - It shows each folder that failed to load, with the reason.
@@ -801,6 +806,8 @@ it.
 - A test serves a plugin from a local `https` server with a test certificate.
   It covers the refusal of the user, a wrong scheme, a redirect to `http`, a
   body over each size limit, and an `entry` that leaves the folder.
+- A temporary folder that an install leaves behind does not load at the next
+  start, and a test asserts it.
 
 ### Slice 8: Hot reload of development plugins
 
