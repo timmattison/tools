@@ -5,4 +5,6 @@
 //! an interrupted call again in place. A walk thus never loses the paths that
 //! it did not print yet.
 
+pub mod fs;
 pub mod pattern;
+pub mod walk;
