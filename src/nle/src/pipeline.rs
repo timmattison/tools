@@ -269,11 +269,12 @@ impl FilterRegistry {
 
     /// Run `filters` in order, and follow the end of the timeline, which
     /// starts at `end`. The chapter times in `chapters` move through the
-    /// filters. Returns the events and the final end.
+    /// filters. A chapter time can become infinite, and the caller drops it
+    /// with the chapters after the end. Returns the events and the final end.
     ///
     /// # Errors
     /// Returns `NleError::RenderError` when a filter fails, or when an event
-    /// time, a chapter time, or the final end is not finite.
+    /// time or the final end is not finite.
     fn run_with_end(
         &self,
         events: Vec<Event>,
@@ -292,13 +293,6 @@ impl FilterRegistry {
                 return Err(NleError::RenderError(format!(
                     "the render gives the time {} s, which is not finite",
                     event.time
-                )));
-            }
-        }
-        for time in chapters.iter() {
-            if !time.is_finite() {
-                return Err(NleError::RenderError(format!(
-                    "the render gives the chapter time {time} s, which is not finite"
                 )));
             }
         }
@@ -325,10 +319,11 @@ impl FilterRegistry {
     ///    first on the timeline. A tie goes to the clip that comes first in
     ///    track order, then in clip order.
     /// 5. `duration` is the end of the timeline after the filters.
-    /// 6. Each event time, each chapter time, and the duration must be
-    ///    finite. Else the render fails with `NleError::RenderError`.
+    /// 6. Each event time and the duration must be finite. Else the render
+    ///    fails with `NleError::RenderError`.
     /// 7. The chapters are the chapters of the project, moved through the
-    ///    filters. A chapter after the duration is dropped. The others are in
+    ///    filters. A chapter after the duration is dropped. A chapter time that
+    ///    overflows to infinity is after the duration too. The others are in
     ///    time order, and two at one time keep the order of
     ///    `EditProject::chapters_in_order`.
     ///
