@@ -49,14 +49,25 @@ library, and do not use a canvas for the first version.
 7. **Keep the hit test and the drag state in Rust, and apply one edit when the
    drag ends.** Use the pointer events of Dioxus. During the drag, a signal
    holds the preview position, and only the transform of the clip changes. On
-   `pointerup`, call `Editor::apply` one time, with `MoveClip` or `TrimClip`.
-   Each call of `Editor::apply` adds one step to the undo history, thus one
-   edit for each pointer move gives one undo step for each move. Escape
-   cancels the drag and applies no edit. The Animations panel of Chrome
-   DevTools uses the same rule: a move only draws, and the release changes the
-   model. A drag that must continue outside the timeline needs one
-   `document::eval` for `setPointerCapture` or for listeners on `window`,
-   because Dioxus 0.7 gives no method for pointer capture.
+   `pointerup`, call `Editor::apply` one time. Each call of `Editor::apply`
+   adds one step to the undo history, thus one edit for each pointer move
+   gives one undo step for each move. Escape cancels the drag and applies no
+   edit. The Animations panel of Chrome DevTools uses the same rule: a move
+   only draws, and the release changes the model. A drag that must continue
+   outside the timeline needs one `document::eval` for `setPointerCapture` or
+   for listeners on `window`, because Dioxus 0.7 gives no method for pointer
+   capture. Each kind of drag gives one edit:
+   - A move of a clip is one `MoveClip`.
+   - A drag of the end edge is one `TrimClip`. It changes `out_point`, and
+     the start of the clip stays.
+   - A drag of the start edge by d adds d to `in_point` and to
+     `timeline_offset`, thus the end edge stays. Remotion Studio does the
+     same (`getTimelineSequenceLeftEdgeDragValues`). The `Edit` of
+     `src/nle/src/editor.rs` has no variant for this drag. `TrimClip` keeps
+     `timeline_offset`, and a `TrimClip` with a `MoveClip` gives two undo
+     steps. Thus issue #150 adds one edit that changes `in_point` and
+     `timeline_offset` together, for example a `TrimClip` that also takes the
+     new `timeline_offset`.
 8. **Take no Dioxus drag crate.** `dioxus-gestures` and `dioxus-dnd` hold a
    drag to no axis, snap to no clip edge, and resize no edge (see
    [Dioxus crates](#dioxus-crates)). The drag of issue #150 is a set of
@@ -236,7 +247,7 @@ In the Source column, a file name with no directory is in
 | Zoom anchor | A wheel zoom keeps the time under the pointer at the same place. If the pointer is within 8 px of the playhead, the playhead is the anchor. | `TimelinePinchZoom.tsx` |
 | Scroll in playback | When the playhead leaves the window, the view moves one window width. | `timeline-scroll-logic.ts`, `TimelinePlayCursorSyncer.tsx` |
 | Playhead | A pointer down on the timeline pauses, moves the playhead to the frame under the pointer, and captures the pointer. Near an edge of the window, the view scrolls each 100 ms. The playhead is a line of 1 px. Its `translateX` is written through a ref, outside the React render. | `TimelineDragHandler.tsx`, `timeline-scroll-logic.ts`, `TimelineSlider.tsx` |
-| Trim | Each clip edge has a hit area of 8 px. A trim starts after 4 px of movement. A clip that is too narrow loses a handle, and the handles do not shrink. A tooltip shows the signed change and the frame of the edge. | `get-timeline-trim-handle-layout.ts`, `TimelineSequenceRightEdgeDragHandle.tsx`, `TimelineTrimTooltip.tsx` |
+| Trim | Each clip edge has a hit area of 8 px. A trim starts after 4 px of movement. A drag of the left edge changes the start and the trim of the clip together, thus the right edge stays. A clip that is too narrow loses a handle, and the handles do not shrink. A tooltip shows the signed change and the frame of the edge. | `get-timeline-trim-handle-layout.ts`, `TimelineSequenceRightEdgeDragHandle.tsx`, `TimelineTrimTooltip.tsx` |
 | Snap | The snap is on by default, and `Shift+M` turns it off and on. A moved clip snaps to the start of the timeline within 10 px. No snap to the playhead or to other clips was found. | `state/editor-snapping.ts`, `TimelineSequenceRightEdgeDragHandle.tsx` |
 | Drag session | Each drag captures the pointer and listens on `window` for `pointermove`, `pointerup`, `pointercancel`, and `blur`. Escape cancels the drag. | `helpers/escape-cancelable-pointer-session.ts`, `packages/sdk/src/pointer-session.ts` |
 | Selection | A drag from an empty area starts a marquee after 3 px. A clip that touches the marquee is selected. Shift and Cmd or Ctrl change the selection on a click. | `TimelineSelection.tsx` |
