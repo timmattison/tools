@@ -1514,3 +1514,16 @@ fn cargo_lock_in_a_large_commit_runs_the_rust_gate() {
         "Cargo.lock in a large commit",
     );
 }
+
+/// A commit that stages a file of the msgs frontend among some thousand other
+/// paths must run the type check and the tests of msgs. The path sorts before
+/// the filler, so a trigger that reads the list from a pipe into `grep -q`
+/// runs no check for it.
+#[test]
+fn msgs_file_in_a_large_commit_runs_the_msgs_checks() {
+    let staged = MSGS_FILES[0];
+    let dir = unique_fixture_dir();
+    write_files(&dir, &[staged]);
+    stage_with_large_filler(&dir, &[staged]);
+    assert_msgs_checks_ran(&dir, &format!("{staged} in a large commit"));
+}
