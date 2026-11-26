@@ -145,3 +145,16 @@ fn skip_to_end_with_the_whole_region_puts_every_event_at_zero() {
 fn the_registry_holds_the_fast_forward_filter() {
     assert!(filters::registry().contains(&kind()));
 }
+
+fn accelerate(start: f64, end: f64, value: f64) -> AppliedFilter {
+    applied(
+        range(start, end),
+        Mode::Accelerate(Acceleration::new(value).unwrap()),
+    )
+}
+
+#[test]
+fn accelerate_divides_times_and_length_and_moves_later_events() {
+    let got = run_times(&[4.0, 12.0, 24.0], &[accelerate(8.0, 24.0, 16.0)]);
+    assert_eq!(got, vec![4.0, 8.25, 9.0]);
+}
