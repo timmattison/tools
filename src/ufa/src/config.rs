@@ -1843,6 +1843,50 @@ mod tests {
         );
     }
 
+    /// The save reads each relative link of a chain from the directory of that
+    /// link, as the kernel does. In the chain `config.toml -> sub/next.toml`
+    /// and `sub/next.toml -> real.toml`, the second link names
+    /// `sub/real.toml`, not the `real.toml` beside the config path.
+    #[cfg(unix)]
+    #[test]
+    fn saving_through_a_chain_of_links_across_directories_reads_each_link_from_its_directory() {
+        let temp = TempConfigDir::new("chained-config");
+        let sub = temp.dir.join("sub");
+        create_directory(&sub);
+        let link = temp.config_file();
+        let next = sub.join("next.toml");
+        std::os::unix::fs::symlink("sub/next.toml", &link).expect("the link must be creatable");
+        std::os::unix::fs::symlink("real.toml", &next).expect("the link must be creatable");
+
+        Config {
+            api_key: Some("plaintext-controller-key".into()),
+            ..Config::default()
+        }
+        .save_to(&link)
+        .expect("saving through the chain of links must succeed");
+
+        for path in [&link, &next] {
+            assert!(
+                fs::symlink_metadata(path)
+                    .expect("the link must exist")
+                    .file_type()
+                    .is_symlink(),
+                "the save must keep {} a symbolic link",
+                path.display()
+            );
+        }
+        assert!(
+            fs::read_to_string(sub.join("real.toml"))
+                .expect("the save must make the file at the end of the chain")
+                .contains("plaintext-controller-key"),
+            "the file at the end of the chain must hold the key"
+        );
+        assert!(
+            fs::symlink_metadata(temp.dir.join("real.toml")).is_err(),
+            "the save must not make a real.toml beside the config path"
+        );
+    }
+
     /// A config path in a loop of symbolic links names no file. The save is
     /// an error, and it leaves both links as they were.
     #[cfg(unix)]
