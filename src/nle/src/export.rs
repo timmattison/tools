@@ -53,7 +53,13 @@ impl Theme {
     /// The name that `beta --theme` takes.
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        ""
+        match self {
+            Self::Auto => "auto",
+            Self::Dracula => "dracula",
+            Self::Monokai => "monokai",
+            Self::SolarizedDark => "solarized-dark",
+            Self::SolarizedLight => "solarized-light",
+        }
     }
 }
 
@@ -64,8 +70,15 @@ impl FromStr for Theme {
     ///
     /// # Errors
     /// Returns `NleError::ExportError` for any other text.
-    fn from_str(_text: &str) -> Result<Self, Self::Err> {
-        Err(NleError::ExportError(String::new()))
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|theme| theme.as_str() == text)
+            .ok_or_else(|| {
+                NleError::ExportError(format!(
+                    "the theme \"{text}\" is not one of auto, dracula, monokai, solarized-dark, solarized-light"
+                ))
+            })
     }
 }
 
@@ -84,14 +97,31 @@ impl FromStr for Resolution {
     ///
     /// # Errors
     /// Returns `NleError::ExportError` for any other text.
-    fn from_str(_text: &str) -> Result<Self, Self::Err> {
-        Err(NleError::ExportError(String::new()))
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let parse_error = || {
+            NleError::ExportError(format!(
+                "the resolution \"{text}\" is not WIDTHxHEIGHT, for example 1920x1080"
+            ))
+        };
+        let (width, height) = text.split_once('x').ok_or_else(parse_error)?;
+        Ok(Self {
+            width: parse_dimension(width).ok_or_else(parse_error)?,
+            height: parse_dimension(height).ok_or_else(parse_error)?,
+        })
     }
 }
 
+/// Read one side of a resolution: digits only, and above zero.
+fn parse_dimension(text: &str) -> Option<NonZeroU32> {
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
 impl fmt::Display for Resolution {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        Ok(())
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}x{}", self.width, self.height)
     }
 }
 
