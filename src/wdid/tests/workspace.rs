@@ -323,3 +323,191 @@ fn a_path_record_with_a_space_and_multibyte_characters_in_the_path_counts() {
     assert_eq!(canonical(&workspace.root), canonical(root.path()));
     assert_eq!(workspace.found_by, FoundBy::InstalledPath { crate_dir });
 }
+
+/// Runs [`find`] without `--repo` in `cwd`, and gives the text of its error.
+fn error_in(cwd: &Path, location: &InstallLocation<'_>) -> String {
+    find(None, cwd, &Programs::default(), location, BINARY)
+        .expect_err("a workspace was found")
+        .to_string()
+}
+
+/// Runs [`find`] without `--repo` outside each work tree, and gives the text
+/// of its error.
+fn error_outside(location: &InstallLocation<'_>) -> String {
+    let cwd = not_a_repository();
+    error_in(cwd.path(), location)
+}
+
+/// Says that `message` names `--repo` and holds `reason`.
+fn assert_names_repo_and(message: &str, reason: &str) {
+    assert!(message.contains("--repo <path>"), "{message}");
+    assert!(message.contains(reason), "no {reason:?} in: {message}");
+}
+
+#[test]
+fn a_missing_records_file_is_an_error_that_names_repo_and_the_reason() {
+    let home = CargoHome::new();
+
+    let message = error_outside(&home.location());
+
+    assert_names_repo_and(&message, "there is no record of the install");
+    assert_names_repo_and(&message, ".crates2.json");
+}
+
+#[test]
+fn a_records_file_without_the_binary_is_an_error_that_names_repo_and_the_reason() {
+    let home = CargoHome::new();
+    home.write_records(&[(&git_key("gsw", REPOSITORY_URL, OTHER_COMMIT), &["gsw"])]);
+
+    let message = error_outside(&home.location());
+
+    assert_names_repo_and(&message, "holds no record of the binary wdid");
+}
+
+#[test]
+fn a_records_file_that_is_not_json_is_an_error_that_names_repo_and_the_reason() {
+    let home = CargoHome::new();
+    std::fs::write(home.path().join(support::RECORDS_FILE), "not json").unwrap();
+
+    let message = error_outside(&home.location());
+
+    assert_names_repo_and(&message, "is not a records file that wdid can read");
+}
+
+#[test]
+fn a_record_from_the_registry_is_an_error_that_names_repo_and_the_reason() {
+    let home =
+        home_with_record("wdid 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)");
+
+    let message = error_outside(&home.location());
+
+    assert_names_repo_and(&message, "names a source that is not git+ or path+file");
+}
+
+#[test]
+fn a_git_record_without_a_full_commit_is_an_error_that_names_repo_and_the_reason() {
+    let home = home_with_record(&git_key(BINARY, REPOSITORY_URL, "12baa41"));
+
+    let message = error_outside(&home.location());
+
+    assert_names_repo_and(&message, "names no full commit");
+}
+
+/// `cargo cache --autoclean` removes the checkouts.
+#[test]
+fn a_missing_checkout_is_an_error_that_names_repo_and_the_reason() {
+    let home = home_with_record(&git_key(BINARY, REPOSITORY_URL, OTHER_COMMIT));
+
+    let message = error_outside(&home.location());
+
+    assert_names_repo_and(&message, "holds no checkout of commit 0123456 of tools");
+    assert_names_repo_and(&message, "cargo cache --autoclean");
+}
+
+#[test]
+fn a_checkout_at_a_different_commit_is_an_error_that_names_repo_and_the_reason() {
+    let source = workspace_repository();
+    let head = source.rev_parse("HEAD");
+    let home = home_with_record(&git_key(BINARY, REPOSITORY_URL, OTHER_COMMIT));
+    home.add_checkout(&source, CHECKOUT_DIRECTORY, short(OTHER_COMMIT));
+
+    let message = error_outside(&home.location());
+
+    assert_names_repo_and(
+        &message,
+        &format!("is at commit {head}, not at commit {OTHER_COMMIT} of the record"),
+    );
+}
+
+/// git does not look above the checkout. A checkout directory without a
+/// repository is thus not a checkout, also inside another work tree.
+#[test]
+fn a_checkout_directory_without_a_repository_is_an_error_that_names_repo_and_the_reason() {
+    let home = home_with_record(&git_key(BINARY, REPOSITORY_URL, OTHER_COMMIT));
+    let checkouts = home.path().join("git").join("checkouts");
+    std::fs::create_dir_all(checkouts.join(CHECKOUT_DIRECTORY).join(short(OTHER_COMMIT))).unwrap();
+    let outer = TestRepo::init();
+    outer.commit_file("README.md", "outer\n", "add a readme");
+    let cargo_home = outer.path().join("cargo-home");
+    std::os::unix::fs::symlink(home.path(), &cargo_home).unwrap();
+    let inside = InstallLocation {
+        cargo_home: Some(cargo_home.as_os_str()),
+        ..InstallLocation::default()
+    };
+
+    let message = error_outside(&inside);
+
+    assert_names_repo_and(&message, "git cannot read the checkout");
+}
+
+#[test]
+fn a_checkout_without_a_cargo_toml_is_an_error_that_names_repo_and_the_reason() {
+    let source = TestRepo::init();
+    source.commit_file("README.md", "no manifest\n", "add a readme");
+    let commit = source.rev_parse("HEAD");
+    let home = home_with_record(&git_key(BINARY, REPOSITORY_URL, &commit));
+    home.add_checkout(&source, CHECKOUT_DIRECTORY, short(&commit));
+
+    let message = error_outside(&home.location());
+
+    assert_names_repo_and(&message, "has no Cargo.toml");
+}
+
+#[test]
+fn a_path_record_whose_crate_directory_is_gone_is_an_error_that_names_repo_and_the_reason() {
+    let gone = tempfile::tempdir().unwrap();
+    let crate_dir = gone.path().join("wdid");
+    let home = home_with_record(&path_key(BINARY, &crate_dir));
+
+    let message = error_outside(&home.location());
+
+    assert_names_repo_and(
+        &message,
+        &format!(
+            "the crate directory {} of the record does not exist",
+            crate_dir.display()
+        ),
+    );
+}
+
+#[test]
+fn without_cargo_home_and_home_the_error_names_repo_and_the_reason() {
+    let message = error_outside(&InstallLocation::default());
+
+    assert_names_repo_and(&message, "neither CARGO_HOME nor HOME is set");
+}
+
+/// The error also says why step 2 found no workspace.
+#[test]
+fn the_error_outside_each_work_tree_says_that_the_directory_is_in_no_work_tree() {
+    let home = CargoHome::new();
+    let cwd = not_a_repository();
+
+    let message = error_in(cwd.path(), &home.location());
+
+    assert!(
+        message.starts_with(&format!(
+            "{} is not in a git work tree, and the installed wdid gives no workspace: ",
+            cwd.path().display()
+        )),
+        "{message}"
+    );
+}
+
+#[test]
+fn the_error_in_a_work_tree_without_a_cargo_toml_names_the_work_tree() {
+    let home = CargoHome::new();
+    let work_tree = TestRepo::init();
+
+    let message = error_in(work_tree.path(), &home.location());
+
+    assert!(message.starts_with("the git work tree "), "{message}");
+    assert!(
+        message.contains(" has no Cargo.toml, and the installed wdid gives no workspace: "),
+        "{message}"
+    );
+    assert!(
+        message.ends_with("Run wdid in a cargo workspace, or name one with --repo <path>"),
+        "{message}"
+    );
+}

@@ -588,3 +588,22 @@ fn in_a_work_tree_without_a_cargo_toml_the_report_is_on_the_source_of_the_instal
     assert_eq!(tool(&document, TOOL_ONE)["uses"], 1, "{document}");
     assert!(tool(&document, TOOL_TWO)["added"].is_string(), "{document}");
 }
+
+#[test]
+fn outside_each_work_tree_without_a_record_the_error_names_repo_and_the_reason() {
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "wdid-fixture-one a")]));
+    let home = support::CargoHome::new();
+    let cwd = gitscratch::testing::not_a_repository();
+
+    let output = run_in(&setup, &home, cwd.path());
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(stdout(&output).is_empty());
+    let message = stderr(&output);
+    assert!(message.starts_with("wdid: "), "{message}");
+    assert!(message.contains("--repo <path>"), "{message}");
+    assert!(
+        message.contains("there is no record of the install"),
+        "{message}"
+    );
+}
