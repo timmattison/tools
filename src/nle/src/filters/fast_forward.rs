@@ -9,7 +9,7 @@
 use crate::error::NleError;
 use crate::filters::time_dilation::Speed;
 use crate::pipeline::{FilterRegistry, Span};
-use crate::types::{AppliedFilter, FilterKind, FilterOptions, FilterRegion};
+use crate::types::{AppliedFilter, Event, FilterKind, FilterOptions, FilterRegion};
 
 /// The kind of the fast-forward filter.
 pub const KIND: &str = "fast-forward";
@@ -100,8 +100,24 @@ pub fn register(registry: &mut FilterRegistry) {
 }
 
 /// Compress a span in the mode of its options.
-fn fast_forward(span: Span, _options: &FilterOptions) -> Result<Span, String> {
+fn fast_forward(span: Span, options: &FilterOptions) -> Result<Span, String> {
+    if options.get(MODE_OPTION).and_then(serde_json::Value::as_str) == Some(SKIP_TO_END) {
+        return Ok(skip_to_end(span));
+    }
     Ok(span)
+}
+
+/// Move each event of a span to the start of the span, and remove the length.
+/// Each event keeps its data, its type, and its place in the list.
+fn skip_to_end(span: Span) -> Span {
+    Span {
+        events: span
+            .events
+            .into_iter()
+            .map(|event| Event { time: 0.0, ..event })
+            .collect(),
+        length: 0.0,
+    }
 }
 
 #[cfg(test)]
