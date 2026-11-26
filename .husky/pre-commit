@@ -125,7 +125,7 @@ fi
 # The block reads staged_paths_with_deletions, as the index gate above does:
 # deleting a file of a plugin, or moving it out, can break the plugin as surely
 # as an edit can.
-if staged_paths_with_deletions | grep -qE '^(plugins/|\.claude-plugin/)|^scripts/plugin-checks\.sh$'; then
+if staged_path_matches '^(plugins/|\.claude-plugin/)|^scripts/plugin-checks\.sh$'; then
     echo "pre-commit: running scripts/plugin-checks.sh"
     ./scripts/plugin-checks.sh
 fi
