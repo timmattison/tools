@@ -976,7 +976,8 @@ mod tests {
 mod action_tests {
     use super::*;
     use crate::test_server::{
-        empty_json, json_response, json_response_with_status, TestServer, INTEGRATION_API,
+        empty_json, json_response, json_response_with_status, no_content, TestServer,
+        INTEGRATION_API,
     };
 
     /// The API key a test hands the client. Nothing reads it back.
@@ -1264,6 +1265,55 @@ mod action_tests {
             None,
             "a power cycle must put nothing on standard output"
         );
+        assert!(
+            report
+                .notes()
+                .iter()
+                .any(|note| note.contains("power cycle initiated")),
+            "the note must say the power cycle started, got {:?}",
+            report.notes()
+        );
+    }
+
+    /// The integration API documents the `200` answer of a device action with
+    /// no content. A controller that sends no body accepted the restart, and
+    /// the command must say so, not fail on a body that it does not need.
+    #[tokio::test]
+    async fn a_restart_that_the_controller_answers_with_no_body_succeeds() {
+        let controller = TestServer::replying(&no_content()).await;
+
+        let report = restart_device(
+            &client_for(&controller),
+            Some(Uuid::new_v4()),
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("a 200 with no body is the answer that the API documents");
+
+        assert!(
+            report
+                .notes()
+                .iter()
+                .any(|note| note.contains("restart initiated")),
+            "the note must say the restart started, got {:?}",
+            report.notes()
+        );
+    }
+
+    /// The same rule for the action of a port.
+    #[tokio::test]
+    async fn a_port_power_cycle_that_the_controller_answers_with_no_body_succeeds() {
+        let controller = TestServer::replying(&no_content()).await;
+
+        let report = power_cycle_port(
+            &client_for(&controller),
+            Some(Uuid::new_v4()),
+            Uuid::new_v4(),
+            3,
+        )
+        .await
+        .expect("a 200 with no body is the answer that the API documents");
+
         assert!(
             report
                 .notes()

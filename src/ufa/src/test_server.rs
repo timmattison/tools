@@ -640,6 +640,18 @@ pub fn json_response_with_status(status: &str, body: &str) -> String {
     )
 }
 
+/// The response that carries no body at all.
+///
+/// The integration API documents this answer for the actions of a device and
+/// of a port: a `200 OK` with no content.
+///
+/// # Returns
+///
+/// A raw `200 OK` response with an empty body.
+pub fn no_content() -> String {
+    String::from("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+}
+
 /// The response that carries an empty JSON object.
 ///
 /// # Returns
