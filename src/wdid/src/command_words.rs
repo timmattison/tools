@@ -271,6 +271,27 @@ pub enum Parsed {
     Unparsed,
 }
 
+/// One expansion of an alias in a command line.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AliasUse {
+    /// The name of the alias. A suffix alias has its marker, `*.` and the
+    /// suffix (`*.md`).
+    pub name: String,
+    /// The alias that the person typed, when this expansion came from the
+    /// value of another alias. `None` when the person typed the name.
+    pub through: Option<String>,
+}
+
+/// The command words of one line, and the aliases that expanded in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Line {
+    /// The command words, in source order. These are the words that
+    /// [`command_words`] gives.
+    pub words: Vec<CommandWord>,
+    /// Each alias expansion of the walk, in walk order.
+    pub aliases: Vec<AliasUse>,
+}
+
 /// The most levels of nesting that the walk reads. A substitution inside a
 /// substitution adds one level. A line that nests deeper is refused.
 const MAX_DEPTH: usize = 64;
@@ -1448,9 +1469,21 @@ impl<'a> Walker<'a> {
 /// the rules of the expansion and of the origin of each word.
 #[must_use]
 pub fn command_words(line: &str, aliases: &Aliases) -> Parsed {
+    parse_line(line, aliases).map_or(Parsed::Unparsed, |line| Parsed::Words(line.words))
+}
+
+/// Gives the command words and the alias expansions of one line, or `None`
+/// when the parser refuses the line. Pure.
+///
+/// The words are the words that [`command_words`] gives.
+#[must_use]
+pub fn parse_line(line: &str, aliases: &Aliases) -> Option<Line> {
     let mut walker = Walker::new(aliases);
     match walker.walk_text(&TextContext::line(line)) {
-        Ok(()) => Parsed::Words(walker.words),
-        Err(Refused) => Parsed::Unparsed,
+        Ok(()) => Some(Line {
+            words: walker.words,
+            aliases: Vec::new(),
+        }),
+        Err(Refused) => None,
     }
 }
