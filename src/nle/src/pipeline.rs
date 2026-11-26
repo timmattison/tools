@@ -12,6 +12,9 @@ use crate::types::{
 
 /// A filter: a pure function from the events of a region to new events.
 ///
+/// This is the event form. `SpanFilterFn` is the span form, for a filter that
+/// changes the length of its region.
+///
 /// The pipeline calls a filter once for each `AppliedFilter` that names it.
 /// What a filter sees, and what the pipeline does with its answer:
 ///
@@ -54,6 +57,29 @@ pub struct Span {
 
 /// A span filter: a pure function from a region and its length to new events
 /// and a new length, or an error message.
+///
+/// Use a span filter when the filter changes the length of its region, for
+/// example a change of speed. The pipeline calls it once for each
+/// `AppliedFilter` that names it. Steps 1 to 3 and 7 to 8 of `FilterFn` are the
+/// same. The other steps are:
+///
+/// 1. The length of the region is from its start to its end, or to the end of
+///    the timeline when the end of the timeline comes first. It is never below
+///    zero, so a region that starts after the end of the timeline has the
+///    length 0. For the region `All`, the length is the end of the timeline.
+/// 2. The filter gets a `Span` with the events inside the region, relative to
+///    its start, and the length. It answers `Ok` with a new `Span`, or `Err`
+///    with a message.
+/// 3. An `Err` fails the pipeline with a render error. Its text names the kind
+///    and holds the message.
+/// 4. Each answered time is checked as in step 5 of `FilterFn`, with the same
+///    error.
+/// 5. The answered length must be finite. It must not be below zero, and it
+///    must not be below the largest answered time. Else the pipeline fails
+///    with a render error that names the kind and the length.
+/// 6. The shift is the answered length minus the length. The events after the
+///    region move by the shift, also when the region holds no event. The end
+///    of the timeline moves by the shift as in step 8 of `FilterFn`.
 pub type SpanFilterFn = dyn Fn(Span, &FilterOptions) -> Result<Span, String> + Send + Sync;
 
 /// A filter in one of its two forms.
@@ -127,7 +153,7 @@ impl FilterRegistry {
         })
     }
 
-    /// One filter step: the steps on `FilterFn`.
+    /// One filter step: the steps on `FilterFn` or on `SpanFilterFn`.
     fn apply(
         &self,
         events: Vec<Event>,
@@ -169,10 +195,21 @@ impl FilterRegistry {
                     events: inside,
                     length,
                 };
-                let answer = filter(span, &applied.options).unwrap_or(Span {
-                    events: Vec::new(),
-                    length,
-                });
+                let answer = filter(span, &applied.options).map_err(|message| {
+                    NleError::RenderError(format!(
+                        "filter \"{}\" failed: {message}",
+                        applied.kind.as_str()
+                    ))
+                })?;
+                let largest = last_time(&answer.events);
+                if !(answer.length.is_finite() && answer.length >= 0.0 && answer.length >= largest)
+                {
+                    return Err(NleError::RenderError(format!(
+                        "filter \"{}\" answered the length {} s, which is not finite, is below zero, or is below its last time {largest} s",
+                        applied.kind.as_str(),
+                        answer.length
+                    )));
+                }
                 let shift = answer.length - length;
                 (answer.events, shift)
             }
@@ -212,8 +249,9 @@ impl FilterRegistry {
     /// # Errors
     /// Returns `NleError::RenderError` when a filter kind is not registered,
     /// when a filter answers a time that is not finite or is below zero on
-    /// the timeline, or when an event time or the end of the timeline that the
-    /// filters give is not finite.
+    /// the timeline, when a span filter answers an error or a bad length, or
+    /// when an event time or the end of the timeline that the filters give is
+    /// not finite.
     pub fn run(
         &self,
         events: Vec<Event>,
@@ -228,8 +266,9 @@ impl FilterRegistry {
     /// starts at `end`. Returns the events and the final end.
     ///
     /// # Errors
-    /// Returns `NleError::RenderError` when a filter fails, or when an event
-    /// time or the final end is not finite.
+    /// Returns `NleError::RenderError` when a filter fails, when a span
+    /// filter answers an error or a bad length, or when an event time or the
+    /// final end is not finite.
     fn run_with_end(
         &self,
         events: Vec<Event>,
