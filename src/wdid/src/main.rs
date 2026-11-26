@@ -56,7 +56,8 @@ const EXIT_ERROR: u8 = 1;
 #[command(version = version_string!(), about = ABOUT)]
 struct Cli {
     /// The cargo workspace to report on. Without this flag, wdid uses the git
-    /// work tree of the current directory.
+    /// work tree of the current directory when it holds a Cargo.toml, else the
+    /// workspace that the installed wdid came from.
     #[arg(long, value_name = "PATH")]
     repo: Option<PathBuf>,
 
