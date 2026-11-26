@@ -331,6 +331,33 @@ fn resolve_insecure(
     Ok(insecure)
 }
 
+/// The advice shown when no source names the URL of the controller.
+const MISSING_URL_MESSAGE: &str = "UniFi URL not provided. Set it via --url, UNIFI_URL environment variable, or run 'ufa config setup' to create a configuration file.";
+
+/// Resolve the URL of the controller, preferring what the command line
+/// supplied over the configuration file.
+///
+/// `supplied` is what clap parsed for `--url`, which already falls back to
+/// `UNIFI_URL`.
+///
+/// # Arguments
+///
+/// * `supplied` - What the command line and the environment supplied.
+/// * `config` - The configuration file, when there is one.
+///
+/// # Returns
+///
+/// The URL, exactly as its source gave it.
+///
+/// # Errors
+///
+/// Returns the advice of [`MISSING_URL_MESSAGE`] if no source names a URL.
+fn resolve_url(supplied: Option<String>, config: Option<&Config>) -> Result<String> {
+    supplied
+        .or_else(|| config.and_then(|config| config.url.clone()))
+        .context(MISSING_URL_MESSAGE)
+}
+
 // The connection and output options are `global = true`, so they are accepted
 // at any position: `ufa devices list --output json` and `ufa --output json
 // devices list` are the same command. Nothing about the leading position was
@@ -530,9 +557,7 @@ async fn main() -> Result<()> {
     // Determine final configuration values. Each `args` field already resolves
     // its flag against the matching UNIFI_* variable via clap's `env`
     // attribute, so what remains here is the fall-through to the config file.
-    let url = args.url
-        .or_else(|| file_config.as_ref().and_then(|c| c.url.clone()))
-        .context("UniFi URL not provided. Set it via --url, UNIFI_URL environment variable, or run 'ufa config setup' to create a configuration file.")?;
+    let url = resolve_url(args.url, file_config.as_ref())?;
 
     let api_key = resolve_credential(
         Credential::Controller,
@@ -1389,6 +1414,82 @@ mod credential_tests {
 /// the server in the real header. The store is a test vault in front of a
 /// real cache file, so each forget runs the real `OpCache::invalidate` and no
 /// read starts the real `op`.
+#[cfg(test)]
+mod url_tests {
+    use super::{resolve_url, Config, MISSING_URL_MESSAGE};
+    use crate::test_support::{parse_args_for_test, ScopedVar};
+
+    /// The URL that the configuration file of these tests names.
+    const CONFIGURED_URL: &str = "https://from-the-configuration-file";
+
+    /// A configuration file that names [`CONFIGURED_URL`].
+    fn config_with_a_url() -> Config {
+        Config {
+            url: Some(CONFIGURED_URL.to_string()),
+            ..Config::default()
+        }
+    }
+
+    /// `export UNIFI_URL=` and `--url ""` say nothing, as a blank key does. A
+    /// blank value used to win over the configuration file and fail as a URL
+    /// that cannot be parsed.
+    #[test]
+    fn a_blank_supplied_url_falls_through_to_the_configuration_file() {
+        for blank in ["", "   ", "\n"] {
+            assert_eq!(
+                resolve_url(Some(blank.to_string()), Some(&config_with_a_url()))
+                    .expect("a blank command line value must fall through to the file"),
+                CONFIGURED_URL,
+                "{blank:?} names no URL, so the configured URL must answer"
+            );
+        }
+    }
+
+    /// The same value, as clap reads it out of the environment.
+    #[test]
+    fn a_blank_environment_url_falls_through_to_the_configuration_file() {
+        for blank in ["", "   "] {
+            let _var = ScopedVar::set("UNIFI_URL", blank);
+            let args = parse_args_for_test(["ufa", "info"]).expect("ufa info must parse");
+
+            assert_eq!(
+                resolve_url(args.url, Some(&config_with_a_url()))
+                    .expect("a blank UNIFI_URL must fall through to the file"),
+                CONFIGURED_URL,
+                "UNIFI_URL={blank:?} names no URL, so the configured URL must answer"
+            );
+        }
+    }
+
+    /// A blank `url` field names no URL either, so the user gets the advice
+    /// rather than an error about a URL that cannot be parsed.
+    #[test]
+    fn a_blank_url_field_with_nothing_supplied_reports_the_advice() {
+        let config = Config {
+            url: Some("  ".to_string()),
+            ..Config::default()
+        };
+
+        let error = resolve_url(None, Some(&config))
+            .expect_err("a blank field and no supplied URL must not resolve");
+
+        assert_eq!(format!("{error:#}"), MISSING_URL_MESSAGE);
+    }
+
+    /// A supplied URL that holds more than blank space wins over the file.
+    #[test]
+    fn a_supplied_url_wins_over_the_configuration_file() {
+        assert_eq!(
+            resolve_url(
+                Some("https://supplied.example".to_string()),
+                Some(&config_with_a_url())
+            )
+            .expect("a URL that is not blank must resolve"),
+            "https://supplied.example"
+        );
+    }
+}
+
 #[cfg(test)]
 mod key_rotation_tests {
     use super::{resolve_credential, run_with_the_current_key, Config, Credential, Secret};
