@@ -586,3 +586,147 @@ fn a_reset_of_the_terminal_gets_the_color_again() {
         ]
     );
 }
+
+// Tests of smart.
+
+#[test]
+fn smart_hides_the_cursor_during_a_burst_and_shows_it_after() {
+    // Each key echoes after its input event, so the typing is not a burst.
+    // The output of the command is.
+    let events = vec![
+        out(0.0, "$ "),
+        input(1.0, "l"),
+        out(1.0, "l"),
+        input(1.05, "s"),
+        out(1.05, "s"),
+        input(1.4, "\r"),
+        out(1.45, "\r\n"),
+        out(1.5, "file1\r\n"),
+        out(1.55, "file2\r\n"),
+        out(1.6, "$ "),
+        out(3.0, "x"),
+    ];
+    let mut expected = events.clone();
+    expected[6] = out(1.45, "\x1b[?25l\r\n");
+    expected[9] = out(1.6, "$ \x1b[?25h");
+
+    let got = run(events, json!({ "visibility": "smart" }), FilterRegion::All).unwrap();
+
+    assert_eq!(got, expected);
+}
+
+#[test]
+fn smart_obeys_the_recording_outside_a_burst() {
+    let events = vec![
+        out(0.0, "\x1b[?25la"),
+        out(1.0, "b"),
+        out(1.05, "\x1b[?25hc"),
+        out(1.1, "d"),
+        out(2.0, "\x1b[?25le"),
+        out(3.0, "\x1b[?25hf"),
+    ];
+
+    let got = run(events, json!({ "visibility": "smart" }), FilterRegion::All).unwrap();
+
+    // The show of the recording in the burst waits for the end of the burst.
+    assert_eq!(
+        got,
+        vec![
+            out(0.0, "\x1b[?25la"),
+            out(1.0, "b"),
+            out(1.05, "c"),
+            out(1.1, "d\x1b[?25h"),
+            out(2.0, "\x1b[?25le"),
+            out(3.0, "\x1b[?25hf"),
+        ]
+    );
+}
+
+#[test]
+fn the_burst_gap_sets_what_counts_as_a_burst() {
+    let events = vec![out(0.0, "a"), out(0.3, "b"), out(1.0, "c")];
+
+    let wide = run(
+        events.clone(),
+        json!({ "visibility": "smart", "burst_gap": 0.5 }),
+        FilterRegion::All,
+    )
+    .unwrap();
+    let default = run(
+        events.clone(),
+        json!({ "visibility": "smart" }),
+        FilterRegion::All,
+    )
+    .unwrap();
+
+    assert_eq!(
+        wide,
+        vec![
+            out(0.0, "\x1b[?25la"),
+            out(0.3, "b\x1b[?25h"),
+            out(1.0, "c")
+        ]
+    );
+    assert_eq!(default, events);
+}
+
+#[test]
+fn smart_waits_for_an_open_sequence_before_it_hides_or_shows_the_cursor() {
+    let smart = json!({ "visibility": "smart" });
+
+    // The burst ends inside a sequence, so the cursor shows after it.
+    assert_eq!(
+        run(
+            vec![out(0.0, "a"), out(0.05, "b\x1b[3"), out(1.0, "1mc")],
+            smart.clone(),
+            FilterRegion::All,
+        )
+        .unwrap(),
+        vec![
+            out(0.0, "\x1b[?25la"),
+            out(0.05, "b\x1b[3"),
+            out(1.0, "1m\x1b[?25hc"),
+        ]
+    );
+    // The burst starts inside a sequence, so the cursor hides after it, also
+    // when the sequence is one that no filter rewrites.
+    assert_eq!(
+        run(
+            vec![out(0.0, "a\x1b("), out(1.0, "Bb"), out(1.05, "c")],
+            smart.clone(),
+            FilterRegion::All,
+        )
+        .unwrap(),
+        vec![
+            out(0.0, "a\x1b("),
+            out(1.0, "B\x1b[?25lb"),
+            out(1.05, "c\x1b[?25h"),
+        ]
+    );
+    // The region ends inside a sequence, so the cursor shows before it.
+    assert_eq!(
+        run(
+            vec![out(0.0, "a"), out(0.05, "b\x1b[")],
+            smart,
+            FilterRegion::All,
+        )
+        .unwrap(),
+        vec![out(0.0, "\x1b[?25la"), out(0.05, "b\x1b[?25h\x1b[")]
+    );
+}
+
+#[test]
+fn smart_in_a_range_leaves_the_cursor_as_the_recording_has_it() {
+    let events = vec![out(1.0, "a"), out(1.05, "b"), out(3.0, "c")];
+
+    let got = run(events, json!({ "visibility": "smart" }), range(0.5, 2.0)).unwrap();
+
+    assert_eq!(
+        got,
+        vec![
+            out(1.0, "\x1b[?25la"),
+            out(1.05, "b\x1b[?25h"),
+            out(3.0, "c"),
+        ]
+    );
+}
