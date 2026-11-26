@@ -143,16 +143,18 @@ impl Catalog {
 pub enum CatalogError {
     /// No `--repo`, and the current directory is not in a git work tree.
     /// [`crate::workspace::find`] turns this case into
-    /// [`crate::workspace::WorkTreeMiss::NotAWorkTree`], whose error gives the
-    /// advice.
+    /// [`crate::workspace::WorkTreeMiss::NotAWorkTree`]. The
+    /// [`crate::workspace::WorkspaceError::NotFound`] that holds that miss
+    /// gives the `--repo` advice.
     #[error("{dir} is not in a git work tree", dir = .dir.display())]
     NotAWorkTree {
         /// The directory that was searched.
         dir: PathBuf,
     },
     /// The root has no `Cargo.toml`. Without `--repo`, [`crate::workspace::find`]
-    /// turns this case into [`crate::workspace::WorkTreeMiss::NoManifest`], whose
-    /// error gives the advice.
+    /// turns this case into [`crate::workspace::WorkTreeMiss::NoManifest`]. The
+    /// [`crate::workspace::WorkspaceError::NotFound`] that holds that miss
+    /// gives the `--repo` advice.
     #[error("{dir} is not a cargo workspace (it has no Cargo.toml)", dir = .dir.display())]
     NotAWorkspace {
         /// The directory that was checked.
