@@ -7,9 +7,11 @@
 //! date of its last use. The function is pure: it starts no process and reads
 //! no file.
 
+use std::collections::{BTreeMap, HashMap, HashSet};
+
 use chrono::NaiveDate;
 
-use crate::command_words::AliasKind;
+use crate::command_words::{parse_line, AliasKind, CommandWord, Line};
 use crate::history::HistoryEntry;
 use crate::shell::Definitions;
 
@@ -180,24 +182,205 @@ fn empty_usages(definitions: &Definitions) -> Vec<Usage> {
         .collect()
 }
 
+/// The counts of one definition, before they become a [`Usage`].
+#[derive(Debug, Default)]
+struct Counts {
+    typed: u64,
+    through: BTreeMap<String, u64>,
+    first_use: Option<NaiveDate>,
+    last_use: Option<NaiveDate>,
+}
+
+impl Counts {
+    /// Counts one use on `date`. `via` is the name that the person typed when
+    /// the use went through another definition.
+    fn record_use(&mut self, via: Option<&str>, date: NaiveDate) {
+        match via {
+            Some(name) => *self.through.entry(name.to_string()).or_insert(0) += 1,
+            None => self.typed += 1,
+        }
+        self.first_use = Some(self.first_use.map_or(date, |first| first.min(date)));
+        self.last_use = Some(self.last_use.map_or(date, |last| last.max(date)));
+    }
+}
+
+/// The counts of every entry, by name and kind, with the names that the walk
+/// needs.
+struct Counter<'a> {
+    definitions: &'a Definitions,
+    /// The kind of each alias, by name.
+    alias_kinds: HashMap<String, Kind>,
+    /// The names of all functions, also the private ones and the unparsed ones.
+    function_names: HashSet<&'a str>,
+    counts: HashMap<(String, Kind), Counts>,
+}
+
+impl<'a> Counter<'a> {
+    /// Makes a counter with one empty count for each entry of `usages`.
+    fn new(definitions: &'a Definitions, usages: &[Usage]) -> Self {
+        let alias_kinds = definitions
+            .aliases
+            .definitions()
+            .into_iter()
+            .map(|alias| (alias.name, Kind::from(alias.kind)))
+            .collect();
+        let function_names = definitions
+            .functions
+            .keys()
+            .chain(definitions.unparsed_functions.iter())
+            .map(String::as_str)
+            .collect();
+        let counts = usages
+            .iter()
+            .map(|usage| ((usage.name.clone(), usage.kind), Counts::default()))
+            .collect();
+        Self {
+            definitions,
+            alias_kinds,
+            function_names,
+            counts,
+        }
+    }
+
+    /// Counts one use of the function `name`. A private function has no entry,
+    /// thus its use is dropped.
+    fn use_function(&mut self, name: &str, via: Option<&str>, date: NaiveDate) {
+        if let Some(entry) = self.counts.get_mut(&(name.to_string(), Kind::Function)) {
+            entry.record_use(via, date);
+        }
+    }
+
+    /// Counts the uses that one parsed line makes on `date`.
+    fn count_line(&mut self, line: &Line, date: NaiveDate) {
+        for alias_use in &line.aliases {
+            let Some(kind) = self.alias_kinds.get(&alias_use.name).copied() else {
+                continue;
+            };
+            if let Some(entry) = self.counts.get_mut(&(alias_use.name.clone(), kind)) {
+                entry.record_use(alias_use.through.as_deref(), date);
+            }
+        }
+        for word in &line.words {
+            self.count_word(word, date);
+        }
+    }
+
+    /// Counts the use of the function that one command word names, and the use
+    /// of each function that its body calls, to any depth. A function counts
+    /// once for each word, and the start of the walk never counts itself.
+    fn count_word(&mut self, word: &CommandWord, date: NaiveDate) {
+        let name = word.word.as_str();
+        if !self.function_names.contains(name) {
+            return;
+        }
+        self.use_function(name, word.alias.as_deref(), date);
+        let via = word.alias.as_deref().unwrap_or(name);
+        let mut visited: HashSet<&str> = HashSet::from([name]);
+        let mut pending: Vec<&str> = vec![name];
+        while let Some(current) = pending.pop() {
+            let Some(body) = self.definitions.functions.get(current) else {
+                continue;
+            };
+            for callee in body.iter().map(|call| call.word.as_str()) {
+                if self.function_names.contains(callee) && visited.insert(callee) {
+                    self.use_function(callee, Some(via), date);
+                    pending.push(callee);
+                }
+            }
+        }
+    }
+}
+
+/// Gives the number of whole days from `date` to `today`.
+fn days_since(today: NaiveDate, date: NaiveDate) -> i64 {
+    (today - date).num_days()
+}
+
+/// Classifies one definition. A definition with no use never ran. A definition
+/// whose last use is older than `idle_days` days is idle.
+fn classify(uses: u64, last_use: Option<NaiveDate>, window: &Window) -> Classification {
+    match last_use {
+        Some(last) if uses > 0 => {
+            if days_since(window.today, last) > i64::from(window.idle_days) {
+                Classification::Idle
+            } else {
+                Classification::Used
+            }
+        }
+        _ => Classification::NeverUsed,
+    }
+}
+
 /// Counts the uses of each alias and each function in `entries`. Pure.
+///
+/// The window drops the rows before `window.since`. A row with exit code 127
+/// does not count, because the shell did not find the command. An alias in the
+/// body of a function does not count, because the shell expanded it when it
+/// read the function.
 #[must_use]
 pub fn tally(entries: &[HistoryEntry], definitions: &Definitions, window: &Window) -> Tally {
-    let _ = window;
-    let usages = empty_usages(definitions);
+    let mut usages = empty_usages(definitions);
+    let mut counter = Counter::new(definitions, &usages);
+    let mut cache: HashMap<&str, Option<Line>> = HashMap::new();
+    let mut before_since: u64 = 0;
+    let mut not_found: u64 = 0;
+    let mut unparsed_rows: u64 = 0;
+    for entry in entries {
+        if window.since.is_some_and(|since| entry.time.date() < since) {
+            before_since += 1;
+            continue;
+        }
+        if entry.exit.is_command_not_found() {
+            not_found += 1;
+            continue;
+        }
+        let parsed = cache
+            .entry(entry.command.as_str())
+            .or_insert_with(|| parse_line(&entry.command, &definitions.aliases));
+        match parsed {
+            Some(line) => counter.count_line(line, entry.time.date()),
+            None => unparsed_rows += 1,
+        }
+    }
+    for usage in &mut usages {
+        let counts = counter
+            .counts
+            .remove(&(usage.name.clone(), usage.kind))
+            .unwrap_or_default();
+        let mut through: Vec<(String, u64)> = counts.through.into_iter().collect();
+        through.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        let through_total: u64 = through.iter().map(|(_, count)| count).sum();
+        usage.typed = counts.typed;
+        usage.uses = counts.typed + through_total;
+        usage.through = through;
+        usage.first_use = counts.first_use;
+        usage.last_use = counts.last_use;
+        usage.classification = classify(usage.uses, counts.last_use, window);
+    }
+    usages.sort_by(|left, right| {
+        right
+            .uses
+            .cmp(&left.uses)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.kind.cmp(&right.kind))
+    });
     let aliases = usages.iter().filter(|u| u.kind != Kind::Function).count();
     let functions = usages.iter().filter(|u| u.kind == Kind::Function).count();
+    let unparsed_functions = usages
+        .iter()
+        .filter(|u| u.kind == Kind::Function && definitions.unparsed_functions.contains(&u.name))
+        .count();
     Tally {
+        definitions: usages,
         summary: Summary {
             rows: u64::try_from(entries.len()).unwrap_or(u64::MAX),
-            before_since: 0,
-            not_found: 0,
-            unparsed_rows: 0,
+            before_since,
+            not_found,
+            unparsed_rows,
             aliases,
             functions,
-            unparsed_functions: 0,
-            unparsed_aliases: 0,
+            unparsed_functions,
+            unparsed_aliases: definitions.unparsed_aliases.len(),
         },
-        definitions: usages,
     }
 }
