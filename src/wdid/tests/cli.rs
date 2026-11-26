@@ -368,6 +368,7 @@ fn json_gives_the_counts_and_the_catalog_facts() {
     assert_eq!(two["installed"], false);
     assert_eq!(two["added"], "2026-03-04");
     assert_eq!(document["never_used_old"], serde_json::json!([TOOL_TWO]));
+    assert_eq!(document["workspace"]["found_by"], "repo_flag", "{document}");
 }
 
 #[test]
@@ -534,13 +535,23 @@ fn a_use_through_an_alias_of_the_real_zsh_counts_for_the_tool() {
     );
 }
 
-/// Makes a cargo home in which the installed `wdid` came from a checkout of
-/// the fixture workspace, through `cargo install --git`.
-fn installed_from_a_checkout() -> support::CargoHome {
+/// A cargo home in which the installed `wdid` came from a checkout of the
+/// fixture workspace, through `cargo install --git`.
+struct Installed {
+    /// The cargo home.
+    home: support::CargoHome,
+    /// The checkout of the commit of the record.
+    checkout: PathBuf,
+    /// The full commit of the record.
+    commit: String,
+}
+
+/// Makes the cargo home of [`Installed`].
+fn installed_from_a_checkout() -> Installed {
     let source = support::workspace_repository();
     let commit = source.rev_parse("HEAD");
     let home = support::CargoHome::new();
-    home.add_checkout(
+    let checkout = home.add_checkout(
         &source,
         support::CHECKOUT_DIRECTORY,
         support::short(&commit),
@@ -549,7 +560,25 @@ fn installed_from_a_checkout() -> support::CargoHome {
         &support::git_key(support::BINARY, support::REPOSITORY_URL, &commit),
         &[support::BINARY],
     )]);
-    home
+    Installed {
+        home,
+        checkout,
+        commit,
+    }
+}
+
+/// Says that the `workspace` block of `document` names the checkout of
+/// `installed`, found by step 3.
+fn assert_installed_workspace(document: &Value, installed: &Installed) {
+    let workspace = &document["workspace"];
+    assert_eq!(workspace["found_by"], "installed_git", "{document}");
+    assert_eq!(workspace["url"], support::REPOSITORY_URL, "{document}");
+    assert_eq!(workspace["commit"], installed.commit.as_str(), "{document}");
+    let root = PathBuf::from(workspace["root"].as_str().unwrap());
+    assert_eq!(
+        root.canonicalize().unwrap(),
+        installed.checkout.canonicalize().unwrap()
+    );
 }
 
 /// Runs `wdid --no-shell --json` in `cwd`, with `home` as the cargo home.
@@ -567,26 +596,46 @@ fn run_in(setup: &Setup, home: &support::CargoHome, cwd: &Path) -> Output {
 #[test]
 fn outside_each_work_tree_the_report_is_on_the_source_of_the_installed_wdid() {
     let setup = Setup::new(&Atuin::Rows(&[row(1, "wdid-fixture-one a")]));
-    let home = installed_from_a_checkout();
+    let installed = installed_from_a_checkout();
     let cwd = gitscratch::testing::not_a_repository();
 
-    let document = json(&run_in(&setup, &home, cwd.path()));
+    let document = json(&run_in(&setup, &installed.home, cwd.path()));
 
     assert_eq!(tool(&document, TOOL_ONE)["uses"], 1, "{document}");
     assert!(tool(&document, TOOL_TWO)["added"].is_string(), "{document}");
+    assert_installed_workspace(&document, &installed);
 }
 
 #[test]
 fn in_a_work_tree_without_a_cargo_toml_the_report_is_on_the_source_of_the_installed_wdid() {
     let setup = Setup::new(&Atuin::Rows(&[row(1, "wdid-fixture-one a")]));
-    let home = installed_from_a_checkout();
+    let installed = installed_from_a_checkout();
     let work_tree = gitscratch::testing::TestRepo::init();
     work_tree.commit_file("README.md", "not a workspace\n", "add a readme");
 
-    let document = json(&run_in(&setup, &home, work_tree.path()));
+    let document = json(&run_in(&setup, &installed.home, work_tree.path()));
 
     assert_eq!(tool(&document, TOOL_ONE)["uses"], 1, "{document}");
     assert!(tool(&document, TOOL_TWO)["added"].is_string(), "{document}");
+    assert_installed_workspace(&document, &installed);
+}
+
+/// In a cargo workspace, the report is on that workspace also when the
+/// installed `wdid` came from another one.
+#[test]
+fn in_a_cargo_workspace_the_report_is_on_that_workspace() {
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "wdid-fixture-one a")]));
+    let installed = installed_from_a_checkout();
+
+    let document = json(&run_in(&setup, &installed.home, setup.workspace.path()));
+
+    let workspace = &document["workspace"];
+    assert_eq!(workspace["found_by"], "work_tree", "{document}");
+    let root = PathBuf::from(workspace["root"].as_str().unwrap());
+    assert_eq!(
+        root.canonicalize().unwrap(),
+        setup.workspace.path().canonicalize().unwrap()
+    );
 }
 
 #[test]

@@ -618,7 +618,8 @@ fn the_json_document_has_the_keys_of_the_design() {
             "shell",
             "since",
             "today",
-            "tools"
+            "tools",
+            "workspace"
         ]
     );
     assert_eq!(value["today"], "2026-10-14");
@@ -628,6 +629,59 @@ fn the_json_document_has_the_keys_of_the_design() {
     assert_eq!(value["never_used_old"], serde_json::json!(["goup"]));
     assert_eq!(value["never_used_new"], serde_json::json!(["faulte"]));
     assert_eq!(value["idle"], serde_json::json!(["aa"]));
+}
+
+/// The `workspace` block names the root and the step that found it. The
+/// steps of the installed source add the facts of the record.
+#[test]
+fn the_json_workspace_block_names_the_root_and_the_step() {
+    let full = "12baa4168146b6018d38dbe4f8cace7ed5b4081b";
+    let cases = [
+        (
+            Workspace {
+                root: PathBuf::from("/code/tools"),
+                found_by: FoundBy::RepoFlag,
+            },
+            serde_json::json!({ "root": "/code/tools", "found_by": "repo_flag" }),
+        ),
+        (
+            workspace(),
+            serde_json::json!({ "root": "/repo", "found_by": "work_tree" }),
+        ),
+        (
+            Workspace {
+                root: PathBuf::from("/u/.cargo/git/checkouts/tools-dda63c64534664e9/12baa41"),
+                found_by: FoundBy::InstalledGit {
+                    url: "https://github.com/timmattison/tools".to_string(),
+                    commit: Commit::parse(full).unwrap(),
+                },
+            },
+            serde_json::json!({
+                "root": "/u/.cargo/git/checkouts/tools-dda63c64534664e9/12baa41",
+                "found_by": "installed_git",
+                "url": "https://github.com/timmattison/tools",
+                "commit": full,
+            }),
+        ),
+        (
+            Workspace {
+                root: PathBuf::from("/code/日本語"),
+                found_by: FoundBy::InstalledPath {
+                    crate_dir: PathBuf::from("/code/日本語/src/wdid"),
+                },
+            },
+            serde_json::json!({
+                "root": "/code/日本語",
+                "found_by": "installed_path",
+                "crate_dir": "/code/日本語/src/wdid",
+            }),
+        ),
+    ];
+    for (workspace, expected) in cases {
+        let raw = json(&fixture(), &window(), &workspace);
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["workspace"], expected, "{raw}");
+    }
 }
 
 /// A `since` date is a date text.
