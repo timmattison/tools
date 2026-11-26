@@ -39,6 +39,9 @@ childenv.workspace = true
 # A zone with summer time, for the tests of the offset of each date.
 chrono-tz.workspace = true
 specta-typescript.workspace = true
+# The lockfile test reads Cargo.lock and pnpm-lock.yaml.
+toml.workspace = true
+yaml-rust2.workspace = true
 
 [lints]
 workspace = true
