@@ -718,8 +718,11 @@ A new library crate, `src/nle-plugins`, with no WASM runtime yet.
 The slice adds the `wasm32-wasip2` target to `rust-toolchain.toml`. The test
 builds the example plugin into a fixed directory under `target/`, and the lock
 of cargo keeps two test runs apart. The slice records in its pull request the
-build time that wasmtime adds to a clean build. If the conformance test is too
-slow for the pre-commit hook, the hook skips it and CI runs it.
+build time that wasmtime adds to a clean build. The conformance test runs in
+the one list of `scripts/rust-checks.sh`, like each other test of the
+workspace. If it is too slow for the pre-commit hook, the slice moves it to the
+pre-push stage of that list, which issue #740 adds. The slice does not make a
+second list.
 
 The slice uses the newest LTS line of wasmtime, now 48. It takes the newest
 patch of that line that is older than the 7-day publish cooldown. It turns off
