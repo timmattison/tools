@@ -1298,6 +1298,31 @@ async fn removing_a_fast_forward_row_keeps_the_speed_row_before_it() {
     assert!(page.contains(&edited_row("1m 0.3s")), "{page}");
 }
 
+/// Skip to End over the whole recording leaves no time for the slow speed
+/// change after it, thus the project renders. A Remove of the fast-forward
+/// gives that change 10 s of time, and the render then fails.
+#[tokio::test]
+async fn a_remove_of_a_fast_forward_after_which_the_render_fails_is_refused() {
+    let mut window = open_recording().await;
+    window.fast_forward(FastForwardButton::SkipToEnd, "0", "100");
+    let remove = window.remove_button();
+    window.apply_speed("0", "10", "1e-308");
+    let page = window.html();
+    assert!(!page.contains("role=\"alert\""), "{page}");
+    window.click(remove);
+    let page = window.html();
+    assert!(page.contains("Failed to fast-forward: "), "{page}");
+    assert!(page.contains("answered the length inf s"), "{page}");
+    assert!(
+        page.contains(&fast_forward_row("0 s to 100 s: skip to end")),
+        "{page}"
+    );
+    assert!(
+        page.contains(&speed_row("0 s to 10 s", &1e-308_f64.to_string())),
+        "{page}"
+    );
+}
+
 #[tokio::test]
 async fn a_bad_fast_forward_shows_the_reason_and_adds_no_row() {
     use FastForwardButton::{Accelerate, SkipToEnd, Summarize};
