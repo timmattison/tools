@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
+#[cfg(target_os = "macos")]
 use anyhow::Context;
 use buildinfo::version_string;
 use clap::Parser;
