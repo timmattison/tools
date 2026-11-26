@@ -21,9 +21,13 @@ impl Acceleration {
     /// Returns `NleError::InvalidAcceleration` when `value` is NaN, infinite,
     /// or not above 1.
     pub fn new(value: f64) -> Result<Self, NleError> {
-        Speed::new(value)
-            .map(Self)
-            .map_err(|_| NleError::InvalidAcceleration(value))
+        if value > 1.0 {
+            Speed::new(value)
+                .map(Self)
+                .map_err(|_| NleError::InvalidAcceleration(value))
+        } else {
+            Err(NleError::InvalidAcceleration(value))
+        }
     }
 
     /// The acceleration as a number.
