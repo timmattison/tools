@@ -671,11 +671,12 @@ fn an_in_place_mark_at_the_region_end_comes_before_an_event_at_that_time() {
 fn an_in_place_mark_at_the_region_end_lands_on_the_end_when_the_sum_rounds_up() {
     // The length is 5.79 - 1.73, and that length plus 1.73 is
     // 5.790000000000001 in f64, one step after the end of the region.
-    assert!((5.79 - 1.73) + 1.73 > 5.79);
+    let (start, end) = std::hint::black_box((1.73, 5.79));
+    assert!((end - start) + start > end);
     let (registry, _seen) = in_place_spy(|view| view.length);
 
     let out = registry
-        .run(events(&[0.0, 1.73, 5.79]), &[range("spot", 1.73, 5.79)])
+        .run(events(&[0.0, start, end]), &[range("spot", start, end)])
         .unwrap();
 
     assert_eq!(
