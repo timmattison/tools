@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::error::NleError;
 use crate::types::{
-    AppliedFilter, EditProject, Event, FilterKind, FilterOptions, FilterRegion, Recording,
+    AppliedFilter, Clip, EditProject, Event, FilterKind, FilterOptions, FilterRegion, Recording,
 };
 
 /// A filter: a pure function from the events of a region to new events.
@@ -184,20 +184,30 @@ impl FilterRegistry {
     /// Returns `NleError::RenderError` for an empty project, and the errors of
     /// `FilterRegistry::run`.
     pub fn render(&self, project: &EditProject) -> Result<Recording, NleError> {
-        let Some(first) = project.clips.first() else {
+        // The clips in track order, then in the order on their track.
+        let ordered: Vec<&Clip> = project
+            .timeline
+            .iter()
+            .flat_map(|track| &track.clips)
+            .filter_map(|id| project.clips.iter().find(|clip| clip.id == *id))
+            .collect();
+        // `min_by` gives the first of several equal clips, so a tie goes to
+        // the earlier clip in that order.
+        let Some(first) = ordered
+            .iter()
+            .min_by(|a, b| a.timeline_offset.get().total_cmp(&b.timeline_offset.get()))
+        else {
             return Err(NleError::RenderError(
                 "the project has no clip to render".to_string(),
             ));
         };
 
-        let mut events = Vec::new();
-        for track in &project.timeline {
-            for id in &track.clips {
-                if let Some(clip) = project.clips.iter().find(|clip| clip.id == *id) {
-                    events.extend(clip.timeline_events());
-                }
-            }
-        }
+        let mut events: Vec<Event> = ordered
+            .iter()
+            .flat_map(|clip| clip.timeline_events())
+            .collect();
+        // A stable sort keeps track order, then clip order, on a tie.
+        events.sort_by(|a, b| a.time.total_cmp(&b.time));
         let events = self.run(events, &project.filters)?;
 
         let header = &first.source;
