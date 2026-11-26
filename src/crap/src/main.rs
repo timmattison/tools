@@ -373,11 +373,17 @@ fn enumerate_user_projects(users_parent: &Path, self_name: &str) -> Vec<UserProj
             let Some(name) = name.to_str() else {
                 continue;
             };
-            let root = user_projects(users_parent, name, self_name);
+            let dir = projects_dir(&users_parent.join(name));
             // Only accounts that have actually run Claude are search roots;
             // `is_dir` follows symlinks, so a symlinked home still counts.
-            if root.projects_dir.is_dir() {
-                others.push(root);
+            if dir.is_dir() {
+                // Foreign by construction, with no alias compare per entry:
+                // a sibling that names the tree of self is dropped below.
+                others.push(UserProjects {
+                    user: name.to_string(),
+                    projects_dir: dir,
+                    is_self: false,
+                });
             }
         }
     }
@@ -388,9 +394,8 @@ fn enumerate_user_projects(users_parent: &Path, self_name: &str) -> Vec<UserProj
     let mut roots = Vec::with_capacity(others.len() + 1);
     // Self goes in first and unconditionally, claiming its canonical tree, so it
     // stays root zero and is the only entry that can ever carry `is_self`. A
-    // sibling alias of self also comes back from `user_projects` with `is_self`
-    // set, but only because its canonical tree is this one, so the dedupe below
-    // drops it.
+    // sibling that names this tree, by the name of self or by an alias, has the
+    // same canonical tree, so the dedupe below drops it.
     let me = user_projects(users_parent, self_name, self_name);
     let mut seen: HashSet<PathBuf> = HashSet::new();
     seen.insert(canonical_or_verbatim(&me.projects_dir));
