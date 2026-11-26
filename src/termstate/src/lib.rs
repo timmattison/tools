@@ -293,10 +293,33 @@ pub struct Cell {
     pub underline: bool,
 }
 
-// The red stub: a clone that holds a blank screen. The next commit makes it real.
 impl Clone for TerminalState {
     fn clone(&self) -> Self {
-        Self::new(self.width, self.height, self.theme.clone())
+        Self {
+            grid: self.grid.clone(),
+            cursor_x: self.cursor_x,
+            cursor_y: self.cursor_y,
+            width: self.width,
+            height: self.height,
+            theme: self.theme.clone(),
+            current_fg: self.current_fg,
+            current_bg: self.current_bg,
+            bold: self.bold,
+            italic: self.italic,
+            underline: self.underline,
+            parser: Parser::new(),
+            saved_cursor_x: self.saved_cursor_x,
+            saved_cursor_y: self.saved_cursor_y,
+            scroll_top: self.scroll_top,
+            scroll_bottom: self.scroll_bottom,
+            use_acs: self.use_acs,
+            cursor_visible: self.cursor_visible,
+            dynamic_palette: self.dynamic_palette.clone(),
+            selection_fg: self.selection_fg,
+            selection_bg: self.selection_bg,
+            override_fg: self.override_fg,
+            override_bg: self.override_bg,
+        }
     }
 }
 
