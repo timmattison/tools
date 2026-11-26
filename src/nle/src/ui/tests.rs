@@ -920,8 +920,8 @@ async fn a_bad_frame_rate_shows_the_banner_and_asks_no_dialog() {
     assert!(page.contains("role=\"alert\""), "{page}");
     assert!(
         page.contains(
-            "Export failed: the frame rate &quot;0&quot; is not a whole number above zero"
-        ) || page.contains("Export failed: the frame rate \"0\" is not a whole number above zero"),
+            "Export failed: the frame rate &#34;0&#34; is not a whole number above zero"
+        ),
         "{page}"
     );
     assert!(fakes.dialogs().is_empty());

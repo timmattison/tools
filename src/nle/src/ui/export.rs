@@ -410,6 +410,11 @@ pub(super) fn ExportBar(
                         return;
                     }
                     let settings = settings();
+                    // A bad setting is an error before any dialog.
+                    if let Err(error) = settings.target() {
+                        on_result.call(Err(error.to_string()));
+                        return;
+                    }
                     let Some(source) = loaded
                         .read()
                         .as_ref()
@@ -423,7 +428,11 @@ pub(super) fn ExportBar(
                     spawn(async move {
                         let dialog = settings.kind.save_dialog(&source);
                         if let Some(picked) = services.pick_export_path(dialog).await {
-                            if let Ok(request) = settings.request(picked) {
+                            let request = settings.request(picked);
+                            if let Err(error) = &request {
+                                on_result.call(Err(error.to_string()));
+                            }
+                            if let Ok(request) = request {
                                 let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
                                 let export = {
                                     let guard = loaded.read();
