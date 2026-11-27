@@ -6365,9 +6365,20 @@ cargo tauri build --no-bundle   # the binary is target/release/msgs
 ## nle (non-linear editor)
 
 A desktop application for the terminal recordings that `beta` writes. It opens
-a `.json` or `.json.gz` recording, makes an edit project of it, and shows its
-metadata. The timeline (issue #150) and the preview pane (issue #151) are
-placeholders.
+a `.json` or `.json.gz` recording, makes an edit project of it, shows its
+metadata, and plays the edited recording in its preview pane. The timeline
+(issue #150) is a placeholder with a playhead control.
+
+The preview pane draws the terminal of the edited recording at the playhead.
+Drag the playhead control under **Timeline** to go to a time. **Play** plays
+the recording from the playhead, and the same button then says **Pause**.
+**Stop** stops playback and goes back to the start. Playback stops at the end,
+and **Play** at the end starts again from the beginning. The readout shows the
+time of the playhead and the duration of the edited recording. The **Theme**
+menu selects one of the palettes of `beta export --theme`: Auto, Dracula,
+Monokai, Solarized Dark, or Solarized Light. The terminal grows or shrinks to
+fit the pane, and each edit shows in the preview at once. A new recording opens
+stopped, at time zero.
 
 The speed panel under the metadata changes the speed of a region. Type the
 start and the end of the region in seconds and a speed, then click
@@ -6384,7 +6395,7 @@ The application is one Rust crate on Dioxus 0.7, with the desktop (webview)
 renderer. Its components call the Rust code directly, and the open project is
 Dioxus state, thus no IPC layer and no frontend package exist.
 
-The editing engine of the crate has four parts:
+The editing engine of the crate has five parts:
 
 - **Edit project** (`EditProject`): clips of source recordings, placed on the
   tracks of the timeline, and the filters that apply to the result. An edit
@@ -6405,6 +6416,12 @@ The editing engine of the crate has four parts:
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
   undo and redo history.
+- **Preview** (`preview::Preview`): replays the events of the rendered
+  recording through the terminal emulator of `termstate`, which the video
+  export of `beta` also uses. On the way it keeps snapshots of the terminal,
+  about one for each second of the recording, so a seek replays only from the
+  nearest snapshot and not from time zero. The number of snapshots has a
+  limit that depends on the size of the grid.
 
 The crate also has functions that save the rendered recording
 (`Editor::save_recording`), list the recordings in a directory, and export a
