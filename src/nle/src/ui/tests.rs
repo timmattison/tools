@@ -1087,3 +1087,22 @@ async fn the_toolbar_shows_the_time_and_stop_returns_to_the_start() {
     assert!(page.contains(&x_run(1)), "{page}");
     assert!(!page.contains(&x_run(2)), "{page}");
 }
+
+#[tokio::test]
+async fn play_moves_the_playhead_and_pause_holds_it() {
+    let mut window = open_recording().await;
+    window.click(window.play_button());
+    assert_eq!(window.play_label(), "Pause");
+
+    window.settle().await;
+    let readout = window.readout();
+    assert!(!readout.starts_with("0m 0.0s"), "{readout}");
+    let page = window.html();
+    assert!(!page.contains(&x_run(1)), "{page}");
+
+    window.click(window.play_button());
+    assert_eq!(window.play_label(), "Play");
+    let held = window.readout();
+    window.settle().await;
+    assert_eq!(window.readout(), held);
+}
