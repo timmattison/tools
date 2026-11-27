@@ -102,9 +102,11 @@ fn panels_root() -> Element {
         }
         Some(document)
     });
+    let playhead = use_signal(|| Seconds::ZERO);
+    let rendered = use_memo(move || preview::render_of(&loaded.read()));
     rsx! {
-        PreviewPane { loaded }
-        Timeline { loaded }
+        PreviewPane { rendered, playhead }
+        Timeline { loaded, rendered, playhead }
         PropertiesPanel { loaded, on_result: |_| {} }
     }
 }
@@ -317,14 +319,26 @@ impl Window {
         self.render();
     }
 
-    /// The Start, End, and Speed fields, in this order.
-    fn speed_fields(&self) -> [ElementId; 3] {
-        let fields: [ElementId; 3] = self
-            .inputs
+    /// The input listeners that the open render created, in creation order:
+    /// the Start, End, and Speed fields of the properties panel, then the
+    /// playhead control of the timeline. The properties panel mounts before the
+    /// timeline, so the playhead is the last one.
+    fn open_inputs(&self) -> [ElementId; 4] {
+        self.inputs
             .clone()
             .try_into()
-            .unwrap_or_else(|ids: Vec<ElementId>| panic!("the page has the inputs {ids:?}"));
-        fields
+            .unwrap_or_else(|ids: Vec<ElementId>| panic!("the page has the inputs {ids:?}"))
+    }
+
+    /// The Start, End, and Speed fields, in this order.
+    fn speed_fields(&self) -> [ElementId; 3] {
+        let [start, end, speed, _] = self.open_inputs();
+        [start, end, speed]
+    }
+
+    /// The playhead control of the timeline.
+    fn playhead_control(&self) -> ElementId {
+        self.open_inputs()[3]
     }
 
     /// The Apply Speed button. `open_recording` noted it.
