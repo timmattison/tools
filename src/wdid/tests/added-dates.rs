@@ -714,3 +714,64 @@ fn a_symbolic_link_to_a_file_in_a_work_tree_gets_the_dates_of_its_target() {
         Some(date(2021, 6, 7))
     );
 }
+
+/// The stub `yadm` of the test of a name that is not UTF-8. It prints a git
+/// directory whose name ends in the byte 0xFF, written as an octal escape.
+const NON_UTF8_YADM: &str = r#"#!/bin/sh
+printf '/no/such/yadm-\377.git\n'
+"#;
+
+/// The stub `git` of the test of a name that is not UTF-8. It compares bytes,
+/// and it answers only to the git directory and the alternate that hold the
+/// byte 0xFF.
+const NON_UTF8_GIT: &str = r#"#!/bin/sh
+export LC_ALL=C
+want=$(printf '/no/such/yadm-\377.git')
+[ "$1" = --git-dir ] && [ "$2" = "$want" ] || exit 1
+alternate=$(printf '.zshrc##os.\377')
+mode=
+last=
+for argument in "$@"; do
+  [ "$argument" = ls-files ] && mode=list
+  [ "$argument" = log ] && mode=log
+  last=$argument
+done
+if [ "$mode" = list ]; then
+  printf '.zshrc##os.\377\000'
+  exit 0
+fi
+if [ "$mode" = log ] && [ "$last" = "$alternate" ]; then
+  printf '\0002024-02-03\n\ndiff --git a/x b/x\n@@ -0,0 +1 @@\n+alias bytes=1\n'
+  exit 0
+fi
+exit 1
+"#;
+
+/// On Linux a file name can hold a byte that is not UTF-8. APFS refuses such a
+/// name, thus the stubs print the bytes and the test makes no such file. The
+/// read keeps the bytes of the git directory of yadm and of its file list, so
+/// the alternate still gets its dates.
+#[test]
+fn a_yadm_path_that_is_not_utf8_keeps_its_bytes() {
+    let home = tempfile::tempdir().unwrap();
+    let stubs = Stubs::new();
+    let yadm = stubs.dir.path().join("yadm");
+    let git = stubs.dir.path().join("git");
+    gitscratch::testing::executable::write_executable(&yadm, NON_UTF8_YADM).unwrap();
+    gitscratch::testing::executable::write_executable(&git, NON_UTF8_GIT).unwrap();
+    let file = home.path().join(".zshrc");
+
+    let dates = read(
+        &files(&[&file]),
+        Some(home.path()),
+        &Programs {
+            git: git.into_os_string(),
+            yadm: yadm.into_os_string(),
+        },
+    );
+
+    assert_eq!(
+        dates.get(&file, &Defined::alias("bytes")),
+        Some(date(2024, 2, 3))
+    );
+}
