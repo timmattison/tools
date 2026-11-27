@@ -48,32 +48,17 @@ library, and do not use a canvas for the first version.
    draws its ruler on a canvas. At 16 px between the minor ticks, a window of
    1,200 px holds at most 75 ticks, thus RSX elements are sufficient.
 7. **Keep the hit test and the drag state in Rust, and apply one edit when the
-   drag ends.** Use the pointer events of Dioxus. During the drag, a signal
-   holds the preview, and only the style of the clip changes. The props of
-   each tile stay the same. On `pointerup`, call `Editor::apply` one time.
-   Each call of `Editor::apply` adds one step to the undo history, thus one
-   edit for each pointer move gives one undo step for each pointer move.
-   Escape cancels the drag and applies no edit. The Animations panel of Chrome
-   DevTools uses the same rule: a pointer move only draws, and the release
-   changes the model. A drag that must continue outside the timeline needs
-   one `document::eval` for `setPointerCapture` or for listeners on `window`,
-   because Dioxus 0.7 gives no method for pointer capture. Each kind of drag
-   gives one preview and one edit:
-   - A move of a clip changes only the transform of the clip. Its edit is one
-     `MoveClip`.
-   - A drag of the end edge changes only the width of the clip. Its edit is
-     one `TrimClip`, which changes `out_point`, and the start of the clip
-     stays.
-   - A drag of the start edge by d moves the clip by d and makes it d
-     narrower. The tiles move by -d inside the clip, thus each event stays at
-     its time on the timeline. The edit adds d to `in_point` and to
-     `timeline_offset`, thus the end edge stays. Remotion Studio does the
-     same (`getTimelineSequenceLeftEdgeDragValues`). The `Edit` of
-     `src/nle/src/editor.rs` has no variant for this drag. `TrimClip` keeps
-     `timeline_offset`, and a `TrimClip` with a `MoveClip` gives two undo
-     steps. Thus issue #150 adds one edit that changes `in_point` and
-     `timeline_offset` together, for example a `TrimClip` that also takes the
-     new `timeline_offset`.
+   drag ends.** Use the pointer events of Dioxus. During a drag, only the
+   style of the clip changes. On `pointerup`, the drag gives its edit to the
+   engine with one call of `Editor::apply`. Each call of `Editor::apply` adds
+   one step to the undo history, thus one edit for each pointer move gives one
+   undo step for each pointer move. Escape cancels the drag and applies no
+   edit. The Animations panel of Chrome DevTools uses the same rule: a pointer
+   move only draws, and the release changes the model. A drag that must
+   continue outside the timeline needs one `document::eval` for
+   `setPointerCapture` or for listeners on `window`, because Dioxus 0.7 gives
+   no method for pointer capture. The parts of issue #150, after its split,
+   decide what each kind of drag changes and which edit it applies.
 8. **Take no Dioxus drag crate.** `dioxus-gestures` and `dioxus-dnd` hold a
    drag to no axis, snap to no clip edge, and resize no edge (see
    [Dioxus crates](#dioxus-crates)). The drag of issue #150 is a set of
