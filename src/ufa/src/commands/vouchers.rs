@@ -517,11 +517,11 @@ where
 /// not stop the others. A success answer that `ufa` cannot read does not stop
 /// them either: a note says that `ufa` does not know if the voucher was
 /// deleted, and the command fails. A failure with no HTTP status stops the
-/// deletion: a timeout, a refused or reset connection, or a connection that
-/// breaks while the body arrives. Such a failure says that the controller
-/// gave no usable answer, and each voucher after it waits the full request
-/// timeout for an answer that does not come. The vouchers after that failure
-/// are not attempted, and a note before the closing note gives their count.
+/// deletion: a timeout, or a refused or reset connection, before the status
+/// arrives. Such a failure says that the controller gave no usable answer,
+/// and each voucher after it waits the full request timeout for an answer
+/// that does not come. The vouchers after that failure are not attempted, and
+/// a note before the closing note gives their count.
 ///
 /// A note names each voucher that was not deleted, with the error. The
 /// controller answers each deletion with a count, and the total is the sum
