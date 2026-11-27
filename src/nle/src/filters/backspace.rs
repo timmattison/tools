@@ -4,6 +4,7 @@
 use std::collections::VecDeque;
 use std::ops::Range;
 
+use serde::Deserialize;
 use termstate::{TerminalState, TerminalTheme};
 
 use crate::pipeline::{FilterRegistry, Span, SpanContext};
@@ -65,6 +66,19 @@ struct TypedKey {
     before: TerminalState,
 }
 
+/// The options of the filter. It has none, so a key is an error.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoOptions {}
+
+/// Check that `options` holds no key. The message of the error names the key.
+fn reject_options(options: &FilterOptions) -> Result<(), String> {
+    let value = serde_json::to_value(options).map_err(|error| error.to_string())?;
+    serde_json::from_value::<NoOptions>(value)
+        .map(|NoOptions {}| ())
+        .map_err(|error| error.to_string())
+}
+
 /// The kind of the backspace removal filter, as a `FilterKind`.
 #[must_use]
 pub fn kind() -> FilterKind {
@@ -81,13 +95,14 @@ pub fn register(registry: &mut FilterRegistry) {
 /// only input events and the output events that follow them. It removes the
 /// time of each removed run, so the viewer sees no pause for the typo.
 ///
-/// The filter does not parse options. It replays the output events before
+/// The filter takes no option. It replays the output events before
 /// the region into the screen first.
 fn remove_backspacing(
     span: Span,
     context: SpanContext<'_>,
-    _options: &FilterOptions,
+    options: &FilterOptions,
 ) -> Result<Span, String> {
+    reject_options(options)?;
     let mut screen = TerminalState::new(
         usize::from(context.size.width),
         usize::from(context.size.height),
