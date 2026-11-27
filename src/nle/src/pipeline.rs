@@ -88,6 +88,34 @@ pub struct RegionView {
 pub type InPlaceFilterFn =
     dyn Fn(&[Event], RegionView, &FilterOptions) -> Result<Vec<Event>, String> + Send + Sync;
 
+/// The size of a terminal, in cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalSize {
+    /// The number of columns.
+    pub width: u16,
+    /// The number of rows.
+    pub height: u16,
+}
+
+impl TerminalSize {
+    /// The size of a VT100: 80 columns and 24 rows.
+    pub const VT100: Self = Self {
+        width: 80,
+        height: 24,
+    };
+}
+
+/// What a span filter knows about the timeline outside its region.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpanContext<'a> {
+    /// The events before the region, at their times on the timeline, in the
+    /// order that they play. A filter that keeps a model of the screen replays
+    /// them to get the screen at the start of the region.
+    pub before: &'a [Event],
+    /// The size of the terminal that the events draw on.
+    pub size: TerminalSize,
+}
+
 /// A region of the timeline as a span filter sees it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Span {
@@ -110,8 +138,9 @@ pub struct Span {
 ///    zero, so a region that starts after the end of the timeline has the
 ///    length 0. For the region `All`, the length is the end of the timeline.
 /// 2. The filter gets a `Span` with the events inside the region, relative to
-///    its start, and the length. It answers `Ok` with a new `Span`, or `Err`
-///    with a message.
+///    its start, and the length. It also gets a `SpanContext`: the events
+///    before the region, and the size of the terminal. It answers `Ok` with a
+///    new `Span`, or `Err` with a message.
 /// 3. An `Err` fails the pipeline with a render error. Its text names the kind
 ///    and holds the message.
 /// 4. Each answered time is checked as in step 5 of `FilterFn`, with the same
@@ -122,7 +151,8 @@ pub struct Span {
 /// 6. The shift is the answered length minus the length. The events after the
 ///    region move by the shift, also when the region holds no event. The end
 ///    of the timeline moves by the shift as in step 8 of `FilterFn`.
-pub type SpanFilterFn = dyn Fn(Span, &FilterOptions) -> Result<Span, String> + Send + Sync;
+pub type SpanFilterFn =
+    dyn Fn(Span, SpanContext<'_>, &FilterOptions) -> Result<Span, String> + Send + Sync;
 
 /// A filter in one of its three forms.
 #[derive(Clone)]
@@ -188,7 +218,10 @@ impl FilterRegistry {
     pub fn register_span(
         &mut self,
         kind: FilterKind,
-        filter: impl Fn(Span, &FilterOptions) -> Result<Span, String> + Send + Sync + 'static,
+        filter: impl Fn(Span, SpanContext<'_>, &FilterOptions) -> Result<Span, String>
+            + Send
+            + Sync
+            + 'static,
     ) {
         self.filters
             .insert(kind, Registered::Span(Arc::new(filter)));
@@ -269,7 +302,11 @@ impl FilterRegistry {
                     events: inside,
                     length,
                 };
-                let answer = filter(span, &applied.options).map_err(|message| {
+                let context = SpanContext {
+                    before: &[],
+                    size: TerminalSize::VT100,
+                };
+                let answer = filter(span, context, &applied.options).map_err(|message| {
                     NleError::RenderError(format!("filter \"{kind}\" failed: {message}"))
                 })?;
                 let largest = last_time(&answer.events);

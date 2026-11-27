@@ -791,8 +791,10 @@ fn an_in_place_filter_cannot_answer_a_time_outside_its_region() {
 // Tests of the span filter: the length and the shift.
 
 /// A span filter that multiplies each time and the length by `factor`.
-fn scale_span(factor: f64) -> impl Fn(Span, &FilterOptions) -> Result<Span, String> + Send + Sync {
-    move |span, _| {
+fn scale_span(
+    factor: f64,
+) -> impl Fn(Span, SpanContext<'_>, &FilterOptions) -> Result<Span, String> + Send + Sync {
+    move |span, _, _| {
         Ok(Span {
             events: span
                 .events
@@ -813,7 +815,7 @@ fn span_spy_registry() -> (FilterRegistry, TestArc<Mutex<Vec<f64>>>) {
     let seen = TestArc::new(Mutex::new(Vec::new()));
     let captured = TestArc::clone(&seen);
     let mut registry = FilterRegistry::new();
-    registry.register_span(kind("spy"), move |span, _| {
+    registry.register_span(kind("spy"), move |span, _, _| {
         captured.lock().unwrap().push(span.length);
         Ok(span)
     });
@@ -921,7 +923,7 @@ fn render_moves_the_duration_by_the_change_of_the_length_of_a_span_filter() {
 #[test]
 fn a_span_filter_that_answers_an_error_fails_the_run_with_the_kind_and_the_message() {
     let mut registry = FilterRegistry::new();
-    registry.register_span(kind("speed"), |_, _| Err("bad speed".to_string()));
+    registry.register_span(kind("speed"), |_, _, _| Err("bad speed".to_string()));
 
     let result = registry.run(events(&[1.0]), &[all("speed")]);
 
@@ -940,7 +942,7 @@ fn a_span_filter_that_answers_a_bad_length_fails_and_names_the_kind() {
     let bad_lengths = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 2.5];
     for length in bad_lengths {
         let mut registry = FilterRegistry::new();
-        registry.register_span(kind("len"), move |span, _| {
+        registry.register_span(kind("len"), move |span, _, _| {
             Ok(Span {
                 events: span.events,
                 length,
@@ -961,7 +963,7 @@ fn a_span_filter_that_answers_a_bad_length_fails_and_names_the_kind() {
 #[test]
 fn a_span_filter_may_answer_a_length_equal_to_its_largest_time() {
     let mut registry = FilterRegistry::new();
-    registry.register_span(kind("len"), |span, _| {
+    registry.register_span(kind("len"), |span, _, _| {
         Ok(Span {
             events: span.events,
             length: 3.0,
@@ -987,4 +989,39 @@ fn register_span_and_register_replace_each_other_under_one_kind() {
     registry.register_span(kind("f"), scale_span(2.0));
     let out = registry.run(events(&[1.0, 2.0]), &[all("f")]).unwrap();
     assert_eq!(times(&out), vec![2.0, 4.0]);
+}
+
+// Tests of the context of a span filter.
+
+/// Registers a span filter under "look" that records each context that it
+/// gets, as the events before its region and the size, and answers with the
+/// span that it got.
+fn context_spy_registry() -> (
+    FilterRegistry,
+    TestArc<Mutex<Vec<(Vec<Event>, TerminalSize)>>>,
+) {
+    let seen = TestArc::new(Mutex::new(Vec::new()));
+    let captured = TestArc::clone(&seen);
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("look"), move |span, context, _| {
+        captured
+            .lock()
+            .unwrap()
+            .push((context.before.to_vec(), context.size));
+        Ok(span)
+    });
+    (registry, seen)
+}
+
+#[test]
+fn a_span_filter_on_a_range_gets_the_events_before_the_range_at_their_times() {
+    let (registry, seen) = context_spy_registry();
+
+    registry
+        .run(events(&[0.5, 1.5, 2.5, 5.0]), &[range("look", 2.0, 3.0)])
+        .unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, events(&[0.5, 1.5]));
 }
