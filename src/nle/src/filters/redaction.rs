@@ -81,7 +81,8 @@
 //!   `net`, `org`, `io`, `dev`, `cloud`, `edu`, `gov`, `mil`, `info`, `biz`,
 //!   `us`, `uk`, `ca`, `de`, `fr`, `jp`, `au`, `local`, `internal`, `lan`,
 //!   `localdomain`, `corp`, or `arpa`. Thus `main.rs` and `localhost` are not
-//!   found.
+//!   found, but the names in `.env.local`, `Dockerfile.dev`, and
+//!   `console.info(` are found.
 
 use serde::{Deserialize, Serialize};
 

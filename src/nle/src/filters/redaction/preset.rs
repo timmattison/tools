@@ -73,9 +73,10 @@ const TOKEN: &str = concat!(
 /// `jp`, `au`, `local`, `internal`, `lan`, `localdomain`, `corp`, and `arpa`.
 /// The list has no case.
 ///
-/// It does not match a name with one label, such as `localhost`. It does not
-/// match a file name such as `main.rs` or `notes.txt`, because its last label
-/// is not in the list.
+/// It does not match a name with one label, such as `localhost`, or a file name
+/// whose last label is not in the list, such as `main.rs`. It matches each name
+/// whose last label is in the list, also inside a file name or a call in code,
+/// such as `.env.local`, `Dockerfile.dev`, or `console.info(`.
 const HOSTNAME: &str = concat!(
     r"\b(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+",
     r"(?i:com|net|org|io|dev|cloud|edu|gov|mil|info|biz|us|uk|ca|de|fr|jp|au",
