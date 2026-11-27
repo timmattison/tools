@@ -442,34 +442,16 @@ mod tests {
     /// spec.
     const SNAKE_FIRMWARE_KEY: &str = "firmware_version";
 
-    /// The key of a firmware version that `ReportedState` writes.
+    /// The key of a firmware version that `ReportedState` names.
     const CAMEL_FIRMWARE_KEY: &str = "firmwareVersion";
 
     /// The `version` that the `network-server` example of the spec reports.
     const NETWORK_SERVER_VERSION: &str = "8.3.11";
 
-    /// The hosts that `sent` holds, with each firmware version of a reported
-    /// state under the key that `--output json` writes.
-    fn as_written(mut sent: serde_json::Value) -> serde_json::Value {
-        if let serde_json::Value::Array(hosts) = &mut sent {
-            for host in hosts {
-                let state = host
-                    .get_mut("reportedState")
-                    .and_then(serde_json::Value::as_object_mut);
-                if let Some(state) = state {
-                    if let Some(firmware) = state.remove(SNAKE_FIRMWARE_KEY) {
-                        state.insert(CAMEL_FIRMWARE_KEY.to_string(), firmware);
-                    }
-                }
-            }
-        }
-        sent
-    }
-
     /// `--output json` answers with the hosts as the API reported them, so
-    /// each field of a spec example must reach the output, also a field that
-    /// no model names. The one change is the key of a firmware version: a
-    /// host that sent `firmware_version` gets `firmwareVersion`.
+    /// each field of a spec example must reach the output under the key that
+    /// the API sent, also a field that no model names. The `network-server`
+    /// example sends `firmware_version`, and the output keeps that key.
     #[test]
     fn the_json_listing_keeps_each_field_the_api_sent() {
         for (example, text) in [
@@ -491,7 +473,7 @@ mod tests {
                 serde_json::from_str(&rendered).expect("--output json must produce JSON");
 
             assert_eq!(
-                first_lost_field(&written, &as_written(sent)),
+                first_lost_field(&written, &sent),
                 None,
                 "--output json must keep each field of {example}, got:\n{rendered}"
             );
@@ -554,6 +536,26 @@ mod tests {
                 NETWORK_SERVER_VERSION,
                 "a host with a {case} firmware version must show its version"
             );
+        }
+    }
+
+    /// The spec gives `reportedState` no schema, and the `network-server`
+    /// example mixes camelCase and snake_case keys. A host can thus send both
+    /// spellings of the firmware key. Such a host must parse, because one
+    /// host that does not parse fails the whole listing, and the Firmware
+    /// column shows the spelling that holds a value.
+    #[test]
+    fn a_host_that_sends_both_firmware_keys_shows_the_one_that_is_set() {
+        for (camel, snake, shown) in [
+            (serde_json::json!("4.0.6"), serde_json::Value::Null, "4.0.6"),
+            (serde_json::Value::Null, serde_json::json!("8.3.0"), "8.3.0"),
+        ] {
+            let host = network_server_host(|state| {
+                state.insert(CAMEL_FIRMWARE_KEY.to_string(), camel);
+                state.insert(SNAKE_FIRMWARE_KEY.to_string(), snake);
+            });
+
+            assert_eq!(HostRow::from(&host).firmware, shown);
         }
     }
 
