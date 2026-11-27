@@ -23,6 +23,7 @@ use wait_timeout::ChildExt;
 use crate::command_words::{command_words, AliasDefinition, Aliases, CommandWord, Parsed};
 use crate::origin::{place, Origin, Places};
 use crate::rules::{runs, Run};
+use crate::starts::Starts;
 use crate::tool::{ToolName, ToolNames};
 
 /// The file name of zsh.
@@ -315,6 +316,8 @@ pub struct Definitions {
     pub function_origins: BTreeMap<String, Origin>,
     /// The directories that the shell gave after its start.
     pub places: Places,
+    /// The code that the shell runs without a typed name.
+    pub starts: Starts,
 }
 
 impl Definitions {

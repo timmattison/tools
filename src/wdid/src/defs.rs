@@ -15,6 +15,7 @@ use crate::command_words::{parse_line, AliasKind, CommandWord, Line};
 use crate::history::HistoryEntry;
 use crate::origin::{Origin, Places};
 use crate::shell::Definitions;
+use crate::starts::Trigger;
 use crate::tally::days_since;
 
 pub mod render;
@@ -93,6 +94,26 @@ pub enum Classification {
     Idle,
     /// The definition never ran.
     NeverUsed,
+    /// The shell runs the definition without a typed name, for example at
+    /// each prompt. The state does not depend on the uses.
+    RunsWithoutTyping,
+}
+
+/// Why the shell runs a definition without a typed name, or why it does not
+/// run a widget function.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Reason {
+    /// `trigger` runs the definition.
+    Runs {
+        /// The event of the shell.
+        trigger: Trigger,
+        /// The definition that `trigger` runs, when `trigger` reaches this
+        /// definition through a call. `None` when `trigger` runs it directly.
+        through: Option<String>,
+    },
+    /// The function implements a widget, and no key starts the widget. Only a
+    /// typed `zle` call or `execute-named-cmd` starts it.
+    WidgetWithoutKey,
 }
 
 /// The uses of one definition.
@@ -122,6 +143,9 @@ pub struct Usage {
     pub origin: Option<Origin>,
     /// True when the definition is mine (see [`Places::is_mine`]).
     pub mine: bool,
+    /// Why the shell runs the definition without a typed name, sorted. It is
+    /// empty for most definitions.
+    pub reasons: Vec<Reason>,
 }
 
 /// The counts about the history and about the shell.
@@ -204,6 +228,7 @@ fn empty_usages(definitions: &Definitions, all: bool) -> Vec<Usage> {
             classification: Classification::NeverUsed,
             mine: definitions.places.is_mine(origin.as_ref()),
             origin,
+            reasons: Vec::new(),
         })
         .collect()
 }

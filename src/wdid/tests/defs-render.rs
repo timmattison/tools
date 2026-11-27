@@ -56,6 +56,7 @@ fn never(name: &str, kind: Kind, definition: &str) -> Usage {
         classification: Classification::NeverUsed,
         origin: None,
         mine: true,
+        reasons: Vec::new(),
     }
 }
 
