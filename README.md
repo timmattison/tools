@@ -1092,9 +1092,11 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
     `XDG_STATE_HOME` is unset, empty, or relative, the file is `~/.local/state/op-cache/audit.jsonl`.
     The audit trail has no switch. Each line is one JSON record, of one of two kinds:
     - `op_start`, before `op` runs: the time, the `request_id`, the attempt, the operation (`read`,
-      `read-binary`, or `item-get` for `list-fields`), the reference, the working directory, the
-      cache file, the zellij session and pane, `TERM_PROGRAM`, the Claude Code session, and the chain
-      of ancestor processes (at most 32, each command line cut to 1024 bytes). The Claude Code
+      `read-binary`, or `item-get` for `list-fields` and for the library function `field_labels`),
+      the reference (`op://<vault>/<item>` for `field_labels`), the working directory, the cache
+      file (empty for `field_labels`, which reads no cache), the zellij session and pane,
+      `TERM_PROGRAM`, the Claude Code session, and the chain of ancestor processes (at most 32, each
+      command line cut to 1024 bytes). The Claude Code
       session is the nearest ancestor that has a file `sessions/<pid>.json` in `$CLAUDE_CONFIG_DIR`,
       else in `~/.claude`. A file whose `startedAt` is earlier than the start of that ancestor is
       skipped, because that PID now belongs to a different process. The lookup then continues to the
@@ -2262,6 +2264,26 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
     `faulte kill` stops the old idle Claude Code sessions after a question. `faulte tui` is a live
     full-screen view with a history. It supports macOS only. See below for the full entry.
   - To install: `cargo install --git https://github.com/timmattison/tools faulte`
+- ufa (UniFi API)
+  - Drives a UniFi Network application through its Integration API, and the cloud consoles of an
+    Ubiquiti account through the Site Manager API. It lists the sites, the devices, the clients,
+    and the hotspot vouchers. It reports the statistics of one device or of every device at once,
+    it restarts a device, and it power cycles a port. It authorizes and unauthorizes a guest, and
+    it creates, shows, and deletes a voucher. `--output json` gives every command a
+    machine-readable answer, and a table is the default.
+  - The two APIs take two different keys. The controller key comes from **Settings -> Control
+    Plane -> Integrations** on the controller itself. The Site Manager key comes from the API
+    section of [unifi.ui.com](https://unifi.ui.com). `ufa config setup` finds a controller in
+    1Password or on the local network, then writes the config file for you. A key can stay in
+    1Password, because the config file holds an `op://` reference that `ufa` resolves through
+    `op-cache`.
+  - `--site-id` belongs to the command group and stands before the leaf subcommand:
+    `ufa devices --site-id <SITE_ID> list`. Leave it out and `ufa` finds the site for you.
+  - Usage: `ufa sites`, `ufa devices list`, `ufa devices stats --all`,
+    `ufa clients list --output json`,
+    `ufa vouchers create --name "Guest pass" --time-limit-minutes 1440 --count 5`,
+    `ufa cloud hosts`, `ufa config setup`
+  - To install: `cargo install --git https://github.com/timmattison/tools ufa`
 
 - ha (hot actions)
   - Shows the GitHub Actions workflow runs of many repositories and owners in one terminal view
@@ -6657,7 +6679,10 @@ The editing engine of the crate has five parts:
   in-place filter (`register_in_place`) also gets the length of its region and
   whether anything comes after it. It rewrites its region and moves nothing. A
   span filter (`register_span`) also gets the length of its region and answers
-  a new length, and the later events move by the change in the length.
+  a new length, and the later events move by the change in the length. A span
+  filter also gets the events before and after its region and the size of the
+  terminal: the size of the clip that starts first, or 80 by 24 in
+  `FilterRegistry::run`.
   `filters::registry()` holds the filters that ship. The cursor filter is an
   in-place filter, and each other one is a span filter:
   - `cursor` (`visibility`, `shape`, `blink`, `color`, issue #168): sets how
@@ -6679,11 +6704,15 @@ The editing engine of the crate has five parts:
   - `auto-trim` (`leading`, `trailing`, both on when not set, issue #154):
     removes the time before the first input event and the time after the last
     output event.
+  - `backspace-removal` (no options, issue #152): removes each typo, the erase
+    key after it, their output, and their time.
+    [The backspace removal filter](#the-backspace-removal-filter) below gives
+    its rules.
 
   The filters of issue #154 parse their options as a Rust type, so the render
   refuses a missing option, a value of the wrong type, and a key that the
   filter does not know. The window cannot add them yet (issue #150). Issues
-  #152 and #157 to #167 add more filters.
+  #157 to #167 add more filters.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
@@ -6747,6 +6776,74 @@ the state of the recording back at the end. The filter sees only its range,
 thus it takes the state before the range to be the default of a terminal: a
 visible cursor, DECSCUSR 0, and the default color. After a reset of the
 terminal (RIS or DECSTR) in the recording, the filter sets the cursor again.
+
+### The backspace removal filter
+
+The `backspace-removal` filter removes the typing errors of a recording. It
+removes a typed key, the key that erased it, and the output of both, so the
+recording shows the text that the typist meant. It also removes their time, so
+no pause shows where the error was. For example, `h`, `r`, Backspace, `e`
+becomes `h`, `e`, and the `e` comes at the time of the `r`.
+
+The filter removes keys only when the screen proves that the removal changes
+nothing that a viewer sees after it. The filter keeps a model of the screen,
+the emulator of the `termstate` crate. It compares the screen after the erase
+with the screen before the typed key. It compares each cell, the cursor, and the
+other state of the emulator, for example the pen and the visibility of the
+cursor. Thus output that writes backspaces with no erase key before it stays,
+for example a progress bar. A full-screen program in which Backspace does a
+different thing also stays, because its screen does not come back.
+
+| Key | Data | What goes |
+|---|---|---|
+| Backspace | DEL (`\x7f`) or BS (`\x08`) | The newest typed key, the Backspace, and their output. |
+| Ctrl+W | `\x17` | The typed keys that the erase removed from the screen, the Ctrl+W, and their output. |
+| Ctrl+U | `\x15` | The same as for Ctrl+W. |
+
+An erase key that has output and changes nothing on the screen goes with that
+output, for example a Backspace at the start of a line that rings the bell. An
+erase key that no typed key explains and that has no output before the next key
+stays, because over a slow link its echo can come after the next key. A key
+that is not a typed character or an erase key ends the line that the filter
+follows: for example Enter, Tab, an arrow, or a paste. An erase after such a
+key does not remove a typed key before it.
+
+The filter takes no option. A project file names it in its `filters` list:
+
+```json
+{ "kind": "backspace-removal", "region": "All", "options": {} }
+```
+
+On a range, the filter replays the output before the range into its screen, so
+it compares the screens that the viewer sees. The events after the range move
+earlier by the removed time. When the first event after the range is output,
+the end of the range cuts the output of the last key of the range. That key
+stays, because the filter cannot see all of its output.
+
+The limits:
+
+- The comparison is as exact as the emulator. The emulator does not wrap at the
+  right margin, it gives each character one cell, and it reads `CSI C` or
+  `CSI D` with no number as a move of zero columns. Thus a typo near such
+  output usually stays.
+- At a prompt that echoes nothing, more than one typed key leaves the screen as
+  a Ctrl+W or a Ctrl+U leaves it. The filter cannot tell how many keys the
+  erase removed, so it keeps them all.
+- Type-ahead over a slow link can put the echo of a key after the next key.
+  The filter then removes a key and keeps its echo. The screen at the end is
+  correct, but the viewer sees one moment that the typist did not type. Two
+  cases are known:
+  - At a prompt that echoes nothing, a typed key and a Backspace with no output
+    go together. Double type-ahead gives the same order of events, and then
+    their echoes stay: the typo shows with no key.
+  - Under single type-ahead, the output after a Backspace can be unrelated
+    output that changes nothing on the screen, for example a bell. The
+    Backspace then goes with that output, and its late echo stays. Thus an
+    earlier typed character goes with no Backspace.
+- The filter keeps a copy of the screen for each typed key of a line: at most
+  256 copies, and at most 4,194,304 cells for all copies. A line of more typed
+  keys keeps its oldest keys. A terminal of more than 1,048,576 cells fails the
+  render.
 
 The export functions run `beta` with the PATH of the app, then
 `$CARGO_HOME/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.

@@ -1034,6 +1034,90 @@ tool's own entry would otherwise document a tool named `To`.
   cargo actually builds, so a binary the guard never learned to discover shows
   up as a set difference instead of a clean report
 
+## 1Password Access
+
+Every crate in this workspace that reads a secret **must** read it through the
+`op-cache` library crate at `src/op-cache/`. No other crate runs the `op`
+binary.
+
+### Why
+
+`op-cache` caches what it read, retries what failed, and writes the cache file
+at mode 600. A crate that runs `op` itself gets none of that, and the failure
+is quiet: the code works, the secret arrives, and only the properties nobody
+can see are gone.
+
+`ufa` did exactly that. `discover_op_controllers` ran
+`op item get ufa --vault Private --format json` to learn which controllers the
+user keeps, and that command prints the value of every concealed field beside
+its label — so every controller key in the item reached a variable of `ufa`
+for a list of names. `op_cache::field_labels` now runs that command. The values
+still reach the process, in a buffer inside `op-cache`, and stop there: no
+value reaches a type or a variable of `ufa`.
+
+The reason it reached around the helper is the part worth remembering:
+`op-cache` had no way to list the fields of an item, so the helper could not do
+the job. **A crate that reaches around this helper is reporting a gap in it.**
+Add the narrow method the helper lacks, then call it.
+
+### Usage
+
+```rust
+// One field of an item, cached in a file the tool names.
+let cache = op_cache::OpCache::with_path(config_dir.join(".op-cache.json"));
+let path = op_cache::OpPath::new("op://Private/ufa/key - 192.168.1.1 port 443")?;
+let key = cache.read(&path, None)?;
+
+// The names of every field of an item, and none of the values.
+let item = op_cache::OpItem::new("Private", "ufa")?;
+let labels = op_cache::field_labels(&item)?;
+```
+
+`field_labels` is the one read in that crate that is not cached. A label is not
+a secret, and a cached list of names goes stale silently: a stale value is
+found out at the point of use, when the service refuses it and the caller
+invalidates the entry, but a stale list of names simply hides the field the
+user just added.
+
+`OpCache::new` puts the cache file at the root of the git repository that
+holds the working directory, and it fails outside a git repository. That suits
+a tool that runs in its own checkout. An installed tool runs from any
+directory, so it names the file with `OpCache::with_path`: `ufa` keeps it
+beside its configuration file. At the root of another repository, the file
+puts a plaintext key where nothing ignores it, and a `git add -A` stages it.
+
+### The Trap: A Text Search Finds One Spelling
+
+`Command::new("op")` is one spelling of many, and a text search reports each of
+the others *clean*. A new spawn of `op` arrives as `childenv::command("op")` or
+`childenv::fixture_command("op")`, because "Spawning Git" makes those two the
+only constructors that clippy permits. The first version of the guard matched
+only a callee that ends in `Command::new`, so it reported each of those spawns
+clean. Other spellings are the call behind an import, the call behind a
+`use … as` rename, the `tokio` type, `portable_pty::CommandBuilder::new`, the
+program named by its path, and the call inside a macro body.
+
+So the guard **parses** each source first, and it refuses a file it cannot
+parse, rather than reporting it clean. Then it reads **tokens**, as
+`repo_guards::git_env_sweep` does, because `syn` leaves the body of a macro
+invocation unparsed. A token walk reads a macro body and a function body with
+one rule, and a comment or a string stays data. The module doc of `op_wall`
+states the spellings that the walk does not see, for example a program or an
+entrance that reaches the call through a binding.
+
+Clippy cannot express this rule. `disallowed-methods` matches a method path and
+ignores its arguments, so it can ban `childenv::command` only for every
+program, not for one.
+
+### Guards Enforcing This
+
+- `repo_guards::op_wall` (`src/repo-guards/src/op_wall.rs`) — no workspace
+  member but `op-cache` runs the `op` binary. The audited set comes from the
+  workspace members rather than a list of crates, so a new crate is covered on
+  the day it is written, and a companion test asks whether every member gave
+  the guard a file to read — a matcher pointed at the wrong directories reports
+  clean with the same silence as a broken one
+
 ## Specs and Plans
 
 A spec **must** live in `specs/` and a plan **must** live in `plans/`, both at
