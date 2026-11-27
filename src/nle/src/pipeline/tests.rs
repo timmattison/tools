@@ -993,13 +993,13 @@ fn register_span_and_register_replace_each_other_under_one_kind() {
 
 // Tests of the context of a span filter.
 
+/// The contexts that a spy got: the events before its region and the size.
+type SeenContexts = TestArc<Mutex<Vec<(Vec<Event>, TerminalSize)>>>;
+
 /// Registers a span filter under "look" that records each context that it
 /// gets, as the events before its region and the size, and answers with the
 /// span that it got.
-fn context_spy_registry() -> (
-    FilterRegistry,
-    TestArc<Mutex<Vec<(Vec<Event>, TerminalSize)>>>,
-) {
+fn context_spy_registry() -> (FilterRegistry, SeenContexts) {
     let seen = TestArc::new(Mutex::new(Vec::new()));
     let captured = TestArc::clone(&seen);
     let mut registry = FilterRegistry::new();
