@@ -6402,10 +6402,29 @@ The editing engine of the crate has five parts:
   whether anything comes after it. It rewrites its region and moves nothing. A
   span filter (`register_span`) also gets the length of its region and answers
   a new length, and the later events move by the change in the length.
-  `filters::registry()` holds the filters that ship: the cursor filter
-  (`cursor`, issue #168) is an in-place filter, and time dilation
-  (`time-dilation`, issue #153) and typing speed (`typing-speed`, issue #155)
-  are span filters. Issues #152 to #167 add the others.
+  `filters::registry()` holds the filters that ship. The cursor filter is an
+  in-place filter, and each other one is a span filter:
+  - `cursor` (`visibility`, `shape`, `blink`, `color`, issue #168): sets how
+    the cursor looks. [The cursor filter](#the-cursor-filter) below gives its
+    options.
+  - `time-dilation` (`speed`, issue #153): plays its region faster or slower.
+  - `typing-speed` (`chars_per_second`, `pause`, `jitter`, issue #155): plays
+    each burst of typing at one rate. The paragraph on this filter below gives
+    its rules.
+  - `pause-removal` (`threshold`, `max_pause`, issue #154): each gap between two
+    events that is longer than `threshold` becomes `max_pause` long.
+  - `pause-insertion` (`at`, `duration`, issue #154): each event at or after
+    `at` moves later by `duration`, and so do the events after a range and the
+    end of the timeline. An `at` past the end of the region by more than a
+    microsecond is an error.
+  - `auto-trim` (`leading`, `trailing`, both on when not set, issue #154):
+    removes the time before the first input event and the time after the last
+    output event.
+
+  The filters of issue #154 parse their options as a Rust type, so the render
+  refuses a missing option, a value of the wrong type, and a key that the
+  filter does not know. The window cannot add them yet (issue #150). Issues
+  #152 and #156 to #167 add more filters.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
