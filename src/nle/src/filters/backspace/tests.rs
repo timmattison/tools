@@ -305,6 +305,40 @@ fn a_backspace_that_changes_nothing_keeps_the_stack() {
     );
 }
 
+/// The events of the issue with type-ahead: the echo of the Backspace comes
+/// after the input of the next key `e`.
+fn typo_then_backspace_with_type_ahead() -> Vec<Event> {
+    vec![
+        out(0.0, "$ "),
+        input(1.0, "h"),
+        out(1.0, "h"),
+        input(1.5, "r"),
+        out(1.5, "r"),
+        input(2.0, "\x7f"),
+        input(2.05, "e"),
+        out(2.06, "\x08 \x08"),
+        out(2.07, "e"),
+    ]
+}
+
+#[test]
+fn a_backspace_whose_echo_comes_after_the_next_key_stays() {
+    // The unit of the Backspace has no output, so its screen does not change.
+    // Its echo is in the unit of the `e`. If the Backspace went, its echo
+    // would stay with no key press before it.
+    let events = typo_then_backspace_with_type_ahead();
+    assert_eq!(run(events.clone()), events);
+}
+
+#[test]
+fn a_range_that_ends_before_the_late_echo_of_a_backspace_keeps_the_backspace() {
+    // The first event after the range is the input of `e`, so the end of the
+    // range cuts no unit. The echo of the Backspace comes after that input.
+    let events = typo_then_backspace_with_type_ahead();
+    let rendered = render_in(80, 24, events.clone(), range(1.0, 2.025)).unwrap();
+    assert_eq!(rendered.events, events);
+}
+
 #[test]
 fn with_no_echo_a_backspace_erases_the_newest_typed_key() {
     // Mutant that was run: the rule for a key that changes nothing runs before
