@@ -1092,9 +1092,11 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
     `XDG_STATE_HOME` is unset, empty, or relative, the file is `~/.local/state/op-cache/audit.jsonl`.
     The audit trail has no switch. Each line is one JSON record, of one of two kinds:
     - `op_start`, before `op` runs: the time, the `request_id`, the attempt, the operation (`read`,
-      `read-binary`, or `item-get` for `list-fields`), the reference, the working directory, the
-      cache file, the zellij session and pane, `TERM_PROGRAM`, the Claude Code session, and the chain
-      of ancestor processes (at most 32, each command line cut to 1024 bytes). The Claude Code
+      `read-binary`, or `item-get` for `list-fields` and for the library function `field_labels`),
+      the reference (`op://<vault>/<item>` for `field_labels`), the working directory, the cache
+      file (empty for `field_labels`, which reads no cache), the zellij session and pane,
+      `TERM_PROGRAM`, the Claude Code session, and the chain of ancestor processes (at most 32, each
+      command line cut to 1024 bytes). The Claude Code
       session is the nearest ancestor that has a file `sessions/<pid>.json` in `$CLAUDE_CONFIG_DIR`,
       else in `~/.claude`. A file whose `startedAt` is earlier than the start of that ancestor is
       skipped, because that PID now belongs to a different process. The lookup then continues to the
@@ -2262,6 +2264,26 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
     `faulte kill` stops the old idle Claude Code sessions after a question. `faulte tui` is a live
     full-screen view with a history. It supports macOS only. See below for the full entry.
   - To install: `cargo install --git https://github.com/timmattison/tools faulte`
+- ufa (UniFi API)
+  - Drives a UniFi Network application through its Integration API, and the cloud consoles of an
+    Ubiquiti account through the Site Manager API. It lists the sites, the devices, the clients,
+    and the hotspot vouchers. It reports the statistics of one device or of every device at once,
+    it restarts a device, and it power cycles a port. It authorizes and unauthorizes a guest, and
+    it creates, shows, and deletes a voucher. `--output json` gives every command a
+    machine-readable answer, and a table is the default.
+  - The two APIs take two different keys. The controller key comes from **Settings -> Control
+    Plane -> Integrations** on the controller itself. The Site Manager key comes from the API
+    section of [unifi.ui.com](https://unifi.ui.com). `ufa config setup` finds a controller in
+    1Password or on the local network, then writes the config file for you. A key can stay in
+    1Password, because the config file holds an `op://` reference that `ufa` resolves through
+    `op-cache`.
+  - `--site-id` belongs to the command group and stands before the leaf subcommand:
+    `ufa devices --site-id <SITE_ID> list`. Leave it out and `ufa` finds the site for you.
+  - Usage: `ufa sites`, `ufa devices list`, `ufa devices stats --all`,
+    `ufa clients list --output json`,
+    `ufa vouchers create --name "Guest pass" --time-limit-minutes 1440 --count 5`,
+    `ufa cloud hosts`, `ufa config setup`
+  - To install: `cargo install --git https://github.com/timmattison/tools ufa`
 
 - ha (hot actions)
   - Shows the GitHub Actions workflow runs of many repositories and owners in one terminal view
