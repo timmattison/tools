@@ -5697,6 +5697,8 @@ The excerpt leaves out rows of the table and entries of the groups. The run was 
 
 `wdid defs` reports on each alias and each function of your interactive shell. Use it to find the definitions that you use, the definitions that you can remove, and the definitions that you forgot. The tools report shows an alias or a function only through a tool of the workspace that it runs. `wdid defs` shows each of your definitions, also an alias that runs `git` and a definition with zero uses.
 
+A definition that the shell runs without a typed name, for example a `precmd` hook or the function of a widget that a key starts, gets the state "runs without typing" with its reason. It does not show in "Never used". See [What runs without typing](#what-runs-without-typing).
+
 Each definition gets its origin: the file that defined it. By default, the text report shows only your own definitions. A shell with oh-my-zsh has hundreds of aliases and functions from its plugins and its `lib` files, and those are not yours. `--all` shows each definition, and groups the others by the file that defined them.
 
 `wdid defs` reads the history and the shell definitions as the tools report does. It needs no cargo workspace, and it starts no `cargo` process and no `git` process. Thus it runs in any directory.
@@ -5722,6 +5724,48 @@ A use through other definitions names the definition that you typed. With `a` th
 - An alias in the body of a function. zsh and bash expand each alias in a function body when they read the definition. Thus the body that `wdid` gets holds the value of the alias, not its name, and the alias gets no use from the function.
 - A name in quoted text, a row with exit code 127, and a line that does not parse, as in the tools report.
 - A function whose name starts with `_`. The completion system makes these functions by the hundred, and nobody types them. Only `--all` shows them. A call through such a function still counts: with `f() { _helper }` and `_helper() { g }`, a typed `f` is a use of `g` through `f`.
+
+#### What runs without typing
+
+zsh and bash run some definitions when nobody types their names. The history has no row for these runs. Thus `wdid` asks the shell for each such start. Each definition that a start reaches gets the state "runs without typing" and its reasons. Such a definition does not show in "Never used" or in "Idle", whatever its uses. Its typed uses still count in the table.
+
+The starts of zsh:
+
+- **A hook function.** The functions `precmd`, `preexec`, `chpwd`, `periodic`, `zshaddhistory`, and `zshexit`, and each name in the arrays `precmd_functions` thru `zshexit_functions`. `add-zsh-hook` fills these arrays. The reason is the hook, for example `precmd hook`.
+- **A trap function.** `TRAPINT`, `TRAPEXIT`, and each other `TRAP` name of a signal in `$signals`. The reason is the signal, for example `INT trap`. A function such as `TRAPPED` is not a trap, because `PED` is not a signal.
+- **The handler of a command that zsh does not find**, `command_not_found_handler`. The reason is `command not found`.
+- **The function of a widget that a key starts.** `zle -lL` gives the function of each widget, and `bindkey -M <keymap> -L` gives the keys of each keymap. The reason is the widget and its keys, for example `widget atuin-search, key ^R`. A key in two keymaps is one key. The space key shows as `" "`.
+- **The function of a special widget**, which zle runs at an event of its own: `zle-line-init`, `zle-line-finish`, `zle-keymap-select`, `zle-isearch-exit`, `zle-isearch-update`, `zle-line-pre-redraw`, and `zle-history-line-set`. A widget that `add-zle-hook-widget` adds to one of them runs at the same event. The reason is the special widget, for example `widget zle-line-init`.
+
+The starts of bash:
+
+- **`PROMPT_COMMAND`**, a text or an array. The reason is `PROMPT_COMMAND`.
+- **The code of a trap**, from `trap -p`. The reason is the signal without `SIG`, for example `EXIT trap`. `wdid` lists the traps before it removes the `DEBUG` trap for its own script.
+- **The command of a `bind -x` key**, from `bind -X`. The reason is the key, for example `bind -x, key \C-x\C-r`. bash has `bind -X` from version 4.3 on. The bash of macOS is 3.2, thus it gives no key.
+
+`wdid` reads the code of a bash start as a typed line. Each function and each alias that the code names runs, also a function that such an alias calls.
+
+Each function that a start runs passes its reason to each function that it calls, to any depth. The reason then names the definition that the start runs, for example `precmd hook, through omz_termsupport_precmd`. The walk visits each function one time, thus a cycle stops. A function whose name starts with `_` passes its reason too, also when the report does not show it.
+
+A widget function that no key starts gets the reason `widget, no key`. Only a typed `zle` call or `execute-named-cmd` starts it. Thus it keeps the state that its uses give, and it can show in "Never used" with that reason.
+
+`wdid` does not find these starts:
+
+- A function in a prompt string, for example `$(git_prompt_info)` in `PROMPT` with `prompt_subst`.
+- A zsh trap that `trap 'code' SIGNAL` sets. Only a `TRAP` function counts in zsh.
+- The bash function `command_not_found_handle`.
+
+The groups of a run with a `precmd` hook, its callee, a widget with a key, and a widget with no key:
+
+```text
+Never used:
+  lonelyfn (function, widget, no key)
+Idle (no use in the last 180 days): none
+Runs without typing:
+  precmd (function, precmd hook)
+  prompt_helper (function, precmd hook, through precmd)
+  searchfn (function, widget history-search, key ^R)
+```
 
 #### The origin and my definitions
 
@@ -5760,18 +5804,21 @@ An alias and a function can have the same name. They are two rows.
 
 With `--all`, the table of my definitions gets the heading `Mine` and a count. After it, the report has one table for each file that defined the others, in path order. The heading of each table is the file and its count of definitions, for example `~/.oh-my-zsh/plugins/git/git.plugin.zsh: 208 definitions`. The tables also hold the functions whose names start with `_`. Each completion function has a file of its own, thus a shell with the completion system gives one table for each completion function.
 
-Two groups follow the tables:
+Three groups follow the tables:
 
 - **Never used.** The definitions with zero uses, each with its kind.
 - **Idle.** The definitions whose last use is older than `--idle-days` days, each with its kind, its uses, and the date of its last use.
+- **Runs without typing.** The definitions that the shell runs without a typed name, each with its kind and its reasons. `; ` divides two reasons. See [What runs without typing](#what-runs-without-typing).
 
-Without `--all`, the two groups hold only my definitions. With `--all`, they hold each definition.
+A widget function that no key starts ends its entry in "Never used" or in "Idle" with its reason, `widget, no key`.
+
+Without `--all`, the three groups hold only my definitions. With `--all`, they hold each definition.
 
 #### Options of wdid defs
 
 - `--since <YYYY-MM-DD>`: Count only the rows from this date on. A row on this date counts.
 - `--all`: Show each definition. The text report also shows the others, grouped by the file that defined them, and the functions whose names start with `_`.
-- `--json`: Print the report as one JSON document. `definitions` holds each definition, also the ones with zero uses and the ones that are not mine, and its `definition` is never cut. Each entry has `origin` and `mine`. `origin` holds `file` and `line`, or it is `null` when the origin is unknown. A function has no line, thus its `line` is `null`. `shell.mine` and `shell.others` give the two counts. `never_used` and `idle` hold the name and the kind of each entry of the two groups, also the entries that are not mine. With `--all`, the document also holds the functions whose names start with `_`.
+- `--json`: Print the report as one JSON document. `definitions` holds each definition, also the ones with zero uses and the ones that are not mine, and its `definition` is never cut. Each entry has `origin` and `mine`. `origin` holds `file` and `line`, or it is `null` when the origin is unknown. A function has no line, thus its `line` is `null`. `shell.mine` and `shell.others` give the two counts. Each entry has `reasons`, the text of each of its reasons as the text report writes it. The list is empty for most entries. `never_used`, `idle`, and `runs_without_typing` hold the name and the kind of each entry of the three groups, also the entries that are not mine. With `--all`, the document also holds the functions whose names start with `_`.
 - `--idle-days <DAYS>`: A definition is idle when its last use is older than this. Defaults to 180.
 
 The options of the tools report (`--repo`, `--no-shell`, `--unparsed`, `--new-days`) do not apply. An option of the tools report before `defs` is a usage error.
@@ -5805,6 +5852,7 @@ Never used:
   which-command (alias)
 Idle (no use in the last 180 days):
   oldfn (function, 1 use, last use 2026-03-21)
+Runs without typing: none
 ```
 
 The same run with `--all` adds a table for the git plugin after the table of my definitions. This excerpt leaves out rows of the first table:
@@ -5833,6 +5881,7 @@ Never used:
   which-command (alias)
 Idle (no use in the last 180 days):
   oldfn (function, 1 use, last use 2026-03-21)
+Runs without typing: none
 ```
 
 One entry of the `--json` document:
@@ -5849,11 +5898,12 @@ One entry of the `--json` document:
   "last_use": "2026-11-25",
   "classification": "used",
   "origin": { "file": "/Users/me/.zshrc", "line": 2 },
-  "mine": true
+  "mine": true,
+  "reasons": []
 }
 ```
 
-`kind` is `alias`, `global_alias`, `suffix_alias`, or `function`. `classification` is `used`, `idle`, or `never_used`.
+`kind` is `alias`, `global_alias`, `suffix_alias`, or `function`. `classification` is `used`, `idle`, `never_used`, or `runs_without_typing`.
 
 ### Install
 
