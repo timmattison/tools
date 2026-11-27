@@ -46,8 +46,9 @@ const AWS_KEY: &str = concat!(
 /// It matches a GitHub token (`ghp_` and its kin, and `github_pat_`), a GitLab
 /// token (`glpat-`), a Slack token (`xox`), an `sk-` key, a Stripe key
 /// (`sk_live_`, `rk_test_`, and their kin), a Google API key (`AIza`), an npm
-/// token (`npm_`), and a JSON web token with three parts. It also matches the
-/// token after the word `Bearer`. Only that token is replaced, because the
+/// token (`npm_`), and a JSON web token with three parts. It also matches a
+/// token of 16 characters or more after the whole word `Bearer` and a space or
+/// a tab on the same line. Only that token is replaced, because the
 /// group `redact` holds it. Only this branch has the group, because a group
 /// name can occur once in a pattern.
 ///
@@ -63,7 +64,7 @@ const TOKEN: &str = concat!(
     r"|\bAIza[0-9A-Za-z_-]{35}",
     r"|\bnpm_[A-Za-z0-9]{36}\b",
     r"|\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
-    r"|(?i:bearer)\s+(?P<redact>[A-Za-z0-9._~+/-]+=*)",
+    r"|\b(?i:bearer)[ \t]+(?P<redact>[A-Za-z0-9._~+/-]{16,}=*)",
 );
 
 /// A hostname with at least two labels.
