@@ -39,8 +39,20 @@ pub(crate) fn format_duration(total_seconds: f64) -> String {
 /// The function rounds to tenths of a second first, as `format_duration`
 /// does. A value that is not finite, or that is below zero, formats as zero.
 pub(crate) fn format_clock(total_seconds: f64, tenths: bool) -> String {
-    let _ = (total_seconds, tenths);
-    String::new()
+    let count = tenths_of_a_second(total_seconds);
+    let hours = count / TENTHS_PER_HOUR;
+    let minutes = count % TENTHS_PER_HOUR / TENTHS_PER_MINUTE;
+    let seconds = count % TENTHS_PER_MINUTE / 10;
+    let clock = if count >= TENTHS_PER_HOUR {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    };
+    if tenths {
+        format!("{clock}.{}", count % 10)
+    } else {
+        clock
+    }
 }
 
 /// Rounds `total_seconds` to whole tenths of a second. A value that is not

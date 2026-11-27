@@ -424,3 +424,9 @@ fn a_ruler_never_holds_more_ticks_than_the_window_has_room_for() {
         );
     }
 }
+
+#[test]
+fn a_ruler_at_the_smallest_zoom_has_no_tick_at_a_bad_place() {
+    let frame = View::default().frame(Extent::new(f64::MAX, 1200.0));
+    assert!(ruler_ticks(frame).iter().all(|tick| tick.x.is_finite()));
+}

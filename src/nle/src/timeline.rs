@@ -4,6 +4,8 @@
 //! The timeline shows project time: the times of the clips on their tracks,
 //! before the filters change them.
 
+use crate::format::format_clock;
+
 /// The largest zoom, in pixels per second: one pixel for each millisecond.
 pub const MAX_PIXELS_PER_SECOND: f64 = 1000.0;
 /// The factor of one step of a zoom button or a zoom key. Remotion Studio
@@ -36,6 +38,17 @@ const MIN_TICK_SPACING: f64 = 16.0;
 /// The counts of ticks in one step between two labels. The ruler takes the
 /// first count that keeps `MIN_TICK_SPACING` between two ticks.
 const TICK_DIVISIONS: [u32; 3] = [10, 5, 2];
+/// The most doublings of the last label step. The largest zoom is above
+/// zero, so a finite zoom needs far fewer.
+const MAX_STEP_DOUBLINGS: u32 = 1100;
+/// The most ticks of one ruler. A window of a sane width holds about one
+/// tick for each `MIN_TICK_SPACING` pixels, far below this count.
+const MAX_TICKS: i64 = 100_000;
+/// The part of a tick step that a tick can be past an edge of the window
+/// and still count as in the window.
+const EDGE_MARGIN: f64 = 1e-9;
+/// The largest integer below which an `f64` holds each integer: 2^53.
+const MAX_EXACT_INTEGER: f64 = 9_007_199_254_740_992.0;
 /// The smallest width of the window in pixels. A window that has no layout
 /// yet counts as this width, so no division is by zero.
 const MIN_WIDTH: f64 = 1.0;
@@ -239,8 +252,76 @@ pub struct Tick {
 /// The labels show tenths of a second when the step is below one second.
 #[must_use]
 pub fn ruler_ticks(frame: Frame) -> Vec<Tick> {
-    let _ = frame;
-    Vec::new()
+    let pixels_per_second = frame.pixels_per_second;
+    let Some(step) = label_step(pixels_per_second) else {
+        return Vec::new();
+    };
+    let divisions = TICK_DIVISIONS
+        .into_iter()
+        .find(|&count| step / f64::from(count) * pixels_per_second >= MIN_TICK_SPACING)
+        .unwrap_or(1);
+    let tick_step = step / f64::from(divisions);
+    // The margin keeps a tick at the edge that the division puts a little
+    // past it.
+    let first = whole_number((frame.start / tick_step - EDGE_MARGIN).ceil());
+    let last = whole_number((frame.end() / tick_step + EDGE_MARGIN).floor());
+    let (Some(first), Some(last)) = (first, last) else {
+        return Vec::new();
+    };
+    // `whole_number` holds both ends within 2^53, so the difference fits.
+    if last < first || last - first > MAX_TICKS {
+        return Vec::new();
+    }
+    let divisions = i64::from(divisions);
+    let tenths = step < 1.0;
+    (first..=last)
+        .map(|index| {
+            // The time of the label is a whole count of steps, so its text
+            // has no error of the division.
+            let label = (index % divisions == 0)
+                .then(|| format_clock((index / divisions) as f64 * step, tenths));
+            Tick {
+                x: frame.x_of(index as f64 * tick_step),
+                label,
+            }
+        })
+        .collect()
+}
+
+/// The step between two labels of the ruler at `pixels_per_second`, or
+/// `None` for a zoom that is not finite and above zero.
+fn label_step(pixels_per_second: f64) -> Option<f64> {
+    if !pixels_per_second.is_finite() || pixels_per_second <= 0.0 {
+        return None;
+    }
+    let fits = |step: f64| step * pixels_per_second >= LABEL_SPACING;
+    if let Some(step) = LABEL_STEPS.into_iter().find(|&step| fits(step)) {
+        return Some(step);
+    }
+    let mut step = LABEL_STEPS[LABEL_STEPS.len() - 1];
+    for _ in 0..MAX_STEP_DOUBLINGS {
+        step *= 2.0;
+        if fits(step) {
+            // A step can grow past the range of `f64` before it fits.
+            return step.is_finite().then_some(step);
+        }
+    }
+    None
+}
+
+/// `value` as an integer, when it is a whole number within 2^53, where an
+/// `f64` holds each integer exactly.
+fn whole_number(value: f64) -> Option<i64> {
+    if value.is_finite() && value.abs() <= MAX_EXACT_INTEGER {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the value is a whole number within 2^53, which i64 holds"
+        )]
+        let whole = value as i64;
+        Some(whole)
+    } else {
+        None
+    }
 }
 
 /// The unit of the deltas of a wheel event.
