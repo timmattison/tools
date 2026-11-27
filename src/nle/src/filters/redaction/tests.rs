@@ -170,6 +170,44 @@ fn a_bare_escape_does_not_swallow_the_text_after_it() {
 }
 
 #[test]
+fn an_unterminated_osc_ends_at_the_next_escape() {
+    let got = masked(
+        Find::Regex(r"\d+".to_string()),
+        Replacement::Asterisks,
+        vec![out(1.0, "\x1b]0;t\x1b[31mred")],
+    );
+    assert_eq!(datas(&got), vec!["\x1b]0;t\x1b[31mred"]);
+}
+
+#[test]
+fn an_unterminated_string_ends_at_the_next_escape() {
+    for intro in ['P', 'X', '^', '_'] {
+        assert_eq!(
+            one(
+                &format!("\x1b{intro}q\x1b[0m$ echo hunter2"),
+                "hunter2",
+                "X"
+            ),
+            format!("\x1b{intro}q\x1b[0m$ echo X")
+        );
+    }
+}
+
+#[test]
+fn can_and_sub_end_an_osc_sequence_and_a_string() {
+    for c in ['\x18', '\x1a'] {
+        assert_eq!(
+            one(&format!("\x1bPq{c}hunter2"), "hunter2", "X"),
+            format!("\x1bPq{c}X")
+        );
+        assert_eq!(
+            one(&format!("ab\x1b]0;t{c}cd"), "abcd", "X"),
+            format!("X\x1b]0;t{c}")
+        );
+    }
+}
+
+#[test]
 fn multi_byte_text_beside_escape_codes_is_replaced() {
     assert_eq!(
         one("\x1b[1m日本語\x1b[0m café", "日本語", "?"),
@@ -313,6 +351,18 @@ fn a_match_across_input_events_is_replaced() {
         vec![inp(1.0, "hun"), out(1.05, "echo"), inp(1.1, "ter2")],
     );
     assert_eq!(datas(&got), vec!["X", "echo", ""]);
+}
+
+#[test]
+fn a_string_introducer_in_input_is_a_key() {
+    for intro in ["P", "X", "^", "_", "]"] {
+        let got = with_input(
+            "hunter2",
+            "X",
+            vec![inp(1.0, "\x1b"), inp(1.1, intro), inp(2.0, "hunter2\r")],
+        );
+        assert_eq!(datas(&got), vec!["\x1b", intro, "X\r"]);
+    }
 }
 
 fn refusal(find: Find, replacement: Replacement) -> String {
