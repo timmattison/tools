@@ -39,7 +39,8 @@ fn plain_text_is_one_run_in_each_row() {
             [Run {
                 text: text.to_string(),
                 style: plain(),
-                single_cell: false
+                single_cell: false,
+                wide: false
             }]
         );
     }
@@ -120,6 +121,10 @@ fn a_wide_character_is_a_run_of_its_own() {
             .iter()
             .map(|run| run.single_cell)
             .collect::<Vec<_>>(),
+        [true, true, false]
+    );
+    assert_eq!(
+        row.runs.iter().map(|run| run.wide).collect::<Vec<_>>(),
         [true, true, false]
     );
 }

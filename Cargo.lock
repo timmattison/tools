@@ -11902,6 +11902,7 @@ name = "termstate"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "unicode-width",
  "vte",
 ]
 

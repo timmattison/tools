@@ -7,11 +7,21 @@
 //! A clone of a `TerminalState` is exact. It copies the screen, and it replays the
 //! bytes of an unfinished escape sequence into its own parser.
 //!
+//! A wide character, such as `日`, takes two cells: the character and a
+//! continuation cell after it (`WIDE_CONTINUATION`). A character of no width,
+//! such as a combining mark, takes no cell.
+//!
 //! It does not draw pixels. `beta` keeps the drawing, the fonts, the tmux
 //! layout, and the ffmpeg pipe.
 
 use anyhow::Result;
+use unicode_width::UnicodeWidthChar;
 use vte::{Parser, Perform};
+
+/// The character of the cell after a wide character. It covers both cells of
+/// the wide character. `vte` runs NUL as a control and never prints it, thus no
+/// printed character has this value.
+pub const WIDE_CONTINUATION: char = '\0';
 
 /// Narrows an SGR colour offset to the palette index it names.
 ///
@@ -472,6 +482,14 @@ impl Clone for TerminalState {
     }
 }
 
+impl Cell {
+    /// Tells if the cell is the continuation of a wide character: the second
+    /// cell of the two that the wide character covers.
+    pub fn is_wide_continuation(&self) -> bool {
+        self.ch == WIDE_CONTINUATION
+    }
+}
+
 impl Default for Cell {
     fn default() -> Self {
         Self {
@@ -846,8 +864,26 @@ impl TerminalState {
             ch
         };
 
+        // A character of no width, such as a combining mark, takes no cell.
+        let width = UnicodeWidthChar::width(display_char).unwrap_or(1);
+        if width == 0 {
+            return;
+        }
+        if width >= 2 && self.cursor_x + 2 > self.width {
+            // A wide character does not fit in the last column.
+            if self.autowrap && self.width >= 2 {
+                self.cursor_x = 0;
+                self.line_feed();
+            } else {
+                return;
+            }
+        }
+
         if self.cursor_y < self.height && self.cursor_x < self.width {
-            self.grid[self.cursor_y][self.cursor_x] = Cell {
+            let x = self.cursor_x;
+            let cells = if width >= 2 { 2 } else { 1 };
+            self.split_wide_pairs_around(x, cells);
+            let cell = Cell {
                 ch: display_char,
                 fg_color: self.current_fg,
                 bg_color: self.current_bg,
@@ -862,12 +898,80 @@ impl TerminalState {
                 hidden: self.hidden,
                 strikethrough: self.strikethrough,
             };
-            if self.cursor_x + 1 >= self.width {
+            let row = &mut self.grid[self.cursor_y];
+            if cells == 2 {
+                if let Some(next) = row.get_mut(x + 1) {
+                    *next = Cell {
+                        ch: WIDE_CONTINUATION,
+                        ..cell
+                    };
+                }
+            }
+            row[x] = cell;
+            if x + cells >= self.width {
                 // Stay in the last column. The wrap happens at the next character.
                 self.cursor_x = self.width - 1;
                 self.wrap_pending = self.autowrap;
             } else {
-                self.cursor_x += 1;
+                self.cursor_x += cells;
+            }
+        }
+    }
+
+    /// A blank cell: a space with the default colors and no attribute.
+    fn blank_cell(&self) -> Cell {
+        Cell {
+            ch: ' ',
+            fg_color: self.theme.foreground,
+            bg_color: self.theme.background,
+            ..Default::default()
+        }
+    }
+
+    /// Keeps the rule of the wide characters before a write of `cells` cells at
+    /// column `x` of the cursor row. A write that starts on a continuation cell
+    /// blanks the wide character before it. A write that ends before a
+    /// continuation cell blanks that cell.
+    fn split_wide_pairs_around(&mut self, x: usize, cells: usize) {
+        let blank = self.blank_cell();
+        let Some(row) = self.grid.get_mut(self.cursor_y) else {
+            return;
+        };
+        if x > 0 && row.get(x).is_some_and(Cell::is_wide_continuation) {
+            if let Some(previous) = row.get_mut(x - 1) {
+                *previous = blank.clone();
+            }
+        }
+        if let Some(after) = row.get_mut(x + cells) {
+            if after.is_wide_continuation() {
+                *after = blank;
+            }
+        }
+    }
+
+    /// Repairs the cursor row after an edit that can cut a wide character. A
+    /// continuation cell that does not follow a wide character becomes blank,
+    /// and a wide character that no continuation cell follows becomes blank.
+    fn repair_wide_pairs(&mut self) {
+        let blank = self.blank_cell();
+        let Some(row) = self.grid.get_mut(self.cursor_y) else {
+            return;
+        };
+        for x in 0..row.len() {
+            let is_head = row
+                .get(x)
+                .is_some_and(|cell| UnicodeWidthChar::width(cell.ch) == Some(2));
+            let followed = row.get(x + 1).is_some_and(Cell::is_wide_continuation);
+            let is_continuation = row.get(x).is_some_and(Cell::is_wide_continuation);
+            let after_head = x > 0
+                && row
+                    .get(x - 1)
+                    .is_some_and(|cell| UnicodeWidthChar::width(cell.ch) == Some(2));
+            let broken = (is_head && !followed) || (is_continuation && !after_head);
+            if broken {
+                if let Some(cell) = row.get_mut(x) {
+                    *cell = blank.clone();
+                }
             }
         }
     }
@@ -1425,6 +1529,9 @@ impl TerminalState {
                     }
                     _ => {}
                 }
+                if matches!(mode, 0 | 1) {
+                    self.repair_wide_pairs();
+                }
             }
             'K' => {
                 // Erase in line
@@ -1462,6 +1569,7 @@ impl TerminalState {
                     }
                     _ => {}
                 }
+                self.repair_wide_pairs();
             }
             'm' => {
                 // Set graphics rendition (colors, bold, etc.)
@@ -1563,6 +1671,7 @@ impl TerminalState {
                         ..Default::default()
                     };
                 }
+                self.repair_wide_pairs();
             }
             '@' => {
                 // Insert characters (clamped to avoid usize underflow)
@@ -1580,6 +1689,7 @@ impl TerminalState {
                         ..Default::default()
                     };
                 }
+                self.repair_wide_pairs();
             }
             'X' => {
                 // Erase characters
@@ -1594,6 +1704,7 @@ impl TerminalState {
                         };
                     }
                 }
+                self.repair_wide_pairs();
             }
             _ => {}
         }

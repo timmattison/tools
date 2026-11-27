@@ -7,6 +7,8 @@ license = "MIT"
 
 [dependencies]
 anyhow.workspace = true
+# The width of a character in terminal cells: a wide character takes two cells.
+unicode-width = { workspace = true }
 vte = "0.15.0"
 
 [lints]

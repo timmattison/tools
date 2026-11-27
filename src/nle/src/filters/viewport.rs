@@ -26,6 +26,11 @@
 //! or height 0, or larger than the limits of the preview, fails the render.
 //! Thus a bad header cannot cause a panic or a very large allocation.
 //!
+//! A wide character (for example 日) covers two cells. When a crop, a hidden
+//! column, or the mask cuts it in half, the visible half shows as a space with
+//! the look of the character. A character of no width (for example a combining
+//! mark) has no cell, thus the output does not show it.
+//!
 //! When all rows and all columns are visible, the filter answers the events
 //! with no change, at the same size.
 //!
@@ -363,9 +368,9 @@ impl Replay {
                     .iter()
                     .flat_map(|row| self.columns.iter().map(move |column| (*row, *column)))
                     .map(|(row, column)| {
-                        grid.get(row)
-                            .and_then(|cells| cells.get(column))
-                            .map_or(Glyph::BLANK, glyph_of)
+                        grid.get(row).map_or(Glyph::BLANK, |cells| {
+                            shown_glyph(cells, column, &self.column_shown)
+                        })
                     })
                     .collect();
                 let cursor = shown
@@ -384,11 +389,11 @@ impl Replay {
                     .enumerate()
                     .flat_map(|(row, cells)| {
                         let row_shown = self.row_shown.get(row).copied().unwrap_or(false);
-                        cells.iter().enumerate().map(move |(column, cell)| {
+                        (0..cells.len()).map(move |column| {
                             let column_shown =
                                 self.column_shown.get(column).copied().unwrap_or(false);
                             if row_shown && column_shown {
-                                glyph_of(cell)
+                                shown_glyph(cells, column, &self.column_shown)
                             } else {
                                 Glyph::BLANK
                             }
@@ -449,14 +454,18 @@ impl Replay {
         // line-drawing set, because the real terminal is in the ASCII set.
         let wrap_pending = self.terminal.is_wrap_pending();
         if wrap_pending {
-            let glyph = self
-                .terminal
-                .get_grid()
-                .get(cursor_y)
-                .and_then(|cells| cells.get(cursor_x))
-                .map(glyph_of);
+            let cells = self.terminal.get_grid().get(cursor_y);
+            let cell = cells.and_then(|cells| cells.get(cursor_x));
+            // A wide character in the last two columns holds the pending wrap
+            // in the last column, thus the write starts at its first cell.
+            let column = if cell.is_some_and(Cell::is_wide_continuation) {
+                cursor_x.saturating_sub(1)
+            } else {
+                cursor_x
+            };
+            let glyph = cells.and_then(|cells| cells.get(column)).map(glyph_of);
             if let Some(glyph) = glyph {
-                self.writer.rewrite(cursor_x, cursor_y, glyph, &mut data);
+                self.writer.rewrite(column, cursor_y, glyph, &mut data);
             }
         }
         if self.terminal.uses_line_drawing() {
@@ -582,6 +591,36 @@ fn new_terminal(size: ScreenSize) -> TerminalState {
         usize::from(size.height),
         TerminalTheme::auto(),
     )
+}
+
+/// The glyph that the cell at `column` of `cells` shows when only the columns
+/// that `column_shown` marks are visible. A wide character covers two cells.
+/// When only one of the two is visible, the visible half is a space with the
+/// look of the character.
+fn shown_glyph(cells: &[Cell], column: usize, column_shown: &[bool]) -> Glyph {
+    let Some(cell) = cells.get(column) else {
+        return Glyph::BLANK;
+    };
+    let visible = |other: Option<usize>| {
+        other.is_some_and(|other| column_shown.get(other).copied().unwrap_or(false))
+    };
+    let glyph = glyph_of(cell);
+    let is_wide = cells
+        .get(column.saturating_add(1))
+        .is_some_and(Cell::is_wide_continuation)
+        && !cell.is_wide_continuation();
+    let cut = if is_wide {
+        !visible(column.checked_add(1))
+    } else if cell.is_wide_continuation() {
+        !visible(column.checked_sub(1))
+    } else {
+        false
+    };
+    if cut {
+        Glyph { ch: ' ', ..glyph }
+    } else {
+        glyph
+    }
 }
 
 /// The glyphs of the whole grid of `terminal`, in row order.

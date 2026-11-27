@@ -6510,6 +6510,10 @@ the full screen again, and it sets the scrolling region, the autowrap mode, the
 pen, the saved cursor, a pending wrap, the character set, and the cursor back to
 the state of the recording.
 
+A wide character, for example 日, covers two cells. If a crop, a hidden column,
+or the mask cuts it in half, the visible half shows as a space. A character of
+no width, for example a combining mark, does not show in the output.
+
 An unknown key fails the render. A crop that does not start before its end, a
 crop or a hidden number that is not on the screen, and options that leave no
 row or no column visible also fail the render, and the message names the

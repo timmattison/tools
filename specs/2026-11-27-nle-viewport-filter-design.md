@@ -183,6 +183,12 @@ that differs:
 3. The character. After a character whose display width is 1, and that is not
    in the last column, the cursor of the model moves one cell right. After
    each other character, the cursor of the model is unknown.
+   A wide character covers its cell and the continuation cell after it
+   (`termstate::WIDE_CONTINUATION`). The paint writes the two cells with one
+   character, and it writes nothing for the continuation cell. When a crop, a
+   hidden column, or the mask makes only one of the two cells visible, that
+   cell is a space with the look of the character. A half that has no other
+   half also shows as a space.
 
 Then the paint sets the cursor: CUP to the visible place of the emulator
 cursor, and mode 25 when the visibility changes. The cursor of the output is
@@ -226,3 +232,5 @@ correctly.
   H-165-2). The output of the filter writes the default color.
 - An SGR attribute that `termstate` does not model (for example SGR 6, 21, or
   53) does not show in the output.
+- A character of no width, for example a combining mark, does not show in the
+  output, because `termstate` gives it no cell.

@@ -114,24 +114,48 @@ impl Writer {
 
     /// Write to `bytes` the cells that differ between the model and `target`,
     /// and update the model. `target` holds the cells in row order.
+    ///
+    /// A wide character covers two cells: the glyph of the character and a
+    /// continuation glyph after it. The paint first turns each half that has
+    /// no other half into a space, because a real terminal shows no such half.
+    /// It writes a wide character with its two cells together, and it writes
+    /// nothing for the continuation glyph.
     pub(super) fn paint_cells(&mut self, target: &[Glyph], bytes: &mut String) {
         let width = self.width.max(1);
-        for (index, (model, want)) in self.grid.iter_mut().zip(target).enumerate() {
-            if model == want {
-                continue;
+        let want = normalized(target, width);
+        let mut index = 0;
+        while index < want.len() {
+            let Some(glyph) = want.get(index).copied() else {
+                break;
+            };
+            let is_pair = is_wide(&glyph)
+                && want
+                    .get(index + 1)
+                    .is_some_and(|next| next.ch == termstate::WIDE_CONTINUATION);
+            let cells = if is_pair { 2 } else { 1 };
+            let differs =
+                (0..cells).any(|offset| self.grid.get(index + offset) != want.get(index + offset));
+            if differs {
+                let (x, y) = (index % width, index / width);
+                if self.cursor != Some((x, y)) {
+                    push_cup(bytes, x, y);
+                }
+                if self.pen != Some(glyph.look) {
+                    bytes.push_str(&sgr(&glyph.look));
+                    self.pen = Some(glyph.look);
+                }
+                bytes.push(glyph.ch);
+                for offset in 0..cells {
+                    if let (Some(slot), Some(value)) =
+                        (self.grid.get_mut(index + offset), want.get(index + offset))
+                    {
+                        *slot = *value;
+                    }
+                }
+                let one_wide = UnicodeWidthChar::width(glyph.ch) == Some(1);
+                self.cursor = (one_wide && x + 1 < width).then_some((x + 1, y));
             }
-            let (x, y) = (index % width, index / width);
-            if self.cursor != Some((x, y)) {
-                push_cup(bytes, x, y);
-            }
-            if self.pen != Some(want.look) {
-                bytes.push_str(&sgr(&want.look));
-                self.pen = Some(want.look);
-            }
-            bytes.push(want.ch);
-            *model = *want;
-            let one_wide = UnicodeWidthChar::width(want.ch) == Some(1);
-            self.cursor = (one_wide && x + 1 < width).then_some((x + 1, y));
+            index += cells;
         }
     }
 
@@ -264,4 +288,50 @@ fn push_color(bytes: &mut String, source: ColorSource, ground: Ground) {
             bytes.push_str(&format!(";{extended};2;{r};{g};{b}"));
         }
     }
+}
+
+/// Tells if `glyph` is a character of display width 2.
+fn is_wide(glyph: &Glyph) -> bool {
+    UnicodeWidthChar::width(glyph.ch) == Some(2)
+}
+
+/// The glyphs of `target` as a real terminal shows them, `width` glyphs to a
+/// row. A wide character that no continuation glyph follows in its row becomes
+/// a space with its look. A continuation glyph that does not follow a wide
+/// character becomes a space with its look.
+fn normalized(target: &[Glyph], width: usize) -> Vec<Glyph> {
+    let space = |glyph: &Glyph| Glyph {
+        ch: ' ',
+        look: glyph.look,
+    };
+    target
+        .iter()
+        .enumerate()
+        .map(|(index, glyph)| {
+            let in_row = |other: usize| other / width == index / width;
+            let is_continuation = |other: Option<&Glyph>| {
+                other.is_some_and(|other| other.ch == termstate::WIDE_CONTINUATION)
+            };
+            if is_wide(glyph) {
+                let next = index.checked_add(1).filter(|next| in_row(*next));
+                if is_continuation(next.and_then(|next| target.get(next))) {
+                    *glyph
+                } else {
+                    space(glyph)
+                }
+            } else if glyph.ch == termstate::WIDE_CONTINUATION {
+                let previous = index.checked_sub(1).filter(|previous| in_row(*previous));
+                if previous
+                    .and_then(|previous| target.get(previous))
+                    .is_some_and(is_wide)
+                {
+                    *glyph
+                } else {
+                    space(glyph)
+                }
+            } else {
+                *glyph
+            }
+        })
+        .collect()
 }
