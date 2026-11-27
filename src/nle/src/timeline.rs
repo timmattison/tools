@@ -258,6 +258,7 @@ pub struct Tick {
 /// two times larger until it leaves the space. Between two labels, the ruler
 /// puts the most ticks that keep `MIN_TICK_SPACING` pixels between two ticks.
 /// The labels show tenths of a second when the step is below one second.
+/// A window that needs more than `MAX_TICKS` ticks gets no tick.
 #[must_use]
 pub fn ruler_ticks(frame: Frame) -> Vec<Tick> {
     let pixels_per_second = frame.pixels_per_second;
@@ -277,7 +278,8 @@ pub fn ruler_ticks(frame: Frame) -> Vec<Tick> {
         return Vec::new();
     };
     // `whole_number` holds both ends within 2^53, so the difference fits.
-    if last < first || last - first > MAX_TICKS {
+    // The range holds `last - first + 1` ticks.
+    if last < first || last - first >= MAX_TICKS {
         return Vec::new();
     }
     let divisions = i64::from(divisions);
