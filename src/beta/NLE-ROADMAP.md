@@ -73,7 +73,7 @@ These filters need deeper terminal state analysis or more complex heuristics.
 | #152 | Smart backspace removal | Done. The `backspace-removal` span filter (`src/nle/src/filters/backspace.rs`) removes a typed key and its erase (Backspace, Ctrl+W, Ctrl+U), with their output and their time, only when the screen of the `termstate` emulator after the erase equals the screen before the key. Thus the backspaces that a TUI writes in its output stay. |
 | #162 | Output fast-forward | Manual region selection works immediately. Auto-detection (future) needs prompt heuristic. |
 | #166 | Color scheme conversion | Operates at ANSI escape sequence level within `event.data`. Must remap palette codes without breaking other sequences. |
-| #161 | Keystroke overlay / HUD | Parse input events into displayable key labels. Needs escape sequence → key name mapping. |
+| #161 | Keystroke overlay / HUD | Done. The `keystroke-hud` screen filter (`src/nle/src/filters/keystroke_hud.rs`) reads the input events of its region, gives each special key a label, and draws the keys in a box with output events. It replays the events through the `termstate` emulator, thus it puts back the cells under the box and keeps the box in place when the output scrolls. |
 
 ### Phase 5: Polish and Extensions (ongoing)
 
