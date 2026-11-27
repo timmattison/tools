@@ -407,6 +407,51 @@ fn a_range_with_no_event_shrinks_and_the_later_events_move() {
 }
 
 #[test]
+fn a_range_replays_from_a_blank_screen_at_its_start_and_marks_its_periods() {
+    let region = FilterRegion::Range {
+        start: Seconds::new(10.0).unwrap(),
+        end: Seconds::new(30.0).unwrap(),
+    };
+    let events = vec![
+        output(0.0, "a"),
+        // A redraw of the "a" from before the range. The replay starts from a
+        // blank screen at 10 s, so this redraw is activity.
+        output(12.0, "\x1b[1;1Ha"),
+        output(22.0, "b"),
+        // A cursor move inside the idle period from 22 s to the end at 30 s.
+        output(26.0, "\x1b[H"),
+        output(35.0, "c"),
+    ];
+    let project = project_of(events, 40.0, vec![applied(region, settings())]);
+
+    let rendered = filters::registry().render_with_marks(&project).unwrap();
+
+    // Relative to 10 s, the activity is at 2 and 12, and the range ends at
+    // 20. The gap from 0 to 2 stays. The periods from 2 to 12 and from 12 to
+    // 20 each become 1 s, so the range of 20 s becomes 4 s. The cursor move
+    // at 16 is half way into its period of 8 s, and the event at 35 s moves
+    // by -16 s.
+    assert_eq!(
+        times(&rendered.recording.events),
+        vec![0.0, 12.0, 13.0, 13.5, 19.0]
+    );
+    assert_eq!(rendered.recording.duration, 24.0);
+    assert_eq!(
+        rendered.marks,
+        vec![
+            Mark {
+                time: 12.0,
+                label: "Idle time: 0m 10.0s compressed to 0m 1.0s".to_string()
+            },
+            Mark {
+                time: 13.0,
+                label: "Idle time: 0m 8.0s compressed to 0m 1.0s".to_string()
+            },
+        ]
+    );
+}
+
+#[test]
 fn events_out_of_time_order_replay_in_time_order() {
     let filter = applied(FilterRegion::All, settings());
 
@@ -479,6 +524,23 @@ fn a_period_that_keeps_its_length_has_no_mark() {
 
     assert_eq!(times(&rendered.recording.events), vec![0.0, 3.0]);
     assert!(rendered.marks.is_empty(), "{:?}", rendered.marks);
+}
+
+#[test]
+fn a_compressed_length_equal_to_the_threshold_shortens_a_longer_period() {
+    let same = IdleCompression::new(3.0, 3.0, 20, 5).unwrap();
+
+    let rendered = compressed(vec![output(0.0, "a"), output(5.0, "b")], 5.0, same);
+
+    assert_eq!(times(&rendered.recording.events), vec![0.0, 3.0]);
+    assert_eq!(rendered.recording.duration, 3.0);
+    assert_eq!(
+        rendered.marks,
+        vec![Mark {
+            time: 0.0,
+            label: "Idle time: 0m 5.0s compressed to 0m 3.0s".to_string()
+        }]
+    );
 }
 
 #[test]
