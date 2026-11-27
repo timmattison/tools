@@ -437,9 +437,38 @@ mod tests {
         }
     }
 
+    /// The key of a firmware version in the `network-server` example of the
+    /// spec.
+    const SNAKE_FIRMWARE_KEY: &str = "firmware_version";
+
+    /// The key of a firmware version that `ReportedState` writes.
+    const CAMEL_FIRMWARE_KEY: &str = "firmwareVersion";
+
+    /// The `version` that the `network-server` example of the spec reports.
+    const NETWORK_SERVER_VERSION: &str = "8.3.11";
+
+    /// The hosts that `sent` holds, with each firmware version of a reported
+    /// state under the key that `--output json` writes.
+    fn as_written(mut sent: serde_json::Value) -> serde_json::Value {
+        if let serde_json::Value::Array(hosts) = &mut sent {
+            for host in hosts {
+                let state = host
+                    .get_mut("reportedState")
+                    .and_then(serde_json::Value::as_object_mut);
+                if let Some(state) = state {
+                    if let Some(firmware) = state.remove(SNAKE_FIRMWARE_KEY) {
+                        state.insert(CAMEL_FIRMWARE_KEY.to_string(), firmware);
+                    }
+                }
+            }
+        }
+        sent
+    }
+
     /// `--output json` answers with the hosts as the API reported them, so
     /// each field of a spec example must reach the output, also a field that
-    /// no model names.
+    /// no model names. The one change is the key of a firmware version: a
+    /// host that sent `firmware_version` gets `firmwareVersion`.
     #[test]
     fn the_json_listing_keeps_each_field_the_api_sent() {
         for (example, text) in [
@@ -461,9 +490,68 @@ mod tests {
                 serde_json::from_str(&rendered).expect("--output json must produce JSON");
 
             assert_eq!(
-                first_lost_field(&written, &sent),
+                first_lost_field(&written, &as_written(sent)),
                 None,
                 "--output json must keep each field of {example}, got:\n{rendered}"
+            );
+        }
+    }
+
+    /// The `data` host of the `network-server` example of the spec, after
+    /// `change` edits its `reportedState`. The example reports a null
+    /// `firmware_version` and a `version` of 8.3.11.
+    fn network_server_host(
+        change: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+    ) -> Host {
+        let mut answer: serde_json::Value =
+            serde_json::from_str(SPEC_HOST_NETWORK_SERVER).expect("the spec example is JSON");
+        let state = answer["data"]["reportedState"]
+            .as_object_mut()
+            .expect("the network-server example reports a state");
+        change(state);
+        serde_json::from_value(answer["data"].take())
+            .expect("the network-server example must parse as a host")
+    }
+
+    /// The spec gives `reportedState` no schema. A host that spells the key
+    /// `firmwareVersion` shows that firmware, also beside a `version`.
+    #[test]
+    fn the_firmware_column_reads_a_camel_case_firmware_version() {
+        let host = network_server_host(|state| {
+            state.remove(SNAKE_FIRMWARE_KEY);
+            state.insert(CAMEL_FIRMWARE_KEY.to_string(), serde_json::json!("4.0.6"));
+        });
+
+        assert_eq!(HostRow::from(&host).firmware, "4.0.6");
+    }
+
+    /// The `network-server` example of the spec spells the key
+    /// `firmware_version`. A host that sends a value under that key shows the
+    /// value, not its `version`.
+    #[test]
+    fn the_firmware_column_reads_a_snake_case_firmware_version() {
+        let host = network_server_host(|state| {
+            state.insert(SNAKE_FIRMWARE_KEY.to_string(), serde_json::json!("8.3.0"));
+        });
+
+        assert_eq!(HostRow::from(&host).firmware, "8.3.0");
+    }
+
+    /// A host that sets no firmware version, with a null or with no key,
+    /// shows its `version`. The `network-server` example of the spec sends a
+    /// null `firmware_version` beside a `version`.
+    #[test]
+    fn the_firmware_column_falls_back_to_version_when_no_firmware_version_is_set() {
+        let null = network_server_host(|_| {});
+        let absent = network_server_host(|state| {
+            state.remove(SNAKE_FIRMWARE_KEY);
+        });
+
+        for (case, host) in [("null", null), ("absent", absent)] {
+            assert_eq!(
+                HostRow::from(&host).firmware,
+                NETWORK_SERVER_VERSION,
+                "a host with a {case} firmware version must show its version"
             );
         }
     }
