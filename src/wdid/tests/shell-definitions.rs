@@ -267,6 +267,31 @@ fn a_function_body_gives_its_command_words() {
 }
 
 #[test]
+fn the_body_of_a_function_is_kept_as_the_shell_gave_it() {
+    let definitions = parsed(&with_functions(
+        "",
+        &[("gitclean", "\tgitnuke --safe \"$@\"\n\tprcp")],
+    ));
+    assert_eq!(
+        definitions
+            .function_bodies
+            .get("gitclean")
+            .map(String::as_str),
+        Some("\tgitnuke --safe \"$@\"\n\tprcp")
+    );
+}
+
+#[test]
+fn the_body_of_a_function_that_does_not_parse_is_kept_too() {
+    let definitions = parsed(&with_functions("", &[("zed", "\techo $(")]));
+    assert_eq!(definitions.unparsed_functions, ["zed"]);
+    assert_eq!(
+        definitions.function_bodies.get("zed").map(String::as_str),
+        Some("\techo $(")
+    );
+}
+
+#[test]
 fn a_function_body_of_many_lines_is_read_as_one_script() {
     let body = "\tif [[ -n $1 ]]; then\n\t\tcwt \"$1\"\n\telse\n\t\tcat x | prhash\n\tfi";
     let definitions = parsed(&with_functions("", &[("wt", body)]));
@@ -1040,6 +1065,235 @@ fn the_origin_of_an_alias_is_read_for_its_kind() {
     );
     assert_eq!(alias_origin(&definitions, "md", AliasKind::Regular), None);
     assert!(definitions.unparsed_aliases.is_empty());
+}
+
+/// A name that two files define has two places, in the order of the
+/// definitions. A place that is not a file stays in the list as `None`.
+#[test]
+fn each_place_of_an_alias_is_read_in_order_and_for_its_kind() {
+    let definitions = parsed(&records(&[
+        "alias ll='ls -la'",
+        "alias ev=true",
+        "alias -s md=less",
+        "alias nop=true",
+        "M ALIAS_PLACE ll",
+        "M ORIGIN /home/me/.zshrc:1",
+        "M ALIAS_PLACE ll",
+        "M ORIGIN /home/me/more.zsh:1",
+        "M ALIAS_PLACE ev",
+        "M ORIGIN (eval):1",
+        "M SUFFIX_PLACE md",
+        "M ORIGIN /home/me/.zshrc:3",
+        "M SUFFIX_PLACE md",
+        "M ORIGIN /home/me/.zshrc:4",
+    ]));
+    let places = |name: &str, kind: AliasKind| {
+        definitions
+            .alias_places(&alias_named(&definitions, name, kind))
+            .to_vec()
+    };
+    assert_eq!(
+        places("ll", AliasKind::Regular),
+        [
+            Some(origin("/home/me/.zshrc", Some(1))),
+            Some(origin("/home/me/more.zsh", Some(1))),
+        ]
+    );
+    assert_eq!(places("ev", AliasKind::Regular), [None]);
+    assert_eq!(
+        places("*.md", AliasKind::Suffix),
+        [
+            Some(origin("/home/me/.zshrc", Some(3))),
+            Some(origin("/home/me/.zshrc", Some(4))),
+        ]
+    );
+    assert!(places("nop", AliasKind::Regular).is_empty());
+    assert_eq!(definitions.alias_places["ll"].len(), 2);
+    assert_eq!(definitions.suffix_places["md"].len(), 2);
+    assert!(!definitions.alias_places.contains_key("md"));
+}
+
+/// The lines of a real zsh that define aliases in more than one place. The
+/// last line sources a file by a relative path, and zsh then gives a place
+/// that is not an absolute path. (`eval` gives the file that holds it.)
+const PLACES_ZSHRC: &str = "alias ll='ls -l'\n\
+source $HOME/more.zsh\n\
+alias -s md=cat\n\
+alias -s md=less\n\
+cd \"$HOME\" && source ./relative.zsh\n";
+
+#[test]
+fn a_real_zsh_gives_each_place_of_an_alias() {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    write_file(home.path(), ".zshrc", PLACES_ZSHRC);
+    write_file(home.path(), "more.zsh", "alias ll='ls -la'\n");
+    write_file(home.path(), "relative.zsh", "alias ev=true\n");
+    let definitions = read(
+        real_shell(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let zshrc = home.path().join(".zshrc");
+    assert_eq!(
+        definitions.alias_places["ll"],
+        [
+            Some(origin(&zshrc, Some(1))),
+            Some(origin(home.path().join("more.zsh"), Some(1))),
+        ]
+    );
+    assert_eq!(
+        definitions.suffix_places["md"],
+        [Some(origin(&zshrc, Some(3))), Some(origin(&zshrc, Some(4)))]
+    );
+    assert_eq!(definitions.alias_places["ev"], [None]);
+}
+
+#[test]
+fn the_program_of_a_name_is_the_line_after_its_record() {
+    let definitions = parsed(&records(&[
+        "M PROGRAM ls",
+        "/bin/ls",
+        "M PROGRAM x",
+        "M PROGRAM y",
+        "relative/y",
+        "M PROGRAM z",
+        "/usr/bin/z",
+        "ignored second line",
+    ]));
+    assert_eq!(
+        definitions.programs.get("ls"),
+        Some(&PathBuf::from("/bin/ls"))
+    );
+    assert_eq!(
+        definitions.programs.get("z"),
+        Some(&PathBuf::from("/usr/bin/z"))
+    );
+    assert!(!definitions.programs.contains_key("x"));
+    assert!(!definitions.programs.contains_key("y"));
+    assert_eq!(definitions.programs.len(), 2);
+    assert!(definitions.unparsed_aliases.is_empty());
+}
+
+#[test]
+fn a_program_record_at_the_end_of_the_output_adds_nothing() {
+    let definitions = parsed(&records(&["M PROGRAM last"]));
+    assert!(definitions.programs.is_empty());
+}
+
+/// Makes the executable files `names` in the directory `bin` of `home`.
+fn make_programs(home: &Path, names: &[&str]) {
+    use std::os::unix::fs::PermissionsExt;
+    for name in names {
+        write_file(home, &format!("bin/{name}"), "#!/bin/sh\n");
+        let path = home.join("bin").join(name);
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+/// Checks the programs of a fixture home: `hidden` and `shadowfn` hide the
+/// files of the directory `bin`, and `noprog` and the builtin `cd` have none.
+fn assert_programs(home: &Path, definitions: &Definitions) {
+    let bin = home.join("bin");
+    assert_eq!(
+        definitions.programs.get("hidden"),
+        Some(&bin.join("hidden"))
+    );
+    assert_eq!(
+        definitions.programs.get("shadowfn"),
+        Some(&bin.join("shadowfn"))
+    );
+    assert!(!definitions.programs.contains_key("noprog"));
+    assert!(!definitions.programs.contains_key("cd"));
+}
+
+#[test]
+fn a_real_zsh_gives_the_program_that_a_name_hides() {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    make_programs(home.path(), &["hidden", "shadowfn", "cd"]);
+    write_file(
+        home.path(),
+        ".zshrc",
+        "path=($HOME/bin $path)\n\
+         alias hidden='echo'\n\
+         alias noprog='true'\n\
+         shadowfn() { true; }\n\
+         cd() { builtin cd \"$@\"; }\n",
+    );
+    let definitions = read(
+        real_shell(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert_programs(home.path(), &definitions);
+}
+
+#[test]
+fn a_real_bash_gives_the_program_that_a_name_hides() {
+    let Some(bash) = find_shell("bash") else {
+        eprintln!("skipped: bash is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    make_programs(home.path(), &["hidden", "shadowfn", "cd"]);
+    write_file(
+        home.path(),
+        ".bashrc",
+        "PATH=$HOME/bin:$PATH\n\
+         alias hidden='echo'\n\
+         alias noprog='true'\n\
+         shadowfn() { true; }\n\
+         cd() { builtin cd \"$@\"; }\n",
+    );
+    let definitions = read(
+        real_shell(&bash, home.path()),
+        ShellKind::Bash,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert_programs(home.path(), &definitions);
+}
+
+/// A name with a glob character stays one name in the bash script, also when
+/// a file in the directory of the shell matches it.
+///
+/// The test looks only for the two names that it is about, `a*c` and `abc`.
+/// An interactive bash also reads a startup file of the system, and that file
+/// can define more functions. The `/etc/bash.bashrc` of Ubuntu defines
+/// `command_not_found_handle`.
+#[test]
+fn a_real_bash_keeps_a_name_with_a_glob_character() {
+    let Some(bash) = find_shell("bash") else {
+        eprintln!("skipped: bash is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    make_programs(home.path(), &["a*c"]);
+    write_file(home.path(), "abc", "");
+    let rc = "PATH=$HOME/bin:$PATH\nfunction a*c { true; }\ncd \"$HOME\"\n";
+    write_file(home.path(), ".bashrc", rc);
+    let shell = real_shell(&bash, home.path());
+    let definitions = read(shell, ShellKind::Bash, Duration::from_secs(60)).unwrap();
+    let names: Vec<&String> = definitions.function_bodies.keys().collect();
+    assert!(
+        definitions.function_bodies.contains_key("a*c"),
+        "the function a*c is missing from {names:?}"
+    );
+    assert!(
+        !definitions.function_bodies.contains_key("abc"),
+        "the name a*c expanded to the file abc in {names:?}"
+    );
+    let program = home.path().join("bin").join("a*c");
+    assert_eq!(definitions.programs.get("a*c"), Some(&program));
 }
 
 #[test]
