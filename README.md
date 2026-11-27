@@ -6464,6 +6464,13 @@ The limits of the HUD:
 - `termstate` gives each character one cell. A wide character (for example
   `日`) in a label moves the right border by one cell in a terminal or in
   xterm.js.
+- The HUD saves and restores the cursor with `ESC 7` and `ESC 8`, and the
+  program shares that one save of the terminal. When the program saves the
+  cursor, the HUD draws, and then the program restores the cursor, the
+  viewer gets the cursor of the draw. The output of that event goes there
+  first, and the HUD then repairs the screen. If that place is the last
+  row, a newline scrolls the viewer and puts one more line into its
+  scrollback.
 
 The crate also has functions that save the rendered recording
 (`Editor::save_recording`), list the recordings in a directory, and export a

@@ -32,6 +32,11 @@ const REPLAY_FOREGROUND: Color = (1, 1, 1);
 /// The replay color of the default background.
 const REPLAY_BACKGROUND: Color = (1, 1, 2);
 
+/// The sequence that selects the DEC line drawing character set.
+const SELECT_LINE_DRAWING: &str = "\x1b(0";
+/// The sequence that selects the ASCII character set.
+const SELECT_ASCII: &str = "\x1b(B";
+
 /// The replay color of the base color `index`, from 0 to 15.
 fn replay_base(index: u8) -> Color {
     (1, 1, index.saturating_add(3))
@@ -284,8 +289,8 @@ fn move_to(row: usize, column: usize) -> String {
     format!("\x1b[{};{}H", row + 1, column + 1)
 }
 
-/// The state of a screen that the HUD can disturb: the cursor and the current
-/// attributes.
+/// The state of a screen that the HUD can disturb: the cursor, the current
+/// attributes and the character set.
 #[derive(PartialEq)]
 struct Pen {
     /// The cursor, as column and row.
@@ -300,6 +305,8 @@ struct Pen {
     italic: bool,
     /// Whether the text is underlined.
     underline: bool,
+    /// Whether the DEC line drawing set is active.
+    use_acs: bool,
 }
 
 impl Pen {
@@ -312,6 +319,7 @@ impl Pen {
             bold: screen.bold,
             italic: screen.italic,
             underline: screen.underline,
+            use_acs: screen.uses_line_drawing(),
         }
     }
 
@@ -323,8 +331,13 @@ impl Pen {
             underline: self.underline,
             ..Cell::default()
         };
+        let charset = if self.use_acs {
+            SELECT_LINE_DRAWING
+        } else {
+            SELECT_ASCII
+        };
         format!(
-            "{}{}",
+            "{}{}{charset}",
             move_to(self.cursor.1, self.cursor.0),
             sgr(&cell, &fg_code(self.fg), &bg_code(self.bg))
         )

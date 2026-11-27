@@ -621,6 +621,11 @@ impl TerminalState {
         self.cursor_visible
     }
 
+    /// Returns whether the DEC line drawing character set is active.
+    pub fn uses_line_drawing(&self) -> bool {
+        self.use_acs
+    }
+
     /// Returns the `(foreground, background)` colors that a cell is drawn with.
     /// This applies the dynamic palette, the OSC color overrides, and the tmux
     /// color corrections.

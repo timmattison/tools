@@ -39,6 +39,13 @@
 //!   xterm.js.
 //! - A cell color of exactly one of the 18 colors of the private replay theme
 //!   comes back as its theme color.
+//! - The HUD saves and restores the cursor with `ESC 7` and `ESC 8`, and the
+//!   program shares that one save of the terminal. When the program saves the
+//!   cursor, the HUD draws, and then the program restores the cursor, the
+//!   viewer gets the cursor of the draw. The output of that event goes there
+//!   first, and the HUD then repairs the screen. If that place is the last
+//!   row, a newline scrolls the viewer and puts one more line into its
+//!   scrollback.
 
 mod keys;
 mod options;
