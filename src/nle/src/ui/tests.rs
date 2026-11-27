@@ -1124,3 +1124,17 @@ async fn playback_stops_at_the_end() {
     assert_eq!(window.play_label(), "Play");
     assert_eq!(window.readout(), "0m 0.2s / 0m 0.2s");
 }
+
+#[tokio::test]
+async fn play_at_the_end_starts_again_from_the_beginning() {
+    let mut window = open_recording().await;
+    let control = window.playhead_control();
+    window.type_into(control, "65.3");
+    assert_eq!(window.readout(), "1m 5.3s / 1m 5.3s");
+
+    window.click(window.play_button());
+
+    assert_eq!(window.readout(), READOUT_AT_ZERO);
+    assert_eq!(window.play_label(), "Pause");
+    window.click(window.play_button());
+}
