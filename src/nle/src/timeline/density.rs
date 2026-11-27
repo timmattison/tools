@@ -14,15 +14,15 @@ use std::sync::Arc;
 
 use crate::types::{Clip, Recording, Seconds};
 
-/// The width of one tile, in pixels.
-pub const TILE_WIDTH: f64 = 512.0;
+/// The pixel columns of one tile.
+const TILE_COLUMNS: usize = 512;
+/// The width of one tile, in pixels: one pixel for each column.
+pub const TILE_WIDTH: f64 = TILE_COLUMNS as f64;
 /// The pixels on each side of the window where the tiles also render, so a
 /// short scroll shows no empty tile.
 pub const OVERSCAN: f64 = 600.0;
 /// The count of events in one column that fills the height of a tile.
 const FULL_COUNT: f64 = 64.0;
-/// The pixel columns of one tile.
-const TILE_COLUMNS: usize = 512;
 
 /// The times of the events that one clip holds, from the start of the clip,
 /// in order, and the length of the clip in seconds.
