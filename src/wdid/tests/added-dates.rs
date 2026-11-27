@@ -286,8 +286,8 @@ fn programs(yadm: OsString) -> Programs {
 }
 
 /// Gives the set of `files`.
-fn files(files: &[PathBuf]) -> BTreeSet<PathBuf> {
-    files.iter().cloned().collect()
+fn files(files: &[&Path]) -> BTreeSet<PathBuf> {
+    files.iter().map(|file| file.to_path_buf()).collect()
 }
 
 /// Says if the call `line` of the recording `git` runs `subcommand`.
@@ -313,7 +313,7 @@ fn a_file_in_a_plain_git_repository_gets_the_dates_of_its_history() {
     let file = repo.path().join("shell/aliases.zsh");
     let stubs = Stubs::new();
 
-    let dates = read(&files(&[file.clone()]), None, &programs(stubs.missing()));
+    let dates = read(&files(&[&file]), None, &programs(stubs.missing()));
 
     assert_eq!(
         dates.get(&file, &Defined::alias("old")),
@@ -339,7 +339,7 @@ fn a_renamed_file_keeps_the_dates_from_before_the_rename() {
     let file = repo.path().join("new-name.zsh");
     let stubs = Stubs::new();
 
-    let dates = read(&files(&[file.clone()]), None, &programs(stubs.missing()));
+    let dates = read(&files(&[&file]), None, &programs(stubs.missing()));
 
     assert_eq!(
         dates.get(&file, &Defined::alias("old")),
@@ -355,7 +355,7 @@ fn a_file_under_home_without_yadm_gets_the_dates_of_its_work_tree() {
     let stubs = Stubs::new();
 
     let dates = read(
-        &files(&[file.clone()]),
+        &files(&[&file]),
         Some(repo.path()),
         &programs(stubs.missing()),
     );
@@ -381,7 +381,7 @@ fn a_file_of_yadm_gets_the_dates_from_the_git_directory_of_yadm() {
     let yadm = stubs.yadm(repo.git_dir());
 
     let dates = read(
-        &files(&[zshrc.clone(), more.clone()]),
+        &files(&[&zshrc, &more]),
         Some(repo.work_tree()),
         &programs(yadm),
     );
@@ -433,11 +433,7 @@ fn an_alternate_template_gives_the_dates_of_its_rendered_file() {
     let stubs = Stubs::new();
     let yadm = stubs.yadm(repo.git_dir());
 
-    let dates = read(
-        &files(&[file.clone()]),
-        Some(repo.work_tree()),
-        &programs(yadm),
-    );
+    let dates = read(&files(&[&file]), Some(repo.work_tree()), &programs(yadm));
 
     assert_eq!(
         dates.get(&file, &Defined::alias("old")),
@@ -467,11 +463,7 @@ fn each_tracked_alternate_counts_and_the_oldest_date_wins() {
     let stubs = Stubs::new();
     let yadm = stubs.yadm(repo.git_dir());
 
-    let dates = read(
-        &files(&[file.clone()]),
-        Some(repo.work_tree()),
-        &programs(yadm),
-    );
+    let dates = read(&files(&[&file]), Some(repo.work_tree()), &programs(yadm));
 
     assert_eq!(
         dates.get(&file, &Defined::alias("both")),
@@ -501,12 +493,7 @@ fn a_file_that_no_repository_tracks_has_no_dates() {
     let yadm = stubs.yadm(repo.git_dir());
 
     let dates = read(
-        &files(&[
-            untracked_in_yadm.clone(),
-            untracked_in_git.clone(),
-            loose.clone(),
-            gone.clone(),
-        ]),
+        &files(&[&untracked_in_yadm, &untracked_in_git, &loose, &gone]),
         Some(repo.work_tree()),
         &programs(yadm),
     );
@@ -532,7 +519,7 @@ fn a_yadm_that_fails_is_skipped() {
     gitscratch::testing::executable::write_executable(&failing, "#!/bin/sh\nexit 1\n").unwrap();
 
     let dates = read(
-        &files(&[file.clone()]),
+        &files(&[&file]),
         Some(repo.path()),
         &programs(failing.into_os_string()),
     );
@@ -563,11 +550,7 @@ fn one_git_log_runs_for_each_origin_file_and_not_for_each_definition() {
     let yadm = stubs.yadm(Path::new("/nonexistent"));
     let git = stubs.recording_git();
 
-    let dates = read(
-        &files(&[a.clone(), b.clone()]),
-        None,
-        &Programs { git, yadm },
-    );
+    let dates = read(&files(&[&a, &b]), None, &Programs { git, yadm });
 
     assert_eq!(dates.get(&a, &Defined::alias("a3")), Some(date(2019, 3, 4)));
     assert_eq!(dates.get(&b, &Defined::alias("b2")), Some(date(2019, 3, 4)));
@@ -598,7 +581,7 @@ fn yadm_adds_one_list_of_its_files_and_then_one_git_log_for_each_origin_file() {
     let git = stubs.recording_git();
 
     let dates = read(
-        &files(&[zshrc.clone(), more.clone()]),
+        &files(&[&zshrc, &more]),
         Some(repo.work_tree()),
         &Programs { git, yadm },
     );
@@ -622,5 +605,26 @@ fn yadm_adds_one_list_of_its_files_and_then_one_git_log_for_each_origin_file() {
         calls.iter().filter(|line| runs(line, "log")).count(),
         2,
         "{calls:#?}"
+    );
+}
+
+#[test]
+fn a_symbolic_link_to_a_file_in_a_work_tree_gets_the_dates_of_its_target() {
+    let repo = TestRepo::init();
+    commit_at(&repo, &[("dotfiles/zshrc", OLD_LINES)], MIDDLE);
+    let home = gitscratch::testing::not_a_repository();
+    let link = home.path().join(".zshrc");
+    std::os::unix::fs::symlink(repo.path().join("dotfiles/zshrc"), &link).unwrap();
+    let stubs = Stubs::new();
+
+    let dates = read(
+        &files(&[&link]),
+        Some(home.path()),
+        &programs(stubs.missing()),
+    );
+
+    assert_eq!(
+        dates.get(&link, &Defined::alias("old")),
+        Some(date(2021, 6, 7))
     );
 }

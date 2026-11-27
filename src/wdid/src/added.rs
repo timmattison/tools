@@ -4,11 +4,14 @@
 //! [`defined_name`] reads one line of a shell file and gives the name that the
 //! line defines. [`added_dates`] reads the history of one file, with its full
 //! diff, and gives the oldest date for each name that an added line defines.
-//! Both functions are pure.
+//! Both functions are pure. [`read`] starts the processes: one `git log` for
+//! each origin file, and for yadm one `yadm introspect repo` and one
+//! `git ls-files`.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use chrono::NaiveDate;
 
@@ -87,19 +90,252 @@ impl AddedDates {
         self.files.get(file)?.get(defined).copied()
     }
 
-    /// Records `date` as the added date of `defined` in `file`.
-    pub fn insert(&mut self, file: impl Into<PathBuf>, defined: Defined, date: NaiveDate) {
+    /// Records `date` as the added date of `defined` in `file`. When a date
+    /// is already known, the older date stays.
+    pub fn record(&mut self, file: impl Into<PathBuf>, defined: Defined, date: NaiveDate) {
         self.files
             .entry(file.into())
             .or_default()
-            .insert(defined, date);
+            .entry(defined)
+            .and_modify(|known| *known = (*known).min(date))
+            .or_insert(date);
     }
 }
 
+/// The arguments of the `git log` that gives the history of one file, before
+/// `--` and the path.
+///
+/// `--literal-pathspecs` makes a `*` or a `:` in the name a plain character.
+/// `--follow` reads the history through each rename of the file. The other
+/// flags make the output the same for each configuration of git: no color, no
+/// external diff, no text conversion, and no signature lines.
+const LOG_ARGUMENTS: [&str; 10] = [
+    "--literal-pathspecs",
+    "log",
+    "--follow",
+    "--format=%x00%as",
+    "--patch",
+    "--unified=0",
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--no-show-signature",
+];
+
+/// The argument that ends the options of git, before the path.
+const END_OF_GIT_OPTIONS: &str = "--";
+
+/// The arguments of `yadm` that print the git directory of yadm.
+const YADM_REPO_ARGUMENTS: [&str; 2] = ["introspect", "repo"];
+
+/// The arguments of the `git ls-files` that lists the files that yadm tracks,
+/// each one ended by a NUL.
+const LIST_ARGUMENTS: [&str; 2] = ["ls-files", "-z"];
+
+/// The character that ends each path of [`LIST_ARGUMENTS`].
+const LIST_SEPARATOR: char = '\0';
+
+/// The option of git that names the git directory.
+const GIT_DIR_OPTION: &str = "--git-dir";
+
+/// The option of git that names the work tree.
+const WORK_TREE_OPTION: &str = "--work-tree";
+
+/// The text between a file and the condition of a yadm alternate, as in
+/// `.zshrc##template.default`.
+const ALTERNATE_SEPARATOR: &str = "##";
+
 /// Reads the added date of each name that each file of `files` defines.
+///
+/// Each file gets the history of the first source that applies:
+///
+/// 1. **yadm.** The file is under `home`, and yadm tracks it. `yadm introspect
+///    repo` gives the git directory, and git runs with that git directory and
+///    with `home` as the work tree.
+/// 2. **A yadm alternate.** The file is under `home`, yadm does not track it,
+///    and yadm tracks one or more files `<file>##<condition>`, for example
+///    `.zshrc##template.default` for the rendered `.zshrc`. Each such file
+///    gives its history, and the oldest date of a name wins. The text of each
+///    line counts, not its number, thus a template with other line numbers
+///    gives the dates of its rendered file.
+/// 3. **A git work tree.** git runs in the directory of the file, or of the
+///    file that a symbolic link names, and finds its repository there.
+///
+/// yadm is the first source because its list of files says without one more
+/// process if yadm tracks the file. A file that no source tracks has no dates.
+///
+/// The read starts one `git log` for each file, or one for each tracked
+/// alternate of it, not one for each definition. When a file is under `home`,
+/// it also starts one `yadm introspect repo` and one `git ls-files` for all
+/// files. When yadm does not start or fails, the read skips step 1 and step
+/// 2. Each child process sheds the inherited git environment before git gets
+/// its own git directory, thus a `GIT_DIR` of a hook never redirects the read.
+/// A process that fails gives no dates. It is not an error, because the dates
+/// are optional.
 #[must_use]
-pub fn read(_files: &BTreeSet<PathBuf>, _home: Option<&Path>, _programs: &Programs) -> AddedDates {
-    AddedDates::default()
+pub fn read(files: &BTreeSet<PathBuf>, home: Option<&Path>, programs: &Programs) -> AddedDates {
+    let yadm = home
+        .filter(|home| files.iter().any(|file| below(file, home).is_some()))
+        .and_then(|home| Yadm::find(home, programs));
+    let mut dates = AddedDates::default();
+    for file in files {
+        for source in sources(file, yadm.as_ref()) {
+            for (defined, date) in added_dates(&source.history(programs)) {
+                dates.record(file.clone(), defined, date);
+            }
+        }
+    }
+    dates
+}
+
+/// Gives the path of `file` relative to `home`, or `None` when `file` is not
+/// under `home`. "Under" compares whole path components.
+fn below(file: &Path, home: &Path) -> Option<PathBuf> {
+    file.strip_prefix(home).ok().map(Path::to_path_buf)
+}
+
+/// The repository of yadm.
+struct Yadm<'a> {
+    /// The git directory that `yadm introspect repo` gives.
+    git_dir: PathBuf,
+    /// The work tree: the home directory.
+    home: &'a Path,
+    /// Each path that yadm tracks, relative to the home directory.
+    tracked: BTreeSet<String>,
+}
+
+impl<'a> Yadm<'a> {
+    /// Asks yadm for its git directory, and git for the files that yadm
+    /// tracks. Gives `None` when yadm does not start, when it fails, when it
+    /// gives no directory, or when git cannot list the files.
+    fn find(home: &'a Path, programs: &Programs) -> Option<Self> {
+        let mut command = childenv::command(&programs.yadm);
+        command.args(YADM_REPO_ARGUMENTS);
+        let output = succeeded(&mut command)?;
+        let text = String::from_utf8_lossy(&output);
+        let git_dir = PathBuf::from(text.trim_end_matches(['\n', '\r']));
+        if git_dir.as_os_str().is_empty() {
+            return None;
+        }
+        let mut yadm = Self {
+            git_dir,
+            home,
+            tracked: BTreeSet::new(),
+        };
+        let mut list = yadm.git(programs);
+        list.args(LIST_ARGUMENTS);
+        yadm.tracked = String::from_utf8_lossy(&succeeded(&mut list)?)
+            .split(LIST_SEPARATOR)
+            .filter(|path| !path.is_empty())
+            .map(String::from)
+            .collect();
+        Some(yadm)
+    }
+
+    /// Gives a git command with the git directory of yadm and the home
+    /// directory as the work tree. It runs in the home directory, thus a
+    /// relative path is relative to the work tree.
+    fn git(&self, programs: &Programs) -> Command {
+        let mut command = childenv::command(&programs.git);
+        command
+            .current_dir(self.home)
+            .arg(GIT_DIR_OPTION)
+            .arg(&self.git_dir)
+            .arg(WORK_TREE_OPTION)
+            .arg(self.home);
+        command
+    }
+
+    /// Gives the tracked files that hold the history of `path`: `path` itself
+    /// when yadm tracks it, else each tracked alternate `<path>##<condition>`.
+    /// The list is empty when yadm tracks neither.
+    fn tracked_files(&self, path: &Path) -> Vec<PathBuf> {
+        let text = path.to_string_lossy();
+        if self.tracked.contains(text.as_ref()) {
+            return vec![path.to_path_buf()];
+        }
+        let prefix = format!("{text}{ALTERNATE_SEPARATOR}");
+        self.tracked
+            .iter()
+            .filter(|tracked| tracked.starts_with(&prefix))
+            .map(PathBuf::from)
+            .collect()
+    }
+}
+
+/// A place that holds the history of one tracked file.
+enum Source<'a> {
+    /// A file that yadm tracks, by its path relative to the home directory.
+    Yadm {
+        /// The repository of yadm.
+        yadm: &'a Yadm<'a>,
+        /// The path, relative to the home directory.
+        path: PathBuf,
+    },
+    /// A file in a git work tree. git finds the repository from the directory.
+    WorkTree {
+        /// The directory of the file.
+        directory: PathBuf,
+        /// The name of the file in the directory.
+        name: OsString,
+    },
+}
+
+impl Source<'_> {
+    /// Gives the output of the `git log` of [`LOG_ARGUMENTS`] for this source,
+    /// or an empty text when git does not start or fails.
+    fn history(&self, programs: &Programs) -> String {
+        let (mut command, path): (Command, &OsStr) = match self {
+            Self::Yadm { yadm, path } => (yadm.git(programs), path.as_os_str()),
+            Self::WorkTree { directory, name } => {
+                let mut command = childenv::command(&programs.git);
+                command.current_dir(directory);
+                (command, name.as_os_str())
+            }
+        };
+        command
+            .args(LOG_ARGUMENTS)
+            .arg(END_OF_GIT_OPTIONS)
+            .arg(path);
+        succeeded(&mut command)
+            .map(|stdout| String::from_utf8_lossy(&stdout).into_owned())
+            .unwrap_or_default()
+    }
+}
+
+/// Gives the sources of the history of `file`, in the order of [`read`].
+fn sources<'a>(file: &Path, yadm: Option<&'a Yadm<'a>>) -> Vec<Source<'a>> {
+    if let Some(yadm) = yadm {
+        let tracked = below(file, yadm.home)
+            .map(|path| yadm.tracked_files(&path))
+            .unwrap_or_default();
+        if !tracked.is_empty() {
+            return tracked
+                .into_iter()
+                .map(|path| Source::Yadm { yadm, path })
+                .collect();
+        }
+    }
+    let target = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+    match (target.parent(), target.file_name()) {
+        (Some(directory), Some(name)) if directory.is_dir() => vec![Source::WorkTree {
+            directory: directory.to_path_buf(),
+            name: name.to_os_string(),
+        }],
+        _ => Vec::new(),
+    }
+}
+
+/// Runs `command` with no standard input, and gives its standard output when
+/// it ends with a zero status. Gives `None` when it does not start or fails.
+fn succeeded(command: &mut Command) -> Option<Vec<u8>> {
+    let output = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    output.status.success().then_some(output.stdout)
 }
 
 /// The word that starts an alias line.
