@@ -487,6 +487,11 @@ fn a_range_that_ends_between_a_backspace_and_its_echo_keeps_the_backspace() {
     // The end of the range cuts the echo of the Backspace from its input
     // event. Inside the range the Backspace changes nothing, but its echo
     // after the range erases the `r`. Thus the filter must keep it.
+    //
+    // The bell gives the unit output inside the range, so the rule of a unit
+    // with no output does not keep the Backspace. Only the cut rule does.
+    // Mutant that was run: `mark_removed` never sets `cut`. Then the
+    // Backspace and the bell go and the test fails.
     let events = vec![
         out(0.0, "$ "),
         input(1.0, "h"),
@@ -494,6 +499,7 @@ fn a_range_that_ends_between_a_backspace_and_its_echo_keeps_the_backspace() {
         input(1.5, "r"),
         out(1.5, "r"),
         input(1.99, "\x7f"),
+        out(1.995, "\x07"),
         out(2.0, "\x08 \x08"),
         input(2.5, "e"),
         out(2.5, "e"),
