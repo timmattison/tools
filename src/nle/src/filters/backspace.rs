@@ -83,11 +83,18 @@ fn reject_options(options: &FilterOptions) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-/// Check that the terminal of `width` by `height` cells can hold a screen.
+/// Check that the terminal of `width` by `height` cells can hold a screen. It
+/// has at least one cell, and not more than `MAX_CELLS`.
 fn check_size(width: usize, height: usize) -> Result<(), String> {
     if width == 0 || height == 0 {
         return Err(format!(
             "the terminal is {width} by {height} cells, and it needs at least 1 by 1"
+        ));
+    }
+    let cells = width.saturating_mul(height);
+    if cells > MAX_CELLS {
+        return Err(format!(
+            "the terminal is {width} by {height} cells, and the limit is {MAX_CELLS} cells"
         ));
     }
     Ok(())
