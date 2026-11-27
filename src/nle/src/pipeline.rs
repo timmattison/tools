@@ -124,9 +124,45 @@ pub struct Span {
 ///    of the timeline moves by the shift as in step 8 of `FilterFn`.
 pub type SpanFilterFn = dyn Fn(Span, &FilterOptions) -> Result<Span, String> + Send + Sync;
 
-/// A filter in one of its three forms.
+/// The size of the screen in cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenSize {
+    /// The number of columns.
+    pub width: u16,
+    /// The number of rows.
+    pub height: u16,
+}
+
+/// What a screen filter knows about its region and its screen.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenView<'a> {
+    /// The same value that an in-place filter gets for this region.
+    pub region: RegionView,
+    /// The size of the screen at this step.
+    pub size: ScreenSize,
+    /// The events before the region, with their times on the timeline.
+    pub before: &'a [Event],
+}
+
+/// The answer of a screen filter: new events and the size of the screen.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Screen {
+    /// The events of the region, with times relative to its start.
+    pub events: Vec<Event>,
+    /// The size of the screen for the later steps.
+    pub size: ScreenSize,
+}
+
+/// A screen filter: a pure function that rewrites the events of a region,
+/// keeps the region in its place on the timeline, and can change the size of
+/// the screen.
+pub type ScreenFilterFn =
+    dyn Fn(&[Event], ScreenView<'_>, &FilterOptions) -> Result<Screen, String> + Send + Sync;
+
+/// A filter in one of its four forms.
 #[derive(Clone)]
 enum Registered {
+    Screen(Arc<ScreenFilterFn>),
     Events(Arc<FilterFn>),
     InPlace(Arc<InPlaceFilterFn>),
     Span(Arc<SpanFilterFn>),
@@ -181,6 +217,20 @@ impl FilterRegistry {
     ) {
         self.filters
             .insert(kind, Registered::InPlace(Arc::new(filter)));
+    }
+
+    /// Register `filter` as a screen filter under `kind`. A filter of any form
+    /// that is already under `kind` is replaced.
+    pub fn register_screen(
+        &mut self,
+        kind: FilterKind,
+        filter: impl Fn(&[Event], ScreenView<'_>, &FilterOptions) -> Result<Screen, String>
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        self.filters
+            .insert(kind, Registered::Screen(Arc::new(filter)));
     }
 
     /// Register `filter` as a span filter under `kind`. A filter of any form
@@ -261,6 +311,27 @@ impl FilterRegistry {
                     NleError::RenderError(format!("filter \"{kind}\" failed: {message}"))
                 })?;
                 // An in-place filter moves nothing.
+                (answer, Some(view), top, 0.0)
+            }
+            Registered::Screen(filter) => {
+                let top = region_end.min(*end).max(start);
+                let view = RegionView {
+                    length: top - start,
+                    open: after.is_empty() && region_end >= *end,
+                };
+                let screen = ScreenView {
+                    region: view,
+                    size: ScreenSize {
+                        width: 0,
+                        height: 0,
+                    },
+                    before: &before,
+                };
+                let answer = filter(&inside, screen, &applied.options)
+                    .map_err(|message| {
+                        NleError::RenderError(format!("filter \"{kind}\" failed: {message}"))
+                    })?
+                    .events;
                 (answer, Some(view), top, 0.0)
             }
             Registered::Span(filter) => {
