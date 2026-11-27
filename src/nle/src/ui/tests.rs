@@ -1285,3 +1285,19 @@ async fn the_theme_stays_when_a_new_recording_opens() {
     );
     assert!(page.contains(&theme_option(PreviewTheme::Monokai, true)));
 }
+
+/// The declarations of the rule that starts with `selector`, from the style sheet.
+fn rule_body(selector: &str) -> String {
+    text_between(STYLE, &format!("{selector} {{"), "}")
+}
+
+#[test]
+fn the_style_sheet_fits_the_grid_to_the_pane() {
+    let pane = rule_body(".preview-screen");
+    assert!(pane.contains("container-type: size"), "{pane}");
+    let terminal = rule_body(".terminal");
+    let size = text_between(&terminal, "font-size:", ";");
+    for part in ["100cqw", "100cqh", "var(--columns)", "var(--rows)"] {
+        assert!(size.contains(part), "{part} missing in {size}");
+    }
+}
