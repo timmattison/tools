@@ -395,3 +395,68 @@ fn a_jitter_does_not_change_a_pause() {
     assert_ne!(got[1].time, 0.25, "the jitter must change the interval");
     assert_eq!(got[2].time, got[1].time + 2.5, "the pause must stay 2.5 s");
 }
+
+#[test]
+fn a_mark_that_idle_compression_puts_inside_the_region_moves_with_the_keys() {
+    use crate::filters::idle_compression::{self, IdleCompression};
+    // Each output writes a character, so each event is activity. Idle
+    // compression shortens each gap of 3 s to 0.5 s, and marks its start.
+    let recording = Recording {
+        version: 2,
+        width: 80,
+        height: 24,
+        timestamp: 0.0,
+        duration: 10.5,
+        command: String::new(),
+        title: String::new(),
+        env: BTreeMap::new(),
+        events: vec![
+            out(0.5, "$"),
+            key(3.5, "a"),
+            out(4.0, "a"),
+            key(7.0, "b"),
+            out(7.5, "b"),
+        ],
+    };
+    let mut project = EditProject::from_recording(Arc::new(recording)).unwrap();
+    let compression = idle_compression::applied(
+        FilterRegion::All,
+        IdleCompression::new(1.0, 0.5, 80, 24).unwrap(),
+    );
+    project.filters = vec![compression];
+    let compressed = filters::registry().render_with_marks(&project).unwrap();
+    // After idle compression, the keys are at 1 s and 2 s, and the marks are
+    // at 0.5 s, 1.5 s, and 2.5 s.
+    assert_eq!(
+        times(&compressed.recording.events),
+        vec![0.5, 1.0, 1.5, 2.0, 2.5]
+    );
+    assert_eq!(mark_times(&compressed.marks), vec![0.5, 1.5, 2.5]);
+    project
+        .filters
+        .push(applied(FilterRegion::All, typing(4.0)));
+
+    let rendered = filters::registry()
+        .render_with_marks(&project)
+        .expect("the render must not fail");
+
+    // The gap of 1 s between the keys becomes 0.25 s. The mark before the
+    // first key keeps its time. The mark between the keys shrinks with their
+    // gap. The mark after the last key moves by the change of that key, as
+    // the events do.
+    assert_eq!(mark_times(&rendered.marks), vec![0.5, 1.125, 1.75]);
+    assert_eq!(
+        times(&rendered.recording.events),
+        vec![0.5, 1.0, 1.125, 1.25, 1.75]
+    );
+    assert_eq!(rendered.recording.duration, 2.25);
+    assert_eq!(mark_labels(&rendered.marks), mark_labels(&compressed.marks));
+}
+
+fn mark_times(marks: &[crate::pipeline::Mark]) -> Vec<f64> {
+    marks.iter().map(|mark| mark.time).collect()
+}
+
+fn mark_labels(marks: &[crate::pipeline::Mark]) -> Vec<&str> {
+    marks.iter().map(|mark| mark.label.as_str()).collect()
+}
