@@ -405,19 +405,40 @@ impl SgrItem {
 
 /// The color of `palette` that has the smallest squared distance to `color` in
 /// RGB. A tie goes to the lower index.
-fn nearest(palette: &[Rgb; THEME_COLORS], _color: Rgb) -> Rgb {
-    palette[0]
+fn nearest(palette: &[Rgb; THEME_COLORS], color: Rgb) -> Rgb {
+    let distance = |other: Rgb| -> i32 {
+        let channel = |a: u8, b: u8| (i32::from(a) - i32::from(b)).pow(2);
+        channel(other.0, color.0) + channel(other.1, color.1) + channel(other.2, color.2)
+    };
+    let mut best = color;
+    let mut best_distance = i32::MAX;
+    for candidate in palette {
+        let candidate_distance = distance(*candidate);
+        if candidate_distance < best_distance {
+            best = *candidate;
+            best_distance = candidate_distance;
+        }
+    }
+    best
 }
 
 /// The color with the same hue and saturation as `color`, and the lightness
 /// 1 - L. Each channel c becomes `c + 255 - (max + min)`.
 fn invert_lightness(color: Rgb) -> Rgb {
-    color
+    let channels = [color.0, color.1, color.2];
+    let max = channels.into_iter().max().unwrap_or(0);
+    let min = channels.into_iter().min().unwrap_or(0);
+    let mirror = u16::from(max) + u16::from(min);
+    let invert = |channel: u8| {
+        let value = (u16::from(channel) + u16::from(u8::MAX)).saturating_sub(mirror);
+        u8::try_from(value).unwrap_or(u8::MAX)
+    };
+    (invert(color.0), invert(color.1), invert(color.2))
 }
 
 /// The index of the grayscale ramp that mirrors `index`: 232 and 255 swap.
 fn invert_gray(index: u8) -> u8 {
-    index
+    u8::try_from(GRAYSCALE_MIRROR.saturating_sub(u16::from(index))).unwrap_or(index)
 }
 
 /// The items of a list of SGR parameters, read from left to right. The texts of

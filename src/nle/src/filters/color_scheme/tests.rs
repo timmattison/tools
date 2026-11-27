@@ -202,7 +202,7 @@ fn the_nearest_color_is_the_palette_color_at_the_smallest_distance() {
 
     assert_eq!(nearest(&palette, (255, 0, 0)), (220, 50, 47));
     assert_eq!(nearest(&palette, (38, 139, 210)), (38, 139, 210));
-    assert_eq!(nearest(&palette, (0, 0, 0)), palette[0]);
+    assert_eq!(nearest(&palette, (0, 0, 0)), palette[8]);
 }
 
 #[test]
