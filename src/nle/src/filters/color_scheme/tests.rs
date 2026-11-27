@@ -671,3 +671,56 @@ fn bad_options_fail_the_render_with_the_kind_in_the_message() {
         other => panic!("expected a RenderError, got {other:?}"),
     }
 }
+
+// Tests of the default colors of the recording.
+
+/// The data of the one output event of the recording that `data` holds, after
+/// the filter with Solarized Light on `FilterRegion::All`. The start event is
+/// not in the answer.
+fn filtered(data: &str) -> String {
+    let answer = light(vec![out(1.0, data)], FilterRegion::All);
+    assert_eq!(answer.len(), 2, "{answer:?}");
+    answer.get(1).map(|event| event.1.clone()).unwrap()
+}
+
+#[test]
+fn an_osc_10_or_11_that_sets_a_color_drops() {
+    assert_eq!(filtered("a\x1b]10;#123456\x07b"), "ab");
+    assert_eq!(filtered("a\x1b]11;rgb:12/34/56\x1b\\b"), "ab");
+}
+
+#[test]
+fn the_default_color_values_of_a_list_drop_and_the_others_stay() {
+    assert_eq!(
+        filtered("\x1b]10;#111111;#222222;#333333\x07"),
+        "\x1b]12;#333333\x07"
+    );
+    assert_eq!(filtered("\x1b]10;?;#222222\x07"), "\x1b]10;?\x07");
+}
+
+#[test]
+fn a_query_of_a_default_color_stays() {
+    assert_eq!(filtered("\x1b]10;?\x07"), "\x1b]10;?\x07");
+    assert_eq!(filtered("\x1b]11;?\x1b\\"), "\x1b]11;?\x1b\\");
+}
+
+#[test]
+fn an_osc_110_or_111_drops() {
+    assert_eq!(filtered("a\x1b]110\x07b\x1b]111\x1b\\c"), "abc");
+}
+
+#[test]
+fn the_other_osc_sequences_stay() {
+    assert_eq!(
+        filtered("\x1b]0;title\x07\x1b]12;#ff0000\x07"),
+        "\x1b]0;title\x07\x1b]12;#ff0000\x07"
+    );
+}
+
+#[test]
+fn a_full_reset_sets_the_colors_of_the_theme_again_right_after_it() {
+    assert_eq!(
+        filtered("a\x1bcb"),
+        format!("a\x1bc{SOLARIZED_LIGHT_START}b")
+    );
+}

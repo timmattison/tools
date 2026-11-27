@@ -757,6 +757,12 @@ impl SchemeEditor {
         text
     }
 
+    /// Follow and drop the default colors that an OSC `text` sets. The stub
+    /// keeps each OSC.
+    fn osc(&mut self, _text: &str, _terminator: &str) -> Option<String> {
+        None
+    }
+
     /// The sequences for the end of a region that is not open.
     fn restore(&self) -> String {
         String::new()
@@ -780,6 +786,7 @@ impl SequenceEditor for SchemeEditor {
                 let new = self.converter.rewrite(params)?;
                 Some(format!("{controls}\x1b[{new}m"))
             }
+            Sequence::Osc { text, terminator } => self.osc(text, terminator),
             _ => None,
         }
     }
