@@ -134,13 +134,13 @@ impl Writer {
                     self.cursor = Some((x, y));
                 }
                 if !self.cursor_shown {
-                    bytes.push_str(SHOW);
+                    bytes.push_str(SHOW_CURSOR);
                     self.cursor_shown = true;
                 }
             }
             None => {
                 if self.cursor_shown {
-                    bytes.push_str(HIDE);
+                    bytes.push_str(HIDE_CURSOR);
                     self.cursor_shown = false;
                 }
             }
@@ -154,9 +154,9 @@ impl Writer {
 }
 
 /// The sequence that shows the cursor.
-const SHOW: &str = "\x1b[?25h";
+pub(super) const SHOW_CURSOR: &str = "\x1b[?25h";
 /// The sequence that hides the cursor.
-const HIDE: &str = "\x1b[?25l";
+pub(super) const HIDE_CURSOR: &str = "\x1b[?25l";
 
 /// Write the CUP to the cell at column `x` and row `y`, counted from 0.
 fn push_cup(bytes: &mut String, x: usize, y: usize) {

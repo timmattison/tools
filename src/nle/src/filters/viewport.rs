@@ -79,7 +79,7 @@ use serde::Deserialize;
 
 use termstate::{Cell, TerminalState, TerminalTheme};
 
-use self::writer::{Glyph, Look, Writer};
+use self::writer::{Glyph, HIDE_CURSOR, Look, SHOW_CURSOR, Writer};
 use crate::ansi::{Scanner, Sequence, Step};
 use crate::pipeline::{FilterRegistry, Screen, ScreenSize, ScreenView};
 use crate::preview::{MAX_COLUMNS, MAX_ROWS};
@@ -95,10 +95,6 @@ const ASCII_SET: &str = "\x1b(B";
 const LINE_DRAWING_SET: &str = "\x1b(0";
 /// The sequence that saves the cursor position.
 const SAVE_CURSOR: &str = "\x1b7";
-/// The sequence that shows the cursor.
-const SHOW_CURSOR: &str = "\x1b[?25h";
-/// The sequence that hides the cursor.
-const HIDE_CURSOR: &str = "\x1b[?25l";
 
 /// The kind of the viewport filter.
 pub const VIEWPORT: &str = "viewport";
