@@ -722,6 +722,141 @@ fn sgr_22_clears_bold_and_dim() {
     assert!(!state.get_grid()[0][0].dim);
 }
 
+const BOLD_ONLY: [bool; 8] = [true, false, false, false, false, false, false, false];
+
+#[test]
+fn an_underline_color_sets_no_attribute() {
+    for sequence in [
+        "\x1b[58;5;196m",
+        "\x1b[58;2;7;8;9m",
+        "\x1b[58;2;0;0;0m",
+        "\x1b[58:5:196m",
+        "\x1b[58:2::7:8:9m",
+        "\x1b[59m",
+    ] {
+        let state = feed_text(&format!("\x1b[1m{sequence}"));
+
+        assert_eq!(
+            pen_attributes(&state),
+            BOLD_ONLY,
+            "{sequence:?}: attributes"
+        );
+        assert_eq!(
+            state.current_fg_source,
+            ColorSource::Default,
+            "{sequence:?}: fg"
+        );
+        assert_eq!(
+            state.current_bg_source,
+            ColorSource::Default,
+            "{sequence:?}: bg"
+        );
+    }
+}
+
+#[test]
+fn a_styled_underline_sets_only_the_underline() {
+    for (sequence, on) in [
+        ("\x1b[4:0m", false),
+        ("\x1b[4:1m", true),
+        ("\x1b[4:2m", true),
+        ("\x1b[4:3m", true),
+        ("\x1b[4:4m", true),
+        ("\x1b[4:5m", true),
+    ] {
+        let state = feed_text(&format!("\x1b[1m{sequence}"));
+
+        assert_eq!(
+            pen_attributes(&state),
+            [true, false, false, on, false, false, false, false],
+            "{sequence:?}"
+        );
+    }
+
+    let state = feed_text("\x1b[1m\x1b[4m\x1b[4:0m");
+    assert_eq!(pen_attributes(&state), BOLD_ONLY, "underline on, then 4:0");
+}
+
+#[test]
+fn a_colon_extended_color_sets_the_color_and_no_attribute() {
+    let fg = |source| (source, ColorSource::Default);
+    let bg = |source| (ColorSource::Default, source);
+    for (sequence, sources, rgb) in [
+        (
+            "\x1b[38:2::10:20:30m",
+            fg(ColorSource::Rgb(10, 20, 30)),
+            Some((10, 20, 30)),
+        ),
+        (
+            "\x1b[38:2:10:20:30m",
+            fg(ColorSource::Rgb(10, 20, 30)),
+            Some((10, 20, 30)),
+        ),
+        ("\x1b[38:5:196m", fg(ColorSource::Indexed(196)), None),
+        (
+            "\x1b[48:2::10:20:30m",
+            bg(ColorSource::Rgb(10, 20, 30)),
+            Some((10, 20, 30)),
+        ),
+        ("\x1b[48:5:196m", bg(ColorSource::Indexed(196)), None),
+    ] {
+        let state = feed_text(sequence);
+
+        assert_eq!(
+            pen_attributes(&state),
+            [false; 8],
+            "{sequence:?}: attributes"
+        );
+        assert_eq!(
+            (state.current_fg_source, state.current_bg_source),
+            sources,
+            "{sequence:?}: sources"
+        );
+        if let Some(rgb) = rgb {
+            let painted = if sequence.starts_with("\x1b[38") {
+                state.current_fg
+            } else {
+                state.current_bg
+            };
+            assert_eq!(painted, rgb, "{sequence:?}: rgb");
+        }
+    }
+}
+
+#[test]
+fn an_incomplete_extended_color_reads_no_attribute() {
+    for sequence in ["\x1b[38;5m", "\x1b[48;2;1;2m", "\x1b[58;5m"] {
+        let state = feed_text(sequence);
+
+        assert_eq!(
+            pen_attributes(&state),
+            [false; 8],
+            "{sequence:?}: attributes"
+        );
+        assert_eq!(
+            state.current_fg_source,
+            ColorSource::Default,
+            "{sequence:?}: fg"
+        );
+        assert_eq!(
+            state.current_bg_source,
+            ColorSource::Default,
+            "{sequence:?}: bg"
+        );
+    }
+}
+
+#[test]
+fn a_colon_group_takes_no_other_group() {
+    let state = feed_text("\x1b[1;38:2::10:20:30;4m");
+
+    assert_eq!(
+        pen_attributes(&state),
+        [true, false, false, true, false, false, false, false]
+    );
+    assert_eq!(state.current_fg_source, ColorSource::Rgb(10, 20, 30));
+}
+
 #[test]
 fn sgr_0_clears_all_eight_attributes() {
     let mut state = TerminalState::new(10, 2, TerminalTheme::auto());
