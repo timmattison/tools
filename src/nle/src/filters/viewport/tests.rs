@@ -351,6 +351,19 @@ fn one_red_bold_character_gives_one_sgr_and_the_character() {
 }
 
 #[test]
+fn sgr_39_and_49_give_the_default_colors_in_the_output() {
+    let rendered = render(
+        vec![out(1.0, "\x1b[31mr\x1b[39mp\x1b[42mg\x1b[49mq")],
+        json!({ "hide_rows": [23] }),
+    );
+
+    assert_eq!(
+        pairs(&rendered.events),
+        vec![(1.0, "\x1b[0;31mr\x1b[0mp\x1b[0;42mg\x1b[0mq")]
+    );
+}
+
+#[test]
 fn a_cell_that_the_cursor_is_not_on_gets_a_cup() {
     let rendered = render(
         vec![out(1.0, "\r\n\x1b[1;31mA")],

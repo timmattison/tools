@@ -296,10 +296,27 @@ fn the_pen_sources_follow_the_sgr_codes() {
 }
 
 #[test]
-fn an_ignored_color_sequence_leaves_the_pen_sources_alone() {
-    let state = feed_text("\x1b[31;41m\x1b[39m\x1b[49m\x1b[38;5m");
+fn sgr_39_and_49_give_the_default_source_and_an_incomplete_color_is_ignored() {
+    let state = feed_text("\x1b[31;41m\x1b[39m\x1b[49m");
+    assert_eq!(state.current_fg_source, ColorSource::Default);
+    assert_eq!(state.current_bg_source, ColorSource::Default);
+
+    let state = feed_text("\x1b[31;41m\x1b[38;5m");
     assert_eq!(state.current_fg_source, ColorSource::Base(1));
     assert_eq!(state.current_bg_source, ColorSource::Base(1));
+}
+
+#[test]
+fn a_cell_after_sgr_39_and_49_has_the_default_source_and_the_old_rgb_value() {
+    let state = feed_text("\x1b[31;41mA\x1b[39;49mB");
+    let red = &state.get_grid()[0][0];
+    let after = &state.get_grid()[0][1];
+    assert_eq!(
+        (after.fg_source, after.bg_source),
+        (ColorSource::Default, ColorSource::Default)
+    );
+    assert_eq!(after.fg_color, red.fg_color);
+    assert_eq!(after.bg_color, red.bg_color);
 }
 
 #[test]
