@@ -1067,6 +1067,89 @@ fn the_origin_of_an_alias_is_read_for_its_kind() {
     assert!(definitions.unparsed_aliases.is_empty());
 }
 
+/// A name that two files define has two places, in the order of the
+/// definitions. A place that is not a file stays in the list as `None`.
+#[test]
+fn each_place_of_an_alias_is_read_in_order_and_for_its_kind() {
+    let definitions = parsed(&records(&[
+        "alias ll='ls -la'",
+        "alias ev=true",
+        "alias -s md=less",
+        "alias nop=true",
+        "M ALIAS_PLACE ll",
+        "M ORIGIN /home/me/.zshrc:1",
+        "M ALIAS_PLACE ll",
+        "M ORIGIN /home/me/more.zsh:1",
+        "M ALIAS_PLACE ev",
+        "M ORIGIN (eval):1",
+        "M SUFFIX_PLACE md",
+        "M ORIGIN /home/me/.zshrc:3",
+        "M SUFFIX_PLACE md",
+        "M ORIGIN /home/me/.zshrc:4",
+    ]));
+    let places = |name: &str, kind: AliasKind| {
+        definitions
+            .alias_places(&alias_named(&definitions, name, kind))
+            .to_vec()
+    };
+    assert_eq!(
+        places("ll", AliasKind::Regular),
+        [
+            Some(origin("/home/me/.zshrc", Some(1))),
+            Some(origin("/home/me/more.zsh", Some(1))),
+        ]
+    );
+    assert_eq!(places("ev", AliasKind::Regular), [None]);
+    assert_eq!(
+        places("*.md", AliasKind::Suffix),
+        [
+            Some(origin("/home/me/.zshrc", Some(3))),
+            Some(origin("/home/me/.zshrc", Some(4))),
+        ]
+    );
+    assert!(places("nop", AliasKind::Regular).is_empty());
+    assert_eq!(definitions.alias_places["ll"].len(), 2);
+    assert_eq!(definitions.suffix_places["md"].len(), 2);
+    assert!(!definitions.alias_places.contains_key("md"));
+}
+
+/// The lines of a real zsh that define aliases in more than one place.
+const PLACES_ZSHRC: &str = "alias ll='ls -l'\n\
+source $HOME/more.zsh\n\
+alias -s md=cat\n\
+alias -s md=less\n\
+eval \"alias ev=true\"\n";
+
+#[test]
+fn a_real_zsh_gives_each_place_of_an_alias() {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    write_file(home.path(), ".zshrc", PLACES_ZSHRC);
+    write_file(home.path(), "more.zsh", "alias ll='ls -la'\n");
+    let definitions = read(
+        real_shell(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let zshrc = home.path().join(".zshrc");
+    assert_eq!(
+        definitions.alias_places["ll"],
+        [
+            Some(origin(&zshrc, Some(1))),
+            Some(origin(home.path().join("more.zsh"), Some(1))),
+        ]
+    );
+    assert_eq!(
+        definitions.suffix_places["md"],
+        [Some(origin(&zshrc, Some(3))), Some(origin(&zshrc, Some(4)))]
+    );
+    assert_eq!(definitions.alias_places["ev"], [None]);
+}
+
 #[test]
 fn an_alias_without_a_known_origin_has_no_origin() {
     let definitions = parsed(&records(&[

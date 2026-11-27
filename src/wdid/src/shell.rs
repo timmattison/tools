@@ -433,6 +433,14 @@ pub struct Definitions {
     /// The origin of each function, by name. A function that this map does
     /// not hold has an unknown origin.
     pub function_origins: BTreeMap<String, Origin>,
+    /// Each place that defined each regular and each global alias, by name, in
+    /// the order of the definitions. `None` stands for a place that is not an
+    /// absolute path, for example `(eval):1`.
+    pub alias_places: BTreeMap<String, Vec<Option<Origin>>>,
+    /// Each place that defined each suffix alias, by its suffix (`md` for
+    /// `*.md`), in the order of the definitions. `None` is as for
+    /// [`Definitions::alias_places`].
+    pub suffix_places: BTreeMap<String, Vec<Option<Origin>>>,
     /// The directories that the shell gave after its start.
     pub places: Places,
     /// The code that the shell runs without a typed name.
@@ -449,6 +457,18 @@ impl Definitions {
             Some(suffix) => self.suffix_origins.get(suffix),
             None => self.alias_origins.get(&alias.name),
         }
+    }
+
+    /// Gives each place that defined `alias`, in the order of the definitions.
+    /// A suffix alias has its places by its suffix, and a regular or a global
+    /// alias by its name. The slice is empty when the shell gave no place.
+    #[must_use]
+    pub fn alias_places(&self, alias: &AliasDefinition) -> &[Option<Origin>] {
+        let places = match alias.suffix() {
+            Some(suffix) => self.suffix_places.get(suffix),
+            None => self.alias_places.get(&alias.name),
+        };
+        places.map_or(&[], Vec::as_slice)
     }
 
     /// Gives the origin of the function `name`, or `None` when it is unknown.
