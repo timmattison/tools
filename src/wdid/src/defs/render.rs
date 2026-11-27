@@ -605,6 +605,27 @@ struct NamedDocument<'a> {
     kind: Kind,
 }
 
+/// One definition of a finding, in the JSON document.
+#[derive(Serialize)]
+struct MemberDocument<'a> {
+    name: &'a str,
+    kind: Kind,
+    origin: Option<&'a Origin>,
+    uses: u64,
+    mine: bool,
+}
+
+/// One duplicate or one shadow, in the JSON document.
+#[derive(Serialize)]
+struct FindingDocument<'a> {
+    kind: FindingKind,
+    mine: bool,
+    definitions: Vec<MemberDocument<'a>>,
+    words: &'a [String],
+    places: Vec<Option<&'a Origin>>,
+    program: Option<&'a Path>,
+}
+
 /// The whole JSON document.
 #[derive(Serialize)]
 struct Document<'a> {
@@ -617,6 +638,29 @@ struct Document<'a> {
     never_used: Vec<NamedDocument<'a>>,
     idle: Vec<NamedDocument<'a>>,
     runs_without_typing: Vec<NamedDocument<'a>>,
+    findings: Vec<FindingDocument<'a>>,
+}
+
+/// Gives the JSON form of one finding.
+fn finding_document(finding: &Finding) -> FindingDocument<'_> {
+    FindingDocument {
+        kind: finding.kind,
+        mine: finding.mine(),
+        definitions: finding
+            .definitions
+            .iter()
+            .map(|member| MemberDocument {
+                name: &member.name,
+                kind: member.kind,
+                origin: member.origin.as_ref(),
+                uses: member.uses,
+                mine: member.mine,
+            })
+            .collect(),
+        words: &finding.words,
+        places: finding.places.iter().map(Option::as_ref).collect(),
+        program: finding.program.as_deref(),
+    }
 }
 
 /// Gives the JSON form of one definition.
@@ -662,6 +706,13 @@ fn named<'a>(definitions: &[&'a Usage]) -> Vec<NamedDocument<'a>> {
 /// `runs_without_typing` hold every entry too, in the order of the text
 /// report.
 ///
+/// `findings` holds each finding of the tally in order, also a finding with no
+/// definition of mine. Each finding has the fields `kind`, `mine`,
+/// `definitions`, `words`, `places`, and `program`, always present. Each
+/// definition has `name`, `kind`, `origin`, `uses`, and `mine`. `words` and
+/// `places` are empty lists, and `program` is `null`, when the kind of the
+/// finding does not use them. A place is an origin or `null`.
+///
 /// # Panics
 ///
 /// Never in practice. The document holds only numbers, dates, and text, and
@@ -694,6 +745,7 @@ pub fn json(tally: &Tally, window: &Window, shell: &str) -> String {
         never_used: named(&with(&every, Classification::NeverUsed)),
         idle: named(&idle_definitions(&every)),
         runs_without_typing: named(&with(&every, Classification::RunsWithoutTyping)),
+        findings: tally.findings.iter().map(finding_document).collect(),
     };
     let mut text = serde_json::to_string_pretty(&document)
         .expect("a document of numbers, dates, and text always serializes");
