@@ -6395,11 +6395,14 @@ The editing engine of the crate has four parts:
   registered by kind. The filters of a project run in order, each on the whole
   timeline or on a range of it. An event filter,
   `Fn(&[Event], &FilterOptions) -> Vec<Event>`, gets the events of its region,
-  and the later events move by the change in the time of its last event. A
+  and the later events move by the change in the time of its last event. An
+  in-place filter (`register_in_place`) also gets the length of its region and
+  whether anything comes after it. It rewrites its region and moves nothing. A
   span filter (`register_span`) also gets the length of its region and answers
   a new length, and the later events move by the change in the length.
-  `filters::registry()` holds the filters that ship: time dilation
-  (`time-dilation`, issue #153) is a span filter. Issues #152 to #168 add the
+  `filters::registry()` holds the filters that ship: the cursor filter
+  (`cursor`, issue #168) is an in-place filter, and time dilation
+  (`time-dilation`, issue #153) is a span filter. Issues #152 to #167 add the
   others.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
@@ -6410,6 +6413,42 @@ The crate also has functions that save the rendered recording
 (`Editor::save_recording`), list the recordings in a directory, and export a
 recording through the `beta` CLI as a video or a web player. The window does
 not call them yet.
+
+### The cursor filter
+
+The `cursor` filter sets how the cursor looks in the rendered recording. It
+rewrites the escape sequences that set the cursor in the output events. Thus
+`beta play` and the web export of `beta` show the result as a terminal shows
+it. The video export of `beta` draws only a block cursor, shown or hidden, thus
+it shows the visibility but not the shape, the blink, or the color.
+
+The window has no control for filters yet. A project file names the filter in
+its `filters` list:
+
+```json
+{
+  "kind": "cursor",
+  "region": "All",
+  "options": { "visibility": "smart", "shape": "bar", "blink": false, "color": "#ffcc00" }
+}
+```
+
+| Option | Values | What it does |
+|---|---|---|
+| `visibility` | `honor` (the default), `always-visible`, `always-hidden`, `smart` | `honor` obeys the DECTCEM sequences (`CSI ? 25 h` and `CSI ? 25 l`) of the recording. `always-visible` and `always-hidden` drop them and set the cursor. `smart` obeys the recording, but hides the cursor during a burst of output. |
+| `burst_gap` | seconds, above zero, 0.1 by default | For `smart` only. A burst is two or more output events, each less than `burst_gap` after the one before it, with no input event between them. Thus the echo of typed keys is not a burst. |
+| `shape` | `block`, `underline`, `bar` | Sets the shape through DECSCUSR (`CSI Ps SP q`). The blink of the recording stays, unless `blink` is set. |
+| `blink` | `true`, `false` | Sets the blink through DECSCUSR, and drops mode 12 of the recording. The shape of the recording stays, unless `shape` is set. |
+| `color` | `#rrggbb` | Sets the color through OSC 12, and drops each cursor color of the recording: OSC 12, OSC 112, and the cursor slot of an OSC 10 or 11 list. |
+
+An option that the options do not name obeys the recording. An unknown key or
+value fails the render, and the message names it.
+
+On a range, the filter sets the cursor at the start of the range, and it sets
+the state of the recording back at the end. The filter sees only its range,
+thus it takes the state before the range to be the default of a terminal: a
+visible cursor, DECSCUSR 0, and the default color. After a reset of the
+terminal (RIS or DECSTR) in the recording, the filter sets the cursor again.
 
 The export functions run `beta` with the PATH of the app, then
 `$CARGO_HOME/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.
