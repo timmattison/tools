@@ -503,8 +503,8 @@ impl Parser {
         match next {
             '[' if !at_end => self.csi(start),
             'O' if !at_end => self.ss3(),
-            ']' if self.skip_string(true) => {}
-            'P' | '_' if self.skip_string(false) => {}
+            ']' if self.skip_string(start, true) => {}
+            'P' | '_' if self.skip_string(start, false) => {}
             c if c.is_control() => self.push_control(c, Mods::NONE.with_alt()),
             ' ' => self.push_special(Mods::NONE.with_alt().label(SPACE)),
             c => self.push_special(modified_label(Mods::NONE.with_alt(), c)),
@@ -512,9 +512,12 @@ impl Parser {
     }
 
     /// Skip an OSC, DCS, or APC string up to its terminator, `ESC \`, or BEL
-    /// when `bel_ends` is true. Answer false and move nothing when the data
-    /// holds no terminator: then the start of the string is an Alt key.
-    fn skip_string(&mut self, bel_ends: bool) -> bool {
+    /// when `bel_ends` is true. The `ESC` of the string is at index `start`.
+    /// When the data holds no terminator and more data follows, the string
+    /// waits for its rest. When the data is final and holds no terminator,
+    /// answer false and move nothing: then the start of the string is an Alt
+    /// key.
+    fn skip_string(&mut self, start: usize, bel_ends: bool) -> bool {
         let rest = self.chars.get(self.pos..).unwrap_or_default();
         let end = rest.iter().enumerate().find_map(|(index, &c)| {
             if bel_ends && c == BEL {
@@ -525,7 +528,13 @@ impl Parser {
                 None
             }
         });
-        end.inspect(|length| self.pos += length).is_some()
+        match end {
+            Some(length) => {
+                self.pos += length;
+                true
+            }
+            None => self.defer(start),
+        }
     }
 
     /// Parse an SS3 sequence. The parser has read `ESC O`.
