@@ -236,7 +236,7 @@ fn the_cursor_comes_back_when_a_full_screen_program_exits() {
 }
 
 #[test]
-fn a_save_of_the_program_across_a_box_still_restores_its_cursor() {
+fn a_restore_of_the_program_across_a_box_is_repaired_after_its_event() {
     let events = ended(vec![
         out(0.0, "\x1b[5;5H\x1b7\x1b[1;1H"),
         inp(1.0, "a"),
@@ -245,6 +245,20 @@ fn a_save_of_the_program_across_a_box_still_restores_its_cursor() {
     let result = hud(&events, &plain(), WIDE);
     assert_eq!(replay(&result, 1.5, WIDE).get_grid()[4][4].ch, 'X');
     assert_same_screen(&replay(&result, 3.0, WIDE), &replay(&events, 3.0, WIDE));
+}
+
+#[test]
+fn a_restore_of_the_program_across_a_box_puts_back_its_character_set() {
+    let events = ended(vec![
+        out(0.0, "\x1b7\x1b(0"),
+        inp(1.0, "a"),
+        out(1.5, "\x1b8q"),
+        out(4.0, "q"),
+    ]);
+    let result = hud(&events, &plain(), WIDE);
+    let at_four: Vec<&Event> = result.iter().filter(|event| event.time == 4.0).collect();
+    assert_eq!(at_four.len(), 1, "a repaint at 4.0: {at_four:?}");
+    assert_same_screen(&replay(&result, 4.5, WIDE), &replay(&events, 4.5, WIDE));
 }
 
 #[test]
