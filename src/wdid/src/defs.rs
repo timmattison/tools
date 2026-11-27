@@ -13,6 +13,7 @@ use chrono::NaiveDate;
 
 use crate::command_words::{parse_line, AliasKind, CommandWord, Line};
 use crate::history::HistoryEntry;
+use crate::origin::{Origin, Places};
 use crate::shell::Definitions;
 use crate::tally::days_since;
 
@@ -26,8 +27,8 @@ const LABEL_GLOBAL_ALIAS: &str = "global alias";
 const LABEL_SUFFIX_ALIAS: &str = "suffix alias";
 /// The label of a function.
 const LABEL_FUNCTION: &str = "function";
-/// The first character of the name of a private function. The report does not
-/// list a private function.
+/// The first character of the name of a private function. The report lists a
+/// private function only with `all` (see [`Window::all`]).
 const PRIVATE_PREFIX: char = '_';
 
 /// The days that the count reads, and the idle limit.
@@ -39,6 +40,10 @@ pub struct Window {
     pub since: Option<NaiveDate>,
     /// A definition whose last use is older than this many days is idle.
     pub idle_days: u32,
+    /// The report lists each definition: the functions whose name starts
+    /// with `_` too, and in the text report the definitions that are not
+    /// mine.
+    pub all: bool,
 }
 
 /// The kind of a definition.
@@ -113,6 +118,10 @@ pub struct Usage {
     pub last_use: Option<NaiveDate>,
     /// The state of the definition.
     pub classification: Classification,
+    /// The file that defined the definition, or `None` when it is unknown.
+    pub origin: Option<Origin>,
+    /// True when the definition is mine (see [`Places::is_mine`]).
+    pub mine: bool,
 }
 
 /// The counts about the history and about the shell.
@@ -134,6 +143,10 @@ pub struct Summary {
     pub unparsed_functions: usize,
     /// The alias lines that did not parse.
     pub unparsed_aliases: usize,
+    /// The entries of the report that are mine.
+    pub mine: usize,
+    /// The entries of the report that are not mine.
+    pub others: usize,
 }
 
 /// The result of the count.
@@ -143,6 +156,9 @@ pub struct Tally {
     pub definitions: Vec<Usage>,
     /// The counts about the history and about the shell.
     pub summary: Summary,
+    /// The directories that decide which definitions are mine. The text
+    /// report shows the home directory as `~`.
+    pub places: Places,
 }
 
 /// Gives the first line of `text`, with its other characters unchanged.
@@ -151,27 +167,32 @@ fn first_line(text: &str) -> &str {
 }
 
 /// Makes one entry with no use for each alias and each function that the
-/// report lists.
-fn empty_usages(definitions: &Definitions) -> Vec<Usage> {
+/// report lists, with its origin. A function whose name starts with `_` is an
+/// entry only when `all` is true.
+fn empty_usages(definitions: &Definitions, all: bool) -> Vec<Usage> {
     let aliases = definitions.aliases.definitions().into_iter().map(|alias| {
-        (
-            alias.name,
-            Kind::from(alias.kind),
-            first_line(&alias.value).to_string(),
-        )
+        let origin = definitions.alias_origin(&alias).cloned();
+        let definition = first_line(&alias.value).to_string();
+        (alias.name, Kind::from(alias.kind), definition, origin)
     });
     let functions = definitions
         .functions
         .keys()
         .chain(definitions.unparsed_functions.iter())
-        .filter(|name| !name.starts_with(PRIVATE_PREFIX))
+        .filter(|name| all || !name.starts_with(PRIVATE_PREFIX))
         .map(|name| {
             let line = definitions.function_lines.get(name).cloned();
-            (name.clone(), Kind::Function, line.unwrap_or_default())
+            let origin = definitions.function_origin(name).cloned();
+            (
+                name.clone(),
+                Kind::Function,
+                line.unwrap_or_default(),
+                origin,
+            )
         });
     aliases
         .chain(functions)
-        .map(|(name, kind, definition)| Usage {
+        .map(|(name, kind, definition, origin)| Usage {
             name,
             kind,
             definition,
@@ -181,6 +202,8 @@ fn empty_usages(definitions: &Definitions) -> Vec<Usage> {
             first_use: None,
             last_use: None,
             classification: Classification::NeverUsed,
+            mine: definitions.places.is_mine(origin.as_ref()),
+            origin,
         })
         .collect()
 }
@@ -311,13 +334,17 @@ fn classify(uses: u64, last_use: Option<NaiveDate>, window: &Window) -> Classifi
 
 /// Counts the uses of each alias and each function in `entries`. Pure.
 ///
+/// Each entry gets the origin of its definition, and says if it is mine. A
+/// function whose name starts with `_` is an entry only with `window.all`. A
+/// call through such a function counts in each case.
+///
 /// The window drops the rows before `window.since`. A row with exit code 127
 /// does not count, because the shell did not find the command. An alias in the
 /// body of a function does not count, because the shell expanded it when it
 /// read the function.
 #[must_use]
 pub fn tally(entries: &[HistoryEntry], definitions: &Definitions, window: &Window) -> Tally {
-    let mut usages = empty_usages(definitions);
+    let mut usages = empty_usages(definitions, window.all);
     let mut counter = Counter::new(definitions, &usages);
     let mut cache: HashMap<&str, Option<Line>> = HashMap::new();
     let mut before_since: u64 = 0;
@@ -368,6 +395,8 @@ pub fn tally(entries: &[HistoryEntry], definitions: &Definitions, window: &Windo
         .iter()
         .filter(|u| u.kind == Kind::Function && definitions.unparsed_functions.contains(&u.name))
         .count();
+    let mine = usages.iter().filter(|u| u.mine).count();
+    let usages_count = usages.len();
     Tally {
         definitions: usages,
         summary: Summary {
@@ -379,6 +408,9 @@ pub fn tally(entries: &[HistoryEntry], definitions: &Definitions, window: &Windo
             functions,
             unparsed_functions,
             unparsed_aliases: definitions.unparsed_aliases.len(),
+            mine,
+            others: usages_count.saturating_sub(mine),
         },
+        places: definitions.places.clone(),
     }
 }

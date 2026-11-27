@@ -24,6 +24,9 @@ use crate::types::{AppliedFilter, EditProject, FilterRegion, Seconds};
 use crate::format::{file_name, format_duration, format_recorded};
 use crate::types::{LoadedRecording, RecordingMetadata};
 
+mod preview;
+use preview::{end_of, render_of, PreviewPane, RenderedState};
+
 /// The style sheet of the window. The `style` element at the top of `App` holds
 /// it, so the webview needs no extra file.
 const STYLE: &str = include_str!("../assets/main.css");
@@ -109,6 +112,9 @@ const MARK_STRIP_LABEL: &str = "Marks on the edited recording";
 const ONE_MARK: &str = "1 mark on the edited recording";
 /// The text after the count of the marks when there is more than one mark.
 const MARKS_SUFFIX: &str = "marks on the edited recording";
+
+/// The accessible label of the playhead control.
+const PLAYHEAD_LABEL: &str = "Playhead";
 
 /// The title of the application window.
 const WINDOW_TITLE: &str = "NLE - Terminal Recording Editor";
@@ -221,6 +227,9 @@ pub(crate) fn App() -> Element {
     let filters = use_hook(|| Arc::new(crate::filters::registry()));
     let mut loaded = use_signal(|| None::<Document>);
     let mut error = use_signal(|| None::<String>);
+    let mut playhead = use_signal(|| Seconds::ZERO);
+    let mut playing = use_signal(|| false);
+    let rendered = use_memo(move || render_of(&loaded.read()));
 
     rsx! {
         style { {STYLE} }
@@ -229,6 +238,9 @@ pub(crate) fn App() -> Element {
                 on_loaded: move |recording| match Document::open(recording, filters.clone()) {
                     Ok(document) => {
                         loaded.set(Some(document));
+                        // A new recording starts at time zero.
+                        playhead.set(Seconds::ZERO);
+                        playing.set(false);
                         error.set(None);
                     }
                     Err(failure) => error.set(Some(format!("{OPEN_FAILED_PREFIX}: {failure}"))),
@@ -241,8 +253,8 @@ pub(crate) fn App() -> Element {
                     button { class: "error-dismiss", onclick: move |_| error.set(None), "Dismiss" }
                 }
             }
-            PreviewPane { loaded }
-            Timeline { loaded }
+            PreviewPane { rendered, playhead, playing }
+            Timeline { loaded, rendered, playhead }
             PropertiesPanel {
                 loaded,
                 on_result: move |result: Result<(), String>| error.set(result.err()),
@@ -284,33 +296,36 @@ fn MenuBar(on_loaded: EventHandler<LoadedRecording>, on_error: EventHandler<Stri
     }
 }
 
-/// The preview of the open recording.
-#[component]
-fn PreviewPane(loaded: ReadSignal<Option<Document>>) -> Element {
-    let loaded = loaded.read();
-    rsx! {
-        div { class: "preview-pane",
-            if let Some(open) = loaded.as_ref() {
-                div { class: "placeholder",
-                    "Terminal preview \u{2014} coming in #151"
-                    br {}
-                    "{open.metadata.width}x{open.metadata.height}"
-                }
-            } else {
-                div { class: "placeholder", "Open a recording to preview it here" }
-            }
-        }
-    }
-}
-
 /// The timeline of the open recording.
+///
+/// The playhead control is a plain range input. Issue #150 replaces it with
+/// the real timeline and its playhead.
 #[component]
-fn Timeline(loaded: ReadSignal<Option<Document>>) -> Element {
+fn Timeline(
+    loaded: ReadSignal<Option<Document>>,
+    rendered: ReadSignal<RenderedState>,
+    mut playhead: Signal<Seconds>,
+) -> Element {
     let loaded = loaded.read();
+    let end = end_of(&rendered.read());
     rsx! {
         div { class: "timeline",
             if let Some(open) = loaded.as_ref() {
                 h3 { "Timeline" }
+                input {
+                    class: "playhead",
+                    r#type: "range",
+                    aria_label: PLAYHEAD_LABEL,
+                    min: "0",
+                    max: "{end.get()}",
+                    step: "any",
+                    value: "{playhead().get()}",
+                    oninput: move |event| {
+                        if let Some(at) = playhead_from(&event.value(), end) {
+                            playhead.set(at);
+                        }
+                    },
+                }
                 div { class: "placeholder",
                     "Timeline editor \u{2014} coming in #150"
                     br {}
@@ -322,6 +337,14 @@ fn Timeline(loaded: ReadSignal<Option<Document>>) -> Element {
             }
         }
     }
+}
+
+/// The playhead that the text of the control states, held at or below `end`.
+/// The answer is `None` for text that is not a valid time.
+fn playhead_from(text: &str, end: Seconds) -> Option<Seconds> {
+    let value: f64 = text.trim().parse().ok()?;
+    let at = Seconds::new(value).ok()?;
+    Some(if at > end { end } else { at })
 }
 
 /// The event count and the duration of the project of the document.
