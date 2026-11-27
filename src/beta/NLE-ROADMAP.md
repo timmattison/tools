@@ -80,7 +80,7 @@ These filters need deeper terminal state analysis or more complex heuristics.
 | Issue | Description | Notes |
 |-------|-------------|-------|
 | #163 | Captions and annotations | Text overlays at timestamps. UI-heavy. |
-| #165 | Terminal crop and zoom | Dynamic viewport requires deep escape sequence understanding. |
+| #165 | Terminal crop and zoom | The static crop and the hiding of rows and columns are done. The `viewport` filter (`src/nle/src/filters/viewport.rs`) is a screen filter: it runs the `termstate` emulator, and it writes the visible cells again as escape sequences, so each player and each exporter shows the crop. The dynamic zoom and focus waits for #151 and #158 in a follow-up issue, because no escape sequence can carry it. |
 | #169 | Plugin architecture | Design can start earlier, but API should stabilize first. TypeScript primary, WASM for advanced. |
 
 ## Difficulty Assessment
@@ -101,7 +101,7 @@ These filters need deeper terminal state analysis or more complex heuristics.
 - #150 (timeline UI — DAW-style component, most complex UI work)
 - #152 (smart backspace — needs terminal state analysis)
 - #157 (multi-clip splicing — terminal state transitions between clips)
-- #165 (crop/zoom — dynamic viewport)
+- #165 (the dynamic zoom: it needs a path to the exporters. The static crop is done.)
 - #169 (plugin architecture — API design, manifest, sandboxing)
 
 ## Shared Infrastructure
@@ -112,7 +112,7 @@ These filters need deeper terminal state analysis or more complex heuristics.
 
 1. **Dioxus app**: One Rust crate, with the desktop (webview) renderer of Dioxus 0.7. The components call the Rust code directly, thus no IPC layer and no second copy of the types exist. The state of the app is Dioxus state (signals), which is Rust, thus the one source of truth is in Rust by construction. On 2026-11-25, Tim chose Dioxus in place of Tauri (issue #761).
 
-2. **Filter interface**: `Fn(&[Event], &FilterOptions) -> Vec<Event>` is the core API (`FilterFn` in `src/nle/src/pipeline.rs`). A filter gets the events of its region, with times relative to the start of the region. The pipeline moves the events after the region by the change in the time of the last event of the region. A filter that changes the length of its region is a span filter (`SpanFilterFn`, `FilterRegistry::register_span`): it also gets the length of its region and answers a new length, and the pipeline moves the events after the region by the change in the length. Time dilation (#153) is a span filter, because a region with no event must also change its length. Pause insertion (#154) and idle time compression (#167) have the same need. Typing speed (#155) is a span filter too, because the event form cannot refuse a bad option. Some filters (#166 color scheme, #168 cursor) operate at the ANSI escape sequence level within `event.data` rather than at the timestamp level. Such a filter uses the in-place form (`InPlaceFilterFn`, `register_in_place`): it also gets a `RegionView` (the length of its region, and whether anything comes after it), it answers a `Result`, and nothing on the timeline moves. Thus a filter that sets a state of the terminal can set it back at the end of a range. The reader of escape sequences in `src/nle/src/ansi.rs` keeps its state from one event to the next. #156 and #166 can use it.
+2. **Filter interface**: `Fn(&[Event], &FilterOptions) -> Vec<Event>` is the core API (`FilterFn` in `src/nle/src/pipeline.rs`). A filter gets the events of its region, with times relative to the start of the region. The pipeline moves the events after the region by the change in the time of the last event of the region. A filter that changes the length of its region is a span filter (`SpanFilterFn`, `FilterRegistry::register_span`): it also gets the length of its region and answers a new length, and the pipeline moves the events after the region by the change in the length. Time dilation (#153) is a span filter, because a region with no event must also change its length. Pause insertion (#154) and idle time compression (#167) have the same need. Typing speed (#155) is a span filter too, because the event form cannot refuse a bad option. Some filters (#166 color scheme, #168 cursor) operate at the ANSI escape sequence level within `event.data` rather than at the timestamp level. Such a filter uses the in-place form (`InPlaceFilterFn`, `register_in_place`): it also gets a `RegionView` (the length of its region, and whether anything comes after it), it answers a `Result`, and nothing on the timeline moves. Thus a filter that sets a state of the terminal can set it back at the end of a range. A filter that changes the size of the screen uses the screen form (`ScreenFilterFn`, `register_screen`): it also gets the size of the screen and the events before its region, nothing on the timeline moves, and on the region `All` it can answer a new size. The viewport filter (#165) is a screen filter. The reader of escape sequences in `src/nle/src/ansi.rs` keeps its state from one event to the next. #156 and #166 can use it.
 
 3. **Existing code to reuse**:
    - `src/main.rs` lines 85-113: `Recording`, `Event`, `EventType` structs (the types in `src/nle/src/types.rs` must mirror these exactly)

@@ -6401,11 +6401,16 @@ The editing engine of the crate has five parts:
   in-place filter (`register_in_place`) also gets the length of its region and
   whether anything comes after it. It rewrites its region and moves nothing. A
   span filter (`register_span`) also gets the length of its region and answers
-  a new length, and the later events move by the change in the length.
+  a new length, and the later events move by the change in the length. A
+  screen filter (`register_screen`) also gets the size of the screen and the
+  events before its region. It rewrites its region, moves nothing, and on the
+  region `All` it can change the size of the screen. The rendered recording
+  has the size that the last screen filter gives.
   `filters::registry()` holds the filters that ship: the cursor filter
-  (`cursor`, issue #168) is an in-place filter, and time dilation
+  (`cursor`, issue #168) is an in-place filter, time dilation
   (`time-dilation`, issue #153) and typing speed (`typing-speed`, issue #155)
-  are span filters. Issues #152 to #167 add the others.
+  are span filters, and the viewport filter (`viewport`, issue #165) is a
+  screen filter. Issues #152 to #167 add the others.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
@@ -6469,6 +6474,55 @@ the state of the recording back at the end. The filter sees only its range,
 thus it takes the state before the range to be the default of a terminal: a
 visible cursor, DECSCUSR 0, and the default color. After a reset of the
 terminal (RIS or DECSTR) in the recording, the filter sets the cursor again.
+
+### The viewport filter
+
+The `viewport` filter crops the screen and hides rows and columns, for example
+the status bar of a multiplexer or an empty part of a wide terminal. It runs the
+terminal emulator of `termstate` over the recording, and it writes the visible
+cells again as escape sequences. Thus `beta play`, each export of `beta`, and
+the preview show the crop, and none of them changes. The colors go out as the
+recording gave them (a base color, a color of the 256-color palette, or a 24-bit
+color), thus the `--theme` of an export still applies.
+
+A project file names the filter in its `filters` list:
+
+```json
+{
+  "kind": "viewport",
+  "region": "All",
+  "options": { "rows": { "start": 1, "end": 24 }, "columns": { "start": 0, "end": 80 }, "hide_rows": [12] }
+}
+```
+
+| Option | Values | What it does |
+|---|---|---|
+| `rows` | `{ "start": n, "end": m }` | Shows only the rows from `start` up to, and not including, `end`. The count starts at 0. All rows show when it is missing. |
+| `columns` | `{ "start": n, "end": m }` | The same for the columns. |
+| `hide_rows` | a list of row numbers | Hides these rows of the full screen, also when they are not next to each other. |
+| `hide_columns` | a list of column numbers | The same for the columns. |
+
+On the region `All`, the rendered recording gets the size of the visible cells:
+a hidden row or column goes out, and the cells after it move up or left. On a
+range, the size stays, each cell keeps its place, and each cell that is not
+visible is blank during the range. At the end of the range, the filter writes
+the full screen again, and it sets the scrolling region, the pen, the saved
+cursor, the character set, and the cursor back to the state of the recording.
+
+An unknown key fails the render. A crop that does not start before its end, a
+crop or a hidden number that is not on the screen, and options that leave no
+row or no column visible also fail the render, and the message names the
+option. A screen larger than 500 by 500 fails too. When every row and every
+column is visible, the filter changes nothing.
+
+The output shows the screen as `termstate` models it, which is the model of the
+video export of `beta`. A sequence that `termstate` does not model, for example
+CHA, VPA, the insert mode, or a second screen buffer for mode 1049, thus has no
+effect in the output. The filter keeps the OSC sequences (the title, the
+palette, the default colors, and the cursor color), DECSCUSR, mode 12, and BEL.
+The design is in `specs/2026-11-27-nle-viewport-filter-design.md`. A zoom into a
+region over time cannot go into escape sequences, thus it waits for the export
+of edited recordings (issue #158).
 
 The export functions run `beta` with the PATH of the app, then
 `$CARGO_HOME/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.
