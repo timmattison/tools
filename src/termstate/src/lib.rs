@@ -314,6 +314,21 @@ pub struct Cell {
     pub italic: bool,
     /// Whether the character is underlined.
     pub underline: bool,
+    /// Whether the character is dim. The emulator tracks it, and `beta` does not
+    /// draw it yet.
+    pub dim: bool,
+    /// Whether the character is blinking. The emulator tracks it, and `beta` does not
+    /// draw it yet.
+    pub blink: bool,
+    /// Whether the character is in reverse video. The emulator tracks it, and `beta` does not
+    /// draw it yet.
+    pub reverse: bool,
+    /// Whether the character is hidden. The emulator tracks it, and `beta` does not
+    /// draw it yet.
+    pub hidden: bool,
+    /// Whether the character is struck through. The emulator tracks it, and `beta` does not
+    /// draw it yet.
+    pub strikethrough: bool,
 }
 
 /// Tells if the parser is settled after one character: in the ground state, with
@@ -433,6 +448,11 @@ impl Clone for TerminalState {
             bold: self.bold,
             italic: self.italic,
             underline: self.underline,
+            dim: self.dim,
+            blink: self.blink,
+            reverse: self.reverse,
+            hidden: self.hidden,
+            strikethrough: self.strikethrough,
             parser: replayed_parser(&self.pending),
             pending: self.pending.clone(),
             saved_cursor_x: self.saved_cursor_x,
@@ -461,6 +481,11 @@ impl Default for Cell {
             bold: false,
             italic: false,
             underline: false,
+            dim: false,
+            blink: false,
+            reverse: false,
+            hidden: false,
+            strikethrough: false,
         }
     }
 }
@@ -494,6 +519,16 @@ pub struct TerminalState {
     pub italic: bool,
     /// Whether the next printed character is underlined.
     pub underline: bool,
+    /// Whether the next printed character is dim.
+    pub dim: bool,
+    /// Whether the next printed character is blinking.
+    pub blink: bool,
+    /// Whether the next printed character is in reverse video.
+    pub reverse: bool,
+    /// Whether the next printed character is hidden.
+    pub hidden: bool,
+    /// Whether the next printed character is struck through.
+    pub strikethrough: bool,
     parser: Parser,
     // The bytes fed since the parser was last settled: in the ground state with
     // no unfinished sequence. Empty means the parser equals `Parser::new()`.
@@ -555,6 +590,11 @@ impl TerminalState {
             bold: false,
             italic: false,
             underline: false,
+            dim: false,
+            blink: false,
+            reverse: false,
+            hidden: false,
+            strikethrough: false,
             theme,
             parser: Parser::new(),
             pending: Vec::new(),
@@ -777,6 +817,11 @@ impl TerminalState {
                 bold: self.bold,
                 italic: self.italic,
                 underline: self.underline,
+                dim: self.dim,
+                blink: self.blink,
+                reverse: self.reverse,
+                hidden: self.hidden,
+                strikethrough: self.strikethrough,
             };
             self.cursor_x += 1;
 
@@ -851,13 +896,31 @@ impl TerminalState {
                     self.bold = false;
                     self.italic = false;
                     self.underline = false;
+                    self.dim = false;
+                    self.blink = false;
+                    self.reverse = false;
+                    self.hidden = false;
+                    self.strikethrough = false;
                 }
                 1 => self.bold = true,
+                2 => self.dim = true,
                 3 => self.italic = true,
                 4 => self.underline = true,
-                22 => self.bold = false,
+                5 => self.blink = true,
+                7 => self.reverse = true,
+                8 => self.hidden = true,
+                9 => self.strikethrough = true,
+                22 => {
+                    // Normal intensity: neither bold nor dim.
+                    self.bold = false;
+                    self.dim = false;
+                }
                 23 => self.italic = false,
                 24 => self.underline = false,
+                25 => self.blink = false,
+                27 => self.reverse = false,
+                28 => self.hidden = false,
+                29 => self.strikethrough = false,
                 39 => {
                     // Only the source changes. Decision H-165-2 keeps the RGB
                     // value for each existing caller.
@@ -1530,6 +1593,11 @@ impl TerminalState {
                 self.bold = false;
                 self.italic = false;
                 self.underline = false;
+                self.dim = false;
+                self.blink = false;
+                self.reverse = false;
+                self.hidden = false;
+                self.strikethrough = false;
                 self.cursor_visible = true;
                 self.use_acs = false;
             }

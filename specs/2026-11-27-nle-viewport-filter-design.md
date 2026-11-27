@@ -153,20 +153,26 @@ character as its Unicode box-drawing character.
 ### The writer
 
 The writer keeps a model of the output terminal: each cell (the character,
-the two color sources, bold, italic, underline), the pen, the cursor position
-(or unknown), and the visibility of the cursor.
+the two color sources, bold, dim, italic, underline, blink, reverse, hidden,
+strikethrough), the pen (or unknown), the cursor position (or unknown), and
+the visibility of the cursor.
 
 - For region `All`, the model starts as a blank terminal of the output size,
   with the default pen and the cursor at the top left, visible.
 - For region `Range`, the model starts as the emulator after `view.before`.
+  The pen and the cursor of the model are unknown at the start. The output
+  terminal can hold an attribute that `termstate` does not model, and a full
+  SGR removes it. Thus the first cell gets a full SGR, and the first write
+  gets a CUP.
 
 A paint compares the target cells with the model in row order. For each cell
 that differs:
 
 1. CUP to the cell, when the cursor of the model is not on it.
 2. One SGR, when the pen of the model differs from the look of the cell:
-   `CSI 0`, then `1` for bold, `3` for italic, `4` for underline, then the
-   foreground and the background, then `m`. `Default` adds nothing. `Base(i)`
+   `CSI 0`, then `1` for bold, `2` for dim, `3` for italic, `4` for
+   underline, `5` for blink, `7` for reverse, `8` for hidden, `9` for
+   strikethrough, then the foreground and the background, then `m`. `Default` adds nothing. `Base(i)`
    adds `30+i` or `40+i` for i below 8, and `90+i-8` or `100+i-8` for 8 to
    15. `Indexed(n)` adds `38;5;n` or `48;5;n`. `Rgb` adds `38;2;r;g;b` or
    `48;2;r;g;b`.
@@ -214,3 +220,5 @@ correctly.
 - After SGR 39 or 49, `beta export video` and the preview of `nle` still draw
   the color before it, because `termstate` keeps the RGB value (decision
   H-165-2). The output of the filter writes the default color.
+- An SGR attribute that `termstate` does not model (for example SGR 6, 21, or
+  53) does not show in the output.

@@ -44,7 +44,8 @@
 //!   uses the line-drawing character set, it first writes `ESC ( B`, because
 //!   the filter writes each line-drawing character as its Unicode
 //!   box-drawing character. The first paint has a CUP, because the cursor of
-//!   the output is not known.
+//!   the output is not known. It also has a full SGR, because the pen of the
+//!   output is not known.
 //! - At the end of a range that is not open (time `view.region.length`), it
 //!   writes one output event that gives the full screen back and sets the
 //!   state of the terminal to the state of the emulator, in this order: the
@@ -328,7 +329,6 @@ impl Replay {
         let writer = Writer::from_screen(
             usize::from(size.width),
             full_target(&terminal),
-            pen_of(&terminal),
             terminal.is_cursor_visible(),
         );
         Ok(Self {
@@ -571,6 +571,11 @@ fn pen_of(terminal: &TerminalState) -> Look {
         bold: terminal.bold,
         italic: terminal.italic,
         underline: terminal.underline,
+        dim: terminal.dim,
+        blink: terminal.blink,
+        reverse: terminal.reverse,
+        hidden: terminal.hidden,
+        strikethrough: terminal.strikethrough,
     }
 }
 
@@ -584,6 +589,11 @@ fn glyph_of(cell: &Cell) -> Glyph {
             bold: cell.bold,
             italic: cell.italic,
             underline: cell.underline,
+            dim: cell.dim,
+            blink: cell.blink,
+            reverse: cell.reverse,
+            hidden: cell.hidden,
+            strikethrough: cell.strikethrough,
         },
     }
 }

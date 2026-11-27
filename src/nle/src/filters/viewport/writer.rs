@@ -17,6 +17,16 @@ pub(super) struct Look {
     pub(super) italic: bool,
     /// Whether the character is underlined.
     pub(super) underline: bool,
+    /// Whether the character is dim.
+    pub(super) dim: bool,
+    /// Whether the character is blinking.
+    pub(super) blink: bool,
+    /// Whether the character is in reverse video.
+    pub(super) reverse: bool,
+    /// Whether the character is hidden.
+    pub(super) hidden: bool,
+    /// Whether the character is struck through.
+    pub(super) strikethrough: bool,
 }
 
 /// One cell of a screen: a character and its look.
@@ -38,6 +48,11 @@ impl Glyph {
             bold: false,
             italic: false,
             underline: false,
+            dim: false,
+            blink: false,
+            reverse: false,
+            hidden: false,
+            strikethrough: false,
         },
     };
 }
@@ -47,7 +62,8 @@ impl Glyph {
 pub(super) struct Writer {
     width: usize,
     grid: Vec<Glyph>,
-    pen: Look,
+    /// The pen of the output terminal, or `None` when it is not known.
+    pen: Option<Look>,
     cursor: Option<(usize, usize)>,
     cursor_shown: bool,
 }
@@ -59,7 +75,7 @@ impl Writer {
         Self {
             width,
             grid: vec![Glyph::BLANK; width.saturating_mul(height)],
-            pen: Look::default(),
+            pen: Some(Look::default()),
             cursor: Some((0, 0)),
             cursor_shown: true,
         }
@@ -67,19 +83,15 @@ impl Writer {
 
     /// A terminal that shows `cells`, in row order, `width` cells to a row.
     ///
-    /// The pen is `pen`, and the cursor is shown or hidden as `cursor_shown`
-    /// says. The place of the cursor is unknown, thus the first write gets a
-    /// CUP.
-    pub(super) fn from_screen(
-        width: usize,
-        cells: Vec<Glyph>,
-        pen: Look,
-        cursor_shown: bool,
-    ) -> Self {
+    /// The cursor is shown or hidden as `cursor_shown` says. The pen and the
+    /// place of the cursor are unknown, thus the first write gets a full SGR
+    /// and a CUP. The output terminal can hold an attribute that the emulator
+    /// does not model. The full SGR starts with `CSI 0`, which removes it.
+    pub(super) fn from_screen(width: usize, cells: Vec<Glyph>, cursor_shown: bool) -> Self {
         Self {
             width,
             grid: cells,
-            pen,
+            pen: None,
             cursor: None,
             cursor_shown,
         }
@@ -112,9 +124,9 @@ impl Writer {
             if self.cursor != Some((x, y)) {
                 push_cup(bytes, x, y);
             }
-            if self.pen != want.look {
+            if self.pen != Some(want.look) {
                 bytes.push_str(&sgr(&want.look));
-                self.pen = want.look;
+                self.pen = Some(want.look);
             }
             bytes.push(want.ch);
             *model = *want;
@@ -149,7 +161,7 @@ impl Writer {
 
     /// Set the pen of the model to `look`, for a caller that wrote its SGR.
     pub(super) fn set_pen(&mut self, look: Look) {
-        self.pen = look;
+        self.pen = Some(look);
     }
 }
 
@@ -174,11 +186,26 @@ pub(super) fn sgr(look: &Look) -> String {
     if look.bold {
         bytes.push_str(";1");
     }
+    if look.dim {
+        bytes.push_str(";2");
+    }
     if look.italic {
         bytes.push_str(";3");
     }
     if look.underline {
         bytes.push_str(";4");
+    }
+    if look.blink {
+        bytes.push_str(";5");
+    }
+    if look.reverse {
+        bytes.push_str(";7");
+    }
+    if look.hidden {
+        bytes.push_str(";8");
+    }
+    if look.strikethrough {
+        bytes.push_str(";9");
     }
     push_color(&mut bytes, look.fg, Ground::Foreground);
     push_color(&mut bytes, look.bg, Ground::Background);

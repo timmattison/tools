@@ -163,6 +163,11 @@ fn test_resolve_cell_colors_with_unmodified_palette() {
         bold: false,
         italic: false,
         underline: false,
+        dim: false,
+        blink: false,
+        reverse: false,
+        hidden: false,
+        strikethrough: false,
     };
 
     let (fg, bg) = state.resolve_cell_colors(&cell);
@@ -644,4 +649,104 @@ fn the_ink_form_of_an_erase_returns_to_the_first_column() {
     let row: String = state.get_grid()[0].iter().take(3).map(|c| c.ch).collect();
     assert_eq!(row, "xbc");
     assert_eq!(state.get_cursor_position(), (1, 0));
+}
+
+/// The five attributes that SGR 2, 5, 7, 8 and 9 set, as `(parameter, off
+/// parameter, reader of the pen, reader of a cell)`.
+type Attribute = (
+    &'static str,
+    &'static str,
+    fn(&TerminalState) -> bool,
+    fn(&Cell) -> bool,
+);
+
+fn attributes() -> [Attribute; 5] {
+    [
+        ("2", "22", |t| t.dim, |c| c.dim),
+        ("5", "25", |t| t.blink, |c| c.blink),
+        ("7", "27", |t| t.reverse, |c| c.reverse),
+        ("8", "28", |t| t.hidden, |c| c.hidden),
+        ("9", "29", |t| t.strikethrough, |c| c.strikethrough),
+    ]
+}
+
+/// Whether the pen of `state` holds each of the eight attributes.
+fn pen_attributes(state: &TerminalState) -> [bool; 8] {
+    [
+        state.bold,
+        state.dim,
+        state.italic,
+        state.underline,
+        state.blink,
+        state.reverse,
+        state.hidden,
+        state.strikethrough,
+    ]
+}
+
+const ALL_ON: &str = "\x1b[1;2;3;4;5;7;8;9m";
+
+#[test]
+fn each_sgr_attribute_sets_the_pen_and_the_printed_cell() {
+    for (on, _, pen, cell) in attributes() {
+        let mut state = TerminalState::new(10, 2, TerminalTheme::auto());
+        state.process_output(&format!("\x1b[{on}mA")).unwrap();
+
+        assert!(pen(&state), "SGR {on}: pen");
+        assert!(cell(&state.get_grid()[0][0]), "SGR {on}: cell");
+        assert!(!cell(&Cell::default()), "SGR {on}: default cell");
+    }
+}
+
+#[test]
+fn each_sgr_off_parameter_clears_its_attribute() {
+    for (on, off, pen, cell) in attributes() {
+        let mut state = TerminalState::new(10, 2, TerminalTheme::auto());
+        state
+            .process_output(&format!("\x1b[{on}m\x1b[{off}mA"))
+            .unwrap();
+
+        assert!(!pen(&state), "SGR {off}: pen");
+        assert!(!cell(&state.get_grid()[0][0]), "SGR {off}: cell");
+    }
+}
+
+#[test]
+fn sgr_22_clears_bold_and_dim() {
+    let mut state = TerminalState::new(10, 2, TerminalTheme::auto());
+    state.process_output("\x1b[1;2m\x1b[22mA").unwrap();
+
+    assert!(!state.bold);
+    assert!(!state.dim);
+    assert!(!state.get_grid()[0][0].bold);
+    assert!(!state.get_grid()[0][0].dim);
+}
+
+#[test]
+fn sgr_0_clears_all_eight_attributes() {
+    let mut state = TerminalState::new(10, 2, TerminalTheme::auto());
+    state.process_output(ALL_ON).unwrap();
+    assert_eq!(pen_attributes(&state), [true; 8]);
+
+    state.process_output("\x1b[0m").unwrap();
+
+    assert_eq!(pen_attributes(&state), [false; 8]);
+}
+
+#[test]
+fn ris_clears_all_eight_attributes() {
+    let mut state = TerminalState::new(10, 2, TerminalTheme::auto());
+    state.process_output(ALL_ON).unwrap();
+
+    state.process_output("\x1bc").unwrap();
+
+    assert_eq!(pen_attributes(&state), [false; 8]);
+}
+
+#[test]
+fn a_clone_keeps_the_eight_attributes() {
+    let mut state = TerminalState::new(10, 2, TerminalTheme::auto());
+    state.process_output(ALL_ON).unwrap();
+
+    assert_eq!(pen_attributes(&state.clone()), [true; 8]);
 }

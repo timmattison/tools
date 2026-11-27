@@ -582,6 +582,7 @@ fn a_paint_writes_one_sgr_for_cells_with_the_same_look() {
         bold: true,
         italic: true,
         underline: true,
+        ..Look::default()
     };
     let styled = |ch| Glyph { ch, look };
     let cells = target(4, 1, &[(0, 0, styled('a')), (1, 0, styled('b'))]);
@@ -764,6 +765,11 @@ fn assert_crop(
             assert_eq!(got.bold, want.bold, "{at}: bold");
             assert_eq!(got.italic, want.italic, "{at}: italic");
             assert_eq!(got.underline, want.underline, "{at}: underline");
+            assert_eq!(got.dim, want.dim, "{at}: dim");
+            assert_eq!(got.blink, want.blink, "{at}: blink");
+            assert_eq!(got.reverse, want.reverse, "{at}: reverse");
+            assert_eq!(got.hidden, want.hidden, "{at}: hidden");
+            assert_eq!(got.strikethrough, want.strikethrough, "{at}: strikethrough");
             assert_eq!(got.fg_color, want.fg_color, "{at}: foreground rgb");
             assert_eq!(got.bg_color, want.bg_color, "{at}: background rgb");
         }
@@ -855,6 +861,17 @@ fn the_output_shows_the_crop_of_each_kind_of_color() {
             "\x1b[38;2;1;2;3mrgb \x1b[44mbg\x1b[1;3;4m styled\x1b[0m\r\n",
             "\x1b[48;5;21mx\x1b[48;2;9;8;7my\x1b[102mz\x1b[0m\r\n",
             "\x1b[4munder\x1b[24m\x1b[3mital\x1b[0m done",
+        ],
+        &shapes(),
+    );
+}
+
+#[test]
+fn the_output_shows_the_crop_of_each_attribute() {
+    assert_each_shape(
+        &[
+            "\x1b[2mdim\x1b[22m \x1b[7mrev\x1b[27m \x1b[9mstrike\x1b[0m\r\n",
+            "\x1b[5mblink\x1b[25m \x1b[8mhid\x1b[28m \x1b[1;2mboth\x1b[22m\x1b[0m\r\n",
         ],
         &shapes(),
     );
