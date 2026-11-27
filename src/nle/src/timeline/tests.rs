@@ -430,6 +430,22 @@ fn a_ruler_never_holds_more_ticks_than_the_window_has_room_for() {
 }
 
 #[test]
+fn a_ruler_holds_at_most_max_ticks_and_is_empty_past_them() {
+    // At 20 pixels per second, the ruler puts one tick each second, from the
+    // tick at zero to the tick at the right edge.
+    let window = |seconds: f64| Frame {
+        pixels_per_second: 20.0,
+        start: 0.0,
+        width: seconds * 20.0,
+    };
+    let cap = usize::try_from(MAX_TICKS).unwrap();
+    let at_cap = ruler_ticks(window(99_999.0)).len();
+    assert_eq!(at_cap, cap);
+    let past_cap = ruler_ticks(window(100_000.0)).len();
+    assert_eq!(past_cap, 0);
+}
+
+#[test]
 fn a_ruler_at_the_smallest_zoom_has_no_tick_at_a_bad_place() {
     // At 1e-307 pixels per second, the label step grows past the range of
     // `f64` before it leaves room for a label. The end of the window stays
