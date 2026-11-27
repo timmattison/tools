@@ -234,5 +234,7 @@ correctly.
   H-165-2). The output of the filter writes the default color.
 - An SGR attribute that `termstate` does not model (for example SGR 6, 21, or
   53) does not show in the output.
+- An underline color (SGR 58 and 59) does not show in the output. A styled
+  underline (SGR 4:2 to 4:5) shows as a single underline.
 - A character of no width, for example a combining mark, does not show in the
   output, because `termstate` gives it no cell.

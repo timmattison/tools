@@ -50,6 +50,62 @@ const fn sgr_color_byte(param: u16) -> u8 {
     param as u8
 }
 
+/// An extended color that SGR 38, 48 or 58 names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtendedColor {
+    /// A color of the 256-color palette.
+    Indexed(u8),
+    /// A 24-bit color.
+    Rgb(u8, u8, u8),
+}
+
+/// Reads the colon form of an extended color from the subparameters after the
+/// code. `5:n` is indexed. `2:r:g:b` and `2:cs:r:g:b` are RGB, and the color
+/// space `cs` is ignored. Each other length gives no color.
+fn read_colon_color(subparams: &[u16]) -> Option<ExtendedColor> {
+    match *subparams {
+        [5, n] => Some(ExtendedColor::Indexed(sgr_color_byte(n))),
+        [2, r, g, b] | [2, _, r, g, b] => Some(ExtendedColor::Rgb(
+            sgr_color_byte(r),
+            sgr_color_byte(g),
+            sgr_color_byte(b),
+        )),
+        _ => None,
+    }
+}
+
+/// Reads the semicolon form of an extended color from the groups that follow
+/// its code, starting at index `at`. Gives the color when it is complete, and
+/// the count of groups that the arguments take. An incomplete color takes each
+/// group that is left. A mode other than 2 or 5, or no mode, takes none.
+fn read_semicolon_color(groups: &[&[u16]], at: usize) -> (Option<ExtendedColor>, usize) {
+    let value = |offset: usize| {
+        groups
+            .get(at + offset)
+            .and_then(|group| group.first())
+            .copied()
+    };
+    let left = groups.len().saturating_sub(at);
+    match value(0) {
+        Some(5) => match value(1) {
+            Some(n) => (Some(ExtendedColor::Indexed(sgr_color_byte(n))), 2),
+            None => (None, left),
+        },
+        Some(2) => match (value(1), value(2), value(3)) {
+            (Some(r), Some(g), Some(b)) => (
+                Some(ExtendedColor::Rgb(
+                    sgr_color_byte(r),
+                    sgr_color_byte(g),
+                    sgr_color_byte(b),
+                )),
+                4,
+            ),
+            _ => (None, left),
+        },
+        _ => (None, 0),
+    }
+}
+
 /// The colors of one terminal theme: the default background and foreground,
 /// and the 16 base ANSI colors.
 #[derive(Debug, Clone)]
@@ -1063,14 +1119,52 @@ impl TerminalState {
         self.cursor_y = 0;
     }
 
+    /// Turns an extended color into its RGB value and its source. An indexed
+    /// color reads the dynamic palette when the index is inside it.
+    fn resolve_extended_color(&self, color: ExtendedColor) -> ((u8, u8, u8), ColorSource) {
+        match color {
+            ExtendedColor::Indexed(index) => {
+                let rgb = self
+                    .dynamic_palette
+                    .get(usize::from(index))
+                    .copied()
+                    .unwrap_or_else(|| TerminalTheme::get_256_color(index));
+                (rgb, ColorSource::Indexed(index))
+            }
+            ExtendedColor::Rgb(r, g, b) => ((r, g, b), ColorSource::Rgb(r, g, b)),
+        }
+    }
+
+    /// Applies the groups of one SGR sequence to the pen. A group with colon
+    /// subparameters takes no other group. A group with none can take the
+    /// groups after it as the arguments of an extended color (38, 48 or 58).
     fn process_sgr_params(&mut self, params: &vte::Params) {
-        let param_vec: Vec<u16> = params.iter().flatten().copied().collect();
+        let groups: Vec<&[u16]> = params.iter().collect();
         let mut i = 0;
 
-        while i < param_vec.len() {
-            let param = param_vec[i];
+        while let Some(group) = groups.get(i) {
+            let Some((&code, subparams)) = group.split_first() else {
+                i += 1;
+                continue;
+            };
+            i += 1;
 
-            match param {
+            if !subparams.is_empty() {
+                // The colon form: this group holds its own arguments.
+                match code {
+                    4 => self.underline = subparams.first().copied() != Some(0),
+                    38 | 48 => {
+                        if let Some(color) = read_colon_color(subparams) {
+                            self.set_extended_color(code, color);
+                        }
+                    }
+                    // 58 is the underline color, which the model lacks.
+                    _ => {}
+                }
+                continue;
+            }
+
+            match code {
                 0 => {
                     // Reset
                     self.current_fg = self.theme.foreground;
@@ -1117,92 +1211,56 @@ impl TerminalState {
                 }
                 30..=37 => {
                     // Foreground colors
-                    let color_index = sgr_palette_index(param - 30);
+                    let color_index = sgr_palette_index(code - 30);
                     self.current_fg = self.theme.get_color(color_index);
                     self.current_fg_source = ColorSource::Base(color_index);
                 }
-                38
-                    // Extended foreground color
-                    if i + 1 < param_vec.len() => {
-                        match param_vec[i + 1] {
-                            5
-                                // 256-color mode: ESC[38;5;n
-                                if i + 2 < param_vec.len() => {
-                                    let color_index = sgr_color_byte(param_vec[i + 2]);
-                                    if (color_index as usize) < self.dynamic_palette.len() {
-                                        self.current_fg =
-                                            self.dynamic_palette[color_index as usize];
-                                    } else {
-                                        self.current_fg = TerminalTheme::get_256_color(color_index);
-                                    }
-                                    self.current_fg_source = ColorSource::Indexed(color_index);
-                                    i += 2; // Skip the 5 and color index
-                                }
-                            2
-                                // 24-bit RGB mode: ESC[38;2;r;g;b
-                                if i + 4 < param_vec.len() => {
-                                    let r = sgr_color_byte(param_vec[i + 2]);
-                                    let g = sgr_color_byte(param_vec[i + 3]);
-                                    let b = sgr_color_byte(param_vec[i + 4]);
-                                    self.current_fg = (r, g, b);
-                                    self.current_fg_source = ColorSource::Rgb(r, g, b);
-                                    i += 4; // Skip the 2, r, g, b
-                                }
-                            _ => {}
-                        }
-                    }
                 40..=47 => {
                     // Background colors
-                    let color_index = sgr_palette_index(param - 40);
+                    let color_index = sgr_palette_index(code - 40);
                     self.current_bg = self.theme.get_color(color_index);
                     self.current_bg_source = ColorSource::Base(color_index);
                 }
-                48
-                    // Extended background color
-                    if i + 1 < param_vec.len() => {
-                        match param_vec[i + 1] {
-                            5
-                                // 256-color mode: ESC[48;5;n
-                                if i + 2 < param_vec.len() => {
-                                    let color_index = sgr_color_byte(param_vec[i + 2]);
-                                    if (color_index as usize) < self.dynamic_palette.len() {
-                                        self.current_bg =
-                                            self.dynamic_palette[color_index as usize];
-                                    } else {
-                                        self.current_bg = TerminalTheme::get_256_color(color_index);
-                                    }
-                                    self.current_bg_source = ColorSource::Indexed(color_index);
-                                    i += 2; // Skip the 5 and color index
-                                }
-                            2
-                                // 24-bit RGB mode: ESC[48;2;r;g;b
-                                if i + 4 < param_vec.len() => {
-                                    let r = sgr_color_byte(param_vec[i + 2]);
-                                    let g = sgr_color_byte(param_vec[i + 3]);
-                                    let b = sgr_color_byte(param_vec[i + 4]);
-                                    self.current_bg = (r, g, b);
-                                    self.current_bg_source = ColorSource::Rgb(r, g, b);
-                                    i += 4; // Skip the 2, r, g, b
-                                }
-                            _ => {}
+                38 | 48 | 58 => {
+                    // Extended color, semicolon form: the next groups are its
+                    // arguments. 58 is the underline color, which the model
+                    // lacks, so it reads its arguments and changes nothing.
+                    let (color, taken) = read_semicolon_color(&groups, i);
+                    i += taken;
+                    if code != 58 {
+                        if let Some(color) = color {
+                            self.set_extended_color(code, color);
                         }
                     }
+                }
+                // Default underline color, which the model lacks.
+                59 => {}
                 90..=97 => {
                     // Bright foreground colors
-                    let color_index = sgr_palette_index(param - 90 + 8);
+                    let color_index = sgr_palette_index(code - 90 + 8);
                     self.current_fg = self.theme.get_color(color_index);
                     self.current_fg_source = ColorSource::Base(color_index);
                 }
                 100..=107 => {
                     // Bright background colors
-                    let color_index = sgr_palette_index(param - 100 + 8);
+                    let color_index = sgr_palette_index(code - 100 + 8);
                     self.current_bg = self.theme.get_color(color_index);
                     self.current_bg_source = ColorSource::Base(color_index);
                 }
                 _ => {}
             }
+        }
+    }
 
-            i += 1;
+    /// Sets the foreground (`code` 38) or the background (`code` 48) pen color.
+    fn set_extended_color(&mut self, code: u16, color: ExtendedColor) {
+        let (rgb, source) = self.resolve_extended_color(color);
+        if code == 38 {
+            self.current_fg = rgb;
+            self.current_fg_source = source;
+        } else {
+            self.current_bg = rgb;
+            self.current_bg_source = source;
         }
     }
 
