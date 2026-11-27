@@ -112,10 +112,11 @@ pub(crate) const MAX_ROWS: usize = 500;
 
 /// The grid size of the preview for `recording`, as `(columns, rows)`.
 ///
-/// Each side is at least 1, because `TerminalState::new` computes `height - 1`
-/// and a height of 0 panics. Each side is at most 500, because a corrupt file
-/// can state 65535 by 65535, which asks for billions of cells. A value from
-/// outside the program must not cause a panic or a huge allocation.
+/// Each side is at least 1, because `TerminalState::new` makes a side of 0 into
+/// 1, and the size of the preview agrees with its grid. Each side is at most
+/// 500, because a corrupt file can state 65535 by 65535, which asks for billions
+/// of cells. A value from outside the program must not cause a panic or a huge
+/// allocation.
 fn grid_size(recording: &Recording) -> (usize, usize) {
     (
         usize::from(recording.width).clamp(1, MAX_COLUMNS),

@@ -735,7 +735,13 @@ pub struct TerminalState {
 
 impl TerminalState {
     /// Creates a blank terminal of `width` columns and `height` rows.
+    ///
+    /// A dimension of 0 becomes 1. The size often comes from outside the
+    /// program, for example from the header of a recording, and the cursor
+    /// needs one cell. Thus the last column and the last row always exist.
     pub fn new(width: usize, height: usize, theme: TerminalTheme) -> Self {
+        let width = width.max(1);
+        let height = height.max(1);
         let mut grid = Vec::new();
         for _ in 0..height {
             let mut row = Vec::new();
