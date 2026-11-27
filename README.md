@@ -176,18 +176,6 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
       moving lots of files is shitty. Much simpler than `find ... -exec mv`, especially for common tasks like moving
       all files of a certain type. Collision-safe by default and handles moves across volumes (where `rename` fails).
     - To install: `cargo install --git https://github.com/timmattison/tools bm`
-- localnext
-    - Runs statically compiled NextJS applications locally. You'll need to build your code and get the magic `out`
-      directory by adding `output: 'export'` to your `next.config.mjs` file. This was written to work with [the
-      templates I was testing at the time](https://github.com/timmattison/material-ui-react-templates). Run it from
-      the project directory or from inside `out`; either way it serves the same directory. Extensionless routes
-      resolve to their `.html` file, and anything it cannot find falls back to `index.html`. The listening port is
-      derived automatically (the same algorithm as `portplz`): inside a git repository from the repository name, the
-      branch, and the current user — the project directory plays no part there — or, outside one, from the directory
-      basename and the current user; either way it stays stable across runs. Two exports from the same repository on
-      the same branch derive the same port, so the second one needs `-p/--port`. Binds `127.0.0.1`. Answers HTTP
-      byte-range requests, so an exported `<video>`/`<audio>` element seeks instead of re-downloading the whole file.
-    - To install: `cargo install --git https://github.com/timmattison/tools localnext`
 - unescapeboard
     - Waits for text with `\\"` in it to be put on the clipboard and then unescapes one level of it.
     - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
@@ -239,6 +227,8 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
       so a given project always serves on a stable port and two users on one machine don't collide; override it with
       `-p/--port`. Binds `127.0.0.1` by default — use `--bind 0.0.0.0` to expose it on the LAN. Answers HTTP
       byte-range requests, so a served `<video>`/`<audio>` file seeks instead of re-downloading from the start.
+    - `sirn` does not try `<path>.html` when `<path>` does not exist, thus a static Next.js export (the `out`
+      directory of `output: 'export'`) needs a server that does, for example `pnpm dlx serve out`.
     - To install: `cargo install --git https://github.com/timmattison/tools sirn`
 - uuidplz
     - Generates UUIDs. With no input it prints a random v4 UUID. Given a string or a file it seeds a name-based
@@ -5685,7 +5675,6 @@ Never used, old (added 90 or more days ago):
   sirn
 Never used, new (added less than 90 days ago):
   faulte (added 2026-09-18)
-  localnext (added 2026-09-04)
   occ (added 2026-08-14)
 Idle (no use in the last 180 days):
   update-aws-credentials (218 uses, last use 2025-11-13)
