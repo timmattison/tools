@@ -247,7 +247,7 @@ pub(crate) fn App() -> Element {
     let mut error = use_signal(|| None::<String>);
     let mut playhead = use_signal(|| Seconds::ZERO);
     let mut playing = use_signal(|| false);
-    let view = use_signal(View::default);
+    let mut view = use_signal(View::default);
     let rendered = use_memo(move || render_of(&loaded.read()));
 
     rsx! {
@@ -257,9 +257,11 @@ pub(crate) fn App() -> Element {
                 on_loaded: move |recording| match Document::open(recording, filters.clone()) {
                     Ok(document) => {
                         loaded.set(Some(document));
-                        // A new recording starts at time zero.
+                        // A new recording starts at time zero, with the
+                        // whole project in the timeline.
                         playhead.set(Seconds::ZERO);
                         playing.set(false);
+                        view.set(View::default());
                         error.set(None);
                     }
                     Err(failure) => error.set(Some(format!("{OPEN_FAILED_PREFIX}: {failure}"))),
