@@ -285,3 +285,45 @@ fn ctrl_u_erases_the_typed_line() {
     expected.extend(typed(&[("p", 1.0), ("w", 1.25), ("d", 1.5)]));
     assert_eq!(run(events), expected);
 }
+
+#[test]
+fn with_no_echo_ctrl_w_keeps_everything() {
+    // Mutant that was run: with more than one match, the rule takes the newest
+    // match. Then `b` goes and the test fails.
+    let events = vec![
+        out(0.0, "Password: "),
+        input(1.0, "a"),
+        input(1.25, "b"),
+        input(1.5, "\x17"),
+    ];
+    assert_eq!(run(events.clone()), events);
+}
+
+#[test]
+fn a_ctrl_w_that_erases_text_no_typed_key_wrote_stays() {
+    // Mutant that was run: with no match, the rule removes the unit. Then the
+    // key and its echo go and the test fails.
+    let events = vec![
+        out(0.0, "$ ls foo"),
+        input(1.0, "\x17"),
+        out(1.0, "\x08\x08\x08   \x08\x08\x08"),
+    ];
+    assert_eq!(run(events.clone()), events);
+}
+
+#[test]
+fn a_ctrl_w_that_changes_nothing_goes() {
+    // Mutant that was run: with no match, the rule never removes. Then the key
+    // and its output stay and the test fails.
+    let events = vec![
+        out(0.0, "$ "),
+        input(1.0, "\x17"),
+        out(1.0, "\x07"),
+        input(2.0, "l"),
+        out(2.0, "l"),
+    ];
+    assert_eq!(
+        run(events),
+        vec![out(0.0, "$ "), input(1.0, "l"), out(1.0, "l")]
+    );
+}
