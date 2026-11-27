@@ -484,6 +484,7 @@ fn RedactionPanel(
                 input {
                     r#type: "text",
                     value: "{pattern}",
+                    disabled: find() != FIND_TEXT && find() != FIND_REGEX,
                     oninput: move |event| pattern.set(event.value()),
                 }
             }
@@ -502,6 +503,7 @@ fn RedactionPanel(
                 input {
                     r#type: "text",
                     value: "{replacement}",
+                    disabled: replace() != REPLACE_TEXT,
                     oninput: move |event| replacement.set(event.value()),
                 }
             }
