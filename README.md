@@ -5561,7 +5561,7 @@ atuin search --filter-mode global --include-duplicates --print0 --timezone +0 \
 
 It does not use `atuin history list`. That command obeys `filter_mode` of your atuin config, and a config with `filter_mode = "session"` gives one row. The search above always gives every row. The times are in UTC.
 
-`wdid` reads the aliases and the functions from your interactive shell (`$SHELL`, zsh or bash). It starts `$SHELL -i -c` with a script that prints them between two unique markers, so text from your startup files does no damage. The shell has 30 seconds. `--no-shell` skips this step.
+`wdid` reads the aliases and the functions from your interactive shell (`$SHELL`, zsh or bash). It starts `$SHELL -i -c` with a script that prints them between two unique markers, so text from your startup files does no damage. The shell has 30 seconds. `--no-shell` skips this step. zsh starts with a temporary `ZDOTDIR` that records the file of each alias, and your startup files run as before (see [The origin and my definitions](#the-origin-and-my-definitions)).
 
 ### What counts
 
@@ -5695,12 +5695,17 @@ The excerpt leaves out rows of the table and entries of the groups. The run was 
 
 ### wdid defs: the aliases and the functions
 
-`wdid defs` reports on each alias and each function of your interactive shell. Use it to find the definitions that you use, the definitions that you can remove, and the definitions that you forgot. The tools report shows an alias or a function only through a tool of the workspace that it runs. `wdid defs` shows each definition, also an alias that runs `git` and a definition with zero uses.
+`wdid defs` reports on each alias and each function of your interactive shell. Use it to find the definitions that you use, the definitions that you can remove, and the definitions that you forgot. The tools report shows an alias or a function only through a tool of the workspace that it runs. `wdid defs` shows each of your definitions, also an alias that runs `git` and a definition with zero uses.
+
+A definition that the shell runs without a typed name, for example a `precmd` hook or the function of a widget that a key starts, gets the state "runs without typing" with its reason. It does not show in "Never used". See [What runs without typing](#what-runs-without-typing).
+
+Each definition gets its origin: the file that defined it. By default, the text report shows only your own definitions. A shell with oh-my-zsh has hundreds of aliases and functions from its plugins and its `lib` files, and those are not yours. `--all` shows each definition, and groups the others by the file that defined them.
 
 `wdid defs` reads the history and the shell definitions as the tools report does. It needs no cargo workspace, and it starts no `cargo` process and no `git` process. Thus it runs in any directory.
 
 ```bash
 wdid defs
+wdid defs --all
 wdid defs --json
 wdid defs --since 2026-01-01 --idle-days 90
 ```
@@ -5718,13 +5723,73 @@ A use through other definitions names the definition that you typed. With `a` th
 
 - An alias in the body of a function. zsh and bash expand each alias in a function body when they read the definition. Thus the body that `wdid` gets holds the value of the alias, not its name, and the alias gets no use from the function.
 - A name in quoted text, a row with exit code 127, and a line that does not parse, as in the tools report.
-- A function whose name starts with `_`. The completion system makes these functions by the hundred, and nobody types them. The report does not show them. A call through such a function still counts: with `f() { _helper }` and `_helper() { g }`, a typed `f` is a use of `g` through `f`.
+- A function whose name starts with `_`. The completion system makes these functions by the hundred, and nobody types them. Only `--all` shows them. A call through such a function still counts: with `f() { _helper }` and `_helper() { g }`, a typed `f` is a use of `g` through `f`.
+
+#### What runs without typing
+
+zsh and bash run some definitions when nobody types their names. The history has no row for these runs. Thus `wdid` asks the shell for each such start. Each definition that a start reaches gets the state "runs without typing" and its reasons. Such a definition does not show in "Never used" or in "Idle", whatever its uses. Its typed uses still count in the table.
+
+The starts of zsh:
+
+- **A hook function.** The functions `precmd`, `preexec`, `chpwd`, `periodic`, `zshaddhistory`, and `zshexit`, and each name in the arrays `precmd_functions` thru `zshexit_functions`. `add-zsh-hook` fills these arrays. The reason is the hook, for example `precmd hook`.
+- **A trap function.** `TRAPINT`, `TRAPEXIT`, and each other `TRAP` name of a signal in `$signals`. The reason is the signal, for example `INT trap`. A function such as `TRAPPED` is not a trap, because `PED` is not a signal.
+- **The handler of a command that zsh does not find**, `command_not_found_handler`. The reason is `command not found`.
+- **The function of a widget that a key starts.** `zle -lL` gives the function of each widget, and `bindkey -M <keymap> -L` gives the keys of each keymap. The reason is the widget and its keys, for example `widget atuin-search, key ^R`. A key in two keymaps is one key. The space key shows as `" "`.
+- **The function of a special widget**, which zle runs at an event of its own: `zle-line-init`, `zle-line-finish`, `zle-keymap-select`, `zle-isearch-exit`, `zle-isearch-update`, `zle-line-pre-redraw`, and `zle-history-line-set`. A widget that `add-zle-hook-widget` adds to one of them runs at the same event. The reason is the special widget, for example `widget zle-line-init`.
+
+The starts of bash:
+
+- **`PROMPT_COMMAND`**, a text or an array. The reason is `PROMPT_COMMAND`.
+- **The code of a trap**, from `trap -p`. The reason is the signal without `SIG`, for example `EXIT trap`. `wdid` lists the traps before it removes the `DEBUG` trap for its own script.
+- **The command of a `bind -x` key**, from `bind -X`. The reason is the key, for example `bind -x, key \C-x\C-r`. bash has `bind -X` from version 4.3 on. The bash of macOS is 3.2, thus it gives no key.
+
+`wdid` reads the code of a bash start as a typed line. Each function and each alias that the code names runs, also a function that such an alias calls.
+
+Each function that a start runs passes its reason to each function that it calls, to any depth. The reason then names the definition that the start runs, for example `precmd hook, through omz_termsupport_precmd`. The walk visits each function one time, thus a cycle stops. A function whose name starts with `_` passes its reason too, also when the report does not show it.
+
+A widget function that no key starts gets the reason `widget, no key`. Only a typed `zle` call or `execute-named-cmd` starts it. Thus it keeps the state that its uses give, and it can show in "Never used" with that reason.
+
+`wdid` does not find these starts:
+
+- A function in a prompt string, for example `$(git_prompt_info)` in `PROMPT` with `prompt_subst`.
+- A zsh trap that `trap 'code' SIGNAL` sets. Only a `TRAP` function counts in zsh.
+- The bash function `command_not_found_handle`.
+
+The groups of a run with a `precmd` hook, its callee, a widget with a key, and a widget with no key:
+
+```text
+Never used:
+  lonelyfn (function, widget, no key)
+Idle (no use in the last 180 days): none
+Runs without typing:
+  precmd (function, precmd hook)
+  prompt_helper (function, precmd hook, through precmd)
+  searchfn (function, widget history-search, key ^R)
+```
+
+#### The origin and my definitions
+
+The origin of an alias is `file:line`. The origin of a function is its file.
+
+- **A zsh function.** zsh keeps the file of each function in `$functions_source`. A function from an `eval` gets the file that holds the `eval`. A function from `source <(…)` gets `/dev/fd/N` on macOS and `/proc/self/fd/N` on Linux. `wdid` loads each autoloaded function first, and a loaded function gets its file too. For a function whose name starts with `_`, `autoload -Ur` finds the file and loads no body.
+- **A zsh alias.** zsh keeps no origin for an alias. Thus `wdid` starts zsh with `ZDOTDIR` set to a new temporary directory. The `.zshenv` of that directory defines a shell function named `alias`. For each definition, the function records the file and the line of the call (`$funcfiletrace`), and then it runs `builtin alias "$@"`. Then the file sets `ZDOTDIR` back to its value in your environment, or removes it when your environment has none, and it sources your real `.zshenv`. zsh then reads your other startup files from your real `ZDOTDIR`, also when your `.zshenv` changes `ZDOTDIR`. Before `wdid` lists the aliases, it removes the function. The temporary directory has a unique name, and `wdid` removes it after the run, also after an error or a timeout.
+- **An alias from `builtin alias`.** This command goes around the function, thus its origin is unknown.
+- **bash.** `shopt -s extdebug` and `declare -F` give the file of each function. bash keeps no origin for an alias, thus the origin of each bash alias is unknown.
+
+An origin that is not an absolute path is unknown, for example `(eval)`, or `environment` for a bash function from the environment.
+
+A definition is mine when its origin is unknown, when its file is under `$ZSH_CUSTOM`, or when its file is under `$HOME` and not under the oh-my-zsh directory (`$ZSH`). `wdid` reads `HOME`, `ZSH`, and `ZSH_CUSTOM` from the shell, after your startup files ran. Thus:
+
+- A definition in `~/.zshrc`, in a file under `$HOME` that `~/.zshrc` sources, or in `$ZSH_CUSTOM` is mine.
+- A definition that an `eval` in `~/.zshrc` makes is mine, for example a function from `eval "$(tsm shell-init)"`. Your file chose to run it.
+- A definition with an unknown origin is mine, so that the default report never hides it. zsh itself defines the aliases `run-help` and `which-command`, which have no file.
+- A definition from `$ZSH`, from `/usr/share/zsh`, from `/dev/fd` or `/proc/self/fd`, or from a different file outside `$HOME` is not mine. A definition from `source <(tsm shell-init)` is in `/dev/fd` on macOS and in `/proc/self/fd` on Linux, thus it is not mine.
 
 #### The report
 
-Two header lines start the report. The first line gives the history rows, the rows with exit code 127, and the rows that did not parse. The second line gives the shell, the number of aliases, and the number of functions.
+Three header lines start the report. The first line gives the history rows, the rows with exit code 127, and the rows that did not parse. The second line gives the shell, the number of aliases, and the number of functions. The third line gives the number of my definitions and the number of the others.
 
-The table has one row for each definition, the most used first:
+The table has one row for each of my definitions, the most used first:
 
 - `Name`: the name. A suffix alias has its marker (`*.md`).
 - `Kind`: `alias`, `global alias`, `suffix alias`, or `function`.
@@ -5732,51 +5797,91 @@ The table has one row for each definition, the most used first:
 - `Typed`: the uses where you typed the name.
 - `Through`: the definitions that gave the other uses, each with its count. When `COLUMNS` or the terminal gives a width, a cell longer than 30 columns wraps. With no width, the cell is one line.
 - `First use` and `Last use`: the dates of the first and the last counted use.
+- `Origin`: the origin, with `~` for your home directory: `file:line` for an alias, the file for a function, or `-` when the origin is unknown.
 - `Definition`: the value of an alias, or the first line of a function body. The cell is one line. When `COLUMNS` or the terminal gives a width, `wdid` cuts the cell to fit that width and ends it with `…`.
 
 An alias and a function can have the same name. They are two rows.
 
-Two groups follow the table:
+With `--all`, the table of my definitions gets the heading `Mine` and a count. After it, the report has one table for each file that defined the others, in path order. The heading of each table is the file and its count of definitions, for example `~/.oh-my-zsh/plugins/git/git.plugin.zsh: 208 definitions`. The tables also hold the functions whose names start with `_`. Each completion function has a file of its own, thus a shell with the completion system gives one table for each completion function.
 
-- **Never used.** The definitions with zero uses, each with its kind.
-- **Idle.** The definitions whose last use is older than `--idle-days` days, each with its kind, its uses, and the date of its last use.
+Three groups follow the tables:
+
+- **Never used.** The definitions with zero uses, each with its kind, but not a definition that runs without typing.
+- **Idle.** The definitions whose last use is older than `--idle-days` days, each with its kind, its uses, and the date of its last use, but not a definition that runs without typing.
+- **Runs without typing.** The definitions that the shell runs without a typed name, each with its kind and its reasons. `; ` divides two reasons. See [What runs without typing](#what-runs-without-typing).
+
+A widget function that no key starts ends its entry in "Never used" or in "Idle" with its reason, `widget, no key`.
+
+Without `--all`, the three groups hold only my definitions. With `--all`, they hold each definition.
 
 #### Options of wdid defs
 
 - `--since <YYYY-MM-DD>`: Count only the rows from this date on. A row on this date counts.
-- `--json`: Print the report as one JSON document. `definitions` holds each definition, also the ones with zero uses, and its `definition` is never cut. `never_used` and `idle` hold the name and the kind of each entry of the two groups.
+- `--all`: Show each definition. The text report also shows the others, grouped by the file that defined them, and the functions whose names start with `_`.
+- `--json`: Print the report as one JSON document. `definitions` holds each definition, also the ones with zero uses and the ones that are not mine, and its `definition` is never cut. Each entry has `origin` and `mine`. `origin` holds `file` and `line`, or it is `null` when the origin is unknown. A function has no line, thus its `line` is `null`. `shell.mine` and `shell.others` give the two counts. Each entry has `reasons`, the text of each of its reasons as the text report writes it. The list is empty for most entries. `never_used`, `idle`, and `runs_without_typing` hold the name and the kind of each entry of the three groups, also the entries that are not mine. With `--all`, the document also holds the functions whose names start with `_`.
 - `--idle-days <DAYS>`: A definition is idle when its last use is older than this. Defaults to 180.
 
 The options of the tools report (`--repo`, `--no-shell`, `--unparsed`, `--new-days`) do not apply. An option of the tools report before `defs` is a usage error.
 
 #### Example of wdid defs
 
-A run on a small history. zsh itself defines `run-help` and `which-command`.
+A run on a small history, with a stand-in of oh-my-zsh in `~/.oh-my-zsh`. Its git plugin defines `gst` and `gco`. zsh itself defines `run-help` and `which-command`.
 
 ```text
-History: 12 rows. 1 not counted (exit 127). 0 did not parse.
-Shell: /bin/zsh, 7 aliases, 3 functions (0 did not parse).
+History: 14 rows. 1 not counted (exit 127). 0 did not parse.
+Shell: /bin/zsh, 9 aliases, 3 functions (0 did not parse).
+Definitions: 10 mine, 2 others (--all shows the others).
 
-┌───────────────┬──────────────┬──────┬───────┬─────────┬────────────┬────────────┬─────────────────────────┐
-│ Name          ┆ Kind         ┆ Uses ┆ Typed ┆ Through ┆ First use  ┆ Last use   ┆ Definition              │
-╞═══════════════╪══════════════╪══════╪═══════╪═════════╪════════════╪════════════╪═════════════════════════╡
-│ wt            ┆ alias        ┆    4 ┆     1 ┆ wtf 3   ┆ 2026-11-23 ┆ 2026-11-25 ┆ cwt                     │
-│ gs            ┆ alias        ┆    3 ┆     3 ┆         ┆ 2026-11-20 ┆ 2026-11-22 ┆ git status              │
-│ wtf           ┆ alias        ┆    3 ┆     3 ┆         ┆ 2026-11-23 ┆ 2026-11-25 ┆ wt -f                   │
-│ *.md          ┆ suffix alias ┆    1 ┆     1 ┆         ┆ 2026-11-24 ┆ 2026-11-24 ┆ glow                    │
-│ G             ┆ global alias ┆    1 ┆     1 ┆         ┆ 2026-11-23 ┆ 2026-11-23 ┆ | grep                  │
-│ helper        ┆ function     ┆    1 ┆     0 ┆ myf 1   ┆ 2026-11-25 ┆ 2026-11-25 ┆ echo "helping $1"       │
-│ myf           ┆ function     ┆    1 ┆     1 ┆         ┆ 2026-11-25 ┆ 2026-11-25 ┆ helper "$@"             │
-│ oldfn         ┆ function     ┆    1 ┆     1 ┆         ┆ 2026-03-21 ┆ 2026-03-21 ┆ tar czf backup.tgz "$@" │
-│ run-help      ┆ alias        ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ man                     │
-│ which-command ┆ alias        ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ whence                  │
-└───────────────┴──────────────┴──────┴───────┴─────────┴────────────┴────────────┴─────────────────────────┘
+┌───────────────┬──────────────┬──────┬───────┬─────────┬────────────┬────────────┬────────────┬─────────────────────────┐
+│ Name          ┆ Kind         ┆ Uses ┆ Typed ┆ Through ┆ First use  ┆ Last use   ┆ Origin     ┆ Definition              │
+╞═══════════════╪══════════════╪══════╪═══════╪═════════╪════════════╪════════════╪════════════╪═════════════════════════╡
+│ wt            ┆ alias        ┆    4 ┆     1 ┆ wtf 3   ┆ 2026-11-23 ┆ 2026-11-25 ┆ ~/.zshrc:2 ┆ cwt                     │
+│ gs            ┆ alias        ┆    3 ┆     3 ┆         ┆ 2026-11-20 ┆ 2026-11-22 ┆ ~/.zshrc:3 ┆ git status              │
+│ wtf           ┆ alias        ┆    3 ┆     3 ┆         ┆ 2026-11-23 ┆ 2026-11-25 ┆ ~/.zshrc:4 ┆ wt -f                   │
+│ *.md          ┆ suffix alias ┆    1 ┆     1 ┆         ┆ 2026-11-24 ┆ 2026-11-24 ┆ ~/.zshrc:5 ┆ glow                    │
+│ G             ┆ global alias ┆    1 ┆     1 ┆         ┆ 2026-11-23 ┆ 2026-11-23 ┆ ~/.zshrc:6 ┆ | grep                  │
+│ helper        ┆ function     ┆    1 ┆     0 ┆ myf 1   ┆ 2026-11-25 ┆ 2026-11-25 ┆ ~/.zshrc   ┆ echo "helping $1"       │
+│ myf           ┆ function     ┆    1 ┆     1 ┆         ┆ 2026-11-25 ┆ 2026-11-25 ┆ ~/.zshrc   ┆ helper "$@"             │
+│ oldfn         ┆ function     ┆    1 ┆     1 ┆         ┆ 2026-03-21 ┆ 2026-03-21 ┆ ~/.zshrc   ┆ tar czf backup.tgz "$@" │
+│ run-help      ┆ alias        ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ -          ┆ man                     │
+│ which-command ┆ alias        ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ -          ┆ whence                  │
+└───────────────┴──────────────┴──────┴───────┴─────────┴────────────┴────────────┴────────────┴─────────────────────────┘
 
 Never used:
   run-help (alias)
   which-command (alias)
 Idle (no use in the last 180 days):
   oldfn (function, 1 use, last use 2026-03-21)
+Runs without typing: none
+```
+
+The same run with `--all` adds a table for the git plugin after the table of my definitions. This excerpt leaves out rows of the first table:
+
+```text
+Definitions: 10 mine, 2 others.
+
+Mine: 10 definitions
+┌───────────────┬──────────────┬──────┬───────┬─────────┬────────────┬────────────┬────────────┬─────────────────────────┐
+│ Name          ┆ Kind         ┆ Uses ┆ Typed ┆ Through ┆ First use  ┆ Last use   ┆ Origin     ┆ Definition              │
+╞═══════════════╪══════════════╪══════╪═══════╪═════════╪════════════╪════════════╪════════════╪═════════════════════════╡
+│ wt            ┆ alias        ┆    4 ┆     1 ┆ wtf 3   ┆ 2026-11-23 ┆ 2026-11-25 ┆ ~/.zshrc:2 ┆ cwt                     │
+└───────────────┴──────────────┴──────┴───────┴─────────┴────────────┴────────────┴────────────┴─────────────────────────┘
+
+~/.oh-my-zsh/plugins/git/git.plugin.zsh: 2 definitions
+┌──────┬───────┬──────┬───────┬─────────┬────────────┬────────────┬───────────────────────────────────────────┬──────────────┐
+│ Name ┆ Kind  ┆ Uses ┆ Typed ┆ Through ┆ First use  ┆ Last use   ┆ Origin                                    ┆ Definition   │
+╞══════╪═══════╪══════╪═══════╪═════════╪════════════╪════════════╪═══════════════════════════════════════════╪══════════════╡
+│ gst  ┆ alias ┆    2 ┆     2 ┆         ┆ 2026-11-26 ┆ 2026-11-26 ┆ ~/.oh-my-zsh/plugins/git/git.plugin.zsh:1 ┆ git status   │
+│ gco  ┆ alias ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ ~/.oh-my-zsh/plugins/git/git.plugin.zsh:2 ┆ git checkout │
+└──────┴───────┴──────┴───────┴─────────┴────────────┴────────────┴───────────────────────────────────────────┴──────────────┘
+
+Never used:
+  gco (alias)
+  run-help (alias)
+  which-command (alias)
+Idle (no use in the last 180 days):
+  oldfn (function, 1 use, last use 2026-03-21)
+Runs without typing: none
 ```
 
 One entry of the `--json` document:
@@ -5791,11 +5896,14 @@ One entry of the `--json` document:
   "through": [{ "name": "wtf", "uses": 3 }],
   "first_use": "2026-11-23",
   "last_use": "2026-11-25",
-  "classification": "used"
+  "classification": "used",
+  "origin": { "file": "/Users/me/.zshrc", "line": 2 },
+  "mine": true,
+  "reasons": []
 }
 ```
 
-`kind` is `alias`, `global_alias`, `suffix_alias`, or `function`. `classification` is `used`, `idle`, or `never_used`.
+`kind` is `alias`, `global_alias`, `suffix_alias`, or `function`. `classification` is `used`, `idle`, `never_used`, or `runs_without_typing`.
 
 ### Install
 
@@ -6382,8 +6490,43 @@ speed changes above it. The panel shows the duration of the edited recording.
 The panel refuses a change after which the recording does not render, and it
 shows the reason in the banner.
 
-The color scheme panel under the speed panel plays the recording in the colors
-of another theme. Pick a **Target theme** and the options, then click
+The redaction panel under the speed panel finds text on the whole timeline and
+replaces it, for example to remove API keys, tokens, hostnames, or user names
+from a recording. **Find** takes an exact text, a regular expression, or a
+preset: email addresses, IP addresses, AWS keys, tokens, or hostnames.
+**Replace with** takes asterisks or blocks (`█`), one for each terminal column
+of the match, or a text. **Events** selects the output events, or the output
+and the input events. Then click **Apply Redaction**. Each redaction gets a row
+with a **Remove** button.
+
+A redaction does not change the time of an event, and it knows escape
+sequences:
+
+- A match can cross events and escape sequences, because the terminal can
+  split a word across writes, or color part of it.
+- An escape sequence never changes, and a search never matches inside one. A
+  search for `31` does not change the color code `ESC [ 31 m`.
+- The text of an OSC sequence, for example a window title, is searched, but a
+  match never crosses from the visible text into an OSC sequence. The text
+  starts after the number of the sequence and its `;`, thus a search for `0`
+  does not change the title sequence `ESC ] 0 ;`. Image data (DCS and APC
+  strings) is not searched. The clipboard data of OSC 52 is not searched
+  either, because it is base64, and a text search cannot read it.
+- The iTerm2 sequence OSC 1337 holds a command `Key=value`. The value is
+  searched, thus a redaction of a user name also changes the host and the
+  directory that the shell integration writes as `RemoteHost=user@host` and
+  `CurrentDir=/Users/user`. The key is not searched. The base64 value of a
+  key such as `File` (an image) or `SetUserVar` is not searched.
+- A mask keeps the control characters of a match, for example a line feed, so
+  the layout of the screen stays the same.
+- In a regular expression, a capture group named `redact` replaces only its
+  own text. The AWS key preset uses it to keep the name of a key visible, and
+  the token preset uses it to keep the word `Bearer`.
+
+The timeline (issue #150) does not show where the redactions are yet.
+
+The color scheme panel under the redaction panel plays the recording in the
+colors of another theme. Pick a **Target theme** and the options, then click
 **Apply Color Scheme**. Leave both times empty for the whole timeline, or type
 the start and the end of a range in seconds. Each color scheme gets a row with
 a **Remove** button. See [The color scheme filter](#the-color-scheme-filter)
@@ -6420,6 +6563,9 @@ The editing engine of the crate has five parts:
     [The color scheme filter](#the-color-scheme-filter) below gives its
     options.
   - `time-dilation` (`speed`, issue #153): plays its region faster or slower.
+  - `redaction` (`find`, `replace`, `input`, issue #156): replaces text in the
+    data of the events and keeps each time. The paragraphs on the redaction
+    panel above give its rules.
   - `typing-speed` (`chars_per_second`, `pause`, `jitter`, issue #155): plays
     each burst of typing at one rate. The paragraph on this filter below gives
     its rules.
@@ -6436,7 +6582,7 @@ The editing engine of the crate has five parts:
   The filters of issue #154 parse their options as a Rust type, so the render
   refuses a missing option, a value of the wrong type, and a key that the
   filter does not know. The window cannot add them yet (issue #150). Issues
-  #152, #156 to #165, and #167 add more filters.
+  #152, #157 to #165, and #167 add more filters.
 
   The two in-place filters read the escape sequences with one reader, and one
   splicer (`filters/splice.rs`) puts each rewritten sequence back into the

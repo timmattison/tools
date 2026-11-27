@@ -174,11 +174,13 @@ h3 {
 }
 
 .speed-panel,
+.redaction-panel,
 .color-scheme-panel {
   margin-top: 16px;
 }
 
 .speed-hint,
+.redaction-hint,
 .color-scheme-hint {
   color: #6c7086;
   font-size: 12px;
@@ -186,6 +188,7 @@ h3 {
 }
 
 .speed-field,
+.redaction-field,
 .color-scheme-field {
   display: flex;
   flex-direction: column;
@@ -196,6 +199,8 @@ h3 {
 }
 
 .speed-field input,
+.redaction-field input,
+.redaction-field select,
 .color-scheme-field select {
   width: 100%;
   background: #1e1e2e;
@@ -207,6 +212,7 @@ h3 {
 }
 
 .speed-row,
+.redaction-row,
 .color-scheme-row {
   display: flex;
   justify-content: space-between;
