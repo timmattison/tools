@@ -958,6 +958,35 @@ fn a_wrap_on_the_last_row_scrolls_the_screen() {
 }
 
 #[test]
+fn a_wrap_on_the_last_row_below_the_scrolling_region_does_not_scroll() {
+    // The scrolling region is rows 1 to 3 of 6. On row 6, below the region,
+    // xterm does not scroll: the wrap stays on row 6, thus characters 11 and
+    // 12 go to columns 1 and 2 of row 6.
+    let state = feed_on(10, 6, "1\r\n2\r\n3\x1b[1;3r\x1b[6;1Habcdefghijkl");
+
+    assert_eq!(row_text(&state, 0), "1");
+    assert_eq!(row_text(&state, 1), "2");
+    assert_eq!(row_text(&state, 2), "3");
+    assert_eq!(row_text(&state, 5), "klcdefghij");
+    assert_eq!(state.get_cursor_position(), (2, 5));
+}
+
+#[test]
+fn lf_ind_and_nel_below_the_scrolling_region_stop_at_the_last_row() {
+    // The scrolling region is rows 1 to 3 of 6, and the cursor starts on row
+    // 5, column 4. Two moves down end on row 6, and nothing scrolls.
+    for (move_down, column) in [("\n", 3), ("\x1bD", 3), ("\x1bE", 0)] {
+        let text = format!("1\r\n2\r\n3\x1b[1;3r\x1b[5;4H{move_down}{move_down}");
+        let state = feed_on(10, 6, &text);
+
+        assert_eq!(row_text(&state, 0), "1", "{move_down:?}");
+        assert_eq!(row_text(&state, 1), "2", "{move_down:?}");
+        assert_eq!(row_text(&state, 2), "3", "{move_down:?}");
+        assert_eq!(state.get_cursor_position(), (column, 5), "{move_down:?}");
+    }
+}
+
+#[test]
 fn with_autowrap_off_each_character_after_the_last_column_overwrites_it() {
     let state = feed_on(5, 3, "\x1b[?7labcdefg");
 
