@@ -401,8 +401,8 @@ impl Clone for TerminalState {
             underline: self.underline,
             parser: replayed_parser(&self.pending),
             pending: self.pending.clone(),
-            saved_cursor_x: self.saved_cursor_x,
-            saved_cursor_y: self.saved_cursor_y,
+            saved: self.saved,
+            alt_screen: self.alt_screen,
             scroll_top: self.scroll_top,
             scroll_bottom: self.scroll_bottom,
             use_acs: self.use_acs,
@@ -427,6 +427,20 @@ impl Default for Cell {
             underline: false,
         }
     }
+}
+
+/// The state that DECSC saves in xterm: the cursor position, the colors, the
+/// text flags, and the character set. DECRC restores all of them.
+#[derive(Clone, Copy)]
+struct SavedCursor {
+    x: usize,
+    y: usize,
+    fg: (u8, u8, u8),
+    bg: (u8, u8, u8),
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    use_acs: bool,
 }
 
 /// The state of a virtual terminal: the screen grid, the cursor, the current
@@ -458,9 +472,11 @@ pub struct TerminalState {
     // The bytes fed since the parser was last settled: in the ground state with
     // no unfinished sequence. Empty means the parser equals `Parser::new()`.
     pending: Vec<u8>,
-    // Saved cursor position for ESC 7/8
-    saved_cursor_x: usize,
-    saved_cursor_y: usize,
+    // The saved cursor states. Slot 0 is for the normal screen.
+    // Slot 1 is for the alternate screen.
+    saved: [SavedCursor; 2],
+    // Whether the alternate screen is on. The terminal keeps one grid.
+    alt_screen: bool,
     // Scrolling region
     scroll_top: usize,
     scroll_bottom: usize,
@@ -502,6 +518,17 @@ impl TerminalState {
             dynamic_palette.push(TerminalTheme::get_256_color(i));
         }
 
+        let initial_cursor = SavedCursor {
+            x: 0,
+            y: 0,
+            fg: theme.foreground,
+            bg: theme.background,
+            bold: false,
+            italic: false,
+            underline: false,
+            use_acs: false,
+        };
+
         Self {
             grid,
             cursor_x: 0,
@@ -516,8 +543,8 @@ impl TerminalState {
             theme,
             parser: Parser::new(),
             pending: Vec::new(),
-            saved_cursor_x: 0,
-            saved_cursor_y: 0,
+            saved: [initial_cursor; 2],
+            alt_screen: false,
             scroll_top: 0,
             scroll_bottom: height - 1,
             use_acs: false,
@@ -686,6 +713,39 @@ fn is_light_color_terminal(color: (u8, u8, u8)) -> bool {
 }
 
 impl TerminalState {
+    /// Returns the state that DECSC saves: the cursor, the attributes, and the
+    /// character set.
+    fn cursor_state(&self) -> SavedCursor {
+        SavedCursor {
+            x: self.cursor_x,
+            y: self.cursor_y,
+            fg: self.current_fg,
+            bg: self.current_bg,
+            bold: self.bold,
+            italic: self.italic,
+            underline: self.underline,
+            use_acs: self.use_acs,
+        }
+    }
+
+    /// Saves the cursor state into the slot of the current screen.
+    fn save_cursor(&mut self) {
+        self.saved[usize::from(self.alt_screen)] = self.cursor_state();
+    }
+
+    /// Restores the cursor state from the slot of the current screen.
+    fn restore_cursor(&mut self) {
+        let saved = self.saved[usize::from(self.alt_screen)];
+        self.cursor_x = saved.x;
+        self.cursor_y = saved.y;
+        self.current_fg = saved.fg;
+        self.current_bg = saved.bg;
+        self.bold = saved.bold;
+        self.italic = saved.italic;
+        self.underline = saved.underline;
+        self.use_acs = saved.use_acs;
+    }
+
     fn put_char(&mut self, ch: char) {
         // Convert ACS characters to Unicode box drawing if needed
         let display_char = if self.use_acs {
@@ -1091,10 +1151,14 @@ impl TerminalState {
                         match *param {
                             25 => self.cursor_visible = true,
                             1049 => {
-                                self.saved_cursor_x = self.cursor_x;
-                                self.saved_cursor_y = self.cursor_y;
+                                // Save into the slot of the current screen, then switch
+                                self.save_cursor();
+                                self.alt_screen = true;
                             }
-                            // 47, 1047, 1000, 1002, 1006, 2004: acknowledged but not rendered
+                            // The one grid stays. These modes only switch the save slot.
+                            47 | 1047 => self.alt_screen = true,
+                            1048 => self.save_cursor(),
+                            // 1000, 1002, 1006, 2004: acknowledged but not rendered
                             _ => {}
                         }
                     }
@@ -1105,9 +1169,12 @@ impl TerminalState {
                         match *param {
                             25 => self.cursor_visible = false,
                             1049 => {
-                                self.cursor_x = self.saved_cursor_x;
-                                self.cursor_y = self.saved_cursor_y;
+                                // Switch to the normal screen, then restore its slot
+                                self.alt_screen = false;
+                                self.restore_cursor();
                             }
+                            47 | 1047 => self.alt_screen = false,
+                            1048 => self.restore_cursor(),
                             _ => {}
                         }
                     }
@@ -1282,14 +1349,12 @@ impl TerminalState {
                 // We're not responding, just consuming it
             }
             's' => {
-                // Save cursor position (ANSI.SYS style) - similar to ESC 7
-                self.saved_cursor_x = self.cursor_x;
-                self.saved_cursor_y = self.cursor_y;
+                // Save cursor (ANSI.SYS style) - the same as ESC 7
+                self.save_cursor();
             }
             'u' => {
-                // Restore cursor position (ANSI.SYS style) - similar to ESC 8
-                self.cursor_x = self.saved_cursor_x;
-                self.cursor_y = self.saved_cursor_y;
+                // Restore cursor (ANSI.SYS style) - the same as ESC 8
+                self.restore_cursor();
             }
             'S' => {
                 // Scroll up
@@ -1421,14 +1486,12 @@ impl TerminalState {
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
         match byte {
             b'7' => {
-                // Save cursor position (DECSC)
-                self.saved_cursor_x = self.cursor_x;
-                self.saved_cursor_y = self.cursor_y;
+                // Save the cursor, the attributes, and the character set (DECSC)
+                self.save_cursor();
             }
             b'8' => {
-                // Restore cursor position (DECRC)
-                self.cursor_x = self.saved_cursor_x;
-                self.cursor_y = self.saved_cursor_y;
+                // Restore the cursor, the attributes, and the character set (DECRC)
+                self.restore_cursor();
             }
             b'D' => {
                 // Index (IND) - move cursor down, scroll if at bottom
@@ -1483,6 +1546,8 @@ impl TerminalState {
                 self.underline = false;
                 self.cursor_visible = true;
                 self.use_acs = false;
+                self.alt_screen = false;
+                self.saved = [self.cursor_state(); 2];
             }
             _ => {
                 // Ignore unhandled escape sequences
