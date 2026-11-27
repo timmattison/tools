@@ -11,7 +11,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use super::{Kind, Usage};
-use crate::command_words::{simple_command, split_words, AliasDefinition, AliasKind};
+use crate::command_words::{
+    parse_line, simple_command, split_words, AliasDefinition, AliasKind, Aliases, WrapperRun,
+    COMMAND,
+};
 use crate::origin::Origin;
 use crate::shell::Definitions;
 
@@ -264,6 +267,46 @@ fn alias_hides_function(entries: &Entries<'_>) -> Vec<Finding> {
         .collect()
 }
 
+/// Says if the body of a function runs the program `name` through `command`,
+/// which skips the function and runs the program. Such a function wraps the
+/// program, and hides nothing.
+fn runs_through_command(body: &str, name: &str) -> bool {
+    let wrapped = WrapperRun {
+        wrapper: COMMAND.to_string(),
+        word: name.to_string(),
+    };
+    parse_line(body, &Aliases::new()).is_some_and(|line| line.wrapped.contains(&wrapped))
+}
+
+/// Finds each regular alias, each global alias, and each function that has the
+/// name of a program. An alias that starts with its own name, and a function
+/// that runs the program through `command`, wrap the program and are no
+/// finding.
+fn hides_program(definitions: &Definitions, entries: &Entries<'_>) -> Vec<Finding> {
+    let aliases = entries
+        .aliases
+        .iter()
+        .filter(|(alias, _)| alias.kind != AliasKind::Suffix && !starts_with_own_name(alias))
+        .map(|(_, usage)| *usage);
+    let functions = entries.functions.values().copied().filter(|function| {
+        let body = definitions.function_bodies.get(&function.name);
+        !body.is_some_and(|body| runs_through_command(body, &function.name))
+    });
+    aliases
+        .chain(functions)
+        .filter_map(|usage| {
+            let program = definitions.programs.get(&usage.name)?;
+            Some(Finding {
+                kind: FindingKind::HidesProgram,
+                definitions: vec![Member::of(usage)],
+                words: Vec::new(),
+                places: Vec::new(),
+                program: Some(program.clone()),
+            })
+        })
+        .collect()
+}
+
 /// Gives the findings among `usages`, sorted by kind, then by the name and the
 /// kind of the first definition. Pure.
 ///
@@ -275,6 +318,7 @@ pub(super) fn find(definitions: &Definitions, usages: &[Usage]) -> Vec<Finding> 
     found.extend(alias_and_function(definitions, &entries));
     found.extend(defined_more_than_once(definitions, &entries));
     found.extend(alias_hides_function(&entries));
+    found.extend(hides_program(definitions, &entries));
     found.sort_by(|left, right| sort_key(left).cmp(&sort_key(right)));
     found
 }
