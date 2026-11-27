@@ -1305,3 +1305,26 @@ fn an_escape_sequence_that_the_start_of_a_range_splits_is_read_by_the_emulator()
     assert_eq!(in_range.len(), 1, "{:?}", rendered.events);
     assert_eq!(in_range[0].data, "\x1b[0;31mred");
 }
+
+#[test]
+fn a_control_sequence_that_the_end_of_a_range_splits_is_finished_after_the_range() {
+    let stream = [
+        (1.0, "before\r\n"),
+        (4.0, "inside\x1b[3"),
+        (7.0, "1mred after"),
+        (8.0, "\r\nmore"),
+    ];
+
+    assert_range_property_each_shape(&stream, 3.0, 6.0);
+}
+
+#[test]
+fn an_osc_that_the_end_of_a_range_splits_is_finished_after_the_range() {
+    let stream = [
+        (1.0, "before\r\n"),
+        (4.0, "inside\x1b]2;ti"),
+        (7.0, "tle\x07after"),
+    ];
+
+    assert_range_property_each_shape(&stream, 3.0, 6.0);
+}
