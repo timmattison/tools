@@ -1797,7 +1797,9 @@ fn a_real_zsh_gives_its_hooks_traps_and_widgets() {
         (Trigger::CommandNotFound, "command_not_found_handler"),
     ] {
         assert!(
-            starts.functions.contains(&(trigger.clone(), name.to_owned())),
+            starts
+                .functions
+                .contains(&(trigger.clone(), name.to_owned())),
             "{trigger:?} {name}: {:?}",
             starts.functions
         );
@@ -1808,7 +1810,10 @@ fn a_real_zsh_gives_its_hooks_traps_and_widgets() {
         starts.functions
     );
     assert_eq!(
-        starts.widgets.get("history-search-wdid").map(String::as_str),
+        starts
+            .widgets
+            .get("history-search-wdid")
+            .map(String::as_str),
         Some("searchfn")
     );
     assert_eq!(

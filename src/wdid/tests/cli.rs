@@ -1171,11 +1171,17 @@ fn defs_gives_the_functions_that_zsh_runs_without_a_typed_name_their_state() {
     assert!(output.status.success(), "{output:?}");
     let text = stdout(&output);
     let never = group_of(&text, "Never used:");
-    assert!(never.contains(&"  lonelyfn (function, widget, no key)"), "{text}");
+    assert!(
+        never.contains(&"  lonelyfn (function, widget, no key)"),
+        "{text}"
+    );
     assert!(never.contains(&"  unused (function)"), "{text}");
     assert!(!never.iter().any(|line| line.contains("precmd")), "{text}");
     let starts = group_of(&text, "Runs without typing:");
-    assert!(starts.contains(&"  precmd (function, precmd hook)"), "{text}");
+    assert!(
+        starts.contains(&"  precmd (function, precmd hook)"),
+        "{text}"
+    );
     assert!(
         starts.contains(&"  searchfn (function, widget history-search-wdid, key ^R)"),
         "{text}"

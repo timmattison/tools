@@ -23,7 +23,9 @@ use wait_timeout::ChildExt;
 use crate::command_words::{command_words, AliasDefinition, Aliases, CommandWord, Parsed};
 use crate::origin::{place, Origin, Places};
 use crate::rules::{runs, Run};
-use crate::starts::Starts;
+use crate::starts::{
+    Starts, Trigger, HOOK_ARRAY_SUFFIX, NOT_FOUND_HANDLER, SPECIAL_WIDGETS, TRAP_PREFIX, ZSH_HOOKS,
+};
 use crate::tool::{ToolName, ToolNames};
 
 /// The file name of zsh.
@@ -67,6 +69,48 @@ const SUFFIX_ORIGIN_LABEL: &str = "SUFFIX_ORIGIN";
 /// this text: `file:line` for an alias, the file for a function, or nothing
 /// when the shell keeps no origin.
 const ORIGIN_LABEL: &str = "ORIGIN";
+
+/// The text that follows the marker on the line that names a zsh hook and a
+/// function that it runs. The hook, one space, and the function follow this
+/// text.
+const HOOK_LABEL: &str = "HOOK";
+
+/// The text that follows the marker on the line that names a signal and its
+/// zsh trap function. The signal, one space, and the function follow this
+/// text.
+const TRAP_LABEL: &str = "TRAP";
+
+/// The text that follows the marker on the line that names the function that
+/// zsh runs for a command that it does not find. The function follows this
+/// text.
+const NOT_FOUND_LABEL: &str = "NOT_FOUND";
+
+/// The text that follows the marker on the line that starts the output of
+/// `zle -lL`.
+const WIDGETS_LABEL: &str = "WIDGETS";
+
+/// The text that follows the marker on the line that starts the output of
+/// `bindkey -L` for one keymap. The name of the keymap follows this text.
+const KEYMAP_LABEL: &str = "KEYMAP";
+
+/// The text that follows the marker on the line that names a special widget
+/// and a widget that `add-zle-hook-widget` added to it. The special widget,
+/// one space, and the widget follow this text.
+const ZLE_HOOK_LABEL: &str = "ZLE_HOOK";
+
+/// The loop variable of the outer loops of the zsh script that list the
+/// starts: the hooks, the keymaps, and the special widgets.
+const OUTER_VARIABLE: &str = "__wdid_outer";
+
+/// The loop variable of the inner loops of the zsh script that list the
+/// starts.
+const NAME_VARIABLE: &str = "__wdid_name";
+
+/// The variable of the zsh script that holds the name of the array of a hook.
+const ARRAY_VARIABLE: &str = "__wdid_array";
+
+/// The array of the zsh script that holds the widgets of a special widget.
+const LIST_VARIABLE: &str = "__wdid_list";
 
 /// The zsh table that the wrapper function `alias` fills: the `file:line` of
 /// each regular and each global alias, by name.
@@ -248,6 +292,7 @@ pub fn script(kind: ShellKind, marker: &Marker) -> String {
              {suffix_origins}\
              autoload +X -m '{AUTOLOAD_PATTERN}' 2>/dev/null || :\n\
              autoload -Ur -m '{PRIVATE_AUTOLOAD_PATTERN}' >/dev/null 2>&1 || :\n\
+             {starts}\
              for {LOOP_VARIABLE} in ${{(ok)functions}}; do\n\
              \x20 print -r -- \"{marker} {FUNCTION_LABEL} ${LOOP_VARIABLE}\"\n\
              \x20 print -r -- \"{marker} {ORIGIN_LABEL} ${{functions_source[${LOOP_VARIABLE}]-}}\"\n\
@@ -256,6 +301,7 @@ pub fn script(kind: ShellKind, marker: &Marker) -> String {
              print -r -- '{marker} {END_LABEL}'\n",
             alias_origins = zsh_origin_loop(marker, ALIAS_ORIGINS_TABLE, ALIAS_ORIGIN_LABEL),
             suffix_origins = zsh_origin_loop(marker, SUFFIX_ORIGINS_TABLE, SUFFIX_ORIGIN_LABEL),
+            starts = zsh_starts(marker),
         ),
         ShellKind::Bash => format!(
             "printf '%s\\n' '{marker} {ALIASES_LABEL}'\n\
@@ -273,6 +319,44 @@ pub fn script(kind: ShellKind, marker: &Marker) -> String {
              printf '%s\\n' '{marker} {END_LABEL}'\n"
         ),
     }
+}
+
+/// Gives the zsh lines that print the starts: a line for each hook function
+/// and each name in a hook array, a line for each trap function, a line for
+/// the handler of a command that zsh does not find, the output of `zle -lL`,
+/// the output of `bindkey -L` for each keymap, and a line for each widget that
+/// `add-zle-hook-widget` added to a special widget.
+///
+/// A hook array that is not set gives no line, also under `NO_UNSET`. A
+/// command that can fail ends with `|| :`, so `ERR_EXIT` does not stop the
+/// script.
+fn zsh_starts(marker: &str) -> String {
+    let hooks = ZSH_HOOKS.join(" ");
+    let specials = SPECIAL_WIDGETS.join(" ");
+    format!(
+        "for {OUTER_VARIABLE} in {hooks}; do\n\
+         \x20 if (( ${{+functions[${OUTER_VARIABLE}]}} )); then print -r -- \"{marker} {HOOK_LABEL} ${OUTER_VARIABLE} ${OUTER_VARIABLE}\"; fi\n\
+         \x20 {ARRAY_VARIABLE}=${{{OUTER_VARIABLE}}}{HOOK_ARRAY_SUFFIX}\n\
+         \x20 if (( ${{(P)+{ARRAY_VARIABLE}}} )); then\n\
+         \x20   for {NAME_VARIABLE} in \"${{(@P){ARRAY_VARIABLE}}}\"; do print -r -- \"{marker} {HOOK_LABEL} ${OUTER_VARIABLE} ${NAME_VARIABLE}\"; done\n\
+         \x20 fi\n\
+         done\n\
+         for {NAME_VARIABLE} in \"${{signals[@]}}\"; do\n\
+         \x20 if (( ${{+functions[{TRAP_PREFIX}${NAME_VARIABLE}]}} )); then print -r -- \"{marker} {TRAP_LABEL} ${NAME_VARIABLE} {TRAP_PREFIX}${NAME_VARIABLE}\"; fi\n\
+         done\n\
+         if (( ${{+functions[{NOT_FOUND_HANDLER}]}} )); then print -r -- '{marker} {NOT_FOUND_LABEL} {NOT_FOUND_HANDLER}'; fi\n\
+         print -r -- '{marker} {WIDGETS_LABEL}'\n\
+         zle -lL 2>/dev/null || :\n\
+         for {OUTER_VARIABLE} in ${{(f)\"$(bindkey -l 2>/dev/null)\"}}; do\n\
+         \x20 print -r -- \"{marker} {KEYMAP_LABEL} ${OUTER_VARIABLE}\"\n\
+         \x20 bindkey -M \"${OUTER_VARIABLE}\" -L 2>/dev/null || :\n\
+         done\n\
+         for {OUTER_VARIABLE} in {specials}; do\n\
+         \x20 {LIST_VARIABLE}=()\n\
+         \x20 zstyle -a \"${OUTER_VARIABLE}\" widgets {LIST_VARIABLE} 2>/dev/null || :\n\
+         \x20 for {NAME_VARIABLE} in \"${{{LIST_VARIABLE}[@]}}\"; do print -r -- \"{marker} {ZLE_HOOK_LABEL} ${OUTER_VARIABLE} ${{{NAME_VARIABLE}#*:}}\"; done\n\
+         done\n"
+    )
 }
 
 /// Gives the zsh lines that print each entry of the origin table `table`: a
@@ -404,17 +488,39 @@ enum Record<'a> {
     Zsh(&'a str),
     /// The custom directory of oh-my-zsh.
     ZshCustom(&'a str),
+    /// A zsh hook and a function that it runs, divided by one space.
+    Hook(&'a str),
+    /// A signal and its zsh trap function, divided by one space.
+    Trap(&'a str),
+    /// The function that zsh runs for a command that it does not find.
+    NotFound(&'a str),
+    /// The start of the output of `zle -lL`.
+    Widgets,
+    /// The start of the output of `bindkey -L` for one keymap.
+    Keymap,
+    /// A special widget and a widget that `add-zle-hook-widget` added to it,
+    /// divided by one space.
+    ZleHook(&'a str),
 }
 
 /// Reads `line` as a record of `marker`. Gives `None` for a line that is not
 /// a record: the marker, one space, a label, then one space and the value.
-/// The end record has no value.
+/// The end record and the start of the output of `zle -lL` have no value.
 fn record<'a>(line: &'a str, marker: &str) -> Option<Record<'a>> {
     let rest = line.strip_prefix(marker)?.strip_prefix(' ')?;
     let Some((label, value)) = rest.split_once(' ') else {
-        return (rest == END_LABEL).then_some(Record::End);
+        return match rest {
+            END_LABEL => Some(Record::End),
+            WIDGETS_LABEL => Some(Record::Widgets),
+            _ => None,
+        };
     };
     match label {
+        HOOK_LABEL => Some(Record::Hook(value)),
+        TRAP_LABEL => Some(Record::Trap(value)),
+        NOT_FOUND_LABEL => Some(Record::NotFound(value)),
+        KEYMAP_LABEL => Some(Record::Keymap),
+        ZLE_HOOK_LABEL => Some(Record::ZleHook(value)),
         FUNCTION_LABEL => Some(Record::Function(value)),
         ALIAS_ORIGIN_LABEL => Some(Record::AliasOrigin(value)),
         SUFFIX_ORIGIN_LABEL => Some(Record::SuffixOrigin(value)),
@@ -439,6 +545,11 @@ enum Section<'a> {
         /// True for a suffix alias.
         suffix: bool,
     },
+    /// The output of `zle -lL`: one `zle` command for each widget.
+    Widgets,
+    /// The output of `bindkey -L` for one keymap: one `bindkey` command for
+    /// each key.
+    Keys,
     /// A function and the lines of its body so far.
     Function {
         /// The name of the function.
@@ -450,12 +561,15 @@ enum Section<'a> {
 
 impl<'a> Section<'a> {
     /// Adds a line that is not a record. The alias listing reads it as an
-    /// alias line, and a function adds it to its body. The origin of an alias
-    /// has no more lines, thus it ignores the line.
+    /// alias line, and a function adds it to its body. A listing of the
+    /// widgets or of the keys reads it as a widget or a key. The origin of an
+    /// alias has no more lines, thus it ignores the line.
     fn push(&mut self, line: &'a str, definitions: &mut Definitions) {
         match self {
             Self::Aliases => read_alias_line(line, definitions),
             Self::AliasOrigin { .. } => {}
+            Self::Widgets => definitions.starts.read_widget_line(line),
+            Self::Keys => definitions.starts.read_key_line(line),
             Self::Function { body, .. } => body.push(line),
         }
     }
@@ -464,7 +578,7 @@ impl<'a> Section<'a> {
     /// that is not known, and an origin in the alias listing, change nothing.
     fn set_origin(&self, text: &str, definitions: &mut Definitions) {
         match self {
-            Self::Aliases => {}
+            Self::Aliases | Self::Widgets | Self::Keys => {}
             Self::AliasOrigin { name, suffix } => {
                 if let Some(origin) = Origin::from_trace(text) {
                     let table = if *suffix {
@@ -541,6 +655,34 @@ pub fn parse_output(stdout: &str, marker: &Marker) -> Result<Definitions, ShellE
                 definitions.places.zsh_custom = place(text);
                 continue;
             }
+            Record::Hook(text) => {
+                if let Some((hook, function)) = text.split_once(' ') {
+                    let trigger = Trigger::Hook(hook.to_owned());
+                    definitions.starts.add_function(trigger, function);
+                }
+                continue;
+            }
+            Record::Trap(text) => {
+                if let Some((signal, function)) = text.split_once(' ') {
+                    let trigger = Trigger::Trap(signal.to_owned());
+                    definitions.starts.add_function(trigger, function);
+                }
+                continue;
+            }
+            Record::NotFound(function) => {
+                definitions
+                    .starts
+                    .add_function(Trigger::CommandNotFound, function);
+                continue;
+            }
+            Record::ZleHook(text) => {
+                if let Some((special, widget)) = text.split_once(' ') {
+                    definitions.starts.add_hook_widget(special, widget);
+                }
+                continue;
+            }
+            Record::Widgets => Section::Widgets,
+            Record::Keymap => Section::Keys,
         };
         std::mem::replace(&mut section, next).finish(&mut definitions);
     }
