@@ -700,8 +700,22 @@ async fn open_recording() -> Window {
     let mut window = Window::open(&fakes);
     window.click(window.open_button());
     window.settle().await;
-    window.apply = window.newest.first().copied();
-    window.compress = window.newest.get(1).copied();
+    // The render of the recording makes two click listeners, in the order of
+    // the page: Apply Speed, then Compress Idle Time.
+    let page = window.html();
+    let labels = (page.find(APPLY_SPEED_LABEL), page.find(APPLY_IDLE_LABEL));
+    assert!(
+        matches!(labels, (Some(speed), Some(idle)) if speed < idle),
+        "the page does not hold {APPLY_SPEED_LABEL}, then {APPLY_IDLE_LABEL}: {page}"
+    );
+    let &[apply, compress] = window.newest.as_slice() else {
+        panic!(
+            "the render of the recording made {:?}, not the {APPLY_SPEED_LABEL} and the {APPLY_IDLE_LABEL} buttons",
+            window.newest
+        );
+    };
+    window.apply = Some(apply);
+    window.compress = Some(compress);
     window
 }
 
