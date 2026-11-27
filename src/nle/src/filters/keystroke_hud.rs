@@ -36,3 +36,12 @@ pub fn applied(region: FilterRegion, options: &HudOptions) -> AppliedFilter {
         options: options.to_options(),
     }
 }
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the painter of the HUD uses the timeline in a later commit of issue #161"
+    )
+)]
+mod timeline;
