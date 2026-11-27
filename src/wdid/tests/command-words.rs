@@ -1304,9 +1304,10 @@ fn split_words_gives_the_words_in_argument_form() {
     }
 }
 
-/// An unquoted glob, brace expansion, or leading `=` is an expansion. The
-/// same text in quotes, and a bracket or a brace that expands nothing, is a
-/// literal.
+/// An unquoted glob, brace expansion, or leading `=` is an expansion, also
+/// when a quoted piece divides it, or when a brace pair that expands nothing
+/// comes first. The same text in quotes, and a bracket or a brace that expands
+/// nothing, is a literal.
 #[test]
 fn split_words_gives_an_unquoted_pattern_as_an_expansion() {
     let rows = [
@@ -1321,6 +1322,10 @@ fn split_words_gives_an_unquoted_pattern_as_an_expansion() {
         ("echo '{a,b}'", vec![lit("echo"), lit("{a,b}")]),
         ("rm {}", vec![lit("rm"), lit("{}")]),
         ("echo {x},y", vec![lit("echo"), lit("{x},y")]),
+        ("echo {x}{a,b}", vec![lit("echo"), exp("{x}{a,b}")]),
+        ("echo {a,\"b\"}", vec![lit("echo"), exp("{a,\"b\"}")]),
+        ("ls [ab\"c\"]", vec![lit("ls"), exp("[ab\"c\"]")]),
+        ("echo {a\",\"b}", vec![lit("echo"), lit("{a,b}")]),
         ("echo =ls", vec![lit("echo"), exp("=ls")]),
         ("echo \\=ls", vec![lit("echo"), lit("=ls")]),
         ("echo a=b", vec![lit("echo"), lit("a=b")]),
