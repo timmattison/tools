@@ -4,7 +4,7 @@
 //! The text report shows only my definitions, unless the window has `all`.
 //! Then it shows mine first, and the others in one table for each file of
 //! origin. The JSON document always holds each entry of the tally, with its
-//! origin and a field that says if it is mine.
+//! origin, its added date, and a field that says if it is mine.
 //!
 //! The text report ends with the group `Duplicates and shadows`. It lists each
 //! finding of the tally that holds a definition of mine or a place of mine, or
@@ -21,11 +21,12 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::{Classification, Finding, FindingKind, Kind, Member, Summary, Tally, Usage, Window};
 use crate::origin::{Origin, Places};
 use crate::render::{
-    counted, date_cell, group, number, number_of, BETWEEN_BLOCKS, THROUGH_SEPARATOR,
+    counted, date_cell, group, never_used_new_heading, never_used_old_heading, number, number_of,
+    BETWEEN_BLOCKS, THROUGH_SEPARATOR,
 };
 
 /// The name of each column of the table, in order.
-const COLUMNS: [&str; 9] = [
+const COLUMNS: [&str; 10] = [
     "Name",
     "Kind",
     "Uses",
@@ -33,6 +34,7 @@ const COLUMNS: [&str; 9] = [
     "Through",
     "First use",
     "Last use",
+    "Added",
     "Origin",
     "Definition",
 ];
@@ -41,7 +43,7 @@ const COLUMNS: [&str; 9] = [
 const THROUGH_COLUMN: usize = 4;
 
 /// The place of the `Definition` column.
-const DEFINITION_COLUMN: usize = 8;
+const DEFINITION_COLUMN: usize = 9;
 
 /// The number of the columns other than the definition.
 const FIXED_COLUMNS: usize = DEFINITION_COLUMN;
@@ -49,6 +51,10 @@ const FIXED_COLUMNS: usize = DEFINITION_COLUMN;
 /// The text of the `Origin` cell when the origin is unknown, and the heading
 /// of the group of the others whose origin is unknown.
 const UNKNOWN_ORIGIN: &str = "-";
+
+/// The text of the `Added` cell when the added date is unknown. Each
+/// definition that is not mine has an unknown added date.
+const UNKNOWN_ADDED: &str = "unknown";
 
 /// The heading of the table of my definitions in the report of `--all`.
 const HEADING_MINE: &str = "Mine";
@@ -78,9 +84,6 @@ const DEFINITION_MIN: usize = 10;
 
 /// The mark that ends a definition that the report cut.
 const CUT_MARK: char = '\u{2026}';
-
-/// The heading of the group of definitions that never ran.
-const HEADING_NEVER: &str = "Never used";
 
 /// The heading of the group of definitions that the shell runs without a
 /// typed name.
@@ -174,6 +177,13 @@ fn origin_cell(usage: &Usage, places: &Places) -> String {
     shown_origin(usage.origin.as_ref(), places)
 }
 
+/// Gives the `Added` cell: the added date, or [`UNKNOWN_ADDED`].
+fn added_cell(usage: &Usage) -> String {
+    usage
+        .added
+        .map_or_else(|| UNKNOWN_ADDED.to_string(), |added| date_cell(Some(added)))
+}
+
 /// Gives the cells of `usage` for the columns other than the definition, in
 /// column order.
 fn fixed_cells(usage: &Usage, places: &Places) -> [String; FIXED_COLUMNS] {
@@ -185,6 +195,7 @@ fn fixed_cells(usage: &Usage, places: &Places) -> [String; FIXED_COLUMNS] {
         through_cell(usage),
         date_cell(usage.first_use),
         date_cell(usage.last_use),
+        added_cell(usage),
         origin_cell(usage, places),
     ]
 }
@@ -303,17 +314,30 @@ fn reasons_suffix(usage: &Usage) -> String {
     format!(", {}", reasons.join(REASON_SEPARATOR))
 }
 
-/// Gives the three groups of `usages`: the definitions never used, the
-/// definitions idle, and the definitions that the shell runs without a typed
-/// name. Each entry ends with its reasons.
+/// Gives the four groups of `usages`: the definitions never used and old,
+/// the definitions never used and new, the definitions idle, and the
+/// definitions that the shell runs without a typed name. An entry of the new
+/// group gives its added date. Each entry ends with its reasons.
 fn group_lines(usages: &[&Usage], window: &Window) -> String {
-    let never: Vec<String> = with(usages, Classification::NeverUsed)
+    let old: Vec<String> = with(usages, Classification::NeverUsedOld)
         .iter()
         .map(|usage| {
             format!(
                 "{} ({}{})",
                 usage.name,
                 usage.kind.label(),
+                reasons_suffix(usage)
+            )
+        })
+        .collect();
+    let new: Vec<String> = with(usages, Classification::NeverUsedNew)
+        .iter()
+        .map(|usage| {
+            format!(
+                "{} ({}, added {}{})",
+                usage.name,
+                usage.kind.label(),
+                date_cell(usage.added),
                 reasons_suffix(usage)
             )
         })
@@ -343,7 +367,8 @@ fn group_lines(usages: &[&Usage], window: &Window) -> String {
         })
         .collect();
     [
-        group(HEADING_NEVER, &never),
+        group(&never_used_old_heading(window.new_days), &old),
+        group(&never_used_new_heading(window.new_days), &new),
         group(
             &format!(
                 "Idle (no use in the last {})",
@@ -535,12 +560,12 @@ fn findings_group(tally: &Tally, all: bool) -> String {
 /// Gives the text report. `shell` is the path of the shell that gave the
 /// definitions. `width` is the table width. `None` sets no limit.
 ///
-/// The report starts with the header. Then come the three groups, and last the
+/// The report starts with the header. Then come the four groups, and last the
 /// group `Duplicates and shadows`. Between the header and the groups, the
 /// report has the table of my definitions. With `window.all`, that table has
 /// the heading `Mine` and a count, and one more table follows for each
 /// file that defined the others, with that file and a count as its heading.
-/// The three groups then hold each entry, else only mine. The last group
+/// The four groups then hold each entry, else only mine. The last group
 /// holds each finding with `window.all`, else only the findings that hold one
 /// of my definitions or one of my places. The definition in a table is one line. It is cut to the
 /// room that the width leaves.
@@ -608,6 +633,7 @@ struct DefinitionDocument<'a> {
     through: Vec<ThroughDocument<'a>>,
     first_use: Option<NaiveDate>,
     last_use: Option<NaiveDate>,
+    added: Option<NaiveDate>,
     classification: Classification,
     origin: Option<&'a Origin>,
     mine: bool,
@@ -647,11 +673,13 @@ struct FindingDocument<'a> {
 struct Document<'a> {
     today: NaiveDate,
     since: Option<NaiveDate>,
+    new_days: u32,
     idle_days: u32,
     history: HistoryDocument,
     shell: ShellDocument<'a>,
     definitions: Vec<DefinitionDocument<'a>>,
-    never_used: Vec<NamedDocument<'a>>,
+    never_used_old: Vec<NamedDocument<'a>>,
+    never_used_new: Vec<NamedDocument<'a>>,
     idle: Vec<NamedDocument<'a>>,
     runs_without_typing: Vec<NamedDocument<'a>>,
     findings: Vec<FindingDocument<'a>>,
@@ -695,6 +723,7 @@ fn definition_document(usage: &Usage) -> DefinitionDocument<'_> {
             .collect(),
         first_use: usage.first_use,
         last_use: usage.last_use,
+        added: usage.added,
         classification: usage.classification,
         origin: usage.origin.as_ref(),
         mine: usage.mine,
@@ -717,11 +746,12 @@ fn named<'a>(definitions: &[&'a Usage]) -> Vec<NamedDocument<'a>> {
 ///
 /// `definitions` holds every entry in tally order, also an entry with no use
 /// and an entry that is not mine. Each entry has its `origin` (`file` and
-/// `line`, or `null` when it is unknown) and `mine`. The definition text is
-/// never cut. Each entry has its `reasons`, as the text report writes them, in
-/// a list that is empty for most entries. The lists `never_used`, `idle`, and
+/// `line`, or `null` when it is unknown), `mine`, and `added` (the added date,
+/// or `null` when it is unknown). The definition text is never cut. Each entry
+/// has its `reasons`, as the text report writes them, in a list that is empty
+/// for most entries. The lists `never_used_old`, `never_used_new`, `idle`, and
 /// `runs_without_typing` hold every entry too, in the order of the text
-/// report.
+/// report. `new_days` gives the limit of the new entries.
 ///
 /// `findings` holds each finding of the tally in order, also a finding with no
 /// definition of mine. A finding is `mine` when one of its definitions or one
@@ -743,6 +773,7 @@ pub fn json(tally: &Tally, window: &Window, shell: &str) -> String {
     let document = Document {
         today: window.today,
         since: window.since,
+        new_days: window.new_days,
         idle_days: window.idle_days,
         history: HistoryDocument {
             rows: summary.rows,
@@ -760,7 +791,8 @@ pub fn json(tally: &Tally, window: &Window, shell: &str) -> String {
             others: summary.others,
         },
         definitions: tally.definitions.iter().map(definition_document).collect(),
-        never_used: named(&with(&every, Classification::NeverUsed)),
+        never_used_old: named(&with(&every, Classification::NeverUsedOld)),
+        never_used_new: named(&with(&every, Classification::NeverUsedNew)),
         idle: named(&idle_definitions(&every)),
         runs_without_typing: named(&with(&every, Classification::RunsWithoutTyping)),
         findings: tally
