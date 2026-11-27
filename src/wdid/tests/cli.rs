@@ -730,8 +730,8 @@ fn defs_outside_each_work_tree_prints_the_report_and_starts_no_cargo_and_no_git(
     let lines: Vec<&str> = text.lines().collect();
     let heading = lines
         .iter()
-        .position(|line| line.starts_with("Never used:"))
-        .unwrap_or_else(|| panic!("no Never used heading in {text}"));
+        .position(|line| line.starts_with("Never used, old "))
+        .unwrap_or_else(|| panic!("no Never used, old heading in {text}"));
     assert!(
         lines[heading + 1..].contains(&"  unused (function)"),
         "{text}"
@@ -801,7 +801,7 @@ fn defs_json_holds_each_definition_also_the_ones_with_zero_uses() {
     assert_eq!(suffix["uses"], 1, "{document}");
     assert_eq!(document["history"]["not_found"], 1, "{document}");
     assert!(
-        document["never_used"]
+        document["never_used_old"]
             .as_array()
             .unwrap()
             .contains(&serde_json::json!({ "name": "unused", "kind": "function" })),
@@ -1172,15 +1172,15 @@ fn defs_gives_the_functions_that_zsh_runs_without_a_typed_name_their_state() {
         );
         assert_eq!(reasons_of(&document, name), [reason], "{name}: {document}");
         assert!(listed_in(&document, "runs_without_typing", name), "{name}");
-        assert!(!listed_in(&document, "never_used", name), "{name}");
+        assert!(!listed_in(&document, "never_used_old", name), "{name}");
         assert!(!listed_in(&document, "idle", name), "{name}");
     }
     let lonely = definition(&document, "lonelyfn");
     assert_eq!(lonely["classification"], "never_used_old", "{document}");
     assert_eq!(reasons_of(&document, "lonelyfn"), ["widget, no key"]);
-    assert!(listed_in(&document, "never_used", "lonelyfn"), "{document}");
+    assert!(listed_in(&document, "never_used_old", "lonelyfn"), "{document}");
     assert!(reasons_of(&document, "unused").is_empty(), "{document}");
-    assert!(listed_in(&document, "never_used", "unused"), "{document}");
+    assert!(listed_in(&document, "never_used_old", "unused"), "{document}");
 
     let output = defs_command(&setup)
         .current_dir(cwd.path())
@@ -1188,7 +1188,7 @@ fn defs_gives_the_functions_that_zsh_runs_without_a_typed_name_their_state() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     let text = stdout(&output);
-    let never = group_of(&text, "Never used:");
+    let never = group_of(&text, "Never used, old ");
     assert!(
         never.contains(&"  lonelyfn (function, widget, no key)"),
         "{text}"
@@ -1239,9 +1239,9 @@ fn defs_gives_the_functions_that_bash_runs_without_a_typed_name_their_state() {
             "{name}: {document}"
         );
         assert_eq!(reasons_of(&document, name), [reason], "{name}: {document}");
-        assert!(!listed_in(&document, "never_used", name), "{name}");
+        assert!(!listed_in(&document, "never_used_old", name), "{name}");
     }
-    assert!(listed_in(&document, "never_used", "unused"), "{document}");
+    assert!(listed_in(&document, "never_used_old", "unused"), "{document}");
 }
 
 /// The `.zshrc` of the tests of the duplicates and the shadows. Each name

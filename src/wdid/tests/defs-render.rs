@@ -152,6 +152,7 @@ fn table_rows() {
     used.through = vec![("wtf".to_string(), 3), ("wtm".to_string(), 1)];
     used.first_use = Some(date(2026, 1, 2));
     used.last_use = Some(date(2026, 11, 1));
+    used.added = Some(date(2025, 6, 1));
     used.classification = Classification::Used;
     let report = text(
         &tally(vec![
@@ -173,13 +174,14 @@ fn table_rows() {
             "wtf 3, wtm 1",
             "2026-01-02",
             "2026-11-01",
+            "2025-06-01",
             "-",
             "cwt"
         ]
     );
     assert_eq!(
         row(&report, "zz"),
-        ["zz", "function", "0", "0", "", "-", "-", "-", "echo zz"]
+        ["zz", "function", "0", "0", "", "-", "-", "unknown", "-", "echo zz"]
     );
     assert_eq!(row(&report, "gx")[1], "global alias");
     let names: Vec<&str> = table_lines(&report)
@@ -208,7 +210,7 @@ fn long_definition_is_cut() {
     let report = text(&one(&"a".repeat(200)), &window(), "/bin/zsh", Some(WIDTH));
     assert_fits(&report, usize::from(WIDTH));
     let cells = row(&report, "wide");
-    assert!(cells[8].ends_with('…'), "{report}");
+    assert!(cells[9].ends_with('…'), "{report}");
     assert_eq!(
         table_lines(&report).len(),
         5,
@@ -226,7 +228,7 @@ fn multibyte_definition_is_cut() {
         Some(WIDTH),
     );
     assert_fits(&report, usize::from(WIDTH));
-    assert!(row(&report, "wide")[8].ends_with('…'), "{report}");
+    assert!(row(&report, "wide")[9].ends_with('…'), "{report}");
 }
 
 /// A short definition is not cut.
@@ -234,7 +236,7 @@ fn multibyte_definition_is_cut() {
 fn short_definition_is_not_cut() {
     let report = text(&one("echo hi"), &window(), "/bin/zsh", Some(WIDTH));
     assert!(!report.contains('…'), "{report}");
-    assert_eq!(row(&report, "wide")[8], "echo hi");
+    assert_eq!(row(&report, "wide")[9], "echo hi");
 }
 
 /// A long `Through` cell wraps inside 30 columns when the report has a width,
@@ -312,7 +314,10 @@ fn groups() {
         None,
     );
     assert!(
-        report.contains("Never used:\n  abc (alias)\n  goup (function)"),
+        report.contains(
+            "Never used, old (added 90 or more days ago):\n  abc (alias)\n  goup (function)\n\
+             Never used, new (added less than 90 days ago): none\n"
+        ),
         "{report}"
     );
     assert!(
@@ -322,7 +327,13 @@ fn groups() {
         "{report}"
     );
     let empty = text(&tally(Vec::new()), &window(), "/bin/zsh", None);
-    assert!(empty.contains("Never used: none"), "{empty}");
+    assert!(
+        empty.contains(
+            "Never used, old (added 90 or more days ago): none\n\
+             Never used, new (added less than 90 days ago): none\n"
+        ),
+        "{empty}"
+    );
     assert!(
         empty.contains("Idle (no use in the last 180 days): none"),
         "{empty}"
@@ -360,6 +371,7 @@ fn json_document() {
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(value["today"], "2026-11-26");
     assert!(value["since"].is_null());
+    assert_eq!(value["new_days"], 90);
     assert_eq!(value["idle_days"], 180);
     assert_eq!(value["history"]["rows"], 1234);
     assert_eq!(value["history"]["not_found"], 3);
@@ -382,12 +394,14 @@ fn json_document() {
     assert_eq!(defs[1]["classification"], "never_used_old");
     assert_eq!(defs[2]["kind"], "global_alias");
     assert_eq!(
-        value["never_used"],
+        value["never_used_old"],
         serde_json::json!([
             {"name": "goup", "kind": "function"},
             {"name": "gx", "kind": "global_alias"}
         ])
     );
+    assert_eq!(value["never_used_new"], serde_json::json!([]));
+    assert!(value.get("never_used").is_none(), "{value}");
     assert_eq!(
         value["idle"],
         serde_json::json!([{"name": "old", "kind": "alias"}])
@@ -480,10 +494,10 @@ fn the_header_counts_mine_and_the_others() {
 #[test]
 fn the_origin_column_shows_a_tilde_for_home_and_a_dash_when_unknown() {
     let report = text(&mixed(), &all_window(), "/bin/zsh", None);
-    assert_eq!(row(&report, "wt")[7], "~/.zshrc:3");
-    assert_eq!(row(&report, "bare")[7], "-");
-    assert_eq!(row(&report, "gfun")[7], "~/omz/plugins/git/git.plugin.zsh");
-    assert_eq!(row(&report, "_comp")[7], "/usr/share/zsh/functions/_comp");
+    assert_eq!(row(&report, "wt")[8], "~/.zshrc:3");
+    assert_eq!(row(&report, "bare")[8], "-");
+    assert_eq!(row(&report, "gfun")[8], "~/omz/plugins/git/git.plugin.zsh");
+    assert_eq!(row(&report, "_comp")[8], "/usr/share/zsh/functions/_comp");
     assert!(report.contains("│ Name "), "{report}");
     assert!(report.contains("┆ Origin "), "{report}");
 }
@@ -493,7 +507,10 @@ fn by_default_the_text_shows_only_my_definitions() {
     let report = text(&mixed(), &window(), "/bin/zsh", None);
     assert_eq!(names(&report), ["Name", "wt", "bare"]);
     assert!(
-        report.contains("Never used:\n  bare (alias)\n  wt (alias)\nIdle"),
+        report.contains(
+            "Never used, old (added 90 or more days ago):\n  bare (alias)\n  wt (alias)\n\
+             Never used, new (added less than 90 days ago): none\nIdle"
+        ),
         "{report}"
     );
     for other in ["gst", "gfun", "_comp", "git.plugin.zsh"] {
@@ -525,7 +542,7 @@ fn all_groups_the_others_by_origin_with_a_count() {
     assert_eq!(names(report.get(comp..).unwrap()), ["Name", "_comp"]);
     assert!(
         report.contains(
-            "Never used:\n  _comp (function)\n  bare (alias)\n  gfun (function)\n  gst (alias)\n  wt (alias)\n"
+            "Never used, old (added 90 or more days ago):\n  _comp (function)\n  bare (alias)\n  gfun (function)\n  gst (alias)\n  wt (alias)\n"
         ),
         "{report}"
     );
@@ -554,7 +571,7 @@ fn the_json_holds_the_origin_and_mine_of_each_definition() {
         defs[3]["origin"],
         serde_json::json!({ "file": GIT_PLUGIN, "line": null })
     );
-    let never: Vec<&str> = value["never_used"]
+    let never: Vec<&str> = value["never_used_old"]
         .as_array()
         .unwrap()
         .iter()
@@ -681,7 +698,9 @@ fn the_text_lists_the_definitions_that_run_without_typing_with_their_reasons() {
 fn a_widget_with_no_key_shows_its_reason_in_its_group() {
     let report = text(&reasons_tally(), &window(), "/bin/zsh", None);
     assert!(
-        report.contains("Never used:\n  lonely (function, widget, no key)\n"),
+        report.contains(
+            "Never used, old (added 90 or more days ago):\n  lonely (function, widget, no key)\n"
+        ),
         "{report}"
     );
     assert!(
@@ -724,7 +743,7 @@ fn the_json_gives_the_state_and_the_reasons() {
         starts[0],
         serde_json::json!({"name": "handler", "kind": "function"})
     );
-    assert!(document["never_used"]
+    assert!(document["never_used_old"]
         .as_array()
         .unwrap()
         .iter()
@@ -1112,5 +1131,115 @@ fn a_control_character_in_a_word_keeps_the_entry_on_one_line() {
     assert!(
         findings_block(&report).contains("\n  Same expansion (printf 'a\\nb'): gs (alias"),
         "{report}"
+    );
+}
+
+/// Makes a definition that never ran, added on `added`, in the state
+/// "never used, new".
+fn fresh(name: &str, kind: Kind, added: NaiveDate) -> Usage {
+    Usage {
+        added: Some(added),
+        classification: Classification::NeverUsedNew,
+        ..never(name, kind, "x")
+    }
+}
+
+/// The table has the column `Added` after `Last use`, and before `Origin`.
+#[test]
+fn the_table_has_an_added_column_after_the_last_use() {
+    let report = text(&one("x"), &window(), "/bin/zsh", None);
+    assert_eq!(
+        row(&report, "Name"),
+        [
+            "Name",
+            "Kind",
+            "Uses",
+            "Typed",
+            "Through",
+            "First use",
+            "Last use",
+            "Added",
+            "Origin",
+            "Definition"
+        ]
+    );
+    assert_eq!(row(&report, "wide")[7], "unknown");
+}
+
+/// The group "Never used, new" gives the added date of each entry, then its
+/// reasons. The group "Never used, old" gives no date.
+#[test]
+fn a_new_definition_shows_its_added_date_in_its_group() {
+    let mut widget = fresh("lonelyfn", Kind::Function, date(2026, 11, 2));
+    widget.reasons = vec![Reason::WidgetWithoutKey];
+    let mut known_old = never("ancient", Kind::Alias, "x");
+    known_old.added = Some(date(2020, 1, 1));
+    let report = text(
+        &tally(vec![
+            fresh("wt", Kind::Alias, date(2026, 11, 20)),
+            widget,
+            known_old,
+        ]),
+        &window(),
+        "/bin/zsh",
+        None,
+    );
+    assert!(
+        report.contains(
+            "Never used, old (added 90 or more days ago):\n  ancient (alias)\n\
+             Never used, new (added less than 90 days ago):\n\
+             \x20 lonelyfn (function, added 2026-11-02, widget, no key)\n\
+             \x20 wt (alias, added 2026-11-20)\n\
+             Idle"
+        ),
+        "{report}"
+    );
+}
+
+/// The headings of the two groups give `new_days`, as in the tools report.
+#[test]
+fn the_new_days_give_the_headings_of_the_two_groups() {
+    let mut narrow = window();
+    narrow.new_days = 1;
+    let report = text(&tally(Vec::new()), &narrow, "/bin/zsh", None);
+    assert!(
+        report.contains(
+            "Never used, old (added 1 or more days ago): none\n\
+             Never used, new (added less than 1 day ago): none\n"
+        ),
+        "{report}"
+    );
+}
+
+/// The JSON document gives `new_days`, the added date of each definition or
+/// `null`, and the two lists of the definitions that never ran.
+#[test]
+fn the_json_gives_the_added_date_and_the_two_lists() {
+    let mut known_old = never("ancient", Kind::Alias, "x");
+    known_old.added = Some(date(2020, 1, 1));
+    let tally = tally(vec![
+        fresh("wt", Kind::Alias, date(2026, 11, 20)),
+        known_old,
+        never("bare", Kind::Function, "x"),
+    ]);
+    let mut wide = window();
+    wide.new_days = 30;
+    let value: serde_json::Value = serde_json::from_str(&json(&tally, &wide, "/bin/zsh")).unwrap();
+    assert_eq!(value["new_days"], 30);
+    let defs = value["definitions"].as_array().unwrap();
+    assert_eq!(defs[0]["added"], "2026-11-20");
+    assert_eq!(defs[0]["classification"], "never_used_new");
+    assert_eq!(defs[1]["added"], "2020-01-01");
+    assert!(defs[2]["added"].is_null(), "{value}");
+    assert_eq!(
+        value["never_used_old"],
+        serde_json::json!([
+            {"name": "ancient", "kind": "alias"},
+            {"name": "bare", "kind": "function"}
+        ])
+    );
+    assert_eq!(
+        value["never_used_new"],
+        serde_json::json!([{"name": "wt", "kind": "alias"}])
     );
 }
