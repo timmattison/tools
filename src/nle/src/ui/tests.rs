@@ -1683,6 +1683,24 @@ impl Specificity {
             text.split_at(end)
         }
 
+        /// The argument at the start of `text`, which starts after a `(`, and
+        /// the text after the `)` that closes it.
+        fn split_argument(text: &str) -> Option<(&str, &str)> {
+            let mut depth = 0_u32;
+            for (index, character) in text.char_indices() {
+                match character {
+                    '(' => depth += 1,
+                    ')' if depth == 0 => {
+                        let (argument, closed) = text.split_at(index);
+                        return Some((argument, closed.strip_prefix(')')?));
+                    }
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+            }
+            None
+        }
+
         let mut counts = Self::default();
         let mut rest = selector.trim();
         while let Some(next) = rest.chars().next() {
@@ -1700,13 +1718,8 @@ impl Specificity {
                         after
                     }
                     Some(inner) => {
-                        let (argument, after) = inner
-                            .split_once(')')
+                        let (argument, after) = split_argument(inner)
                             .unwrap_or_else(|| panic!("no ) after :{name}( in {selector}"));
-                        assert!(
-                            !argument.contains([',', '(']),
-                            "no rule for the argument of :{name}() in {selector}"
-                        );
                         let added = match name {
                             "where" => Self::default(),
                             "not" | "is" => Self::of(argument),
