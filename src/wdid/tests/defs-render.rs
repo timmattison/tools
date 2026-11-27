@@ -4,7 +4,9 @@ use chrono::NaiveDate;
 use std::path::PathBuf;
 use unicode_width::UnicodeWidthStr;
 use wdid::defs::render::{json, text};
-use wdid::defs::{Classification, Kind, Reason, Summary, Tally, Usage, Window};
+use wdid::defs::{
+    Classification, Finding, FindingKind, Kind, Member, Reason, Summary, Tally, Usage, Window,
+};
 use wdid::starts::Trigger;
 
 use wdid::origin::{Origin, Places};
@@ -79,6 +81,7 @@ fn tally(definitions: Vec<Usage>) -> Tally {
         definitions,
         summary: summary(),
         places: Places::default(),
+        findings: Vec::new(),
     }
 }
 
@@ -648,7 +651,7 @@ fn reasons_tally() -> Tally {
 fn the_text_lists_the_definitions_that_run_without_typing_with_their_reasons() {
     let report = text(&reasons_tally(), &window(), "/bin/zsh", None);
     assert!(
-        report.ends_with(
+        report.contains(
             "Runs without typing:\n\
              \x20 handler (function, command not found)\n\
              \x20 helper (function, precmd hook, through myprecmd; INT trap)\n\
@@ -658,8 +661,13 @@ fn the_text_lists_the_definitions_that_run_without_typing_with_their_reasons() {
              \x20 precmd (function, precmd hook)\n\
              \x20 searchfn (function, widget atuin-search, key ^R)\n\
              \x20 spacefn (function, widget expand, key \" \")\n\
-             \x20 twokeys (function, widget w, keys ^R, ^S, through _twokeys)\n"
+             \x20 twokeys (function, widget w, keys ^R, ^S, through _twokeys)\n\n\
+             Duplicates and shadows: none\n"
         ),
+        "{report}"
+    );
+    assert!(
+        report.ends_with("Duplicates and shadows: none\n"),
         "{report}"
     );
     let empty = text(&tally(Vec::new()), &window(), "/bin/zsh", None);
@@ -719,4 +727,388 @@ fn the_json_gives_the_state_and_the_reasons() {
         .unwrap()
         .iter()
         .all(|entry| entry["name"] == "lonely"));
+}
+
+/// Makes a member of a finding, defined in `file` at `line`.
+fn member(name: &str, kind: Kind, origin: Option<(&str, Option<u32>)>, uses: u64) -> Member {
+    Member {
+        name: name.to_string(),
+        kind,
+        origin: origin.map(|(file, line)| Origin {
+            file: PathBuf::from(file),
+            line,
+        }),
+        uses,
+        mine: true,
+    }
+}
+
+/// Makes a finding of `kind` with `definitions` and no words, no places, and
+/// no program.
+fn finding(kind: FindingKind, definitions: Vec<Member>) -> Finding {
+    Finding {
+        kind,
+        definitions,
+        words: Vec::new(),
+        places: Vec::new(),
+        program: None,
+    }
+}
+
+/// Makes a tally with the home of [`places`] and `findings`.
+fn with_findings(findings: Vec<Finding>) -> Tally {
+    let mut counts = tally(Vec::new());
+    counts.places = places();
+    counts.findings = findings;
+    counts
+}
+
+/// Gives the text of `report` after the heading `Duplicates and shadows`.
+fn findings_block(report: &str) -> &str {
+    let (_, block) = report
+        .split_once("Duplicates and shadows")
+        .unwrap_or_else(|| panic!("no findings block in:\n{report}"));
+    block
+}
+
+/// The same-expansion finding of two aliases of git status.
+fn same_expansion() -> Finding {
+    Finding {
+        words: vec!["git".to_string(), "status".to_string()],
+        ..finding(
+            FindingKind::SameExpansion,
+            vec![
+                member("gs", Kind::Alias, Some(("/home/me/.zshrc", Some(3))), 3),
+                member("gst", Kind::Alias, Some((GIT_PLUGIN, Some(1))), 2),
+            ],
+        )
+    }
+}
+
+#[test]
+fn a_same_expansion_entry_names_the_words_and_each_member() {
+    let report = text(
+        &with_findings(vec![same_expansion()]),
+        &window(),
+        "/bin/zsh",
+        None,
+    );
+    assert!(
+        report.ends_with(
+            "\n\nDuplicates and shadows:\n  Same expansion (git status): gs (alias, ~/.zshrc:3, 3 uses), gst (alias, ~/omz/plugins/git/git.plugin.zsh:1, 2 uses)\n"
+        ),
+        "{report}"
+    );
+}
+
+#[test]
+fn an_alias_and_function_entry_names_the_words_and_each_member() {
+    let found = Finding {
+        words: vec!["git".to_string(), "log".to_string()],
+        ..finding(
+            FindingKind::AliasAndFunction,
+            vec![
+                member("gl", Kind::Alias, Some(("/home/me/.zshrc", Some(7))), 0),
+                member("glog", Kind::Function, Some(("/home/me/.zshrc", None)), 1),
+            ],
+        )
+    };
+    let report = text(&with_findings(vec![found]), &window(), "/bin/zsh", None);
+    assert!(
+        findings_block(&report).contains(
+            "\n  Alias and function (git log): gl (alias, ~/.zshrc:7, 0 uses), glog (function, ~/.zshrc, 1 use)\n"
+        ),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_defined_more_than_once_entry_counts_the_places_and_marks_the_last() {
+    let found = Finding {
+        places: vec![
+            Some(Origin {
+                file: PathBuf::from("/home/me/omz/lib/directories.zsh"),
+                line: Some(30),
+            }),
+            Some(Origin {
+                file: PathBuf::from("/home/me/.zshrc"),
+                line: Some(12),
+            }),
+        ],
+        ..finding(
+            FindingKind::DefinedMoreThanOnce,
+            vec![member("ll", Kind::Alias, None, 4)],
+        )
+    };
+    let report = text(&with_findings(vec![found]), &window(), "/bin/zsh", None);
+    assert!(
+        findings_block(&report).contains(
+            "\n  Defined 2 times: ll (alias, 4 uses) at ~/omz/lib/directories.zsh:30, ~/.zshrc:12 (in effect)\n"
+        ),
+        "{report}"
+    );
+}
+
+/// An alias of my startup file that a plugin defines again is mine, although
+/// the definition in effect is the plugin's.
+#[test]
+fn a_defined_more_than_once_entry_with_my_place_first_shows_without_all() {
+    let found = Finding {
+        places: vec![
+            Some(Origin {
+                file: PathBuf::from("/home/me/.zshrc"),
+                line: Some(12),
+            }),
+            Some(Origin {
+                file: PathBuf::from(GIT_PLUGIN),
+                line: Some(30),
+            }),
+        ],
+        ..finding(
+            FindingKind::DefinedMoreThanOnce,
+            vec![Member {
+                mine: false,
+                ..member("ll", Kind::Alias, Some((GIT_PLUGIN, Some(30))), 4)
+            }],
+        )
+    };
+    let counts = with_findings(vec![found]);
+    let report = text(&counts, &window(), "/bin/zsh", None);
+    assert!(
+        findings_block(&report).contains(
+            "\n  Defined 2 times: ll (alias, 4 uses) at ~/.zshrc:12, ~/omz/plugins/git/git.plugin.zsh:30 (in effect)\n"
+        ),
+        "{report}"
+    );
+    let document: serde_json::Value =
+        serde_json::from_str(&json(&counts, &window(), "/bin/zsh")).unwrap();
+    assert_eq!(document["findings"][0]["mine"], true, "{document}");
+    assert_eq!(
+        document["findings"][0]["definitions"][0]["mine"], false,
+        "{document}"
+    );
+}
+
+#[test]
+fn an_alias_hides_function_entry_names_both_members() {
+    let found = finding(
+        FindingKind::AliasHidesFunction,
+        vec![
+            member("wdx", Kind::Alias, Some(("/home/me/.zshrc", Some(9))), 0),
+            member("wdx", Kind::Function, Some(("/home/me/.zshrc", None)), 5),
+        ],
+    );
+    let report = text(&with_findings(vec![found]), &window(), "/bin/zsh", None);
+    assert!(
+        findings_block(&report).contains(
+            "\n  Alias hides function: wdx (alias, ~/.zshrc:9, 0 uses), wdx (function, ~/.zshrc, 5 uses)\n"
+        ),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_hides_program_entry_shows_the_program_with_a_tilde() {
+    let found = Finding {
+        program: Some(PathBuf::from("/home/me/bin/hidden")),
+        ..finding(
+            FindingKind::HidesProgram,
+            vec![member(
+                "hidden",
+                Kind::Alias,
+                Some(("/home/me/.zshrc", Some(11))),
+                0,
+            )],
+        )
+    };
+    let report = text(&with_findings(vec![found]), &window(), "/bin/zsh", None);
+    assert!(
+        findings_block(&report)
+            .contains("\n  Hides a program (~/bin/hidden): hidden (alias, ~/.zshrc:11, 0 uses)\n"),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_multibyte_name_and_an_unknown_origin_and_place_are_shown() {
+    let found = Finding {
+        places: vec![None, None],
+        ..finding(
+            FindingKind::DefinedMoreThanOnce,
+            vec![member("日本", Kind::Alias, None, 1)],
+        )
+    };
+    let same = Finding {
+        words: vec!["ls".to_string()],
+        ..finding(
+            FindingKind::SameExpansion,
+            vec![
+                member("日本", Kind::Alias, None, 0),
+                member("café", Kind::Alias, Some(("/home/me/.zshrc", Some(2))), 2),
+            ],
+        )
+    };
+    let report = text(
+        &with_findings(vec![found, same]),
+        &window(),
+        "/bin/zsh",
+        None,
+    );
+    let block = findings_block(&report);
+    assert!(
+        block.contains("\n  Defined 2 times: 日本 (alias, 1 use) at -, - (in effect)\n"),
+        "{report}"
+    );
+    assert!(
+        block.contains(
+            "\n  Same expansion (ls): 日本 (alias, -, 0 uses), café (alias, ~/.zshrc:2, 2 uses)\n"
+        ),
+        "{report}"
+    );
+}
+
+#[test]
+fn findings_of_others_only_show_with_all() {
+    let mut others = same_expansion();
+    for member in &mut others.definitions {
+        member.mine = false;
+    }
+    others.words = vec!["other".to_string()];
+    let mut partly = same_expansion();
+    partly.words = vec!["partly".to_string()];
+    if let Some(second) = partly.definitions.get_mut(1) {
+        second.mine = false;
+    }
+    let counts = with_findings(vec![others, partly]);
+    let default = text(&counts, &window(), "/bin/zsh", None);
+    let block = findings_block(&default);
+    assert!(block.contains("Same expansion (partly)"), "{default}");
+    assert!(!block.contains("Same expansion (other)"), "{default}");
+    let all = text(&counts, &all_window(), "/bin/zsh", None);
+    let block = findings_block(&all);
+    assert!(block.contains("Same expansion (partly)"), "{all}");
+    assert!(block.contains("Same expansion (other)"), "{all}");
+    let other_at = block.find("(other)").unwrap();
+    let partly_at = block.find("(partly)").unwrap();
+    assert!(other_at < partly_at, "the order is the order of the tally");
+}
+
+#[test]
+fn no_finding_gives_none_in_the_last_block() {
+    let report = text(&with_findings(Vec::new()), &window(), "/bin/zsh", None);
+    assert!(
+        report.ends_with("\n\nDuplicates and shadows: none\n"),
+        "{report}"
+    );
+    assert!(!report.ends_with("\n\n"), "{report}");
+    let mut others = same_expansion();
+    for member in &mut others.definitions {
+        member.mine = false;
+    }
+    let hidden = text(&with_findings(vec![others]), &window(), "/bin/zsh", None);
+    assert!(
+        hidden.ends_with("\n\nDuplicates and shadows: none\n"),
+        "{hidden}"
+    );
+}
+
+#[test]
+fn the_json_holds_each_finding_also_one_with_no_member_of_mine() {
+    let mut others = same_expansion();
+    for member in &mut others.definitions {
+        member.mine = false;
+    }
+    let more = Finding {
+        places: vec![
+            Some(Origin {
+                file: PathBuf::from("/home/me/omz/lib/directories.zsh"),
+                line: Some(30),
+            }),
+            None,
+        ],
+        ..finding(
+            FindingKind::DefinedMoreThanOnce,
+            vec![member("ll", Kind::Alias, None, 4)],
+        )
+    };
+    let hides = Finding {
+        program: Some(PathBuf::from("/home/me/bin/hidden")),
+        ..finding(
+            FindingKind::HidesProgram,
+            vec![member(
+                "hidden",
+                Kind::Function,
+                Some(("/home/me/.zshrc", None)),
+                0,
+            )],
+        )
+    };
+    let counts = with_findings(vec![others, more, hides]);
+    let document: serde_json::Value =
+        serde_json::from_str(&json(&counts, &window(), "/bin/zsh")).unwrap();
+    let found = document["findings"].as_array().unwrap();
+    assert_eq!(found.len(), 3, "{document}");
+
+    let first = &found[0];
+    assert_eq!(first["kind"], "same_expansion");
+    assert_eq!(first["mine"], false);
+    assert_eq!(first["words"], serde_json::json!(["git", "status"]));
+    assert_eq!(first["places"], serde_json::json!([]));
+    assert_eq!(first["program"], serde_json::Value::Null);
+    let members = first["definitions"].as_array().unwrap();
+    assert_eq!(
+        members[0],
+        serde_json::json!({
+            "name": "gs",
+            "kind": "alias",
+            "origin": {"file": "/home/me/.zshrc", "line": 3},
+            "uses": 3,
+            "mine": false,
+        })
+    );
+    assert_eq!(members[1]["name"], "gst");
+    assert_eq!(members[1]["uses"], 2);
+
+    let second = &found[1];
+    assert_eq!(second["kind"], "defined_more_than_once");
+    assert_eq!(second["mine"], true);
+    assert_eq!(second["words"], serde_json::json!([]));
+    assert_eq!(
+        second["places"],
+        serde_json::json!([
+            {"file": "/home/me/omz/lib/directories.zsh", "line": 30},
+            null
+        ])
+    );
+    assert_eq!(second["definitions"][0]["origin"], serde_json::Value::Null);
+    assert_eq!(second["definitions"][0]["mine"], true);
+
+    let third = &found[2];
+    assert_eq!(third["kind"], "hides_program");
+    assert_eq!(third["program"], "/home/me/bin/hidden");
+    assert_eq!(third["definitions"][0]["kind"], "function");
+    assert_eq!(
+        third["definitions"][0]["origin"],
+        serde_json::json!({"file": "/home/me/.zshrc", "line": null})
+    );
+}
+
+#[test]
+fn the_json_findings_are_an_empty_list_when_there_is_none() {
+    let document: serde_json::Value =
+        serde_json::from_str(&json(&tally(Vec::new()), &window(), "/bin/zsh")).unwrap();
+    assert_eq!(document["findings"], serde_json::json!([]), "{document}");
+}
+
+#[test]
+fn a_control_character_in_a_word_keeps_the_entry_on_one_line() {
+    let found = Finding {
+        words: vec!["printf".to_string(), "'a\nb'".to_string()],
+        ..same_expansion()
+    };
+    let report = text(&with_findings(vec![found]), &window(), "/bin/zsh", None);
+    assert!(
+        findings_block(&report).contains("\n  Same expansion (printf 'a\\nb'): gs (alias"),
+        "{report}"
+    );
 }

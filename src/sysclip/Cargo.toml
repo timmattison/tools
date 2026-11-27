@@ -9,6 +9,11 @@ license = "MIT"
 arboard.workspace = true
 childenv.workspace = true
 thiserror.workspace = true
+# Writes the fake `pbcopy` and `pbpaste` of `testing` with `write_executable`.
+# On Linux, a script that the test process held open for writing gives ETXTBSY
+# at its run. Optional, so a build without the `testing` feature holds none of
+# it.
+gitscratch = { workspace = true, features = ["testing"], optional = true }
 # Quotes the message of the refusing `pbpaste` in `testing`. Optional, so a
 # build without the `testing` feature holds none of it.
 shellquote = { workspace = true, optional = true }
@@ -16,9 +21,12 @@ shellquote = { workspace = true, optional = true }
 [features]
 # The fake `pbcopy` and `pbpaste` of a mosh-rs session, for the tests of other
 # crates. Take it as a dev-dependency only.
-testing = ["dep:shellquote"]
+testing = ["dep:gitscratch", "dep:shellquote"]
 
 [dev-dependencies]
+# `write_executable` writes the scripts that the unit tests run, for the same
+# reason as above.
+gitscratch = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 
 [lints]
