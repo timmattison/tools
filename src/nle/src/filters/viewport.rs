@@ -79,7 +79,7 @@ use serde::Deserialize;
 
 use termstate::{Cell, TerminalState, TerminalTheme};
 
-use self::writer::{Glyph, HIDE_CURSOR, Look, SHOW_CURSOR, Writer};
+use self::writer::{Glyph, Look, Writer, HIDE_CURSOR, SHOW_CURSOR};
 use crate::ansi::{Scanner, Sequence, Step};
 use crate::pipeline::{FilterRegistry, Screen, ScreenSize, ScreenView};
 use crate::preview::{MAX_COLUMNS, MAX_ROWS};
