@@ -976,6 +976,7 @@ dependencies = [
  "clap",
  "crossterm",
  "flate2",
+ "gitscratch",
  "image",
  "imageproc",
  "minijinja",
@@ -983,10 +984,11 @@ dependencies = [
  "serde",
  "serde_json",
  "signal-hook 0.3.18",
+ "tempfile",
  "termsize",
+ "termstate",
  "tokio",
  "tokio-stream",
- "vte",
 ]
 
 [[package]]
@@ -6984,21 +6986,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 
 [[package]]
-name = "localnext"
-version = "0.1.0"
-dependencies = [
- "buildinfo",
- "childenv",
- "clap",
- "httpfile",
- "percent-encoding",
- "portplz-core",
- "tempfile",
- "thiserror 2.0.21",
- "tiny_http",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11909,6 +11896,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "termstate"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "vte",
+]
+
+[[package]]
 name = "termwindow"
 version = "0.1.0"
 
@@ -13288,6 +13283,7 @@ dependencies = [
  "tempfile",
  "termsize",
  "thiserror 2.0.21",
+ "unicode-width",
  "url",
  "wait-timeout",
 ]
