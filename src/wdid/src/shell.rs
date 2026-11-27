@@ -347,6 +347,10 @@ impl Marker {
 /// The bash script turns off the `DEBUG` trap before `extdebug`, because
 /// `extdebug` skips the next command when that trap fails. It lists the traps
 /// before that.
+///
+/// The bash script reads each name from an unquoted command substitution, thus
+/// it turns off pathname expansion (`set -f`) for those loops. Else a name
+/// such as `a*c` expands to the files of the current directory that match it.
 #[must_use]
 pub fn script(kind: ShellKind, marker: &Marker) -> String {
     let marker = marker.as_str();
@@ -400,6 +404,7 @@ pub fn script(kind: ShellKind, marker: &Marker) -> String {
              bind -X 2>/dev/null || :\n\
              trap - DEBUG\n\
              shopt -s extdebug\n\
+             set -f\n\
              for {LOOP_VARIABLE} in $(compgen -A function); do\n\
              \x20 printf '%s\\n' \"{marker} {FUNCTION_LABEL} ${LOOP_VARIABLE}\"\n\
              \x20 {BASH_ORIGIN_VARIABLE}=$(declare -F -- \"${LOOP_VARIABLE}\")\n\
@@ -413,6 +418,7 @@ pub fn script(kind: ShellKind, marker: &Marker) -> String {
              \x20 printf '%s\\n' \"{marker} {PROGRAM_LABEL} ${PROGRAM_VARIABLE}\"\n\
              \x20 type -P -- \"${PROGRAM_VARIABLE}\" 2>/dev/null || :\n\
              done\n\
+             set +f\n\
              printf '%s\\n' '{marker} {END_LABEL}'\n"
         ),
     }
