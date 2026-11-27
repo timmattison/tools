@@ -725,9 +725,13 @@ fn edited_row(text: &str) -> String {
 /// preview toolbar, as it does for the input listeners, and the Play button
 /// comes before the Stop button.
 async fn open_recording() -> Window {
-    let fakes = Fakes::new()
-        .pick(picked())
-        .load(Answer::Ready(Ok(fixture())));
+    open_loaded(fixture()).await
+}
+
+/// Opens `loaded` through the fakes, and notes the three click listeners as
+/// `open_recording` does.
+async fn open_loaded(loaded: LoadedRecording) -> Window {
+    let fakes = Fakes::new().pick(picked()).load(Answer::Ready(Ok(loaded)));
     let mut window = Window::open(&fakes);
     window.click(window.open_button());
     window.settle().await;
@@ -1105,4 +1109,18 @@ async fn play_moves_the_playhead_and_pause_holds_it() {
     let held = window.readout();
     window.settle().await;
     assert_eq!(window.readout(), held);
+}
+
+#[tokio::test]
+async fn playback_stops_at_the_end() {
+    let mut loaded = fixture();
+    loaded.recording.duration = 0.2;
+    let mut window = open_loaded(loaded).await;
+    window.click(window.play_button());
+    assert_eq!(window.play_label(), "Pause");
+
+    window.settle().await;
+
+    assert_eq!(window.play_label(), "Play");
+    assert_eq!(window.readout(), "0m 0.2s / 0m 0.2s");
 }
