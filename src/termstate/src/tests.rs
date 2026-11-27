@@ -1370,7 +1370,12 @@ fn the_theme_counts_although_only_a_palette_color_differs() {
 
 #[test]
 fn each_attribute_of_the_pen_counts_although_the_screen_is_the_same() {
-    for (on, _, _, _) in attributes() {
+    // The eight parameters of `ALL_ON`. `attributes()` holds only five.
+    let parameters = ALL_ON
+        .trim_start_matches("\x1b[")
+        .trim_end_matches('m')
+        .split(';');
+    for on in parameters {
         assert!(
             feed_text("ab") != feed_text(&format!("ab\x1b[{on}m")),
             "SGR {on}"
