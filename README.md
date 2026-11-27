@@ -6615,7 +6615,7 @@ sequences:
   own text. The AWS key preset uses it to keep the name of a key visible, and
   the token preset uses it to keep the word `Bearer`.
 
-The timeline (issue #150) does not show where the redactions are yet.
+The timeline does not show where the redactions are yet (issue #818).
 
 The application is one Rust crate on Dioxus 0.7, with the desktop (webview)
 renderer. Its components call the Rust code directly, and the open project is
@@ -6668,8 +6668,9 @@ The editing engine of the crate has five parts:
 
   The filters of issue #154 parse their options as a Rust type, so the render
   refuses a missing option, a value of the wrong type, and a key that the
-  filter does not know. The window cannot add them yet (issue #150). Issues
-  #157 to #167 add more filters.
+  filter does not know. The window cannot add them yet. Issue #804 adds the
+  click on the timeline that places a pause. Issues #157 to #167 add more
+  filters.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
