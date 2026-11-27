@@ -24,6 +24,9 @@ use crate::types::{AppliedFilter, EditProject, FilterRegion, Seconds};
 use crate::format::{file_name, format_duration, format_recorded};
 use crate::types::{LoadedRecording, RecordingMetadata};
 
+mod history;
+use history::{step_history, HistoryButtons, HistoryStep};
+
 mod preview;
 use preview::{end_of, render_of, PreviewPane, RenderedState};
 
@@ -245,11 +248,19 @@ pub(crate) fn App() -> Element {
     let mut playhead = use_signal(|| Seconds::ZERO);
     let mut playing = use_signal(|| false);
     let rendered = use_memo(move || render_of(&loaded.read()));
+    // A step that changed the project clears the banner, as an edit does.
+    let take_step = move |step: HistoryStep| match step_history(loaded, step) {
+        Ok(true) => error.set(None),
+        Ok(false) => {}
+        Err(message) => error.set(Some(message)),
+    };
 
     rsx! {
         style { {STYLE} }
         div { class: "app-layout",
             MenuBar {
+                loaded,
+                on_step: take_step,
                 on_loaded: move |recording| match Document::open(recording, filters.clone()) {
                     Ok(document) => {
                         loaded.set(Some(document));
@@ -278,9 +289,16 @@ pub(crate) fn App() -> Element {
     }
 }
 
-/// The menu bar with the Open Recording button.
+/// The menu bar: the Open Recording button, then the Undo button and the Redo
+/// button of the editor of `loaded`. Each click of Undo or Redo sends its step
+/// to `on_step`.
 #[component]
-fn MenuBar(on_loaded: EventHandler<LoadedRecording>, on_error: EventHandler<String>) -> Element {
+fn MenuBar(
+    loaded: ReadSignal<Option<Document>>,
+    on_step: EventHandler<HistoryStep>,
+    on_loaded: EventHandler<LoadedRecording>,
+    on_error: EventHandler<String>,
+) -> Element {
     let services = use_context::<Services>();
     // True from the click until the dialog and the load end.
     let mut opening = use_signal(|| false);
@@ -307,6 +325,7 @@ fn MenuBar(on_loaded: EventHandler<LoadedRecording>, on_error: EventHandler<Stri
                 },
                 "Open Recording"
             }
+            HistoryButtons { loaded, on_step }
         }
     }
 }
