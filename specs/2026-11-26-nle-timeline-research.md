@@ -22,11 +22,11 @@ library, and do not use a canvas for the first version.
 2. **Draw the clips as RSX elements.** Each clip is one `div` with an absolute
    position and `overflow: hidden`.
 3. **Divide each clip into tiles of 512 px, and render only the tiles in the
-   window and in an overscan of 600 px.** A `Tile` component takes only the
-   clip, the tile index, and the pixels per second as props. Thus Dioxus skips
-   each tile during a drag and a pan, and renders the tiles again only on a
-   zoom. In the real timeline, a filter changes the events of a clip, thus the
-   props of a tile must also hold a revision number of those events.
+   window and in an overscan of 600 px.** A `Tile` component takes four props:
+   the clip, the tile index, the pixels per second, and a revision number of
+   the events of the clip. Thus Dioxus skips each tile during a drag and a pan.
+   Only a zoom and a change of the events, for example by a filter, render the
+   tiles again.
 4. **Draw the event density of a tile as one SVG `path`.** Rust counts the
    events of each pixel column (a binary search for the first and the last
    event, then one pass), and the path has one vertical segment for each
