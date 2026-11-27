@@ -436,3 +436,23 @@ fn an_option_fails_the_render_and_the_message_names_it() {
     assert!(message.contains("speed"), "{message}");
     assert!(message.contains("backspace-removal"), "{message}");
 }
+
+/// The message of the render error that `result` holds.
+fn render_error_message(result: Result<Recording, NleError>) -> String {
+    match result {
+        Err(NleError::RenderError(message)) => message,
+        other => panic!("expected a render error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_terminal_of_no_columns_fails_the_render() {
+    let message = render_error_message(render(0, 24, vec![out(0.0, "x")]));
+    assert!(message.contains("0 by 24"), "{message}");
+}
+
+#[test]
+fn a_terminal_of_no_rows_fails_the_render() {
+    let message = render_error_message(render(80, 0, vec![out(0.0, "x")]));
+    assert!(message.contains("80 by 0"), "{message}");
+}
