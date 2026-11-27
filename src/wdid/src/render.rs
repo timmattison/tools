@@ -42,13 +42,13 @@ const WHOLE_COLUMNS: [usize; 7] = [0, 1, 2, 4, 5, 6, 7];
 const TEXT_COLUMNS: [(usize, u16); 2] = [(3, 22), (8, 16)];
 
 /// The text in place of a date that the tally does not know.
-const NO_DATE: &str = "-";
+pub(crate) const NO_DATE: &str = "-";
 
 /// The format of a date in the report.
-const DATE_FORMAT: &str = "%Y-%m-%d";
+pub(crate) const DATE_FORMAT: &str = "%Y-%m-%d";
 
 /// What holds the parts of the `Through` cell apart.
-const THROUGH_SEPARATOR: &str = ", ";
+pub(crate) const THROUGH_SEPARATOR: &str = ", ";
 
 /// The note of a tool that `cargo install --list` does not name.
 const NOTE_NOT_INSTALLED: &str = "not installed";
@@ -60,12 +60,12 @@ const NOTE_NOT_ON_PATH: &str = "not on PATH";
 const NOTE_RUNS_FIRST: &str = "runs first";
 
 /// Gives `count` with a comma between each group of three digits.
-fn number(count: u64) -> String {
+pub(crate) fn number(count: u64) -> String {
     count.to_formatted_string(&Locale::en)
 }
 
 /// Gives `count`, a `usize`, with a comma between each group of three digits.
-fn number_of(count: usize) -> String {
+pub(crate) fn number_of(count: usize) -> String {
     count.to_formatted_string(&Locale::en)
 }
 
@@ -73,7 +73,7 @@ fn number_of(count: usize) -> String {
 /// three digits, one space, and `singular` when the count is 1 or `plural`
 /// for every other count. English plurals are irregular, so the caller gives
 /// both forms.
-fn counted<T>(count: T, singular: &str, plural: &str) -> String
+pub(crate) fn counted<T>(count: T, singular: &str, plural: &str) -> String
 where
     T: ToFormattedString + PartialEq + From<u8>,
 {
@@ -86,7 +86,7 @@ where
 }
 
 /// Gives `date` as `YYYY-MM-DD`, or `-` when the date is not known.
-fn date_cell(date: Option<NaiveDate>) -> String {
+pub(crate) fn date_cell(date: Option<NaiveDate>) -> String {
     date.map_or_else(
         || NO_DATE.to_string(),
         |date| date.format(DATE_FORMAT).to_string(),
@@ -162,13 +162,13 @@ fn table(tally: &Tally, width: Option<u16>) -> String {
 }
 
 /// The word `none`, for a group with no entry.
-const NONE: &str = "none";
+pub(crate) const NONE: &str = "none";
 
 /// What holds the entries of a group apart.
 const ENTRY_SEPARATOR: &str = ", ";
 
 /// What holds the blocks of the text report apart: one blank line.
-const BETWEEN_BLOCKS: &str = "\n\n";
+pub(crate) const BETWEEN_BLOCKS: &str = "\n\n";
 
 /// Gives the tools that have `classification`, sorted by name.
 fn tools_with(tally: &Tally, classification: Classification) -> Vec<&ToolUsage> {
@@ -191,14 +191,14 @@ fn idle_tools(tally: &Tally) -> Vec<&ToolUsage> {
 
 /// What starts each entry of a group: two spaces, so that the entries stand
 /// under their heading.
-const ENTRY_INDENT: &str = "  ";
+pub(crate) const ENTRY_INDENT: &str = "  ";
 
 /// Gives one group: the heading and a colon, then one indented line for each
 /// entry. A group with no entry is one line that ends with `none`.
 ///
 /// One line for each entry keeps a long group readable. On a real history the
 /// idle group held 21 tools, which on one line took 870 characters.
-fn group(heading: &str, entries: &[String]) -> String {
+pub(crate) fn group(heading: &str, entries: &[String]) -> String {
     if entries.is_empty() {
         return format!("{heading}: {NONE}");
     }

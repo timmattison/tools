@@ -5,7 +5,9 @@
 //! break a rule of its type. The keys of the options are the field names
 //! below, and they are a part of the project file format.
 
+pub mod cursor;
 pub mod time_dilation;
+pub mod typing_speed;
 
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -62,11 +64,14 @@ const END_TOLERANCE: f64 = 1e-6;
 /// on a range the events after the range keep their gap from its end.
 pub const AUTO_TRIM: &str = "auto-trim";
 
-/// A registry that holds every filter that ships with the app.
+/// A registry that holds every filter that ships with the app, under its
+/// kind.
 #[must_use]
 pub fn registry() -> FilterRegistry {
     let mut registry = FilterRegistry::new();
+    cursor::register(&mut registry);
     time_dilation::register(&mut registry);
+    typing_speed::register(&mut registry);
     register_with_options(&mut registry, PAUSE_REMOVAL, |span, options| {
         Ok(remove_pauses(span, options))
     });
