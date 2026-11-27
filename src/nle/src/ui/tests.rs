@@ -481,10 +481,12 @@ fn timeline_reads_the_project_of_the_editor() {
 }
 
 #[test]
-fn preview_shows_the_size_of_the_recording() {
+fn preview_draws_the_terminal_at_time_zero() {
     let page = render_panels(fixture());
-    assert!(page.contains("coming in #151"), "{page}");
-    assert!(page.contains("120x40"), "{page}");
+    assert!(page.contains("--columns:120;--rows:40"), "{page}");
+    assert!(page.contains(">x</span>"), "{page}");
+    assert!(page.contains("terminal-row"), "{page}");
+    assert!(!page.contains("coming in #151"), "{page}");
 }
 
 fn picked() -> Answer<Option<PathBuf>> {
