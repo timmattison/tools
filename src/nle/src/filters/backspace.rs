@@ -44,6 +44,9 @@
 //!   changed nothing on the screen, for example a Backspace at the start of a
 //!   line that rings the bell. Else the unit stays and the stack ends.
 //! - An other key stays and ends the stack. The filter follows one line.
+//! - The last unit of a range stays and ends the stack when the first event
+//!   after the range is an output event. The end of the range cuts the output
+//!   of that unit, so the filter cannot see all of it.
 //!
 //! # The times
 //!
@@ -208,7 +211,8 @@ pub fn register(registry: &mut FilterRegistry) {
 /// so the viewer sees no pause for the typo.
 ///
 /// The filter takes no option. It replays the output events before the region
-/// into the screen first.
+/// into the screen first. When the first event after the region is an output
+/// event, the end of the region cuts the last unit, and that unit stays.
 ///
 /// # Errors
 /// Returns an error when `options` holds a key, when the terminal has no
@@ -233,17 +237,23 @@ fn remove_backspacing(
     {
         feed(&mut screen, event)?;
     }
-    let removed = mark_removed(&span.events, &mut screen, depth)?;
+    let last_unit_is_cut = context
+        .after
+        .first()
+        .is_some_and(|event| event.event_type == EventType::Output);
+    let removed = mark_removed(&span.events, &mut screen, depth, last_unit_is_cut)?;
     Ok(cut_removed(span, removed))
 }
 
 /// Walk `events` and mark the events that the filter removes. `screen` is the
 /// screen at the start of the events. The stack of typed keys holds at most
-/// `depth` keys.
+/// `depth` keys. When `last_unit_is_cut` is true, the end of the region cuts
+/// the output of the last unit, so the last unit stays and ends the stack.
 fn mark_removed(
     events: &[Event],
     screen: &mut TerminalState,
     depth: usize,
+    last_unit_is_cut: bool,
 ) -> Result<Vec<bool>, String> {
     let mut walk = Walk::new(events.len(), depth);
     let mut index = 0;
@@ -259,7 +269,8 @@ fn mark_removed(
             .skip(index + 1)
             .find(|(_, later)| later.event_type == EventType::Input)
             .map_or(events.len(), |(position, _)| position);
-        let key = key_of(&event.data);
+        let cut = last_unit_is_cut && unit_end == events.len();
+        let key = if cut { Key::Other } else { key_of(&event.data) };
         let before = (key != Key::Other).then(|| screen.clone());
         for output in events.get(index + 1..unit_end).unwrap_or_default() {
             feed(screen, output)?;

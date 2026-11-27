@@ -1027,6 +1027,24 @@ fn a_span_filter_on_a_range_gets_the_events_before_the_range_at_their_times() {
 }
 
 #[test]
+fn a_span_filter_on_a_range_gets_the_events_after_the_range_at_their_times() {
+    let seen = TestArc::new(Mutex::new(Vec::new()));
+    let captured = TestArc::clone(&seen);
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("look"), move |span, context, _| {
+        captured.lock().unwrap().push(context.after.to_vec());
+        Ok(span)
+    });
+
+    // The event at the end of the region is after the region.
+    registry
+        .run(events(&[0.5, 1.5, 2.0, 5.0]), &[range("look", 1.0, 2.0)])
+        .unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), vec![events(&[2.0, 5.0])]);
+}
+
+#[test]
 fn run_gives_a_span_filter_the_size_of_a_vt100() {
     let (registry, seen) = context_spy_registry();
 

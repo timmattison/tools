@@ -6400,8 +6400,9 @@ The editing engine of the crate has four parts:
   whether anything comes after it. It rewrites its region and moves nothing. A
   span filter (`register_span`) also gets the length of its region and answers
   a new length, and the later events move by the change in the length. A span
-  filter also gets the events before its region and the size of the terminal:
-  the size of the clip that starts first, or 80 by 24 in `FilterRegistry::run`.
+  filter also gets the events before and after its region and the size of the
+  terminal: the size of the clip that starts first, or 80 by 24 in
+  `FilterRegistry::run`.
   `filters::registry()` holds the filters that ship: the cursor filter
   (`cursor`, issue #168) is an in-place filter, and time dilation
   (`time-dilation`, issue #153) and backspace removal (`backspace-removal`,
@@ -6489,7 +6490,9 @@ The filter takes no option. A project file names it in its `filters` list:
 
 On a range, the filter replays the output before the range into its screen, so
 it compares the screens that the viewer sees. The events after the range move
-earlier by the removed time.
+earlier by the removed time. When the first event after the range is output,
+the end of the range cuts the output of the last key of the range. That key
+stays, because the filter cannot see all of its output.
 
 The limits:
 

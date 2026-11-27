@@ -112,6 +112,11 @@ pub struct SpanContext<'a> {
     /// order that they play. A filter that keeps a model of the screen replays
     /// them to get the screen at the start of the region.
     pub before: &'a [Event],
+    /// The events after the region, at their times on the timeline before
+    /// the pipeline moves them, in the order that they play. A filter that
+    /// reads the output of each input event finds from them if the end of the
+    /// region cuts the output of its last input event.
+    pub after: &'a [Event],
     /// The size of the terminal that the events draw on.
     pub size: TerminalSize,
 }
@@ -139,8 +144,8 @@ pub struct Span {
 ///    length 0. For the region `All`, the length is the end of the timeline.
 /// 2. The filter gets a `Span` with the events inside the region, relative to
 ///    its start, and the length. It also gets a `SpanContext`: the events
-///    before the region, and the size of the terminal. It answers `Ok` with a
-///    new `Span`, or `Err` with a message.
+///    before the region, the events after it, and the size of the terminal.
+///    It answers `Ok` with a new `Span`, or `Err` with a message.
 /// 3. An `Err` fails the pipeline with a render error. Its text names the kind
 ///    and holds the message.
 /// 4. Each answered time is checked as in step 5 of `FilterFn`, with the same
@@ -305,6 +310,7 @@ impl FilterRegistry {
                 };
                 let context = SpanContext {
                     before: &before,
+                    after: &after,
                     size,
                 };
                 let answer = filter(span, context, &applied.options).map_err(|message| {
