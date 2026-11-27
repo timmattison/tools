@@ -499,4 +499,8 @@ fn a_redaction_of_input_after_the_hud_does_not_hide_the_typed_keys() {
         .unwrap();
     assert_eq!(text(&replay(&result, 1.05, WIDE), 2, 34, 39), "│ x │");
     assert_eq!(text(&replay(&result, 1.55, WIDE), 2, 29, 39), "│ xyzzy4 │");
+    // The box holds the whole password, and the redaction does not mask it.
+    // The draw at 1.6 s writes only the cells that change, and the z at column
+    // 34 does not change. Thus no output event holds the password in one run.
+    assert_eq!(text(&replay(&result, 1.65, WIDE), 2, 28, 39), "│ xyzzy42 │");
 }
