@@ -1229,3 +1229,173 @@ fn defs_gives_the_functions_that_bash_runs_without_a_typed_name_their_state() {
     }
     assert!(listed_in(&document, "never_used", "unused"), "{document}");
 }
+
+/// The `.zshrc` of the tests of the duplicates and the shadows. Each name
+/// starts with `wd`, so a program of the machine seldom shares it. Line 3 is
+/// `wdgs`, line 5 is `wdgl`, and line 7 is the first `wdll`.
+const FINDINGS_ZSHRC: &str = "export ZSH=$HOME/omz\n\
+path=($HOME/bin $path)\n\
+alias wdgs='git status'\n\
+source $ZSH/plugins/git/git.plugin.zsh\n\
+alias wdgl='git log'\n\
+wdglog() { git log \"$@\" }\n\
+alias wdll='ls -l'\n\
+source $HOME/more.zsh\n\
+wdx() { true }\n\
+alias wdx='echo x'\n\
+alias wdhidden='echo hi'\n\
+alias wdwrapped='wdwrapped --flag'\n\
+wdcmd() { command wdcmd --flag \"$@\" }\n";
+
+/// The plugin of [`FINDINGS_ZSHRC`]: two aliases of mine are not in it, and
+/// two others share `git checkout`.
+const FINDINGS_PLUGIN: &str = "alias wdgst='git status'\n\
+alias wdgco='git checkout'\n\
+alias wdgcheck='git checkout'\n";
+
+/// The file that defines `wdll` a second time, in the home directory.
+const FINDINGS_MORE: &str = "alias wdll='ls -la'\n";
+
+/// The programs in the `bin` directory of the home that
+/// [`FINDINGS_ZSHRC`] puts first on the path.
+const FINDINGS_PROGRAMS: [&str; 3] = ["wdhidden", "wdwrapped", "wdcmd"];
+
+/// The heading of the group of the duplicates and the shadows.
+const FINDINGS_HEADING: &str = "Duplicates and shadows:";
+
+/// Runs `wdid defs` with `args` on the home of [`FINDINGS_ZSHRC`], outside each
+/// work tree. The history uses `wdgs` twice, `wdglog` once, and `wdll` once.
+fn run_findings_defs(args: &[&str]) -> (Setup, Output) {
+    let setup = Setup::new(&Atuin::Rows(&[
+        row(1, "wdgs"),
+        row(2, "wdgs"),
+        row(1, "wdglog"),
+        row(1, "wdll"),
+    ]));
+    let home = setup.home.path();
+    std::fs::write(home.join(".zshrc"), FINDINGS_ZSHRC).unwrap();
+    std::fs::write(home.join("more.zsh"), FINDINGS_MORE).unwrap();
+    let plugin = home.join(ORIGIN_PLUGIN);
+    std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+    std::fs::write(plugin, FINDINGS_PLUGIN).unwrap();
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for program in FINDINGS_PROGRAMS {
+        write_script(&bin, program, "");
+    }
+    let cwd = gitscratch::testing::not_a_repository();
+    let output = defs_command(&setup)
+        .args(args)
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+    (setup, output)
+}
+
+/// Gives the lines of the group of the duplicates and the shadows in `text`:
+/// the indented lines after its heading.
+fn findings_lines(text: &str) -> Vec<&str> {
+    let mut lines = text.lines().skip_while(|line| *line != FINDINGS_HEADING);
+    assert!(lines.next().is_some(), "no findings group in:\n{text}");
+    lines.take_while(|line| line.starts_with("  ")).collect()
+}
+
+#[test]
+fn defs_lists_the_duplicates_and_the_shadows_of_my_definitions() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let (_setup, output) = run_findings_defs(&[]);
+    assert!(output.status.success(), "{output:?}");
+    let text = stdout(&output);
+    let lines = findings_lines(&text);
+    let has = |entry: &str| lines.iter().any(|line| *line == format!("  {entry}"));
+    let plugin = format!("~/{ORIGIN_PLUGIN}");
+    assert!(
+        has(&format!(
+            "Same expansion (git status): wdgs (alias, ~/.zshrc:3, 2 uses), wdgst (alias, {plugin}:1, 0 uses)"
+        )),
+        "{text}"
+    );
+    assert!(
+        has("Alias and function (git log): wdgl (alias, ~/.zshrc:5, 0 uses), wdglog (function, ~/.zshrc, 1 use)"),
+        "{text}"
+    );
+    assert!(
+        has("Defined 2 times: wdll (alias, 1 use) at ~/.zshrc:7, ~/more.zsh:1 (in effect)"),
+        "{text}"
+    );
+    assert!(
+        has("Alias hides function: wdx (alias, ~/.zshrc:10, 0 uses), wdx (function, ~/.zshrc, 0 uses)"),
+        "{text}"
+    );
+    assert!(
+        has("Hides a program (~/bin/wdhidden): wdhidden (alias, ~/.zshrc:11, 0 uses)"),
+        "{text}"
+    );
+    let block = lines.join("\n");
+    assert!(!block.contains("wdwrapped"), "{text}");
+    assert!(!block.contains("wdcmd"), "{text}");
+    assert!(!block.contains("wdgcheck"), "{text}");
+}
+
+#[test]
+fn defs_all_also_lists_the_findings_of_the_others() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let (_setup, output) = run_findings_defs(&["--all"]);
+    assert!(output.status.success(), "{output:?}");
+    let text = stdout(&output);
+    let lines = findings_lines(&text);
+    let plugin = format!("~/{ORIGIN_PLUGIN}");
+    let others = format!(
+        "  Same expansion (git checkout): wdgcheck (alias, {plugin}:3, 0 uses), wdgco (alias, {plugin}:2, 0 uses)"
+    );
+    assert!(lines.iter().any(|line| *line == others), "{text}");
+}
+
+#[test]
+fn defs_json_lists_each_kind_of_finding_and_marks_the_others() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let (_setup, output) = run_findings_defs(&["--json"]);
+    let document = json(&output);
+    let found = document["findings"].as_array().unwrap();
+    let names = |entry: &Value| -> Vec<String> {
+        entry["definitions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|member| member["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    for (kind, first) in [
+        ("same_expansion", "wdgs"),
+        ("alias_and_function", "wdgl"),
+        ("defined_more_than_once", "wdll"),
+        ("alias_hides_function", "wdx"),
+        ("hides_program", "wdhidden"),
+    ] {
+        let entry = found
+            .iter()
+            .find(|entry| entry["kind"] == kind && names(entry).iter().any(|name| name == first))
+            .unwrap_or_else(|| panic!("no {kind} finding of {first} in {document}"));
+        assert_eq!(entry["mine"], true, "{entry}");
+    }
+    let others = found
+        .iter()
+        .find(|entry| {
+            entry["kind"] == "same_expansion" && names(entry).iter().any(|name| name == "wdgcheck")
+        })
+        .unwrap_or_else(|| panic!("no finding of wdgcheck in {document}"));
+    assert_eq!(others["mine"], false, "{others}");
+    assert_eq!(others["words"], serde_json::json!(["git", "checkout"]));
+    let mut members = names(others);
+    members.sort();
+    assert_eq!(members, ["wdgcheck", "wdgco"]);
+}
