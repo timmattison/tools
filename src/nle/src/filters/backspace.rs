@@ -18,6 +18,9 @@ const BS: &str = "\x08";
 /// The data of the Ctrl+W key. It erases the word before the cursor.
 const CTRL_W: &str = "\x17";
 
+/// The data of the Ctrl+U key. It erases the line before the cursor.
+const CTRL_U: &str = "\x15";
+
 /// What the data of an input event is, for this filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Key {
@@ -27,6 +30,8 @@ enum Key {
     EraseChar,
     /// The Ctrl+W key.
     EraseWord,
+    /// The Ctrl+U key.
+    EraseLine,
     /// Any other input. It ends the line that the filter follows.
     Other,
 }
@@ -38,6 +43,9 @@ fn key_of(data: &str) -> Key {
     }
     if data == CTRL_W {
         return Key::EraseWord;
+    }
+    if data == CTRL_U {
+        return Key::EraseLine;
     }
     let mut chars = data.chars();
     match (chars.next(), chars.next()) {
@@ -126,7 +134,7 @@ fn mark_removed(events: &[Event], screen: &mut TerminalState) -> Result<Vec<bool
                     screen == &before,
                 ),
             },
-            (Key::EraseWord, Some(before)) => {
+            (Key::EraseWord | Key::EraseLine, Some(before)) => {
                 erase_many(&mut removed, &mut stack, index..unit_end, screen, &before);
             }
             _ => stack.clear(),
