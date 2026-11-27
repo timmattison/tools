@@ -349,6 +349,31 @@ fn pause_insertion_refuses_a_point_past_the_end_of_its_range() {
 }
 
 #[test]
+fn pause_insertion_accepts_the_end_of_a_range_with_decimal_bounds() {
+    // The range from 1.1 to 1.3 has the length 1.3 - 1.1, which is
+    // 0.19999999999999996 and not 0.2. The point 0.2 that a person types is
+    // the end of the range, so the pause goes there, and the event at 2 after
+    // the range moves later by the duration.
+    let events = || outputs(&[0.0, 1.1, 2.0]);
+    let out = run(
+        events(),
+        range(PAUSE_INSERTION, 1.1, 1.3, insertion(0.2, 1.0)),
+    )
+    .unwrap();
+
+    assert_eq!(times(&out), vec![0.0, 1.1, 3.0]);
+
+    // A point that is past the end by more than a rounding error is still
+    // an error.
+    let result = run(
+        events(),
+        range(PAUSE_INSERTION, 1.1, 1.3, insertion(0.21, 1.0)),
+    );
+
+    assert_invalid_options(result, PAUSE_INSERTION, "past the end of the region");
+}
+
+#[test]
 fn pause_insertion_refuses_invalid_options() {
     let cases = [
         (FilterOptions::new().with("duration", 1.0), "at"),
