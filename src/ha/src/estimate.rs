@@ -56,8 +56,10 @@ struct Term {
     /// The end of the run if this job is the last one. A running job past its
     /// estimate ends now or later, thus its end is now plus the tail.
     end: i64,
-    /// The end of the run if this job ended at its estimate. This value is
-    /// different from `end` only for a running job past its estimate.
+    /// The end of the run if this job is the last one, with no floor at now.
+    /// This value is different from `end` only for a running job past its
+    /// estimate. Then it is the tail less the time over, and it can be before
+    /// now.
     unfloored: i64,
     /// True when the job waits for a runner.
     waits: bool,
