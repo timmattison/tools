@@ -402,6 +402,7 @@ impl Clone for TerminalState {
             parser: replayed_parser(&self.pending),
             pending: self.pending.clone(),
             saved: self.saved,
+            restores: self.restores,
             alt_screen: self.alt_screen,
             scroll_top: self.scroll_top,
             scroll_bottom: self.scroll_bottom,
@@ -472,6 +473,8 @@ pub struct TerminalState {
     // The bytes fed since the parser was last settled: in the ground state with
     // no unfinished sequence. Empty means the parser equals `Parser::new()`.
     pending: Vec<u8>,
+    // The count of restores of a save slot.
+    restores: u64,
     // The saved cursor states. Slot 0 is for the normal screen.
     // Slot 1 is for the alternate screen.
     saved: [SavedCursor; 2],
@@ -544,6 +547,7 @@ impl TerminalState {
             parser: Parser::new(),
             pending: Vec::new(),
             saved: [initial_cursor; 2],
+            restores: 0,
             alt_screen: false,
             scroll_top: 0,
             scroll_bottom: height - 1,
@@ -624,6 +628,18 @@ impl TerminalState {
     /// Returns whether the DEC line drawing character set is active.
     pub fn uses_line_drawing(&self) -> bool {
         self.use_acs
+    }
+
+    /// Returns how many times a restore of the cursor state has run: ESC 8,
+    /// `CSI u`, `?1048l` and `?1049l`. A restore is the one event that lets a
+    /// save slot change what the terminal shows later. The count wraps.
+    pub fn restore_count(&self) -> u64 {
+        self.restores
+    }
+
+    /// Returns whether the parser holds no unfinished escape sequence.
+    pub fn is_settled(&self) -> bool {
+        self.pending.is_empty()
     }
 
     /// Returns the `(foreground, background)` colors that a cell is drawn with.
@@ -740,6 +756,7 @@ impl TerminalState {
 
     /// Restores the cursor state from the slot of the current screen.
     fn restore_cursor(&mut self) {
+        self.restores = self.restores.wrapping_add(1);
         let saved = self.saved[usize::from(self.alt_screen)];
         self.cursor_x = saved.x;
         self.cursor_y = saved.y;

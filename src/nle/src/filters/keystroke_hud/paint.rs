@@ -353,6 +353,10 @@ pub(crate) struct Painter {
     clean: TerminalState,
     /// The screen as the viewer sees it.
     shown: TerminalState,
+    /// The restore count of `clean` at the last paint that found the two
+    /// replays the same with both parsers settled, or `None`. While no restore
+    /// runs, the two replays stay the same until the next box.
+    synced: Option<u64>,
     /// The number of times that `paint` scanned the grid.
     #[cfg(test)]
     scans: usize,
@@ -369,6 +373,7 @@ impl Painter {
         Some(Self {
             clean: TerminalState::new(width, height, replay_theme()),
             shown: TerminalState::new(width, height, replay_theme()),
+            synced: Some(0),
             #[cfg(test)]
             scans: 0,
         })
@@ -383,7 +388,13 @@ impl Painter {
     /// The output that makes the viewer see the screen of the recording with
     /// `overlay` on top, or `None` when the viewer sees that already. The
     /// painter feeds this output to its own copy of the screen of the viewer.
+    /// A paint with no box writes nothing and scans nothing while the replays
+    /// agree: no restore of a save slot has run since they last agreed, and
+    /// both parsers hold no unfinished sequence.
     pub(crate) fn paint(&mut self, overlay: Option<&Overlay>) -> Option<String> {
+        if overlay.is_none() && self.synced == Some(self.clean.restore_count()) {
+            return None;
+        }
         #[cfg(test)]
         {
             self.scans += 1;
@@ -444,6 +455,12 @@ impl Painter {
         }
         let (shown_pen, clean_pen) = (Pen::of(&self.shown), Pen::of(&self.clean));
         let repair = (shown_pen != clean_pen).then(|| clean_pen.restore(&shown_pen));
+        self.synced = (overlay.is_none()
+            && !any_cell
+            && repair.is_none()
+            && self.clean.is_settled()
+            && self.shown.is_settled())
+        .then(|| self.clean.restore_count());
         let mut output = String::new();
         if any_cell {
             output.push_str("\x1b7\x0f\x1b(B\x1b[?6l");

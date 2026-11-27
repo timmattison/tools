@@ -283,3 +283,22 @@ fn ris_on_the_alternate_screen_returns_to_the_normal_screen() {
     let state = feed_new("\x1b[?1049h\x1bc\x1b[3;5H\x1b7\x1b[1;1H\x1b[?1049l");
     assert_eq!(state.get_cursor_position(), (4, 2));
 }
+
+#[test]
+fn restore_count_increases_by_one_for_each_kind_of_restore() {
+    for restore in ["\x1b8", "\x1b[u", "\x1b[?1048l", "\x1b[?1049l"] {
+        let mut state = feed_new("\x1b7");
+        assert_eq!(state.restore_count(), 0, "a save is not a restore");
+        state.process_output(restore).unwrap();
+        assert_eq!(state.restore_count(), 1, "{restore:?}");
+        let copy = state.clone();
+        assert_eq!(copy.restore_count(), 1, "a clone keeps the count");
+    }
+}
+
+#[test]
+fn is_settled_is_false_inside_a_sequence_and_true_after_it() {
+    assert!(feed_new("").is_settled());
+    assert!(!feed_new("\x1b[").is_settled());
+    assert!(feed_new("\x1b[5;5H").is_settled());
+}
