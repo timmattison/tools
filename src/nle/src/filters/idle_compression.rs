@@ -82,6 +82,22 @@ impl IdleCompression {
         width: u16,
         height: u16,
     ) -> Result<Self, NleError> {
+        if !(threshold.is_finite() && threshold > 0.0) {
+            return Err(NleError::InvalidIdleCompression(format!(
+                "the threshold {threshold} s must be finite and above zero"
+            )));
+        }
+        if !(compress_to.is_finite() && compress_to >= 0.0 && compress_to <= threshold) {
+            return Err(NleError::InvalidIdleCompression(format!(
+                "the compressed length {compress_to} s must be finite, not below zero, and not above the threshold {threshold} s"
+            )));
+        }
+        let cells = u32::from(width) * u32::from(height);
+        if cells == 0 || cells > MAX_SCREEN_CELLS {
+            return Err(NleError::InvalidIdleCompression(format!(
+                "the screen of {width}x{height} cells must have at least one column and one row, and at most {MAX_SCREEN_CELLS} cells"
+            )));
+        }
         Ok(Self {
             threshold,
             compress_to,
@@ -99,6 +115,12 @@ impl IdleCompression {
     /// Returns `NleError::InvalidIdleCompression` when `top` and `bottom`
     /// together are more than the rows of the screen.
     pub fn ignoring_rows(self, top: u16, bottom: u16) -> Result<Self, NleError> {
+        if u32::from(top) + u32::from(bottom) > u32::from(self.height) {
+            return Err(NleError::InvalidIdleCompression(format!(
+                "the {top} top and {bottom} bottom rows to ignore are more than the {} rows of the screen",
+                self.height
+            )));
+        }
         Ok(Self {
             ignore_top_rows: top,
             ignore_bottom_rows: bottom,
@@ -170,8 +192,45 @@ pub fn applied(region: FilterRegion, settings: IdleCompression) -> AppliedFilter
 /// settings.
 #[must_use]
 pub fn settings_of(filter: &AppliedFilter) -> Option<IdleCompression> {
-    let _ = filter;
-    None
+    if filter.kind != kind() {
+        return None;
+    }
+    settings_from(&filter.options).ok()
+}
+
+/// The settings that `options` hold, or the reason why they do not make
+/// valid settings.
+fn settings_from(options: &FilterOptions) -> Result<IdleCompression, String> {
+    let seconds = |name: &str| {
+        options
+            .get(name)
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(|| format!("the option \"{name}\" is missing or is not a number"))
+    };
+    let count = |name: &str| {
+        options
+            .get(name)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u16::try_from(value).ok())
+            .ok_or_else(|| {
+                format!(
+                    "the option \"{name}\" is missing or is not a whole number from 0 to {}",
+                    u16::MAX
+                )
+            })
+    };
+    let (top, bottom) = (
+        count(IGNORE_TOP_ROWS_OPTION)?,
+        count(IGNORE_BOTTOM_ROWS_OPTION)?,
+    );
+    IdleCompression::new(
+        seconds(THRESHOLD_OPTION)?,
+        seconds(COMPRESS_TO_OPTION)?,
+        count(WIDTH_OPTION)?,
+        count(HEIGHT_OPTION)?,
+    )
+    .and_then(|settings| settings.ignoring_rows(top, bottom))
+    .map_err(|error| error.to_string())
 }
 
 /// Add the idle compression filter to `registry`.
