@@ -9,6 +9,7 @@
 //! starts no process and reads no file.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 
 use chrono::NaiveDate;
 
@@ -124,6 +125,26 @@ impl Reason {
     #[must_use]
     pub const fn runs_without_typing(&self) -> bool {
         matches!(self, Self::Runs { .. })
+    }
+}
+
+impl fmt::Display for Reason {
+    /// Writes the text of the reason that a report shows: the text of the
+    /// trigger, then `, through` and the name when the trigger reaches the
+    /// definition through a call. A widget that no key starts has the text
+    /// `widget, no key`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Runs {
+                trigger,
+                through: None,
+            } => write!(formatter, "{trigger}"),
+            Self::Runs {
+                trigger,
+                through: Some(name),
+            } => write!(formatter, "{trigger}, through {name}"),
+            Self::WidgetWithoutKey => formatter.write_str("widget, no key"),
+        }
     }
 }
 

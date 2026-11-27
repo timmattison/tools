@@ -78,6 +78,13 @@ const CUT_MARK: char = '\u{2026}';
 /// The heading of the group of definitions that never ran.
 const HEADING_NEVER: &str = "Never used";
 
+/// The heading of the group of definitions that the shell runs without a
+/// typed name.
+const HEADING_RUNS: &str = "Runs without typing";
+
+/// The text that divides two reasons of one definition in a group.
+const REASON_SEPARATOR: &str = "; ";
+
 /// What starts the shell line of the header.
 const SHELL_LABEL: &str = "Shell";
 
@@ -248,22 +255,52 @@ fn idle_definitions<'a>(usages: &[&'a Usage]) -> Vec<&'a Usage> {
     idle
 }
 
-/// Gives the two groups of `usages`: the definitions never used and the
-/// definitions idle.
+/// Gives the text after the facts of `usage` in a group: a comma and its
+/// reasons, divided by [`REASON_SEPARATOR`], or nothing when it has none.
+fn reasons_suffix(usage: &Usage) -> String {
+    if usage.reasons.is_empty() {
+        return String::new();
+    }
+    let reasons: Vec<String> = usage.reasons.iter().map(ToString::to_string).collect();
+    format!(", {}", reasons.join(REASON_SEPARATOR))
+}
+
+/// Gives the three groups of `usages`: the definitions never used, the
+/// definitions idle, and the definitions that the shell runs without a typed
+/// name. Each entry ends with its reasons.
 fn group_lines(usages: &[&Usage], window: &Window) -> String {
     let never: Vec<String> = with(usages, Classification::NeverUsed)
         .iter()
-        .map(|usage| format!("{} ({})", usage.name, usage.kind.label()))
+        .map(|usage| {
+            format!(
+                "{} ({}{})",
+                usage.name,
+                usage.kind.label(),
+                reasons_suffix(usage)
+            )
+        })
         .collect();
     let idle: Vec<String> = idle_definitions(usages)
         .iter()
         .map(|usage| {
             format!(
-                "{} ({}, {}, last use {})",
+                "{} ({}, {}, last use {}{})",
                 usage.name,
                 usage.kind.label(),
                 counted(usage.uses, "use", "uses"),
                 date_cell(usage.last_use),
+                reasons_suffix(usage),
+            )
+        })
+        .collect();
+    let runs: Vec<String> = with(usages, Classification::RunsWithoutTyping)
+        .iter()
+        .map(|usage| {
+            format!(
+                "{} ({}{})",
+                usage.name,
+                usage.kind.label(),
+                reasons_suffix(usage)
             )
         })
         .collect();
@@ -276,6 +313,7 @@ fn group_lines(usages: &[&Usage], window: &Window) -> String {
             ),
             &idle,
         ),
+        group(HEADING_RUNS, &runs),
     ]
     .join("\n")
 }
@@ -360,11 +398,11 @@ fn file_heading(file: Option<&Path>, places: &Places) -> String {
 /// Gives the text report. `shell` is the path of the shell that gave the
 /// definitions. `width` is the table width. `None` sets no limit.
 ///
-/// The report starts with the header and ends with the two groups. Between
+/// The report starts with the header and ends with the three groups. Between
 /// them, it has the table of my definitions. With `window.all`, that table
 /// has the heading `Mine` and a count, and one more table follows for each
 /// file that defined the others, with that file and a count as its heading.
-/// The two groups then hold each entry, else only mine. The definition in a
+/// The three groups then hold each entry, else only mine. The definition in a
 /// table is one line. It is cut to the room that the width leaves.
 #[must_use]
 pub fn text(tally: &Tally, window: &Window, shell: &str, width: Option<u16>) -> String {
@@ -432,6 +470,7 @@ struct DefinitionDocument<'a> {
     classification: Classification,
     origin: Option<&'a Origin>,
     mine: bool,
+    reasons: Vec<String>,
 }
 
 /// The name and the kind of one definition, in a list of the JSON document.
@@ -452,6 +491,7 @@ struct Document<'a> {
     definitions: Vec<DefinitionDocument<'a>>,
     never_used: Vec<NamedDocument<'a>>,
     idle: Vec<NamedDocument<'a>>,
+    runs_without_typing: Vec<NamedDocument<'a>>,
 }
 
 /// Gives the JSON form of one definition.
@@ -472,6 +512,7 @@ fn definition_document(usage: &Usage) -> DefinitionDocument<'_> {
         classification: usage.classification,
         origin: usage.origin.as_ref(),
         mine: usage.mine,
+        reasons: usage.reasons.iter().map(ToString::to_string).collect(),
     }
 }
 
@@ -491,8 +532,10 @@ fn named<'a>(definitions: &[&'a Usage]) -> Vec<NamedDocument<'a>> {
 /// `definitions` holds every entry in tally order, also an entry with no use
 /// and an entry that is not mine. Each entry has its `origin` (`file` and
 /// `line`, or `null` when it is unknown) and `mine`. The definition text is
-/// never cut. The lists `never_used` and `idle` hold every entry too, in the
-/// order of the text report.
+/// never cut. Each entry has its `reasons`, as the text report writes them, in
+/// a list that is empty for most entries. The lists `never_used`, `idle`, and
+/// `runs_without_typing` hold every entry too, in the order of the text
+/// report.
 ///
 /// # Panics
 ///
@@ -525,6 +568,7 @@ pub fn json(tally: &Tally, window: &Window, shell: &str) -> String {
         definitions: tally.definitions.iter().map(definition_document).collect(),
         never_used: named(&with(&every, Classification::NeverUsed)),
         idle: named(&idle_definitions(&every)),
+        runs_without_typing: named(&with(&every, Classification::RunsWithoutTyping)),
     };
     let mut text = serde_json::to_string_pretty(&document)
         .expect("a document of numbers, dates, and text always serializes");

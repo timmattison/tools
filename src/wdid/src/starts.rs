@@ -8,6 +8,7 @@
 //! definition that a start reaches.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 use crate::command_words::{command_words, Aliases, CommandWord, Parsed};
 
@@ -108,6 +109,44 @@ pub enum Trigger {
     PromptCommand,
     /// A bash `bind -x` key, by its key sequence.
     KeyCommand(String),
+}
+
+/// The text that divides the keys of one widget in the text of a trigger.
+const KEY_SEPARATOR: &str = ", ";
+
+/// Gives the text of the key `key` in the text of a trigger: the key, or the
+/// key in double quotes when it is empty or holds a blank, so that a reader
+/// sees the space key.
+fn shown_key(key: &str) -> String {
+    if key.is_empty() || key.chars().any(char::is_whitespace) {
+        format!("{DOUBLE_QUOTE}{key}{DOUBLE_QUOTE}")
+    } else {
+        key.to_owned()
+    }
+}
+
+impl fmt::Display for Trigger {
+    /// Writes the text of the trigger that a report shows, for example
+    /// `precmd hook`, `INT trap`, or `widget atuin-search, key ^R`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Hook(hook) => write!(formatter, "{hook} hook"),
+            Self::Trap(signal) => write!(formatter, "{signal} trap"),
+            Self::CommandNotFound => formatter.write_str("command not found"),
+            Self::Widget { widget, keys } => {
+                write!(formatter, "widget {widget}")?;
+                let label = if keys.len() == 1 { "key" } else { "keys" };
+                let shown: Vec<String> = keys.iter().map(|key| shown_key(key)).collect();
+                if !shown.is_empty() {
+                    write!(formatter, ", {label} {}", shown.join(KEY_SEPARATOR))?;
+                }
+                Ok(())
+            }
+            Self::SpecialWidget(widget) => write!(formatter, "widget {widget}"),
+            Self::PromptCommand => formatter.write_str("PROMPT_COMMAND"),
+            Self::KeyCommand(key) => write!(formatter, "bind -x, key {}", shown_key(key)),
+        }
+    }
 }
 
 /// What the shell gives about the code that it runs without a typed name.
