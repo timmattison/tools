@@ -84,10 +84,12 @@ fn text(state: &TerminalState, row: usize, from: usize, to: usize) -> String {
         .collect()
 }
 
-/// Assert that the viewer of `shown` sees what the viewer of `reference` sees.
+/// Assert that the viewer of `shown` sees what the viewer of `reference` sees:
+/// the grid, the cursor, and the visibility of the cursor.
 fn assert_same_screen(shown: &TerminalState, reference: &TerminalState) {
     assert_eq!(shown.get_grid(), reference.get_grid());
     assert_eq!(shown.get_cursor_position(), reference.get_cursor_position());
+    assert_eq!(shown.is_cursor_visible(), reference.is_cursor_visible());
 }
 
 const WIDE: TerminalSize = TerminalSize {
@@ -389,4 +391,32 @@ fn a_paste_over_several_input_events_shows_as_one_paste() {
             "row {row} shows pasted text"
         );
     }
+}
+
+#[test]
+fn a_box_that_goes_away_inside_a_sequence_of_the_program_waits_for_its_end() {
+    let events = ended(vec![
+        out(0.0, "ab"),
+        inp(1.0, "a"),
+        out(1.95, "\x1b[?25"),
+        out(2.05, "l"),
+    ]);
+    let result = hud(&events, &plain(), WIDE);
+    assert_same_screen(&replay(&result, 3.0, WIDE), &replay(&events, 3.0, WIDE));
+}
+
+#[test]
+fn a_region_that_ends_inside_a_sequence_of_the_program_takes_its_box_away() {
+    let events = ended(vec![
+        out(0.0, "ab"),
+        inp(1.0, "a"),
+        out(1.4, "\x1b[?25"),
+        out(1.6, "l"),
+    ]);
+    let region = FilterRegion::Range {
+        start: Seconds::new(0.0).unwrap(),
+        end: Seconds::new(1.5).unwrap(),
+    };
+    let result = run(&events, &plain(), region, WIDE);
+    assert_same_screen(&replay(&result, 3.0, WIDE), &replay(&events, 3.0, WIDE));
 }
