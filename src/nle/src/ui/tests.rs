@@ -1089,7 +1089,8 @@ async fn a_good_redaction_after_a_bad_one_removes_the_banner() {
     window.type_into(pattern_field, "hunter2");
     window.click(window.redact_button());
     let page = window.html();
-    assert!(page.contains("hunter2"), "{page}");
+    let row = redaction_row("text \u{201c}hunter2\u{201d} \u{2192} asterisks (output)");
+    assert!(page.contains(&row), "{row} missing in {page}");
     assert!(!page.contains("role=\"alert\""), "{page}");
 }
 
