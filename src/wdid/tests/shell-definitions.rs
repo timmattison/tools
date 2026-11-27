@@ -1835,3 +1835,164 @@ fn a_real_zsh_gives_its_hooks_traps_and_widgets() {
         vec![CommandWord::new("prompt_helper", [] as [&str; 0])]
     );
 }
+
+/// `trap -p` writes one `trap` command for each signal, with the code in
+/// single quotes. The code of each signal is one text, also when it holds a
+/// quote or a newline. The name of a signal loses its `SIG`. An empty code
+/// ignores the signal, thus it runs nothing.
+#[test]
+fn the_trap_lines_give_the_code_of_each_signal() {
+    let starts = starts_of(&[
+        "M TRAPS",
+        "trap -- 'trapfn' EXIT",
+        "trap -- 'echo it'\\''s; other' SIGINT",
+        "trap -- 'multi",
+        "line' SIGUSR1",
+        "trap -- '' SIGTSTP",
+        "trap -- 'dbgfn' DEBUG",
+    ]);
+    assert_eq!(
+        starts.code,
+        [
+            (Trigger::Trap("EXIT".into()), "trapfn".to_owned()),
+            (Trigger::Trap("INT".into()), "echo it's; other".to_owned()),
+            (Trigger::Trap("USR1".into()), "multi\nline".to_owned()),
+            (Trigger::Trap("DEBUG".into()), "dbgfn".to_owned()),
+        ]
+    );
+}
+
+/// Each element of `PROMPT_COMMAND` has a record of its own, and its lines
+/// are one text.
+#[test]
+fn each_element_of_prompt_command_is_one_code() {
+    let starts = starts_of(&[
+        "M PROMPT_COMMAND",
+        "pcfn; history -a",
+        "M PROMPT_COMMAND",
+        "second",
+        "line2",
+        "M PROMPT_COMMAND",
+    ]);
+    assert_eq!(
+        starts.code,
+        [
+            (Trigger::PromptCommand, "pcfn; history -a".to_owned()),
+            (Trigger::PromptCommand, "second\nline2".to_owned()),
+        ]
+    );
+}
+
+/// `bind -X` writes the key and the command of each `bind -x` binding, each in
+/// double quotes. bash 5.3 divides them with a space, and an older bash with a
+/// colon and a space. The command loses one level of backslashes. A line of a
+/// different form gives nothing.
+#[test]
+fn the_key_command_lines_give_the_command_of_each_key() {
+    let starts = starts_of(&[
+        "M KEY_COMMANDS",
+        "\"\\C-x\\C-r\" \"keyfn\"",
+        "\"\\C-g\": \"echo \\\\\\\"q\\\\\\\" x\"",
+        "\"\\C-a\" \"\"",
+        "garbage",
+        "\"unclosed",
+    ]);
+    assert_eq!(
+        starts.code,
+        [
+            (Trigger::KeyCommand("\\C-x\\C-r".into()), "keyfn".to_owned()),
+            (
+                Trigger::KeyCommand("\\C-g".into()),
+                "echo \\\"q\\\" x".to_owned()
+            ),
+        ]
+    );
+}
+
+/// The `.bashrc` of the test of the starts of a real bash. `set -u` must not
+/// stop the script. The script removes the `DEBUG` trap before it lists the
+/// functions, thus it must list the traps first.
+const STARTS_BASHRC: &str = "set -u\n\
+pcfn() { pc_helper; }\n\
+pc_helper() { true; }\n\
+PROMPT_COMMAND='pcfn; history -a'\n\
+trapfn() { true; }\n\
+trap 'trapfn' EXIT\n\
+dbgfn() { true; }\n\
+trap 'dbgfn' DEBUG\n";
+
+/// A real bash gives its `PROMPT_COMMAND` and the code of each trap.
+#[test]
+fn a_real_bash_gives_its_prompt_command_and_its_traps() {
+    let Some(bash) = find_shell("bash") else {
+        eprintln!("skipped: bash is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    write_file(home.path(), ".bashrc", STARTS_BASHRC);
+    let definitions = read(
+        real_shell(&bash, home.path()),
+        ShellKind::Bash,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let code = &definitions.starts.code;
+    for expected in [
+        (Trigger::PromptCommand, "pcfn; history -a"),
+        (Trigger::Trap("EXIT".into()), "trapfn"),
+        (Trigger::Trap("DEBUG".into()), "dbgfn"),
+    ] {
+        assert!(
+            code.contains(&(expected.0.clone(), expected.1.to_owned())),
+            "{expected:?}: {code:?}"
+        );
+    }
+    assert!(definitions.starts.widgets.is_empty());
+    assert!(definitions.starts.functions.is_empty());
+    assert_eq!(
+        definitions.functions["pcfn"],
+        vec![CommandWord::new("pc_helper", [] as [&str; 0])]
+    );
+}
+
+/// Finds a bash whose `bind` has the option `-X`, which lists the `bind -x`
+/// bindings. bash has it from version 4.3 on. The bash of macOS is 3.2, thus
+/// the search reads each bash on the `PATH` and the fixed paths.
+fn bash_with_key_listing() -> Option<PathBuf> {
+    let search_path = std::env::var_os("PATH").unwrap_or_default();
+    let candidates = std::env::split_paths(&search_path)
+        .chain(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"].map(PathBuf::from))
+        .map(|dir| dir.join("bash"));
+    candidates.filter(|path| path.is_file()).find(|path| {
+        childenv::fixture_command(path)
+            .args(["-c", "help bind"])
+            .output()
+            .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains("PSVX]"))
+    })
+}
+
+/// A real bash gives the command of each `bind -x` key.
+#[test]
+fn a_real_bash_gives_its_key_commands() {
+    let Some(bash) = bash_with_key_listing() else {
+        eprintln!("skipped: no bash with bind -X is installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    write_file(
+        home.path(),
+        ".bashrc",
+        "keyfn() { true; }\nbind -x '\"\\C-x\\C-r\": keyfn' 2>/dev/null\n",
+    );
+    let definitions = read(
+        real_shell(&bash, home.path()),
+        ShellKind::Bash,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert_eq!(
+        definitions.starts.code,
+        [(Trigger::KeyCommand("\\C-x\\C-r".into()), "keyfn".to_owned())],
+        "{bash:?}"
+    );
+}
