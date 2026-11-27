@@ -290,19 +290,24 @@ impl Clip {
     /// clips that a cut splits at one time do not both hold an event at that
     /// time. An event at time `t` goes to `t - in_point + timeline_offset`.
     pub fn timeline_events(&self) -> impl Iterator<Item = Event> + '_ {
-        let (in_point, out_point) = (self.in_point.get(), self.out_point.get());
-        let to_the_end = out_point >= self.source.duration;
+        let in_point = self.in_point.get();
         self.source
             .events
             .iter()
-            .filter(move |event| {
-                event.time >= in_point
-                    && (event.time < out_point || (to_the_end && event.time == out_point))
-            })
+            .filter(move |event| self.holds(event.time))
             .map(move |event| Event {
                 time: event.time - in_point + self.timeline_offset.get(),
                 ..event.clone()
             })
+    }
+
+    /// True when this clip holds an event of its source at `time`, by the
+    /// rule of `timeline_events`.
+    #[must_use]
+    pub fn holds(&self, time: f64) -> bool {
+        let (in_point, out_point) = (self.in_point.get(), self.out_point.get());
+        let to_the_end = out_point >= self.source.duration;
+        time >= in_point && (time < out_point || (to_the_end && time == out_point))
     }
 }
 
