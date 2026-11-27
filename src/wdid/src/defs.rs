@@ -27,8 +27,8 @@ const LABEL_GLOBAL_ALIAS: &str = "global alias";
 const LABEL_SUFFIX_ALIAS: &str = "suffix alias";
 /// The label of a function.
 const LABEL_FUNCTION: &str = "function";
-/// The first character of the name of a private function. The report does not
-/// list a private function.
+/// The first character of the name of a private function. The report lists a
+/// private function only with `all` (see [`Window::all`]).
 const PRIVATE_PREFIX: char = '_';
 
 /// The days that the count reads, and the idle limit.
@@ -167,27 +167,32 @@ fn first_line(text: &str) -> &str {
 }
 
 /// Makes one entry with no use for each alias and each function that the
-/// report lists.
-fn empty_usages(definitions: &Definitions) -> Vec<Usage> {
+/// report lists, with its origin. A function whose name starts with `_` is an
+/// entry only when `all` is true.
+fn empty_usages(definitions: &Definitions, all: bool) -> Vec<Usage> {
     let aliases = definitions.aliases.definitions().into_iter().map(|alias| {
-        (
-            alias.name,
-            Kind::from(alias.kind),
-            first_line(&alias.value).to_string(),
-        )
+        let origin = definitions.alias_origin(&alias).cloned();
+        let definition = first_line(&alias.value).to_string();
+        (alias.name, Kind::from(alias.kind), definition, origin)
     });
     let functions = definitions
         .functions
         .keys()
         .chain(definitions.unparsed_functions.iter())
-        .filter(|name| !name.starts_with(PRIVATE_PREFIX))
+        .filter(|name| all || !name.starts_with(PRIVATE_PREFIX))
         .map(|name| {
             let line = definitions.function_lines.get(name).cloned();
-            (name.clone(), Kind::Function, line.unwrap_or_default())
+            let origin = definitions.function_origin(name).cloned();
+            (
+                name.clone(),
+                Kind::Function,
+                line.unwrap_or_default(),
+                origin,
+            )
         });
     aliases
         .chain(functions)
-        .map(|(name, kind, definition)| Usage {
+        .map(|(name, kind, definition, origin)| Usage {
             name,
             kind,
             definition,
@@ -197,8 +202,8 @@ fn empty_usages(definitions: &Definitions) -> Vec<Usage> {
             first_use: None,
             last_use: None,
             classification: Classification::NeverUsed,
-            origin: None,
-            mine: false,
+            mine: definitions.places.is_mine(origin.as_ref()),
+            origin,
         })
         .collect()
 }
@@ -329,13 +334,17 @@ fn classify(uses: u64, last_use: Option<NaiveDate>, window: &Window) -> Classifi
 
 /// Counts the uses of each alias and each function in `entries`. Pure.
 ///
+/// Each entry gets the origin of its definition, and says if it is mine. A
+/// function whose name starts with `_` is an entry only with `window.all`. A
+/// call through such a function counts in each case.
+///
 /// The window drops the rows before `window.since`. A row with exit code 127
 /// does not count, because the shell did not find the command. An alias in the
 /// body of a function does not count, because the shell expanded it when it
 /// read the function.
 #[must_use]
 pub fn tally(entries: &[HistoryEntry], definitions: &Definitions, window: &Window) -> Tally {
-    let mut usages = empty_usages(definitions);
+    let mut usages = empty_usages(definitions, window.all);
     let mut counter = Counter::new(definitions, &usages);
     let mut cache: HashMap<&str, Option<Line>> = HashMap::new();
     let mut before_since: u64 = 0;
@@ -386,6 +395,8 @@ pub fn tally(entries: &[HistoryEntry], definitions: &Definitions, window: &Windo
         .iter()
         .filter(|u| u.kind == Kind::Function && definitions.unparsed_functions.contains(&u.name))
         .count();
+    let mine = usages.iter().filter(|u| u.mine).count();
+    let usages_count = usages.len();
     Tally {
         definitions: usages,
         summary: Summary {
@@ -397,9 +408,9 @@ pub fn tally(entries: &[HistoryEntry], definitions: &Definitions, window: &Windo
             functions,
             unparsed_functions,
             unparsed_aliases: definitions.unparsed_aliases.len(),
-            mine: 0,
-            others: 0,
+            mine,
+            others: usages_count.saturating_sub(mine),
         },
-        places: Places::default(),
+        places: definitions.places.clone(),
     }
 }
