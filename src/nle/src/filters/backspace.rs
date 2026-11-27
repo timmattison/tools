@@ -32,6 +32,10 @@ const MAX_CELLS: usize = 1 << 20;
 /// The most typed keys that the stack holds, on a small terminal.
 const MAX_DEPTH: usize = 256;
 
+/// The most cells that the screens of the stack hold together. A large
+/// terminal gets a smaller depth.
+const SNAPSHOT_BUDGET: usize = 1 << 22;
+
 /// What the data of an input event is, for this filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Key {
@@ -86,9 +90,10 @@ fn reject_options(options: &FilterOptions) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-/// Check that the terminal of `width` by `height` cells can hold a screen. It
-/// has at least one cell, and not more than `MAX_CELLS`.
-fn check_size(width: usize, height: usize) -> Result<(), String> {
+/// Check that the terminal of `width` by `height` cells can hold a screen, and
+/// give its number of cells. It has at least one cell, and not more than
+/// `MAX_CELLS`.
+fn check_size(width: usize, height: usize) -> Result<usize, String> {
     if width == 0 || height == 0 {
         return Err(format!(
             "the terminal is {width} by {height} cells, and it needs at least 1 by 1"
@@ -100,7 +105,14 @@ fn check_size(width: usize, height: usize) -> Result<(), String> {
             "the terminal is {width} by {height} cells, and the limit is {MAX_CELLS} cells"
         ));
     }
-    Ok(())
+    Ok(cells)
+}
+
+/// The depth of the stack for a terminal of `cells` cells. The screens of the
+/// stack together hold at most `SNAPSHOT_BUDGET` cells, but the stack holds at
+/// least one key and at most `MAX_DEPTH` keys.
+fn depth_for(cells: usize) -> usize {
+    (SNAPSHOT_BUDGET / cells.max(1)).clamp(1, MAX_DEPTH)
 }
 
 /// The kind of the backspace removal filter, as a `FilterKind`.
@@ -131,7 +143,7 @@ fn remove_backspacing(
         usize::from(context.size.width),
         usize::from(context.size.height),
     );
-    check_size(width, height)?;
+    let depth = depth_for(check_size(width, height)?);
     let mut screen = TerminalState::new(width, height, probe_theme());
     for event in context
         .before
@@ -140,14 +152,19 @@ fn remove_backspacing(
     {
         feed(&mut screen, event)?;
     }
-    let removed = mark_removed(&span.events, &mut screen)?;
+    let removed = mark_removed(&span.events, &mut screen, depth)?;
     Ok(cut_removed(span, removed))
 }
 
 /// Walk `events` and mark the events that the filter removes. `screen` is the
-/// screen at the start of the events.
-fn mark_removed(events: &[Event], screen: &mut TerminalState) -> Result<Vec<bool>, String> {
-    let mut walk = Walk::new(events.len());
+/// screen at the start of the events. The stack of typed keys holds at most
+/// `depth` keys.
+fn mark_removed(
+    events: &[Event],
+    screen: &mut TerminalState,
+    depth: usize,
+) -> Result<Vec<bool>, String> {
+    let mut walk = Walk::new(events.len(), depth);
     let mut index = 0;
     while let Some(event) = events.get(index) {
         if event.event_type == EventType::Output {
@@ -187,20 +204,27 @@ struct Walk {
     removed: Vec<bool>,
     /// The typed keys of the current line. The newest is at the back.
     stack: VecDeque<TypedKey>,
+    /// The most keys that the stack holds.
+    depth: usize,
 }
 
 impl Walk {
-    /// A walk over `count` events, with no event removed and no typed key.
-    fn new(count: usize) -> Self {
+    /// A walk over `count` events, with no event removed and no typed key. The
+    /// stack holds at most `depth` keys.
+    fn new(count: usize, depth: usize) -> Self {
         Self {
             removed: vec![false; count],
             stack: VecDeque::new(),
+            depth,
         }
     }
 
     /// Put the typed key at event `first` on the stack. `before` is the screen
-    /// before the key.
+    /// before the key. If the stack is full, the oldest key leaves it.
     fn push(&mut self, first: usize, before: TerminalState) {
+        if self.stack.len() >= self.depth {
+            self.stack.pop_front();
+        }
         self.stack.push_back(TypedKey { first, before });
     }
 
