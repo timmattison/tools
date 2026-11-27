@@ -417,6 +417,16 @@ impl Window {
         let (_, tag) = before.rsplit_once("<button").expect("a button start tag");
         tag.split([' ', '>', '=']).any(|word| word == "disabled")
     }
+
+    /// Whether the start tag of the input after the text `label` holds `disabled`.
+    fn field_is_disabled(&self, label: &str) -> bool {
+        let page = self.html();
+        let (_, after) = page
+            .split_once(&format!(">{label}<input"))
+            .unwrap_or_else(|| panic!("no field {label} in {page}"));
+        let (tag, _) = after.split_once('>').expect("an input start tag");
+        tag.split([' ', '/', '=']).any(|word| word == "disabled")
+    }
 }
 
 #[test]
@@ -1092,6 +1102,19 @@ async fn a_good_redaction_after_a_bad_one_removes_the_banner() {
     let row = redaction_row("text \u{201c}hunter2\u{201d} \u{2192} asterisks (output)");
     assert!(page.contains(&row), "{row} missing in {page}");
     assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn a_field_that_the_menus_ignore_is_disabled() {
+    let mut window = open_recording().await;
+    let [find, _, replace, ..] = window.redaction_fields();
+    let disabled = |window: &Window| {
+        [PATTERN_LABEL, REPLACEMENT_LABEL].map(|label| window.field_is_disabled(label))
+    };
+    assert_eq!(disabled(&window), [false, true], "{}", window.html());
+    window.type_into(find, "email");
+    window.type_into(replace, REPLACE_TEXT);
+    assert_eq!(disabled(&window), [true, false], "{}", window.html());
 }
 
 #[tokio::test]
