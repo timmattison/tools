@@ -1,7 +1,7 @@
 //! The filter that crops the screen and hides rows and columns.
 //!
 //! The filter runs the `termstate` emulator at the size of the screen. After
-//! each output event, it compares the cells that the output must show with the
+//! each output event, it compares the rows that the event changed with the
 //! cells that it already wrote, and it writes only the changed cells, as escape
 //! sequences. Thus each player and each exporter shows the crop.
 //!
@@ -330,6 +330,10 @@ struct Replay {
     row_shown: Vec<bool>,
     /// For each column of the screen, whether it is in `columns`.
     column_shown: Vec<bool>,
+    /// For each row of the screen, its row in the output, or `None` when the
+    /// row is not visible. The layout `Moved` counts the visible rows. The
+    /// layout `Masked` keeps the row of the screen.
+    output_rows: Vec<Option<usize>>,
     writer: Writer,
 }
 
@@ -345,6 +349,7 @@ impl Replay {
             writer: Writer::blank(columns.len(), rows.len()),
             row_shown: shown(&rows, usize::from(size.height)),
             column_shown: shown(&columns, usize::from(size.width)),
+            output_rows: output_rows(&rows, usize::from(size.height), Layout::Moved),
             rows,
             columns,
         }
@@ -374,6 +379,9 @@ impl Replay {
                 reader.read(c);
             }
         }
+        // The model of the writer starts from this screen, so no row of it is
+        // a change.
+        terminal.take_changed_rows();
         let writer = Writer::from_screen(
             usize::from(size.width),
             full_target(&terminal),
@@ -385,6 +393,7 @@ impl Replay {
             layout: Layout::Masked,
             row_shown: shown(&rows, usize::from(size.height)),
             column_shown: shown(&columns, usize::from(size.width)),
+            output_rows: output_rows(&rows, usize::from(size.height), Layout::Masked),
             rows,
             columns,
             writer,
@@ -394,54 +403,85 @@ impl Replay {
     /// The cells that the output must show now, in row order, and the place of
     /// its cursor, or `None` when the cursor is hidden.
     fn target(&self) -> (Vec<Glyph>, Option<(usize, usize)>) {
-        let grid = self.terminal.get_grid();
-        let (cursor_x, cursor_y) = self.terminal.get_cursor_position();
-        let shown = self.terminal.is_cursor_visible();
+        let target = match self.layout {
+            Layout::Moved => self
+                .rows
+                .iter()
+                .flat_map(|row| self.row_glyphs(*row))
+                .collect(),
+            Layout::Masked => (0..self.terminal.get_grid().len())
+                .flat_map(|row| self.row_glyphs(row))
+                .collect(),
+        };
+        (target, self.output_cursor())
+    }
+
+    /// The cells that the output must show for row `row` of the screen. In the
+    /// layout `Moved`, they are the visible columns. In the layout `Masked`,
+    /// they are all columns, and a cell that is not visible is blank.
+    fn row_glyphs(&self, row: usize) -> Vec<Glyph> {
+        let Some(cells) = self.terminal.get_grid().get(row) else {
+            return match self.layout {
+                Layout::Moved => vec![Glyph::BLANK; self.columns.len()],
+                Layout::Masked => Vec::new(),
+            };
+        };
         match self.layout {
-            Layout::Moved => {
-                let target = self
-                    .rows
-                    .iter()
-                    .flat_map(|row| self.columns.iter().map(move |column| (*row, *column)))
-                    .map(|(row, column)| {
-                        grid.get(row).map_or(Glyph::BLANK, |cells| {
-                            shown_glyph(cells, column, &self.column_shown)
-                        })
-                    })
-                    .collect();
-                let cursor = shown
-                    .then(|| {
-                        self.columns
-                            .iter()
-                            .position(|column| *column == cursor_x)
-                            .zip(self.rows.iter().position(|row| *row == cursor_y))
-                    })
-                    .flatten();
-                (target, cursor)
-            }
+            Layout::Moved => self
+                .columns
+                .iter()
+                .map(|column| shown_glyph(cells, *column, &self.column_shown))
+                .collect(),
             Layout::Masked => {
-                let target = grid
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(row, cells)| {
-                        let row_shown = self.row_shown.get(row).copied().unwrap_or(false);
-                        (0..cells.len()).map(move |column| {
-                            let column_shown =
-                                self.column_shown.get(column).copied().unwrap_or(false);
-                            if row_shown && column_shown {
-                                shown_glyph(cells, column, &self.column_shown)
-                            } else {
-                                Glyph::BLANK
-                            }
-                        })
+                let row_shown = self.row_shown.get(row).copied().unwrap_or(false);
+                (0..cells.len())
+                    .map(|column| {
+                        let column_shown = self.column_shown.get(column).copied().unwrap_or(false);
+                        if row_shown && column_shown {
+                            shown_glyph(cells, column, &self.column_shown)
+                        } else {
+                            Glyph::BLANK
+                        }
                     })
-                    .collect();
-                let visible = self.row_shown.get(cursor_y).copied().unwrap_or(false)
-                    && self.column_shown.get(cursor_x).copied().unwrap_or(false);
-                let cursor = (shown && visible).then_some((cursor_x, cursor_y));
-                (target, cursor)
+                    .collect()
             }
         }
+    }
+
+    /// The place of the cursor in the output as `(column, row)`, or `None`
+    /// when the cursor is hidden or not visible.
+    fn output_cursor(&self) -> Option<(usize, usize)> {
+        let (cursor_x, cursor_y) = self.terminal.get_cursor_position();
+        if !self.terminal.is_cursor_visible() {
+            return None;
+        }
+        match self.layout {
+            Layout::Moved => self
+                .columns
+                .iter()
+                .position(|column| *column == cursor_x)
+                .zip(self.rows.iter().position(|row| *row == cursor_y)),
+            Layout::Masked => {
+                let visible = self.row_shown.get(cursor_y).copied().unwrap_or(false)
+                    && self.column_shown.get(cursor_x).copied().unwrap_or(false);
+                visible.then_some((cursor_x, cursor_y))
+            }
+        }
+    }
+
+    /// The paint of the rows that the emulator changed since the last call,
+    /// then of the cursor.
+    fn paint_changes(&mut self) -> String {
+        let mut bytes = String::new();
+        for row in self.terminal.take_changed_rows() {
+            if let Some(output_row) = self.output_rows.get(row).copied().flatten() {
+                let glyphs = self.row_glyphs(row);
+                self.writer.paint_row(output_row, &glyphs, &mut bytes);
+            }
+        }
+        let cursor = self.output_cursor();
+        self.writer.paint_cursor(cursor, &mut bytes);
+        bytes
     }
 
     /// The paint of the screen that the emulator shows now.
@@ -548,11 +588,12 @@ impl Replay {
             self.terminal
                 .process_output(&event.data)
                 .map_err(|error| error.to_string())?;
-            data.push_str(&self.paint());
+            data.push_str(&self.paint_changes());
             if !data.is_empty() {
                 answer.push(Event {
+                    time: event.time,
+                    event_type: EventType::Output,
                     data,
-                    ..event.clone()
                 });
             }
         }
@@ -607,6 +648,21 @@ impl Reader {
     fn open(&self) -> &str {
         &self.open
     }
+}
+
+/// For each row of a screen of `height` rows, its row in the output, or `None`
+/// when `rows` does not hold it. `rows` is the list of the visible rows.
+fn output_rows(rows: &[usize], height: usize, layout: Layout) -> Vec<Option<usize>> {
+    let mut lookup = vec![None; height];
+    for (index, row) in rows.iter().enumerate() {
+        if let Some(slot) = lookup.get_mut(*row) {
+            *slot = Some(match layout {
+                Layout::Moved => index,
+                Layout::Masked => *row,
+            });
+        }
+    }
+    lookup
 }
 
 /// For each of `len` indexes, whether `indexes` holds it.

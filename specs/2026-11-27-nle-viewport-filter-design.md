@@ -10,9 +10,9 @@ issue #151 and issue #158, because no escape sequence can carry it.
 ## The idea
 
 The filter runs the `termstate` emulator at the size of the screen. After each
-output event, it compares the cells that the output must show with the cells
-that it already wrote, and it writes only the changed cells, as escape
-sequences. Thus each player and each exporter (`beta play`, `beta export web`,
+output event, it compares the rows that the event changed with the cells that
+it already wrote, and it writes only the changed cells, as escape sequences.
+Thus each player and each exporter (`beta play`, `beta export web`,
 `beta export video`, the preview of nle) shows the crop, and none of them
 changes.
 

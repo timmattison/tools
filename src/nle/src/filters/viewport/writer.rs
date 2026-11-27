@@ -115,14 +115,26 @@ impl Writer {
     /// Write to `bytes` the cells that differ between the model and `target`,
     /// and update the model. `target` holds the cells in row order.
     ///
+    /// It calls `paint_row` for each row of `target`.
+    pub(super) fn paint_cells(&mut self, target: &[Glyph], bytes: &mut String) {
+        let width = self.width.max(1);
+        for (y, row) in target.chunks(width).enumerate() {
+            self.paint_row(y, row, bytes);
+        }
+    }
+
+    /// Write to `bytes` the cells of row `y` that differ between the model and
+    /// `row`, and update the model. `row` holds the cells of that one row.
+    ///
     /// A wide character covers two cells: the glyph of the character and a
     /// continuation glyph after it. The paint first turns each half that has
     /// no other half into a space, because a real terminal shows no such half.
     /// It writes a wide character with its two cells together, and it writes
     /// nothing for the continuation glyph.
-    pub(super) fn paint_cells(&mut self, target: &[Glyph], bytes: &mut String) {
+    pub(super) fn paint_row(&mut self, y: usize, row: &[Glyph], bytes: &mut String) {
         let width = self.width.max(1);
-        let want = normalized(target, width);
+        let base = y.saturating_mul(width);
+        let want = normalized(row, width);
         let mut index = 0;
         while index < want.len() {
             let Some(glyph) = want.get(index).copied() else {
@@ -133,10 +145,10 @@ impl Writer {
                     .get(index + 1)
                     .is_some_and(|next| next.ch == termstate::WIDE_CONTINUATION);
             let cells = if is_pair { 2 } else { 1 };
-            let differs =
-                (0..cells).any(|offset| self.grid.get(index + offset) != want.get(index + offset));
+            let differs = (0..cells)
+                .any(|offset| self.grid.get(base + index + offset) != want.get(index + offset));
             if differs {
-                let (x, y) = (index % width, index / width);
+                let x = index;
                 if self.cursor != Some((x, y)) {
                     push_cup(bytes, x, y);
                 }
@@ -146,9 +158,10 @@ impl Writer {
                 }
                 bytes.push(glyph.ch);
                 for offset in 0..cells {
-                    if let (Some(slot), Some(value)) =
-                        (self.grid.get_mut(index + offset), want.get(index + offset))
-                    {
+                    if let (Some(slot), Some(value)) = (
+                        self.grid.get_mut(base + index + offset),
+                        want.get(index + offset),
+                    ) {
                         *slot = *value;
                     }
                 }
@@ -182,7 +195,7 @@ impl Writer {
     /// Write to `bytes` the sequences that bring the cursor to `cursor`, a
     /// `(column, row)` place or `None` for a hidden cursor, and update the
     /// model.
-    fn paint_cursor(&mut self, cursor: Option<(usize, usize)>, bytes: &mut String) {
+    pub(super) fn paint_cursor(&mut self, cursor: Option<(usize, usize)>, bytes: &mut String) {
         match cursor {
             Some((x, y)) => {
                 if self.cursor != Some((x, y)) {
