@@ -97,7 +97,7 @@ fn mark_removed(events: &[Event], screen: &mut TerminalState) -> Result<Vec<bool
             .find(|(_, later)| later.event_type == EventType::Input)
             .map_or(events.len(), |(position, _)| position);
         let key = key_of(&event.data);
-        let before = (key == Key::Typed).then(|| screen.clone());
+        let before = (key != Key::Other).then(|| screen.clone());
         for output in events.get(index + 1..unit_end).unwrap_or_default() {
             feed(screen, output)?;
         }
@@ -106,20 +106,46 @@ fn mark_removed(events: &[Event], screen: &mut TerminalState) -> Result<Vec<bool
                 first: index,
                 before,
             }),
-            (Key::EraseChar, _) => match stack.last() {
+            (Key::EraseChar, Some(before)) => match stack.last() {
                 Some(newest) if *screen == newest.before => {
-                    if let Some(range) = removed.get_mut(newest.first..unit_end) {
-                        range.fill(true);
-                    }
+                    mark(&mut removed, newest.first, unit_end);
                     stack.pop();
                 }
-                _ => stack.clear(),
+                _ => erase_without_typed_key(
+                    &mut removed,
+                    &mut stack,
+                    index..unit_end,
+                    screen == &before,
+                ),
             },
             _ => stack.clear(),
         }
         index = unit_end;
     }
     Ok(removed)
+}
+
+/// Mark the events from `from` up to `to` as removed.
+fn mark(removed: &mut [bool], from: usize, to: usize) {
+    if let Some(range) = removed.get_mut(from..to) {
+        range.fill(true);
+    }
+}
+
+/// The rule of an erase key that no typed key explains. If the key changed
+/// nothing on the screen, `unit` goes and the stack stays. Else the key
+/// changed text that no typed key wrote, so the unit stays and the stack ends.
+fn erase_without_typed_key(
+    removed: &mut [bool],
+    stack: &mut Vec<TypedKey>,
+    unit: std::ops::Range<usize>,
+    changed_nothing: bool,
+) {
+    if changed_nothing {
+        mark(removed, unit.start, unit.end);
+    } else {
+        stack.clear();
+    }
 }
 
 /// Feed the data of the output event `event` to `screen`.
