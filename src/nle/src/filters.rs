@@ -5,6 +5,7 @@
 //! break a rule of its type. The keys of the options are the field names
 //! below, and they are a part of the project file format.
 
+pub mod backspace;
 pub mod color_scheme;
 pub mod cursor;
 pub mod redaction;
@@ -16,7 +17,7 @@ mod splice;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
-use crate::pipeline::{FilterRegistry, Span};
+use crate::pipeline::{FilterRegistry, Span, SpanContext};
 use crate::types::{Event, EventType, FilterKind, FilterOptions, Seconds};
 
 /// The kind of the filter that shortens the long pauses between events.
@@ -73,6 +74,7 @@ pub const AUTO_TRIM: &str = "auto-trim";
 #[must_use]
 pub fn registry() -> FilterRegistry {
     let mut registry = FilterRegistry::new();
+    backspace::register(&mut registry);
     cursor::register(&mut registry);
     color_scheme::register(&mut registry);
     time_dilation::register(&mut registry);
@@ -98,6 +100,10 @@ pub fn registry() -> FilterRegistry {
 /// its options do not fit its region. Options that do not parse, and an
 /// `Err`, each fail the render with a render error that names the kind, says
 /// that the options are invalid, and holds the reason.
+///
+/// The filter does not get the `SpanContext` of its region, because no filter
+/// of this form reads the events outside its region or the size of the
+/// terminal.
 fn register_with_options<O, F>(registry: &mut FilterRegistry, kind: &str, filter: F)
 where
     O: DeserializeOwned + 'static,
@@ -105,7 +111,7 @@ where
 {
     registry.register_span(
         FilterKind::new(kind),
-        move |span, options: &FilterOptions| {
+        move |span, _context: SpanContext<'_>, options: &FilterOptions| {
             options
                 .parse::<O>()
                 .map_err(|error| error.to_string())

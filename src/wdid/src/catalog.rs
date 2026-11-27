@@ -72,10 +72,10 @@ const CARGO_DIRECTORY: &str = ".cargo";
 const BINARY_KIND: &str = "bin";
 
 /// The byte that starts each record of the git log.
-const LOG_RECORD_START: char = '\0';
+pub(crate) const LOG_RECORD_START: char = '\0';
 
 /// The format of the date that `%as` prints.
-const LOG_DATE_FORMAT: &str = "%Y-%m-%d";
+pub(crate) const LOG_DATE_FORMAT: &str = "%Y-%m-%d";
 
 /// The programs that the catalog starts.
 #[derive(Debug, Clone, PartialEq, Eq)]

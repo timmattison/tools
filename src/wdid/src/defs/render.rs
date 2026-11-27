@@ -4,7 +4,11 @@
 //! The text report shows only my definitions, unless the window has `all`.
 //! Then it shows mine first, and the others in one table for each file of
 //! origin. The JSON document always holds each entry of the tally, with its
-//! origin and a field that says if it is mine.
+//! origin, its added date, and a field that says if it is mine.
+//!
+//! The text report ends with the group `Duplicates and shadows`. It lists each
+//! finding of the tally that holds a definition of mine or a place of mine, or
+//! each finding with `all`. The JSON document holds each finding.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -14,14 +18,15 @@ use comfy_table::{presets, CellAlignment, ColumnConstraint, ContentArrangement, 
 use serde::Serialize;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::{Classification, Kind, Summary, Tally, Usage, Window};
+use super::{Classification, Finding, FindingKind, Kind, Member, Summary, Tally, Usage, Window};
 use crate::origin::{Origin, Places};
 use crate::render::{
-    counted, date_cell, group, number, number_of, BETWEEN_BLOCKS, THROUGH_SEPARATOR,
+    counted, date_cell, group, never_used_new_heading, never_used_old_heading, number, number_of,
+    BETWEEN_BLOCKS, THROUGH_SEPARATOR,
 };
 
 /// The name of each column of the table, in order.
-const COLUMNS: [&str; 9] = [
+const COLUMNS: [&str; 10] = [
     "Name",
     "Kind",
     "Uses",
@@ -29,6 +34,7 @@ const COLUMNS: [&str; 9] = [
     "Through",
     "First use",
     "Last use",
+    "Added",
     "Origin",
     "Definition",
 ];
@@ -37,7 +43,7 @@ const COLUMNS: [&str; 9] = [
 const THROUGH_COLUMN: usize = 4;
 
 /// The place of the `Definition` column.
-const DEFINITION_COLUMN: usize = 8;
+const DEFINITION_COLUMN: usize = 9;
 
 /// The number of the columns other than the definition.
 const FIXED_COLUMNS: usize = DEFINITION_COLUMN;
@@ -45,6 +51,10 @@ const FIXED_COLUMNS: usize = DEFINITION_COLUMN;
 /// The text of the `Origin` cell when the origin is unknown, and the heading
 /// of the group of the others whose origin is unknown.
 const UNKNOWN_ORIGIN: &str = "-";
+
+/// The text of the `Added` cell when the added date is unknown. Each
+/// definition that is not mine has an unknown added date.
+const UNKNOWN_ADDED: &str = "unknown";
 
 /// The heading of the table of my definitions in the report of `--all`.
 const HEADING_MINE: &str = "Mine";
@@ -75,9 +85,6 @@ const DEFINITION_MIN: usize = 10;
 /// The mark that ends a definition that the report cut.
 const CUT_MARK: char = '\u{2026}';
 
-/// The heading of the group of definitions that never ran.
-const HEADING_NEVER: &str = "Never used";
-
 /// The heading of the group of definitions that the shell runs without a
 /// typed name.
 const HEADING_RUNS: &str = "Runs without typing";
@@ -94,6 +101,37 @@ const DEFINITIONS_LABEL: &str = "Definitions";
 /// The note after the counts of mine and the others, when the text report
 /// does not show the others.
 const ALL_HINT: &str = " (--all shows the others)";
+
+/// The heading of the group of the duplicates and the shadows.
+const HEADING_FINDINGS: &str = "Duplicates and shadows";
+
+/// What starts the entry of a finding of the kind
+/// [`FindingKind::SameExpansion`].
+const LABEL_SAME_EXPANSION: &str = "Same expansion";
+
+/// What starts the entry of a finding of the kind
+/// [`FindingKind::AliasAndFunction`].
+const LABEL_ALIAS_AND_FUNCTION: &str = "Alias and function";
+
+/// What starts the entry of a finding of the kind
+/// [`FindingKind::AliasHidesFunction`].
+const LABEL_ALIAS_HIDES_FUNCTION: &str = "Alias hides function";
+
+/// What starts the entry of a finding of the kind
+/// [`FindingKind::HidesProgram`].
+const LABEL_HIDES_PROGRAM: &str = "Hides a program";
+
+/// The text that divides the members of a finding, and the places of a
+/// finding.
+const MEMBER_SEPARATOR: &str = ", ";
+
+/// The text between the members of a finding of the kind
+/// [`FindingKind::DefinedMoreThanOnce`] and its places.
+const AT: &str = " at ";
+
+/// The note after the last place of a finding of the kind
+/// [`FindingKind::DefinedMoreThanOnce`].
+const IN_EFFECT: &str = " (in effect)";
 
 /// Gives the `Through` cell: each name with its count, most used first.
 fn through_cell(usage: &Usage) -> String {
@@ -127,13 +165,23 @@ fn cut(definition: &str, available: usize) -> String {
     kept
 }
 
+/// Gives the text of `origin` with `~` for the home directory, or
+/// [`UNKNOWN_ORIGIN`].
+fn shown_origin(origin: Option<&Origin>, places: &Places) -> String {
+    origin.map_or_else(|| UNKNOWN_ORIGIN.to_string(), |origin| places.show(origin))
+}
+
 /// Gives the `Origin` cell: the origin with `~` for the home directory, or
 /// [`UNKNOWN_ORIGIN`].
 fn origin_cell(usage: &Usage, places: &Places) -> String {
+    shown_origin(usage.origin.as_ref(), places)
+}
+
+/// Gives the `Added` cell: the added date, or [`UNKNOWN_ADDED`].
+fn added_cell(usage: &Usage) -> String {
     usage
-        .origin
-        .as_ref()
-        .map_or_else(|| UNKNOWN_ORIGIN.to_string(), |origin| places.show(origin))
+        .added
+        .map_or_else(|| UNKNOWN_ADDED.to_string(), |added| date_cell(Some(added)))
 }
 
 /// Gives the cells of `usage` for the columns other than the definition, in
@@ -147,6 +195,7 @@ fn fixed_cells(usage: &Usage, places: &Places) -> [String; FIXED_COLUMNS] {
         through_cell(usage),
         date_cell(usage.first_use),
         date_cell(usage.last_use),
+        added_cell(usage),
         origin_cell(usage, places),
     ]
 }
@@ -265,17 +314,30 @@ fn reasons_suffix(usage: &Usage) -> String {
     format!(", {}", reasons.join(REASON_SEPARATOR))
 }
 
-/// Gives the three groups of `usages`: the definitions never used, the
-/// definitions idle, and the definitions that the shell runs without a typed
-/// name. Each entry ends with its reasons.
+/// Gives the four groups of `usages`: the definitions never used and old,
+/// the definitions never used and new, the definitions idle, and the
+/// definitions that the shell runs without a typed name. An entry of the new
+/// group gives its added date. Each entry ends with its reasons.
 fn group_lines(usages: &[&Usage], window: &Window) -> String {
-    let never: Vec<String> = with(usages, Classification::NeverUsed)
+    let old: Vec<String> = with(usages, Classification::NeverUsedOld)
         .iter()
         .map(|usage| {
             format!(
                 "{} ({}{})",
                 usage.name,
                 usage.kind.label(),
+                reasons_suffix(usage)
+            )
+        })
+        .collect();
+    let new: Vec<String> = with(usages, Classification::NeverUsedNew)
+        .iter()
+        .map(|usage| {
+            format!(
+                "{} ({}, added {}{})",
+                usage.name,
+                usage.kind.label(),
+                date_cell(usage.added),
                 reasons_suffix(usage)
             )
         })
@@ -305,7 +367,8 @@ fn group_lines(usages: &[&Usage], window: &Window) -> String {
         })
         .collect();
     [
-        group(HEADING_NEVER, &never),
+        group(&never_used_old_heading(window.new_days), &old),
+        group(&never_used_new_heading(window.new_days), &new),
         group(
             &format!(
                 "Idle (no use in the last {})",
@@ -395,15 +458,117 @@ fn file_heading(file: Option<&Path>, places: &Places) -> String {
     )
 }
 
+/// Gives the text of `member`: its name, then its kind, its origin, and its
+/// uses in parentheses. With `with_origin` false, the origin is left out.
+fn member_text(member: &Member, places: &Places, with_origin: bool) -> String {
+    let uses = counted(member.uses, "use", "uses");
+    if with_origin {
+        let origin = shown_origin(member.origin.as_ref(), places);
+        format!(
+            "{} ({}, {origin}, {uses})",
+            member.name,
+            member.kind.label()
+        )
+    } else {
+        format!("{} ({}, {uses})", member.name, member.kind.label())
+    }
+}
+
+/// Gives the members of `finding`, divided by [`MEMBER_SEPARATOR`].
+fn members_text(finding: &Finding, places: &Places, with_origin: bool) -> String {
+    finding
+        .definitions
+        .iter()
+        .map(|member| member_text(member, places, with_origin))
+        .collect::<Vec<_>>()
+        .join(MEMBER_SEPARATOR)
+}
+
+/// Joins `words` with one space. Each control character shows as the escape
+/// of [`char::escape_default`] (`\n`, `\t`, `\u{1b}`), so that the entry stays
+/// on one line. A backslash stays as it is, because the words are shell text.
+fn words_text(words: &[String]) -> String {
+    let mut text = String::new();
+    for character in words.join(" ").chars() {
+        if character.is_control() {
+            text.extend(character.escape_default());
+        } else {
+            text.push(character);
+        }
+    }
+    text
+}
+
+/// Gives the entry of `finding` in the group of the duplicates and the
+/// shadows. The text of each kind has its own shape.
+fn finding_entry(finding: &Finding, places: &Places) -> String {
+    match finding.kind {
+        FindingKind::SameExpansion => format!(
+            "{LABEL_SAME_EXPANSION} ({}): {}",
+            words_text(&finding.words),
+            members_text(finding, places, true),
+        ),
+        FindingKind::AliasAndFunction => format!(
+            "{LABEL_ALIAS_AND_FUNCTION} ({}): {}",
+            words_text(&finding.words),
+            members_text(finding, places, true),
+        ),
+        FindingKind::DefinedMoreThanOnce => {
+            let spots = finding
+                .places
+                .iter()
+                .map(|origin| shown_origin(origin.as_ref(), places))
+                .collect::<Vec<_>>()
+                .join(MEMBER_SEPARATOR);
+            format!(
+                "Defined {}: {}{AT}{spots}{IN_EFFECT}",
+                counted(finding.places.len(), "time", "times"),
+                members_text(finding, places, false),
+            )
+        }
+        FindingKind::AliasHidesFunction => format!(
+            "{LABEL_ALIAS_HIDES_FUNCTION}: {}",
+            members_text(finding, places, true),
+        ),
+        FindingKind::HidesProgram => {
+            let program = finding.program.as_ref().map(|file| Origin {
+                file: file.clone(),
+                line: None,
+            });
+            format!(
+                "{LABEL_HIDES_PROGRAM} ({}): {}",
+                shown_origin(program.as_ref(), places),
+                members_text(finding, places, true),
+            )
+        }
+    }
+}
+
+/// Gives the group of the duplicates and the shadows: each finding of the
+/// tally with a definition of mine or a place of mine, or each finding when
+/// `all` is true.
+fn findings_group(tally: &Tally, all: bool) -> String {
+    let entries: Vec<String> = tally
+        .findings
+        .iter()
+        .filter(|finding| all || finding.mine(&tally.places))
+        .map(|finding| finding_entry(finding, &tally.places))
+        .collect();
+    group(HEADING_FINDINGS, &entries)
+}
+
 /// Gives the text report. `shell` is the path of the shell that gave the
 /// definitions. `width` is the table width. `None` sets no limit.
 ///
-/// The report starts with the header and ends with the three groups. Between
-/// them, it has the table of my definitions. With `window.all`, that table
-/// has the heading `Mine` and a count, and one more table follows for each
+/// The report starts with the header. Then come the four groups, and last the
+/// group `Duplicates and shadows`. Between the header and the groups, the
+/// report has the table of my definitions. With `window.all`, that table has
+/// the heading `Mine` and a count, and one more table follows for each
 /// file that defined the others, with that file and a count as its heading.
-/// The three groups then hold each entry, else only mine. The definition in a
-/// table is one line. It is cut to the room that the width leaves.
+/// The four groups then hold each entry, else only mine. The last group
+/// holds each finding with `window.all`, else only the findings that hold one
+/// of my definitions or one of my places. The definition in a table is one line. It is cut to the
+/// room that the width leaves.
 #[must_use]
 pub fn text(tally: &Tally, window: &Window, shell: &str, width: Option<u16>) -> String {
     let places = &tally.places;
@@ -425,6 +590,7 @@ pub fn text(tally: &Tally, window: &Window, shell: &str, width: Option<u16>) -> 
         mine
     };
     blocks.push(group_lines(&shown, window));
+    blocks.push(findings_group(tally, window.all));
     blocks.join(BETWEEN_BLOCKS) + "\n"
 }
 
@@ -467,6 +633,7 @@ struct DefinitionDocument<'a> {
     through: Vec<ThroughDocument<'a>>,
     first_use: Option<NaiveDate>,
     last_use: Option<NaiveDate>,
+    added: Option<NaiveDate>,
     classification: Classification,
     origin: Option<&'a Origin>,
     mine: bool,
@@ -480,18 +647,65 @@ struct NamedDocument<'a> {
     kind: Kind,
 }
 
+/// One definition of a finding, in the JSON document.
+#[derive(Serialize)]
+struct MemberDocument<'a> {
+    name: &'a str,
+    kind: Kind,
+    origin: Option<&'a Origin>,
+    uses: u64,
+    mine: bool,
+}
+
+/// One duplicate or one shadow, in the JSON document.
+#[derive(Serialize)]
+struct FindingDocument<'a> {
+    kind: FindingKind,
+    mine: bool,
+    definitions: Vec<MemberDocument<'a>>,
+    words: &'a [String],
+    places: Vec<Option<&'a Origin>>,
+    program: Option<&'a Path>,
+}
+
 /// The whole JSON document.
 #[derive(Serialize)]
 struct Document<'a> {
     today: NaiveDate,
     since: Option<NaiveDate>,
+    new_days: u32,
     idle_days: u32,
     history: HistoryDocument,
     shell: ShellDocument<'a>,
     definitions: Vec<DefinitionDocument<'a>>,
-    never_used: Vec<NamedDocument<'a>>,
+    never_used_old: Vec<NamedDocument<'a>>,
+    never_used_new: Vec<NamedDocument<'a>>,
     idle: Vec<NamedDocument<'a>>,
     runs_without_typing: Vec<NamedDocument<'a>>,
+    findings: Vec<FindingDocument<'a>>,
+}
+
+/// Gives the JSON form of one finding. `directories` decides which places are
+/// mine.
+fn finding_document<'a>(finding: &'a Finding, directories: &Places) -> FindingDocument<'a> {
+    FindingDocument {
+        kind: finding.kind,
+        mine: finding.mine(directories),
+        definitions: finding
+            .definitions
+            .iter()
+            .map(|member| MemberDocument {
+                name: &member.name,
+                kind: member.kind,
+                origin: member.origin.as_ref(),
+                uses: member.uses,
+                mine: member.mine,
+            })
+            .collect(),
+        words: &finding.words,
+        places: finding.places.iter().map(Option::as_ref).collect(),
+        program: finding.program.as_deref(),
+    }
 }
 
 /// Gives the JSON form of one definition.
@@ -509,6 +723,7 @@ fn definition_document(usage: &Usage) -> DefinitionDocument<'_> {
             .collect(),
         first_use: usage.first_use,
         last_use: usage.last_use,
+        added: usage.added,
         classification: usage.classification,
         origin: usage.origin.as_ref(),
         mine: usage.mine,
@@ -531,11 +746,20 @@ fn named<'a>(definitions: &[&'a Usage]) -> Vec<NamedDocument<'a>> {
 ///
 /// `definitions` holds every entry in tally order, also an entry with no use
 /// and an entry that is not mine. Each entry has its `origin` (`file` and
-/// `line`, or `null` when it is unknown) and `mine`. The definition text is
-/// never cut. Each entry has its `reasons`, as the text report writes them, in
-/// a list that is empty for most entries. The lists `never_used`, `idle`, and
+/// `line`, or `null` when it is unknown), `mine`, and `added` (the added date,
+/// or `null` when it is unknown). The definition text is never cut. Each entry
+/// has its `reasons`, as the text report writes them, in a list that is empty
+/// for most entries. The lists `never_used_old`, `never_used_new`, `idle`, and
 /// `runs_without_typing` hold every entry too, in the order of the text
-/// report.
+/// report. `new_days` gives the limit of the new entries.
+///
+/// `findings` holds each finding of the tally in order, also a finding with no
+/// definition of mine. A finding is `mine` when one of its definitions or one
+/// of its places is mine. Each finding has the fields `kind`, `mine`,
+/// `definitions`, `words`, `places`, and `program`, always present. Each
+/// definition has `name`, `kind`, `origin`, `uses`, and `mine`. `words` and
+/// `places` are empty lists, and `program` is `null`, when the kind of the
+/// finding does not use them. A place is an origin or `null`.
 ///
 /// # Panics
 ///
@@ -549,6 +773,7 @@ pub fn json(tally: &Tally, window: &Window, shell: &str) -> String {
     let document = Document {
         today: window.today,
         since: window.since,
+        new_days: window.new_days,
         idle_days: window.idle_days,
         history: HistoryDocument {
             rows: summary.rows,
@@ -566,9 +791,15 @@ pub fn json(tally: &Tally, window: &Window, shell: &str) -> String {
             others: summary.others,
         },
         definitions: tally.definitions.iter().map(definition_document).collect(),
-        never_used: named(&with(&every, Classification::NeverUsed)),
+        never_used_old: named(&with(&every, Classification::NeverUsedOld)),
+        never_used_new: named(&with(&every, Classification::NeverUsedNew)),
         idle: named(&idle_definitions(&every)),
         runs_without_typing: named(&with(&every, Classification::RunsWithoutTyping)),
+        findings: tally
+            .findings
+            .iter()
+            .map(|finding| finding_document(finding, &tally.places))
+            .collect(),
     };
     let mut text = serde_json::to_string_pretty(&document)
         .expect("a document of numbers, dates, and text always serializes");

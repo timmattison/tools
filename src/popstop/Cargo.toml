@@ -30,6 +30,9 @@ objc2-core-audio-types = { workspace = true, features = ["CoreAudioBaseTypes"] }
 objc2-core-foundation = { workspace = true, features = ["CFString"] }
 
 [dev-dependencies]
+# `write_executable` writes the script of a late copy. On Linux, a script that
+# the test process held open for writing gives ETXTBSY at its run.
+gitscratch = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 
 [lints]

@@ -80,12 +80,15 @@
 //! This module owns the parser. No type of the parser is part of a public
 //! signature, and no other module sees one.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
 use std::ops::Range;
 
 use brush_parser::ast;
-use brush_parser::word::{self, TildeExpr, WordPiece, WordPieceWithSource};
+use brush_parser::word::{
+    self, BraceExpressionMember, BraceExpressionOrText, Parameter, ParameterExpr, SpecialParameter,
+    TildeExpr, WordPiece, WordPieceWithSource,
+};
 use brush_parser::{tokenize_str_with_options, Parser, ParserOptions, Token};
 
 /// The alias table: the name of each alias and its value, after quote removal.
@@ -343,7 +346,18 @@ pub struct AliasUse {
     pub through: Option<String>,
 }
 
-/// The command words of one line, and the aliases that expanded in it.
+/// One run of a word by a wrapper. In `sudo command ls`, `sudo` runs `command`
+/// and `command` runs `ls`, thus the line has two runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrapperRun {
+    /// The name of the wrapper.
+    pub wrapper: String,
+    /// The literal text of the word that the wrapper runs.
+    pub word: String,
+}
+
+/// The command words of one line, the aliases that expanded in it, and each
+/// run of a word by a wrapper.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
     /// The command words, in source order. These are the words that
@@ -351,6 +365,9 @@ pub struct Line {
     pub words: Vec<CommandWord>,
     /// Each alias expansion of the walk, in walk order.
     pub aliases: Vec<AliasUse>,
+    /// Each run of a word by a wrapper, in walk order. A wrapper that looks a
+    /// name up (`command -v ls`) runs nothing and adds no run.
+    pub wrapped: Vec<WrapperRun>,
 }
 
 /// The most levels of nesting that the walk reads. A substitution inside a
@@ -612,7 +629,7 @@ struct GlobalWord<'a> {
 
 /// The text that comes before the suffix in the marker of a suffix alias, as
 /// in `*.md`.
-const SUFFIX_MARKER: &str = "*.";
+pub(crate) const SUFFIX_MARKER: &str = "*.";
 
 /// The characters that make an alias expand the next word too, when the value
 /// of the alias ends with one of them.
@@ -733,6 +750,9 @@ const PLAIN: Wrapper = Wrapper {
     lookup_options: false,
 };
 
+/// The name of the wrapper `command`.
+pub const COMMAND: &str = "command";
+
 /// Every wrapper that the walk knows, with its option tables.
 const WRAPPERS: &[Wrapper] = &[
     Wrapper {
@@ -783,7 +803,7 @@ const WRAPPERS: &[Wrapper] = &[
         ..PLAIN
     },
     Wrapper {
-        name: "command",
+        name: COMMAND,
         lookup_options: true,
         ..PLAIN
     },
@@ -949,8 +969,10 @@ fn is_assignment(text: &str) -> bool {
 /// candidate. A wrapper hands the candidate to the word after its options, and
 /// the loop repeats for a wrapper inside a wrapper. Gives `None` when nothing
 /// runs: no word is left, the candidate holds an expansion, or the wrapper
-/// looks a name up.
-fn unwrap_command(words: &[&ReadWord]) -> Option<usize> {
+/// looks a name up. For each wrapper hop, `runs` gets the name of the wrapper
+/// and the literal text of the word that the wrapper runs, when that word
+/// exists and has a literal.
+fn unwrap_command(words: &[&ReadWord], runs: &mut Vec<WrapperRun>) -> Option<usize> {
     let mut index = 0;
     loop {
         let literal = words.get(index)?.literal()?;
@@ -958,6 +980,12 @@ fn unwrap_command(words: &[&ReadWord]) -> Option<usize> {
             return Some(index);
         };
         index = wrapper.skip(words, index + 1)?;
+        if let Some(word) = words.get(index).and_then(|word| word.literal()) {
+            runs.push(WrapperRun {
+                wrapper: literal,
+                word,
+            });
+        }
     }
 }
 
@@ -976,6 +1004,8 @@ struct Walker<'a> {
     words: Vec<CommandWord>,
     /// The alias expansions found so far, in walk order.
     uses: Vec<AliasUse>,
+    /// The runs of a word by a wrapper found so far, in walk order.
+    wrapped: Vec<WrapperRun>,
 }
 
 impl<'a> Walker<'a> {
@@ -986,6 +1016,7 @@ impl<'a> Walker<'a> {
             options: ParserOptions::default(),
             words: Vec::new(),
             uses: Vec::new(),
+            wrapped: Vec::new(),
         }
     }
 
@@ -1281,7 +1312,7 @@ impl<'a> Walker<'a> {
             let sequence: Vec<&ReadWord> = std::iter::once(command)
                 .chain(suffix.iter().filter_map(|(_, read)| read.as_ref()))
                 .collect();
-            if let Some(index) = unwrap_command(&sequence) {
+            if let Some(index) = unwrap_command(&sequence, &mut self.wrapped) {
                 if let (Some(runs), Some(rest)) = (sequence.get(index), sequence.get(index + 1..)) {
                     if let Some(literal) = runs.literal() {
                         let args = rest.iter().map(|word| word.argument());
@@ -1568,7 +1599,447 @@ pub fn parse_line(line: &str, aliases: &Aliases) -> Option<Line> {
         Ok(()) => Some(Line {
             words: walker.words,
             aliases: walker.uses,
+            wrapped: walker.wrapped,
         }),
         Err(Refused) => None,
+    }
+}
+
+/// One word of a text in argument form, as [`split_words`] and
+/// [`simple_command`] give it.
+///
+/// The kind keeps apart two words with the same text. `'$HOME'` is the
+/// literal `$HOME`, but `$HOME` is an expansion. `'|'` is the literal `|`,
+/// but `|` is an operator.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Argument {
+    /// A word with no expansion: its text after quote removal.
+    Literal(String),
+    /// A word that holds an expansion, a tilde or an unquoted pattern
+    /// included: its raw text, quotes included.
+    Expansion(String),
+    /// An operator of the tokenizer, for example `|` or a newline.
+    Operator(String),
+}
+
+/// The characters, besides letters and digits, that a literal word holds
+/// without quotes. `=` is not safe as the first character, because zsh
+/// expands `=ls` to the path of `ls`.
+const SAFE_WORD_CHARACTERS: &str = "_-./,:@%+=";
+
+/// The first character of a word that zsh expands to the path of a program,
+/// for example `=ls`.
+const EQUALS_EXPANSION: char = '=';
+
+impl Argument {
+    /// Gives the word as the shell reads it. A literal that holds only safe
+    /// characters stays bare, and each other literal gets single quotes. An
+    /// expansion and an operator keep their text.
+    #[must_use]
+    pub fn shell_text(&self) -> String {
+        match self {
+            Self::Literal(text) => {
+                let bare = !text.is_empty()
+                    && !text.starts_with(EQUALS_EXPANSION)
+                    && text
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || SAFE_WORD_CHARACTERS.contains(c));
+                if bare {
+                    text.clone()
+                } else {
+                    shellquote::shell_quote(text)
+                }
+            }
+            Self::Expansion(text) | Self::Operator(text) => text.clone(),
+        }
+    }
+
+    /// Gives the names of the `name=value` words that the shell makes of this
+    /// word, in order, with no duplicate and no empty name.
+    ///
+    /// A literal word gives the text before its first `=`. An expansion word
+    /// gives one name for each word that its brace lists make, as `alias`
+    /// reads them: the shell expands the braces of the whole word, then
+    /// `alias` splits each result at its first `=`. Thus `{a1,a2}=y` gives
+    /// `a1` and `a2`, and `{b=1,c=2}` gives `b` and `c`. A result gives no
+    /// name when text that only the shell can expand comes before its first
+    /// `=`: a parameter, a substitution, an arithmetic expansion, a tilde, an
+    /// ANSI-C string, or a glob. A name that holds a brace sequence such as
+    /// `{1..3}` gives no name, because the parser loses the zero padding that
+    /// the shell keeps. A sequence in the value does not change the name, thus
+    /// `x=a{1..3}` gives `x`. A word that grows past [`MAX_BRACE_WORDS`] words
+    /// gives the name of its own text, thus a brace list in that name gives no
+    /// name. An operator gives no name.
+    #[must_use]
+    pub fn assignment_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        match self {
+            Self::Literal(text) => {
+                if let Some((name, _)) = text.split_once(ASSIGNMENT) {
+                    names.push(name.to_string());
+                }
+            }
+            Self::Expansion(raw) => {
+                for word in brace_words(raw).unwrap_or_else(|| vec![raw.clone()]) {
+                    names.extend(name_of_raw_word(&word));
+                }
+            }
+            Self::Operator(_) => {}
+        }
+        let mut seen = HashSet::new();
+        names.retain(|name| !name.is_empty() && seen.insert(name.clone()));
+        names
+    }
+
+    /// Gives the text of the word, whatever its kind.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Literal(text) | Self::Expansion(text) | Self::Operator(text) => text,
+        }
+    }
+
+    /// Says if the word is `"$@"` or `"${@}"`: a double-quoted expansion of
+    /// all the arguments, which passes on each argument as one word.
+    #[must_use]
+    pub fn is_all_arguments(&self) -> bool {
+        let Self::Expansion(raw) = self else {
+            return false;
+        };
+        let Ok(pieces) = word::parse(raw, &ParserOptions::default()) else {
+            return false;
+        };
+        matches!(
+            pieces.as_slice(),
+            [WordPieceWithSource { piece: WordPiece::DoubleQuotedSequence(inner), .. }]
+                if matches!(
+                    inner.as_slice(),
+                    [WordPieceWithSource {
+                        piece: WordPiece::ParameterExpansion(ParameterExpr::Parameter {
+                            parameter: Parameter::Special(
+                                SpecialParameter::AllPositionalParameters { concatenate: false }
+                            ),
+                            indirect: false,
+                        }),
+                        ..
+                    }]
+                )
+        )
+    }
+}
+
+/// The character that stands for each piece of a word other than unquoted
+/// text and a line join in the probe of [`argument_from`]. It has no meaning
+/// in a glob or in a brace expansion, so a quoted `,` or `}` stays out of the
+/// probe, as the shell keeps it out. A line join gives nothing, as in
+/// [`literal_of`], because the shell removes it.
+const PIECE_STAND_IN: char = 'x';
+
+/// Says if the probe text `probe` of a word holds a pattern that the shell
+/// expands: `*`, `?`, or `[` before `]` (a glob), a `{` and the first `}`
+/// after it with `,` or `..` between them (a brace expansion), or a first `=`
+/// (zsh gives the path of the program). Each `{` counts, so `{x}{a,b}` is a
+/// pattern.
+fn is_pattern(probe: &str) -> bool {
+    let bracket = probe
+        .split_once('[')
+        .is_some_and(|(_, rest)| rest.contains(']'));
+    let brace = probe
+        .match_indices('{')
+        .filter_map(|(index, open)| probe.get(index + open.len()..))
+        .any(|rest| {
+            rest.split_once('}')
+                .is_some_and(|(inside, _)| inside.contains(',') || inside.contains(".."))
+        });
+    probe.contains(['*', '?']) || bracket || brace || probe.starts_with(EQUALS_EXPANSION)
+}
+
+/// The most words that the brace lists of one word may make. A dotfile line is
+/// input from outside the program, and `{a,b}` repeated n times makes 2^n
+/// words.
+const MAX_BRACE_WORDS: usize = 1024;
+
+/// The raw text that stands for each brace sequence in the words of
+/// [`brace_words`]. Only the name of a word counts, and [`is_pattern`] refuses
+/// a name that holds this text. Thus a sequence in the name gives no name, and
+/// a sequence in the value keeps the name.
+const SEQUENCE_STAND_IN: &str = "{1..2}";
+
+/// Gives the raw words that the brace lists of `raw` make, in the order of the
+/// shell. A word with no brace list gives itself. Each brace sequence gives
+/// one word, [`SEQUENCE_STAND_IN`]. Gives `None` when the word grows past
+/// [`MAX_BRACE_WORDS`] words.
+fn brace_words(raw: &str) -> Option<Vec<String>> {
+    match word::parse_brace_expansions(raw, &ParserOptions::default()) {
+        Ok(Some(parts)) => expand_parts(&parts),
+        Ok(None) | Err(_) => Some(vec![raw.to_string()]),
+    }
+}
+
+/// Gives the product of `parts` in order: each result is the prefix, one word
+/// of each list, and the suffix. A sequence is [`SEQUENCE_STAND_IN`]. Gives
+/// `None` past the cap.
+fn expand_parts(parts: &[BraceExpressionOrText]) -> Option<Vec<String>> {
+    let mut words = vec![String::new()];
+    for part in parts {
+        let choices = match part {
+            BraceExpressionOrText::Text(text) => vec![text.clone()],
+            BraceExpressionOrText::Expr(members) => {
+                let mut union = Vec::new();
+                for member in members {
+                    match member {
+                        BraceExpressionMember::Child(children) => {
+                            union.extend(expand_parts(children)?);
+                        }
+                        BraceExpressionMember::NumberSequence { .. }
+                        | BraceExpressionMember::CharSequence { .. } => {
+                            union.push(SEQUENCE_STAND_IN.to_string());
+                        }
+                    }
+                    if union.len() > MAX_BRACE_WORDS {
+                        return None;
+                    }
+                }
+                union
+            }
+        };
+        if words.len().checked_mul(choices.len())? > MAX_BRACE_WORDS {
+            return None;
+        }
+        words = words
+            .iter()
+            .flat_map(|prefix| {
+                choices
+                    .iter()
+                    .map(move |choice| format!("{prefix}{choice}"))
+            })
+            .collect();
+    }
+    Some(words)
+}
+
+/// The literal text and the glob probe of the part of a word before its
+/// first `=`.
+#[derive(Default)]
+struct NameScan {
+    /// The text of the name after quote removal.
+    name: String,
+    /// The probe of the name, built as [`argument_from`] builds it.
+    probe: String,
+}
+
+impl NameScan {
+    /// Adds `text` and stops at its first `=`. Gives `true` when the `=` was
+    /// found. `quoted` makes the probe take a stand-in for the text.
+    fn add(&mut self, text: &str, quoted: bool) -> bool {
+        let (before, found) = match text.split_once(ASSIGNMENT) {
+            Some((before, _)) => (before, true),
+            None => (text, false),
+        };
+        self.name.push_str(before);
+        if quoted {
+            self.probe.push(PIECE_STAND_IN);
+        } else {
+            self.probe.push_str(before);
+        }
+        found
+    }
+
+    /// Reads `pieces` up to the first `=`. Gives `Some(true)` when the `=`
+    /// was found, `Some(false)` when the pieces end first, and `None` when a
+    /// piece before the `=` is not literal text.
+    fn scan(&mut self, pieces: &[WordPieceWithSource], quoted: bool) -> Option<bool> {
+        for WordPieceWithSource { piece, .. } in pieces {
+            let found = match piece {
+                WordPiece::Text(text) => self.add(text, quoted),
+                WordPiece::SingleQuotedText(text) => self.add(text, true),
+                WordPiece::EscapeSequence(escape) => self.add(unescape(escape), true),
+                WordPiece::DoubleQuotedSequence(inner) => {
+                    let found = self.scan(inner, true)?;
+                    self.probe.push(PIECE_STAND_IN);
+                    found
+                }
+                _ => return None,
+            };
+            if found {
+                return Some(true);
+            }
+        }
+        Some(false)
+    }
+}
+
+/// Gives the name of the `name=value` word with the raw text `raw`, or `None`
+/// when the word has no `=`, does not parse, or needs the shell to give its
+/// name. See [`Argument::assignment_names`].
+fn name_of_raw_word(raw: &str) -> Option<String> {
+    let pieces = word::parse(raw, &ParserOptions::default()).ok()?;
+    let mut scan = NameScan::default();
+    if !scan.scan(&pieces, false)? || is_pattern(&scan.probe) {
+        return None;
+    }
+    Some(scan.name)
+}
+
+/// Gives the [`Argument`] of a word with the raw text `raw` and the top-level
+/// `pieces`. A tilde expansion or an unquoted pattern makes an
+/// [`Argument::Expansion`], so `~` is not the literal `'~'`, and `*.c` is not
+/// the literal `'*.c'`. This is the one place of that rule.
+///
+/// The pattern rule reads one probe of the whole word: the text of each
+/// unquoted piece, nothing for a line join, and [`PIECE_STAND_IN`] for each
+/// other piece. Thus a quoted piece does not divide `{a,"b"}` into two texts
+/// that hold no pattern, and a line join does not divide `{1..3}`.
+fn argument_from(raw: &str, pieces: &[WordPieceWithSource]) -> Argument {
+    let mut probe = String::new();
+    for WordPieceWithSource { piece, .. } in pieces {
+        match piece {
+            WordPiece::TildeExpansion(_) => return Argument::Expansion(raw.to_string()),
+            WordPiece::Text(text) => probe.push_str(text),
+            WordPiece::EscapeSequence(escape) if unescape(escape).is_empty() => {}
+            _ => probe.push(PIECE_STAND_IN),
+        }
+    }
+    if is_pattern(&probe) {
+        return Argument::Expansion(raw.to_string());
+    }
+    match literal_of(pieces) {
+        Some(text) => Argument::Literal(text),
+        None => Argument::Expansion(raw.to_string()),
+    }
+}
+
+/// Gives the words of `text` as the shell splits it. Pure.
+///
+/// A word is an [`Argument::Literal`] with its text after quote removal, or an
+/// [`Argument::Expansion`] with its raw text when it holds an expansion. An
+/// operator is an [`Argument::Operator`], for example `|`. Gives `None` when
+/// the tokenizer refuses the text or a word does not parse.
+#[must_use]
+pub fn split_words(text: &str) -> Option<Vec<Argument>> {
+    let tokens =
+        tokenize_str_with_options(text, &ParserOptions::default().tokenizer_options()).ok()?;
+    tokens
+        .iter()
+        .map(|token| match token {
+            Token::Operator(operator, _) => Some(Argument::Operator(operator.clone())),
+            Token::Word(raw, _) => {
+                let pieces = word::parse(raw, &ParserOptions::default()).ok()?;
+                Some(argument_from(raw, &pieces))
+            }
+        })
+        .collect()
+}
+
+/// Gives the words of `text` when the text is exactly one simple command, or
+/// `None`. Pure.
+///
+/// A brace group that holds one simple command counts as that command. A
+/// pipeline, a list, a background command, a redirect, a process substitution,
+/// a negation, a timer, and any other compound command give `None`. So does a
+/// command that has no command word. The words are the prefix assignments, the
+/// command word, and the suffix words, each an [`Argument`].
+#[must_use]
+pub fn simple_command(text: &str) -> Option<Vec<Argument>> {
+    let options = ParserOptions::default();
+    let program = Parser::new(BufReader::new(text.as_bytes()), &options)
+        .parse_program()
+        .ok()?;
+    let [list] = program.complete_commands.as_slice() else {
+        return None;
+    };
+    words_of_single_list(list, &options)
+}
+
+/// Gives the words of `list` when it holds exactly one item, that item ends
+/// with `;` or a newline, and it is one simple command. See [`simple_command`].
+fn words_of_single_list(
+    list: &ast::CompoundList,
+    options: &ParserOptions,
+) -> Option<Vec<Argument>> {
+    let [ast::CompoundListItem(and_or, ast::SeparatorOperator::Sequence)] = list.0.as_slice()
+    else {
+        return None;
+    };
+    if !and_or.additional.is_empty() {
+        return None;
+    }
+    let pipeline = &and_or.first;
+    if pipeline.timed.is_some() || pipeline.bang {
+        return None;
+    }
+    let [command] = pipeline.seq.as_slice() else {
+        return None;
+    };
+    match command {
+        ast::Command::Simple(simple) => words_of_simple(simple, options),
+        ast::Command::Compound(ast::CompoundCommand::BraceGroup(group), None) => {
+            words_of_single_list(&group.list, options)
+        }
+        _ => None,
+    }
+}
+
+/// Gives the words of a simple command in source order, each an [`Argument`].
+/// Gives `None` when it has a redirect, a process substitution, or no command
+/// word, or when a word does not parse.
+fn words_of_simple(simple: &ast::SimpleCommand, options: &ParserOptions) -> Option<Vec<Argument>> {
+    let command = simple.word_or_name.as_ref()?;
+    let mut words = Vec::new();
+    for item in simple.prefix.iter().flat_map(|prefix| &prefix.0) {
+        words.push(item_argument(item, options)?);
+    }
+    words.push(argument_of(command, options)?);
+    for item in simple.suffix.iter().flat_map(|suffix| &suffix.0) {
+        words.push(item_argument(item, options)?);
+    }
+    Some(words)
+}
+
+/// Gives the [`Argument`] of one prefix or suffix item. Gives `None` for a
+/// redirect or a process substitution.
+fn item_argument(
+    item: &ast::CommandPrefixOrSuffixItem,
+    options: &ParserOptions,
+) -> Option<Argument> {
+    match item {
+        ast::CommandPrefixOrSuffixItem::Word(word)
+        | ast::CommandPrefixOrSuffixItem::AssignmentWord(_, word) => argument_of(word, options),
+        _ => None,
+    }
+}
+
+/// Gives the [`Argument`] of `word`: a literal, or an expansion with its raw
+/// text. Gives `None` when the word does not parse.
+fn argument_of(word: &ast::Word, options: &ParserOptions) -> Option<Argument> {
+    let pieces = word::parse(&word.value, options).ok()?;
+    Some(argument_from(&word.value, &pieces))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Gives the [`Argument`] of the raw text `raw` as one word, through
+    /// [`argument_from`] and not through the tokenizer.
+    fn argument(raw: &str) -> Option<Argument> {
+        let pieces = word::parse(raw, &ParserOptions::default()).ok()?;
+        Some(argument_from(raw, &pieces))
+    }
+
+    /// The shell removes a line join, so a line join does not divide a
+    /// pattern, and it is not a piece of the probe. The tokenizer removes an
+    /// unquoted line join before a word parses, but [`argument_from`] reads
+    /// the pieces of each raw text that it gets.
+    #[test]
+    fn a_line_join_does_not_divide_a_pattern() {
+        let rows = [
+            ("{1.\\\n.3}", Argument::Expansion("{1.\\\n.3}".to_owned())),
+            ("\\\n=ls", Argument::Expansion("\\\n=ls".to_owned())),
+            ("a\\\nb", Argument::Literal("ab".to_owned())),
+        ];
+        for (raw, expected) in rows {
+            assert_eq!(argument(raw), Some(expected), "raw: {raw:?}");
+        }
     }
 }

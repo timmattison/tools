@@ -18,6 +18,8 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
+use super::executable::write_executable;
+
 /// How long the shim pauses before a subcommand of `pause_before`.
 ///
 /// It is longer than `PROGRESS_DELAY` (500 ms, in `console.rs`), so a display
@@ -47,9 +49,9 @@ impl GitShim {
     /// Write the shim script, and pause for [`PAUSE`] before each subcommand
     /// named in `pause_before`. An empty slice never pauses.
     ///
-    /// The script is written with `std::fs::write` and `set_permissions`, as
-    /// `tests/safety.rs` does. Issue #651 moves each such site onto
-    /// `testing::executable::write_executable` later.
+    /// The script is written with [`write_executable`], because a test runs it.
+    /// On Linux, a script that this process held open for writing gives
+    /// `ETXTBSY` when another thread forks before the run.
     ///
     /// # Panics
     ///
@@ -97,9 +99,7 @@ impl GitShim {
             log = shellquote::shell_quote(&log.to_string_lossy()),
             real = shellquote::shell_quote(&real_git.to_string_lossy()),
         );
-        std::fs::write(&script, contents).expect("write the git shim");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-            .expect("make the git shim executable");
+        write_executable(&script, contents).expect("write the git shim");
         Self { dir }
     }
 
