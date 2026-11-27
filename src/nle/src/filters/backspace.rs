@@ -29,6 +29,9 @@ const CTRL_U: &str = "\x15";
 /// fails the render, because the filter holds many copies of the screen.
 const MAX_CELLS: usize = 1 << 20;
 
+/// The most typed keys that the stack holds, on a small terminal.
+const MAX_DEPTH: usize = 256;
+
 /// What the data of an input event is, for this filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Key {

@@ -463,3 +463,27 @@ fn a_terminal_of_more_than_the_cell_limit_fails_the_render() {
     assert!(message.contains("2048 by 1024"), "{message}");
     assert!(message.contains(&MAX_CELLS.to_string()), "{message}");
 }
+
+#[test]
+fn a_line_of_more_typed_keys_than_the_depth_keeps_its_oldest_key() {
+    // The first typed key falls off the stack. The last backspace then has no
+    // typed key to erase, so it stays with the key before it.
+    let mut events = vec![out(0.0, "$ ")];
+    for i in 0..=MAX_DEPTH {
+        events.extend(typed(&[("a", 1.0 + 0.25 * i as f64)]));
+    }
+    for i in 0..=MAX_DEPTH {
+        let time = 1.0 + 0.25 * (MAX_DEPTH + 1 + i) as f64;
+        events.push(input(time, "\x7f"));
+        events.push(out(time, "\x08 \x08"));
+    }
+    let expected = vec![
+        out(0.0, "$ "),
+        input(1.0, "a"),
+        out(1.0, "a"),
+        input(1.25, "\x7f"),
+        out(1.25, "\x08 \x08"),
+    ];
+    let rendered = render(300, 3, events).unwrap();
+    assert_eq!(rendered.events, expected);
+}
