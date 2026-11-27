@@ -563,7 +563,10 @@ fn label_tag(left: f64) -> String {
 fn the_view_takes_the_focus_and_the_label_of_a_clip_stays_in_the_window() {
     let mut page = Page::open(Vec::new());
     let html = page.html();
-    assert!(html.contains("class=\"timeline-view\" tabindex=\"0\""), "{html}");
+    assert!(
+        html.contains("class=\"timeline-view\" tabindex=\"0\""),
+        "{html}"
+    );
     assert!(html.contains(&label_tag(0.0)), "{html}");
 
     let extent = start_extent();
@@ -574,4 +577,23 @@ fn the_view_takes_the_focus_and_the_label_of_a_clip_stays_in_the_window() {
     assert!(start < 0.0, "the clip starts left of the window: {start}");
     let html = page.html();
     assert!(html.contains(&label_tag(-start)), "{html}");
+}
+
+#[test]
+fn a_scroll_renders_no_tile_again() {
+    let extent = start_extent();
+    let mut page = Page::open(Vec::new());
+    page.key("+", Modifiers::empty());
+    let before = TILE_RENDERS.with(std::cell::Cell::get);
+    assert!(before > 0, "the tiles rendered");
+
+    page.wheel(10.0, 0.0, 300.0, Modifiers::empty());
+
+    let view = View::default()
+        .zoom(extent, ZOOM_STEP, START_WIDTH / 2.0)
+        .pan(extent, 10.0);
+    let html = page.html();
+    assert!(html.contains(&content_style(view, extent)), "{html}");
+    assert_eq!(html.matches("<svg").count(), 3, "{html}");
+    assert_eq!(TILE_RENDERS.with(std::cell::Cell::get), before);
 }

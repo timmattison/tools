@@ -261,11 +261,20 @@ async fn read_left(data: Rc<MountedData>, mut left: Signal<f64>) {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The number of renders of `Tile` on this thread, for the tests. Each test
+    /// runs on its own thread and renders its own `VirtualDom` there.
+    static TILE_RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// One tile of a clip: the event density of `TILE_WIDTH` pixels of the clip
 /// as one SVG path. The props change only with a zoom or with new events, so
 /// a scroll renders no tile again.
 #[component]
 fn Tile(events: ClipEvents, index: usize, pixels_per_second: f64) -> Element {
+    #[cfg(test)]
+    TILE_RENDERS.with(|renders| renders.set(renders.get() + 1));
     let width = tile_width(events.length() * pixels_per_second, index);
     let left = index as f64 * TILE_WIDTH;
     let path = density_path(&events, index, pixels_per_second, DENSITY_HEIGHT);
