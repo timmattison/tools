@@ -616,6 +616,7 @@ fn scale_span(factor: f64) -> impl Fn(Span, &FilterOptions) -> Result<Span, Stri
                 })
                 .collect(),
             length: span.length * factor,
+            marks: span.marks,
         })
     }
 }
@@ -757,6 +758,7 @@ fn a_span_filter_that_answers_a_bad_length_fails_and_names_the_kind() {
             Ok(Span {
                 events: span.events,
                 length,
+                marks: span.marks,
             })
         });
 
@@ -778,6 +780,7 @@ fn a_span_filter_may_answer_a_length_equal_to_its_largest_time() {
         Ok(Span {
             events: span.events,
             length: 3.0,
+            marks: span.marks,
         })
     });
 

@@ -46,6 +46,16 @@ use crate::types::{
 /// the end of the timeline is not finite, because a shift can overflow.
 pub type FilterFn = dyn Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync;
 
+/// A place on the timeline that a filter marks, for example the start of an
+/// idle period that it compressed. The timeline shows each mark of the render.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mark {
+    /// The time of the mark in seconds.
+    pub time: f64,
+    /// The text of the mark.
+    pub label: String,
+}
+
 /// A region of the timeline as a span filter sees it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Span {
@@ -53,6 +63,18 @@ pub struct Span {
     pub events: Vec<Event>,
     /// The length of the region in seconds.
     pub length: f64,
+    /// The marks of the region, with times relative to its start.
+    pub marks: Vec<Mark>,
+}
+
+/// The render of a project: one recording, and the marks of the filters.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rendered {
+    /// The recording that the project flattens into.
+    pub recording: Recording,
+    /// The marks of the filters, in time order, on the timeline of the
+    /// recording.
+    pub marks: Vec<Mark>,
 }
 
 /// A span filter: a pure function from a region and its length to new events
@@ -194,6 +216,7 @@ impl FilterRegistry {
                 let span = Span {
                     events: inside,
                     length,
+                    marks: Vec::new(),
                 };
                 let answer = filter(span, &applied.options).map_err(|message| {
                     NleError::RenderError(format!(
@@ -325,6 +348,16 @@ impl FilterRegistry {
     /// `EditProject::validate`, `NleError::RenderError` for an empty project,
     /// and the errors of `FilterRegistry::run`.
     pub fn render(&self, project: &EditProject) -> Result<Recording, NleError> {
+        self.render_with_marks(project)
+            .map(|rendered| rendered.recording)
+    }
+
+    /// Flatten `project` into one recording, by the rules of `render`, and
+    /// give the marks of its filters too.
+    ///
+    /// # Errors
+    /// Returns the errors of `render`.
+    pub fn render_with_marks(&self, project: &EditProject) -> Result<Rendered, NleError> {
         project.validate()?;
         // The clips in track order, then in the order on their track.
         let ordered: Vec<&Clip> = project
@@ -353,16 +386,19 @@ impl FilterRegistry {
         let (events, end) = self.run_with_end(events, &project.filters, project.duration())?;
 
         let header = &first.source;
-        Ok(Recording {
-            version: header.version,
-            width: header.width,
-            height: header.height,
-            timestamp: header.timestamp,
-            duration: end,
-            command: header.command.clone(),
-            title: header.title.clone(),
-            env: header.env.clone(),
-            events,
+        Ok(Rendered {
+            recording: Recording {
+                version: header.version,
+                width: header.width,
+                height: header.height,
+                timestamp: header.timestamp,
+                duration: end,
+                command: header.command.clone(),
+                title: header.title.clone(),
+                env: header.env.clone(),
+                events,
+            },
+            marks: Vec::new(),
         })
     }
 }

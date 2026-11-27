@@ -97,6 +97,7 @@ fn dilate(span: Span, options: &FilterOptions) -> Result<Span, String> {
             })
             .collect(),
         length: span.length / speed,
+        marks: Vec::new(),
     })
 }
 
