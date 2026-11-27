@@ -250,8 +250,31 @@ pub enum WheelAction {
 /// nothing.
 #[must_use]
 pub fn wheel_action(wheel: Wheel, width: f64) -> WheelAction {
-    let _ = (wheel, width);
-    WheelAction::Nothing
+    let scale = match wheel.unit {
+        WheelUnit::Pixels => 1.0,
+        WheelUnit::Lines => WHEEL_LINE_PIXELS,
+        WheelUnit::Pages => width,
+    };
+    let (x, y) = (wheel.x * scale, wheel.y * scale);
+    if !x.is_finite() || !y.is_finite() {
+        return WheelAction::Nothing;
+    }
+    if wheel.command {
+        if y == 0.0 {
+            return WheelAction::Nothing;
+        }
+        let factor = (-WHEEL_ZOOM_RATE * y)
+            .exp()
+            .clamp(1.0 / MAX_WHEEL_ZOOM_FACTOR, MAX_WHEEL_ZOOM_FACTOR);
+        return WheelAction::Zoom(factor);
+    }
+    if x != 0.0 {
+        WheelAction::Pan(x)
+    } else if wheel.shift && y != 0.0 {
+        WheelAction::Pan(y)
+    } else {
+        WheelAction::Nothing
+    }
 }
 
 /// What a key does to the timeline.
@@ -272,8 +295,15 @@ pub enum KeyAction {
 /// shortcuts of the system stay.
 #[must_use]
 pub fn key_action(key: &str, command: bool) -> Option<KeyAction> {
-    let _ = (key, command);
-    None
+    if command {
+        return None;
+    }
+    match key {
+        "+" | "=" => Some(KeyAction::ZoomIn),
+        "-" | "_" => Some(KeyAction::ZoomOut),
+        "0" => Some(KeyAction::Fit),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
