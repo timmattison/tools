@@ -265,7 +265,16 @@ async fn create_vouchers(
     let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/hotspot/vouchers", site_id);
 
-    let response: VoucherCreateResponse = client.post(&path, &request).await?;
+    let response: VoucherCreateResponse =
+        client
+            .post(&path, &request)
+            .await
+            .map_err(|error| match failed_answer(&error) {
+                FailedAnswer::Unreadable(status) => error.context(format!(
+                    "The controller answered the creation with HTTP {status}, but ufa could not read the answer, so the controller can have made the vouchers. Run `ufa vouchers list` to see them before you run this command again"
+                )),
+                FailedAnswer::Refused(_) | FailedAnswer::Missing => error,
+            })?;
 
     match output_format {
         OutputFormat::Json => {
