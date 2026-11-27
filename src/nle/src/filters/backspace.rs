@@ -15,6 +15,9 @@ const DEL: &str = "\x7f";
 /// The data of the Ctrl+H key (BS). Many terminals send it for Backspace.
 const BS: &str = "\x08";
 
+/// The data of the Ctrl+W key. It erases the word before the cursor.
+const CTRL_W: &str = "\x17";
+
 /// What the data of an input event is, for this filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Key {
@@ -22,6 +25,8 @@ enum Key {
     Typed,
     /// The Backspace key, as DEL or as BS.
     EraseChar,
+    /// The Ctrl+W key.
+    EraseWord,
     /// Any other input. It ends the line that the filter follows.
     Other,
 }
@@ -30,6 +35,9 @@ enum Key {
 fn key_of(data: &str) -> Key {
     if data == DEL || data == BS {
         return Key::EraseChar;
+    }
+    if data == CTRL_W {
+        return Key::EraseWord;
     }
     let mut chars = data.chars();
     match (chars.next(), chars.next()) {
@@ -118,6 +126,9 @@ fn mark_removed(events: &[Event], screen: &mut TerminalState) -> Result<Vec<bool
                     screen == &before,
                 ),
             },
+            (Key::EraseWord, Some(before)) => {
+                erase_many(&mut removed, &mut stack, index..unit_end, screen, &before);
+            }
             _ => stack.clear(),
         }
         index = unit_end;
@@ -145,6 +156,37 @@ fn erase_without_typed_key(
         mark(removed, unit.start, unit.end);
     } else {
         stack.clear();
+    }
+}
+
+/// The rule of an erase key that can remove many typed keys. It looks for the
+/// typed keys whose screen before the key is the screen now.
+///
+/// - One match: the events from that typed key to the end of the unit go, and
+///   the stack keeps the keys before it.
+/// - More than one match: the filter cannot tell how many keys the erase
+///   removed. The unit stays and the stack ends.
+/// - No match: the rule of a key that no typed key explains.
+fn erase_many(
+    removed: &mut [bool],
+    stack: &mut Vec<TypedKey>,
+    unit: std::ops::Range<usize>,
+    screen: &TerminalState,
+    before: &TerminalState,
+) {
+    let mut matches = stack
+        .iter()
+        .enumerate()
+        .filter(|(_, typed)| typed.before == *screen)
+        .map(|(position, typed)| (position, typed.first));
+    let (first_match, second_match) = (matches.next(), matches.next());
+    match (first_match, second_match) {
+        (Some((position, first)), None) => {
+            mark(removed, first, unit.end);
+            stack.truncate(position);
+        }
+        (Some(_), Some(_)) => stack.clear(),
+        (None, _) => erase_without_typed_key(removed, stack, unit, screen == before),
     }
 }
 
