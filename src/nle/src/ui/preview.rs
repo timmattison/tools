@@ -53,7 +53,7 @@ pub(super) fn render_of(document: &Option<Document>) -> RenderedState {
     document.as_ref().map(|open| {
         open.editor
             .render()
-            .map(|recording| Rendered(Arc::new(recording)))
+            .map(Rendered)
             .map_err(|error| error.to_string())
     })
 }

@@ -232,18 +232,18 @@ fn track_position(project: &EditProject, id: TrackId) -> Result<usize, NleError>
         .ok_or_else(|| missing_track(id))
 }
 
-/// What the editor keeps of the render of its project: the duration and the
-/// marks.
+/// What the editor keeps of the render of its project: the recording and the
+/// marks. The recording is shared, so the preview holds it with no copy.
 #[derive(Debug, Clone, PartialEq)]
 struct Kept {
-    duration: f64,
+    recording: Arc<Recording>,
     marks: Vec<Mark>,
 }
 
 impl From<Rendered> for Kept {
     fn from(rendered: Rendered) -> Self {
         Self {
-            duration: rendered.recording.duration,
+            recording: Arc::new(rendered.recording),
             marks: rendered.marks,
         }
     }
@@ -267,7 +267,7 @@ struct Applied {
 #[derive(Debug)]
 pub struct Editor {
     project: EditProject,
-    /// The duration and the marks of the render of `project`, after the check
+    /// The recording and the marks of the render of `project`, after the check
     /// of the last edit or a read of the render made them. Each change of
     /// `project` empties it, so it never holds the render of an earlier state.
     kept: OnceCell<Kept>,
@@ -392,12 +392,13 @@ impl Editor {
         !self.redo.is_empty()
     }
 
-    /// Render the project in its present state into one recording.
+    /// The recording of the render of the project in its present state. One
+    /// render of a state gives its recording, its duration, and its marks.
     ///
     /// # Errors
     /// Returns the errors of `FilterRegistry::render`.
-    pub fn render(&self) -> Result<Recording, NleError> {
-        self.filters.render(&self.project)
+    pub fn render(&self) -> Result<Arc<Recording>, NleError> {
+        self.kept().map(|kept| Arc::clone(&kept.recording))
     }
 
     /// What the editor keeps of the render of the project in its present
@@ -413,16 +414,17 @@ impl Editor {
     }
 
     /// The duration of the render of the project in its present state. One
-    /// render of a state gives its duration and its marks.
+    /// render of a state gives its recording, its duration, and its marks.
     ///
     /// # Errors
     /// Returns the errors of `FilterRegistry::render`.
     pub fn rendered_duration(&self) -> Result<f64, NleError> {
-        self.kept().map(|kept| kept.duration)
+        self.kept().map(|kept| kept.recording.duration)
     }
 
     /// The marks of the render of the project in its present state, in time
-    /// order. One render of a state gives its duration and its marks.
+    /// order. One render of a state gives its recording, its duration, and its
+    /// marks.
     ///
     /// # Errors
     /// Returns the errors of `FilterRegistry::render`.

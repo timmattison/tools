@@ -544,7 +544,7 @@ fn render_equals_the_registry_render_of_an_edited_project() {
 
     let rendered = editor.render().unwrap();
 
-    assert_eq!(rendered, registry().render(editor.project()).unwrap());
+    assert_eq!(*rendered, registry().render(editor.project()).unwrap());
     // The filter doubled the time of the event at 1.5.
     assert!(rendered.events.iter().any(|e| e.time == 3.0));
 }
@@ -620,7 +620,7 @@ async fn save_recording_writes_the_rendered_recording() {
         .unwrap();
 
     let loaded = Recording::load(&file).unwrap();
-    assert_eq!(loaded, editor.render().unwrap());
+    assert_eq!(loaded, *editor.render().unwrap());
     assert_ne!(loaded, Recording::test_fixture());
 }
 
@@ -635,7 +635,7 @@ async fn the_save_future_does_not_borrow_the_editor() {
     drop(editor);
     future.await.unwrap();
 
-    assert_eq!(Recording::load(&file).unwrap(), expected);
+    assert_eq!(Recording::load(&file).unwrap(), *expected);
 }
 
 #[tokio::test]
