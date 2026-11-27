@@ -81,7 +81,7 @@ These filters need deeper terminal state analysis or more complex heuristics.
 |-------|-------------|-------|
 | #163 | Captions and annotations | Text overlays at timestamps. UI-heavy. |
 | #165 | Terminal crop and zoom | Dynamic viewport requires deep escape sequence understanding. |
-| #169 | Plugin architecture | Design can start earlier, but API should stabilize first. TypeScript primary, WASM for advanced. |
+| #169 | Plugin architecture | Designed in [the plugin spec](../../specs/2026-11-26-nle-plugin-architecture-design.md): WASM components on wasmtime, with a WIT contract. The spec lists the slices of the implementation. Its slice 0 (the event form `FilterFn` returns a `Result`, like the in-place form and the span form) comes before the first built-in filter of the event form. |
 
 ## Difficulty Assessment
 
@@ -119,3 +119,5 @@ These filters need deeper terminal state analysis or more complex heuristics.
    - `src/export/web.rs`: `TerminalPlayer` JavaScript class. #151 did not use it: the preview uses the Rust emulator of `src/termstate`, so the preview and the video export draw from one emulator.
    - `src/export/video.rs`: Frame-to-FFmpeg pipeline (#160 already exists)
    - `src/termstate/src/lib.rs` (the `termstate` crate): VT100 emulator (reference for #152's state analysis)
+
+4. **Plugins**: Third-party filters, analyzers, and renderers are WASM components that run on wasmtime, in a sandbox with no file, no network, and no real clock. One WIT package, `nle:plugin`, is the contract. A plugin filter has the event form, the in-place form, or the span form, like a built-in filter, and the built-in filters stay native closures. Slice 0 of the spec changes the return type of the event form of decision 2 to `Result<Vec<Event>, String>`, the error type of the in-place form and the span form, because a plugin filter can fail. See [the plugin spec](../../specs/2026-11-26-nle-plugin-architecture-design.md) (issue #169).
