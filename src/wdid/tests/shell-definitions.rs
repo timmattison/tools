@@ -1,6 +1,7 @@
 //! Tests of the shell definitions: the kind of the shell, the marker, the
 //! script, the parse of the output, the read of a real shell, and the resolver.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -12,6 +13,7 @@ use wdid::origin::{Origin, Places};
 use wdid::shell::{
     parse_output, read, script, Definitions, Marker, Resolver, ShellError, ShellKind,
 };
+use wdid::starts::{Starts, Trigger};
 use wdid::tool::{ToolName, ToolNames};
 
 #[test]
@@ -1601,4 +1603,452 @@ fn a_bash_shell_gets_no_temporary_zdotdir() {
         std::fs::read_to_string(&record).unwrap(),
         "/nowhere/zdotdir"
     );
+}
+
+/// Parses `lines` between the markers of `M` and gives the starts.
+fn starts_of(lines: &[&str]) -> Starts {
+    let definitions = parsed(&records(lines));
+    assert!(
+        definitions.unparsed_aliases.is_empty(),
+        "a line of a start is not an alias line: {:?}",
+        definitions.unparsed_aliases
+    );
+    definitions.starts
+}
+
+/// Makes a map of text to text from pairs.
+fn text_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+    pairs
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect()
+}
+
+/// Makes a set of text.
+fn text_set(items: &[&str]) -> BTreeSet<String> {
+    items.iter().map(|item| (*item).to_owned()).collect()
+}
+
+/// A hook record names the hook and the function, a trap record names the
+/// signal and the function, and the handler record names the handler.
+#[test]
+fn the_hook_trap_and_handler_records_give_their_functions() {
+    let starts = starts_of(&[
+        "M HOOK precmd precmd",
+        "M HOOK chpwd mychpwd",
+        "M TRAP INT TRAPINT",
+        "M NOT_FOUND command_not_found_handler",
+    ]);
+    assert_eq!(
+        starts.functions,
+        [
+            (Trigger::Hook("precmd".into()), "precmd".to_owned()),
+            (Trigger::Hook("chpwd".into()), "mychpwd".to_owned()),
+            (Trigger::Trap("INT".into()), "TRAPINT".to_owned()),
+            (
+                Trigger::CommandNotFound,
+                "command_not_found_handler".to_owned()
+            ),
+        ]
+    );
+}
+
+/// `zle -lL` writes one `zle` command for each widget. The function of `-N`
+/// is the widget itself when the line names no function, and the function of
+/// `-C` comes after the completion widget.
+#[test]
+fn the_widget_lines_give_the_function_of_each_widget() {
+    let starts = starts_of(&[
+        "M WIDGETS",
+        "zle -N lonely",
+        "zle -N my-widget myw",
+        "zle -N zle-keymap-select azhw:zle-keymap-select",
+        "zle -C mycomp complete-word _mycomp",
+        "zle -N 'odd widget' oddfn",
+        "zle -N",
+        "echo $(",
+    ]);
+    assert_eq!(
+        starts.widgets,
+        text_map(&[
+            ("lonely", "lonely"),
+            ("my-widget", "myw"),
+            ("zle-keymap-select", "azhw:zle-keymap-select"),
+            ("mycomp", "_mycomp"),
+            ("odd widget", "oddfn"),
+        ])
+    );
+}
+
+/// zsh writes `--` after the option of `zle` when the name of the widget
+/// starts with `-`. The widget and its function stay the same.
+#[test]
+fn the_widget_lines_skip_the_end_of_the_options() {
+    let starts = starts_of(&[
+        "M WIDGETS",
+        "zle -N -- -x g",
+        "zle -N -- -y",
+        "zle -C -- -c complete-word f",
+        "zle -N -- --",
+    ]);
+    assert_eq!(
+        starts.widgets,
+        text_map(&[("-x", "g"), ("-y", "-y"), ("-c", "f"), ("--", "--")])
+    );
+}
+
+/// `bindkey -M <keymap> -L` writes one `bindkey` command for each key. The
+/// key is the word before the widget, without its quotes. A key in two
+/// keymaps is one key. A string binding (`-s`) starts no widget.
+#[test]
+fn the_keymap_lines_give_the_keys_of_each_widget() {
+    let starts = starts_of(&[
+        "M WIDGETS",
+        "zle -N my-widget myw",
+        "M KEYMAP emacs",
+        "bindkey -M emacs \"^R\" my-widget",
+        "bindkey -s \"^Xa\" \"abc\"",
+        "bindkey -R -M emacs \"a\"-\"z\" self-insert",
+        "M KEYMAP vicmd",
+        "bindkey -a \"^X^E\" my-widget",
+        "bindkey -a \"-\" vi-up-line-or-history",
+        "M KEYMAP main",
+        "bindkey \"^R\" my-widget",
+        "bindkey \" \" my-widget",
+    ]);
+    let expected: BTreeMap<String, BTreeSet<String>> = [
+        ("my-widget", text_set(&["^R", "^X^E", " "])),
+        ("self-insert", text_set(&["a-z"])),
+        ("vi-up-line-or-history", text_set(&["-"])),
+    ]
+    .into_iter()
+    .map(|(widget, keys)| (widget.to_owned(), keys))
+    .collect();
+    assert_eq!(starts.keys, expected);
+    assert_eq!(starts.widgets, text_map(&[("my-widget", "myw")]));
+}
+
+/// A record of `add-zle-hook-widget` names the special widget and the widget
+/// that it runs, in the order that the shell gives.
+#[test]
+fn the_zle_hook_records_give_the_widgets_of_each_special_widget() {
+    let starts = starts_of(&[
+        "M ZLE_HOOK zle-keymap-select kmsel",
+        "M ZLE_HOOK zle-line-init user:zle-line-init",
+        "M ZLE_HOOK zle-line-init other",
+    ]);
+    let expected: BTreeMap<String, Vec<String>> = [
+        ("zle-keymap-select", vec!["kmsel".to_owned()]),
+        (
+            "zle-line-init",
+            vec!["user:zle-line-init".to_owned(), "other".to_owned()],
+        ),
+    ]
+    .into_iter()
+    .map(|(special, widgets)| (special.to_owned(), widgets))
+    .collect();
+    assert_eq!(starts.hook_widgets, expected);
+}
+
+/// A function record after the starts still reads its body, and a start
+/// record with no value gives nothing.
+#[test]
+fn a_function_after_the_starts_keeps_its_body() {
+    let definitions = parsed(&records(&[
+        "M WIDGETS",
+        "zle -N w f",
+        "M HOOK precmd",
+        "M FUNCTION f",
+        "\tprcp x",
+    ]));
+    assert_eq!(definitions.starts.widgets, text_map(&[("w", "f")]));
+    assert!(definitions.starts.functions.is_empty());
+    assert_eq!(
+        definitions.functions["f"],
+        vec![CommandWord::new("prcp", ["x"])]
+    );
+}
+
+/// The `.zshrc` of the test of the starts of a real zsh. `ERR_EXIT` and
+/// `NO_UNSET` must not stop the script, also when a hook array is not set.
+const STARTS_ZSHRC: &str = "setopt ERR_EXIT NO_UNSET\n\
+precmd() { prompt_helper }\n\
+prompt_helper() { true }\n\
+mychpwd() { true }\n\
+autoload -Uz add-zsh-hook\n\
+add-zsh-hook chpwd mychpwd\n\
+TRAPINT() { return 128 }\n\
+TRAPPED() { true }\n\
+command_not_found_handler() { return 127 }\n\
+searchfn() { true }\n\
+zle -N history-search-wdid searchfn\n\
+bindkey '^R' history-search-wdid\n\
+bindkey -M vicmd '^X^E' history-search-wdid\n\
+lonelyfn() { true }\n\
+zle -N lonely-widget lonelyfn\n\
+kmsel() { true }\n\
+autoload -Uz add-zle-hook-widget\n\
+add-zle-hook-widget keymap-select kmsel\n";
+
+/// A real zsh gives its hooks, its trap functions, its handler, its widgets,
+/// the keys of each widget, and the widgets of `add-zle-hook-widget`.
+#[test]
+fn a_real_zsh_gives_its_hooks_traps_and_widgets() {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    write_file(home.path(), ".zshrc", STARTS_ZSHRC);
+    let definitions = read(
+        real_shell(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let starts = &definitions.starts;
+    for (trigger, name) in [
+        (Trigger::Hook("precmd".into()), "precmd"),
+        (Trigger::Hook("chpwd".into()), "mychpwd"),
+        (Trigger::Trap("INT".into()), "TRAPINT"),
+        (Trigger::CommandNotFound, "command_not_found_handler"),
+    ] {
+        assert!(
+            starts
+                .functions
+                .contains(&(trigger.clone(), name.to_owned())),
+            "{trigger:?} {name}: {:?}",
+            starts.functions
+        );
+    }
+    assert!(
+        !starts.functions.iter().any(|(_, name)| name == "TRAPPED"),
+        "PED is no signal: {:?}",
+        starts.functions
+    );
+    assert_eq!(
+        starts
+            .widgets
+            .get("history-search-wdid")
+            .map(String::as_str),
+        Some("searchfn")
+    );
+    assert_eq!(
+        starts.widgets.get("lonely-widget").map(String::as_str),
+        Some("lonelyfn")
+    );
+    assert_eq!(
+        starts.keys.get("history-search-wdid"),
+        Some(&text_set(&["^R", "^X^E"]))
+    );
+    assert_eq!(starts.keys.get("lonely-widget"), None);
+    assert_eq!(
+        starts.hook_widgets.get("zle-keymap-select"),
+        Some(&vec!["kmsel".to_owned()])
+    );
+    assert!(starts.code.is_empty(), "{:?}", starts.code);
+    assert_eq!(
+        definitions.functions["precmd"],
+        vec![CommandWord::new("prompt_helper", [] as [&str; 0])]
+    );
+}
+
+/// `trap -p` writes one `trap` command for each signal, with the code in
+/// single quotes. The code of each signal is one text, also when it holds a
+/// quote or a newline. The name of a signal loses its `SIG`. An empty code
+/// ignores the signal, thus it runs nothing.
+#[test]
+fn the_trap_lines_give_the_code_of_each_signal() {
+    let starts = starts_of(&[
+        "M TRAPS",
+        "trap -- 'trapfn' EXIT",
+        "trap -- 'echo it'\\''s; other' SIGINT",
+        "trap -- 'multi",
+        "line' SIGUSR1",
+        "trap -- '' SIGTSTP",
+        "trap -- 'dbgfn' DEBUG",
+    ]);
+    assert_eq!(
+        starts.code,
+        [
+            (Trigger::Trap("EXIT".into()), "trapfn".to_owned()),
+            (Trigger::Trap("INT".into()), "echo it's; other".to_owned()),
+            (Trigger::Trap("USR1".into()), "multi\nline".to_owned()),
+            (Trigger::Trap("DEBUG".into()), "dbgfn".to_owned()),
+        ]
+    );
+}
+
+/// Each element of `PROMPT_COMMAND` has a record of its own, and its lines
+/// are one text.
+#[test]
+fn each_element_of_prompt_command_is_one_code() {
+    let starts = starts_of(&[
+        "M PROMPT_COMMAND",
+        "pcfn; history -a",
+        "M PROMPT_COMMAND",
+        "second",
+        "line2",
+        "M PROMPT_COMMAND",
+    ]);
+    assert_eq!(
+        starts.code,
+        [
+            (Trigger::PromptCommand, "pcfn; history -a".to_owned()),
+            (Trigger::PromptCommand, "second\nline2".to_owned()),
+        ]
+    );
+}
+
+/// `bind -X` writes the key and the command of each `bind -x` binding, each in
+/// double quotes. bash 5.3 divides them with a space, and an older bash with a
+/// colon and a space. The command loses one level of backslashes. A line of a
+/// different form gives nothing.
+#[test]
+fn the_key_command_lines_give_the_command_of_each_key() {
+    let starts = starts_of(&[
+        "M KEY_COMMANDS",
+        "\"\\C-x\\C-r\" \"keyfn\"",
+        "\"\\C-g\": \"echo \\\\\\\"q\\\\\\\" x\"",
+        "\"\\C-a\" \"\"",
+        "garbage",
+        "\"unclosed",
+    ]);
+    assert_eq!(
+        starts.code,
+        [
+            (Trigger::KeyCommand("\\C-x\\C-r".into()), "keyfn".to_owned()),
+            (
+                Trigger::KeyCommand("\\C-g".into()),
+                "echo \\\"q\\\" x".to_owned()
+            ),
+        ]
+    );
+}
+
+/// readline writes each control byte and each byte with the high bit of a
+/// `bind -x` command as an escape: `\C-j` for a newline, `\C-?` for DEL, `\e`
+/// for the escape character, and `\M-` before the form of the byte without
+/// its high bit. The command gets back each byte, thus a second line and a
+/// name in UTF-8. A backslash before a different character stays.
+#[test]
+fn the_key_command_lines_decode_the_escapes_of_readline() {
+    let starts = starts_of(&[
+        "M KEY_COMMANDS",
+        r#""\C-g" "printf a\C-jecho b""#,
+        r#""\C-t" "caf\M-C\M-)_fn""#,
+        r#""\C-u" "printf \"\C-ix\"""#,
+        r#""\C-v" "go_\M-b\M-\C-f\M-\C-r""#,
+        r#""\C-w" "x\e[A\C-?\q""#,
+    ]);
+    let key = |key: &str| Trigger::KeyCommand(key.to_owned());
+    assert_eq!(
+        starts.code,
+        [
+            (key("\\C-g"), "printf a\necho b".to_owned()),
+            (key("\\C-t"), "café_fn".to_owned()),
+            (key("\\C-u"), "printf \"\tx\"".to_owned()),
+            (key("\\C-v"), "go_→".to_owned()),
+            (key("\\C-w"), "x\u{1b}[A\u{7f}\\q".to_owned()),
+        ]
+    );
+}
+
+/// The `.bashrc` of the test of the starts of a real bash. `set -u` must not
+/// stop the script. The script removes the `DEBUG` trap before it lists the
+/// functions, thus it must list the traps first.
+const STARTS_BASHRC: &str = "set -u\n\
+pcfn() { pc_helper; }\n\
+pc_helper() { true; }\n\
+PROMPT_COMMAND='pcfn; history -a'\n\
+trapfn() { true; }\n\
+trap 'trapfn' EXIT\n\
+dbgfn() { true; }\n\
+trap 'dbgfn' DEBUG\n";
+
+/// A real bash gives its `PROMPT_COMMAND` and the code of each trap.
+#[test]
+fn a_real_bash_gives_its_prompt_command_and_its_traps() {
+    let Some(bash) = find_shell("bash") else {
+        eprintln!("skipped: bash is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    write_file(home.path(), ".bashrc", STARTS_BASHRC);
+    let definitions = read(
+        real_shell(&bash, home.path()),
+        ShellKind::Bash,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let code = &definitions.starts.code;
+    for expected in [
+        (Trigger::PromptCommand, "pcfn; history -a"),
+        (Trigger::Trap("EXIT".into()), "trapfn"),
+        (Trigger::Trap("DEBUG".into()), "dbgfn"),
+    ] {
+        assert!(
+            code.contains(&(expected.0.clone(), expected.1.to_owned())),
+            "{expected:?}: {code:?}"
+        );
+    }
+    assert!(definitions.starts.widgets.is_empty());
+    assert!(definitions.starts.functions.is_empty());
+    assert_eq!(
+        definitions.functions["pcfn"],
+        vec![CommandWord::new("pc_helper", [] as [&str; 0])]
+    );
+}
+
+/// Finds a bash whose `bind` has the option `-X`, which lists the `bind -x`
+/// bindings. bash has it from version 4.3 on. The bash of macOS is 3.2, thus
+/// the search reads each bash on the `PATH` and the fixed paths.
+fn bash_with_key_listing() -> Option<PathBuf> {
+    let search_path = std::env::var_os("PATH").unwrap_or_default();
+    let candidates = std::env::split_paths(&search_path)
+        .chain(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"].map(PathBuf::from))
+        .map(|dir| dir.join("bash"));
+    candidates.filter(|path| path.is_file()).find(|path| {
+        childenv::fixture_command(path)
+            .args(["-c", "help bind"])
+            .output()
+            .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains("PSVX]"))
+    })
+}
+
+/// The `.bashrc` of the test of the `bind -x` keys of a real bash: one command
+/// of one line, one command of two lines, and one command with a name in
+/// UTF-8.
+const KEY_COMMANDS_BASHRC: &str = "keyfn() { true; }\n\
+bind -x '\"\\C-x\\C-r\": keyfn' 2>/dev/null\n\
+bind -x '\"\\C-g\": printf a\n\
+echo b' 2>/dev/null\n\
+bind -x '\"\\C-t\": café_fn' 2>/dev/null\n";
+
+/// A real bash gives the command of each `bind -x` key, with each line and
+/// each byte of the command.
+#[test]
+fn a_real_bash_gives_its_key_commands() {
+    let Some(bash) = bash_with_key_listing() else {
+        eprintln!("skipped: no bash with bind -X is installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    write_file(home.path(), ".bashrc", KEY_COMMANDS_BASHRC);
+    let definitions = read(
+        real_shell(&bash, home.path()),
+        ShellKind::Bash,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let code = &definitions.starts.code;
+    for (key, command) in [
+        ("\\C-x\\C-r", "keyfn"),
+        ("\\C-g", "printf a\necho b"),
+        ("\\C-t", "café_fn"),
+    ] {
+        let expected = (Trigger::KeyCommand(key.to_owned()), command.to_owned());
+        assert!(code.contains(&expected), "{bash:?}: {expected:?}: {code:?}");
+    }
+    assert_eq!(code.len(), 3, "{bash:?}: {code:?}");
 }

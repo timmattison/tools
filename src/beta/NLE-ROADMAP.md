@@ -27,7 +27,7 @@ Parent issue: [#148](https://github.com/timmattison/tools/issues/148)
 | #170 | Scaffold the desktop app | Sets up the dev tooling, the app shell with its layout regions, and the Rust functions that load and save recordings and run the existing exporters. #170 built the scaffold on Tauri 2 and React. |
 | #761 | Move the scaffold to Dioxus | Dioxus 0.7 with the desktop (webview) renderer, in one Rust crate. The components call the Rust code directly, thus no IPC layer and no generated TypeScript types exist. `dx serve` runs the app, and `dx bundle` builds it. |
 | #149 | Core editing engine | Done. The project model (clips, tracks, filters), the filter pipeline and its registry, the render step that flattens a project into one recording, the edit operations with undo and redo, and project save/load. The types are in `src/nle/src/types.rs`. The app keeps the `Editor` in its Dioxus state. |
-| #159 | Research timeline UI components | Research task. Can run in parallel with #170. Informs #150. |
+| #159 | Research timeline UI components | Done. The findings, the frame times of a prototype, and the recommendation are in [specs/2026-11-26-nle-timeline-research.md](../../specs/2026-11-26-nle-timeline-research.md). No Dioxus crate or JavaScript library fits, thus #150 builds a custom timeline. |
 
 ### Phase 1: Quick Wins (3-5 days, all parallel)
 
@@ -41,7 +41,7 @@ All of these can be built **simultaneously** after Phase 0 types exist.
 | #154 | Pause removal/insertion | Done | `pause-removal`, `pause-insertion`, and `auto-trim` in `src/nle/src/filters.rs`. Each one is a span filter whose options parse as a Rust type, thus the render refuses bad options. Auto-trim cuts the time after the last event, and a pause in a range moves the events after the range also when no event of the range moves: each one changes the length of its region. A point past the end of the region by more than a microsecond would move events that are before the point, thus pause insertion refuses it. The microsecond is for the rounding of a range with decimal bounds. Each one moves the marks of the earlier filters as it moves time: a mark in a shortened gap shrinks with it in proportion. The click on the timeline that places a pause, and the marker where a pause was removed, wait for #150. |
 | #155 | Typing speed normalization | Done | A span filter (`src/nle/src/filters/typing_speed.rs`): it puts the keys of each burst of typing one interval apart, at a rate in characters per second, with an optional jitter that repeats in each render. Each output keeps its delay after its key, and a mark of an earlier filter moves as an output does. A gap longer than the pause threshold and the gap after a line end stay. No panel applies it yet. |
 | #167 | Idle time compression | Done | A span filter (`src/nle/src/filters/idle_compression.rs`): it replays the output through `termstate`. A key, or an output event that changes a cell outside the ignored rows, is activity. Each idle stretch of at least the threshold becomes the compressed length. The idle panel applies it to the whole timeline, and the marks of the filter show on a strip under the timeline placeholder until #150. |
-| #156 | Text replacement/redaction | 1 day | Regex replace on `event.data`. Needs care with ANSI escape sequence boundaries. |
+| #156 | Text replacement/redaction | Done | A span filter (`src/nle/src/filters/redaction.rs`) that replaces text in `event.data` and keeps each time. It joins the events of a stream, so a match can cross events and escape sequences, and it never searches or changes an escape sequence. Presets find emails, IP addresses, AWS keys, tokens, and hostnames. The redaction panel of the properties panel applies it. The timeline marks of the redactions wait for #150. |
 | #168 | Cursor customization | 1 day | Done. The `cursor` filter (`src/nle/src/filters/cursor.rs`) rewrites DECTCEM, DECSCUSR, mode 12, and OSC 12 in the output events: honor, always visible, always hidden, or smart (hidden during a burst of output), and a shape, a blink, and a color. The render-only items wait for #768 and #151 in a follow-up issue: custom shapes, size, opacity, glow, an outline, a smooth blink, animation, the draw of the shape, the blink, and the color in the video export, CSS in the web export, and the editor preview. |
 | #160 | Rendering pipeline progress | Half day | Add structured progress reporting to existing `beta export video`. |
 
@@ -61,7 +61,7 @@ The big UI push. This is the most complex part of the project.
 
 | Issue | Description | Notes |
 |-------|-------------|-------|
-| #150 | Timeline UI component | Informed by #159 research. Horizontal scrolling, zoom, clip dragging, playhead, selection ranges. Likely canvas-based for performance. |
+| #150 | Timeline UI component | Informed by #159 research ([specs/2026-11-26-nle-timeline-research.md](../../specs/2026-11-26-nle-timeline-research.md)). Horizontal scrolling, zoom, clip dragging, playhead, selection ranges. RSX elements with virtualization in tiles, and one SVG path for the event density of each tile. A canvas is the fallback for a later dense layer. |
 | #157 | Multi-clip splicing | Start with hard cuts (clear screen between clips). Transitions later. Terminal size differences between clips need handling. |
 
 ### Phase 4: Advanced Filters (1-2 weeks, parallel)

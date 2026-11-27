@@ -31,6 +31,9 @@ pub enum NleError {
     #[error("Invalid idle compression: {0}")]
     InvalidIdleCompression(String),
 
+    #[error("Invalid redaction: {0}")]
+    InvalidRedaction(String),
+
     #[error("Invalid typing rate: {0} (a typing rate must be finite and above zero)")]
     InvalidTypingRate(f64),
 
