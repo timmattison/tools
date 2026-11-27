@@ -87,6 +87,12 @@ fn use_ticker(
         let mut last = tokio::time::Instant::now();
         loop {
             tokio::time::sleep(FRAME_INTERVAL).await;
+            // A Pause or a Stop cancels this task, but the cancel runs in a
+            // later step of the scheduler. A frame that woke before the cancel
+            // must not move the playhead after Stop set it to zero.
+            if !*playing.peek() {
+                return;
+            }
             let now = tokio::time::Instant::now();
             let elapsed = now.saturating_duration_since(last);
             last = now;
