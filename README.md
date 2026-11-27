@@ -5727,7 +5727,7 @@ A use through other definitions names the definition that you typed. With `a` th
 
 The origin of an alias is `file:line`. The origin of a function is its file.
 
-- **A zsh function.** zsh keeps the file of each function in `$functions_source`. A function from an `eval` gets the file that holds the `eval`. A function from `source <(…)` gets `/dev/fd/N`. `wdid` loads each autoloaded function first, and a loaded function gets its file too. For a function whose name starts with `_`, `autoload -Ur` finds the file and loads no body.
+- **A zsh function.** zsh keeps the file of each function in `$functions_source`. A function from an `eval` gets the file that holds the `eval`. A function from `source <(…)` gets `/dev/fd/N` on macOS and `/proc/self/fd/N` on Linux. `wdid` loads each autoloaded function first, and a loaded function gets its file too. For a function whose name starts with `_`, `autoload -Ur` finds the file and loads no body.
 - **A zsh alias.** zsh keeps no origin for an alias. Thus `wdid` starts zsh with `ZDOTDIR` set to a new temporary directory. The `.zshenv` of that directory defines a shell function named `alias`. For each definition, the function records the file and the line of the call (`$funcfiletrace`), and then it runs `builtin alias "$@"`. Then the file sets `ZDOTDIR` back to its value in your environment, or removes it when your environment has none, and it sources your real `.zshenv`. zsh then reads your other startup files from your real `ZDOTDIR`, also when your `.zshenv` changes `ZDOTDIR`. Before `wdid` lists the aliases, it removes the function. The temporary directory has a unique name, and `wdid` removes it after the run, also after an error or a timeout.
 - **An alias from `builtin alias`.** This command goes around the function, thus its origin is unknown.
 - **bash.** `shopt -s extdebug` and `declare -F` give the file of each function. bash keeps no origin for an alias, thus the origin of each bash alias is unknown.
@@ -5739,7 +5739,7 @@ A definition is mine when its origin is unknown, when its file is under `$ZSH_CU
 - A definition in `~/.zshrc`, in a file under `$HOME` that `~/.zshrc` sources, or in `$ZSH_CUSTOM` is mine.
 - A definition that an `eval` in `~/.zshrc` makes is mine, for example a function from `eval "$(tsm shell-init)"`. Your file chose to run it.
 - A definition with an unknown origin is mine, so that the default report never hides it. zsh itself defines the aliases `run-help` and `which-command`, which have no file.
-- A definition from `$ZSH`, from `/usr/share/zsh`, from `/dev/fd`, or from a different file outside `$HOME` is not mine. A definition from `source <(tsm shell-init)` is in `/dev/fd`, thus it is not mine.
+- A definition from `$ZSH`, from `/usr/share/zsh`, from `/dev/fd` or `/proc/self/fd`, or from a different file outside `$HOME` is not mine. A definition from `source <(tsm shell-init)` is in `/dev/fd` on macOS and in `/proc/self/fd` on Linux, thus it is not mine.
 
 #### The report
 
