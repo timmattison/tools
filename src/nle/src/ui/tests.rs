@@ -3,6 +3,7 @@
 
 use super::*;
 use std::any::Any;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, Once};
@@ -111,6 +112,56 @@ fn panels_root() -> Element {
         Timeline { loaded, rendered, playhead }
         PropertiesPanel { loaded, on_result: |_| {} }
     }
+}
+
+/// What `preview_root` takes from the test, and gives back to it.
+#[derive(Clone)]
+struct PreviewInput {
+    /// The recording for the first render. The root takes it out, so the
+    /// context holds no strong count.
+    recording: Rc<RefCell<Option<Arc<Recording>>>>,
+    /// The signal of the root. The root puts it here, so the test can write it.
+    signal: Rc<Cell<Option<Signal<RenderedState>>>>,
+}
+
+/// A test root that shows the preview pane of the recording in the context.
+fn preview_root() -> Element {
+    let input = use_context::<PreviewInput>();
+    let rendered = use_signal(|| {
+        input
+            .recording
+            .borrow_mut()
+            .take()
+            .map(|recording| Ok(preview::Rendered(recording)))
+    });
+    input.signal.set(Some(rendered));
+    let playhead = use_signal(|| Seconds::ZERO);
+    let playing = use_signal(|| false);
+    rsx! {
+        PreviewPane { rendered, playhead, playing }
+    }
+}
+
+#[test]
+fn a_failed_render_frees_the_old_preview() {
+    let recording = Arc::new(fixture().recording);
+    let weak = Arc::downgrade(&recording);
+    let input = PreviewInput {
+        recording: Rc::new(RefCell::new(Some(recording))),
+        signal: Rc::new(Cell::new(None)),
+    };
+    let mut dom = VirtualDom::new(preview_root).with_root_context(input.clone());
+    dom.rebuild_in_place();
+    assert!(weak.upgrade().is_some(), "the engine holds the recording");
+    let mut signal = input.signal.take().expect("the root stored its signal");
+    dom.in_runtime(|| signal.set(Some(Err("boom".to_owned()))));
+    dom.render_immediate_to_vec();
+    assert_eq!(
+        weak.strong_count(),
+        0,
+        "the pane cannot show the old preview, so it must drop it"
+    );
+    assert!(dioxus_ssr::render(&dom).contains(preview::PREVIEW_FAILED_PREFIX));
 }
 
 /// Renders the `App` with no recording. The fakes are never called.
