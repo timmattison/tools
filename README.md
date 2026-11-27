@@ -6769,9 +6769,10 @@ The keystroke HUD filter (`keystroke-hud`) shows the keys of the presenter
 in a box with rounded corners, as a screencast tool does. It reads the input
 events of its region. Typed text shows as text, for example `ls -la`. A special
 key shows as a label in the accent color, for example `Enter`, `Tab`, `Ctrl+R`,
-`Alt+.`, or `↑`. Fast typing goes into one box, and `Enter` closes the box. A
-held key shows once with a count, for example `↓ ×12`. The box fades in and
-out in steps of 24-bit color.
+`Alt+.`, or `↑`. Fast typing goes into one box, and `Enter` closes the box.
+The keys of one input event stay in one box, thus a paste of `ls`, `Enter`,
+`pwd`, `Enter` shows as `ls Enter pwd Enter`. A held key shows once with a
+count, for example `↓ ×12`. The box fades in and out in steps of 24-bit color.
 
 The filter draws with output events: each one saves the cursor, draws the box,
 and restores the cursor. It replays the events through the emulator of

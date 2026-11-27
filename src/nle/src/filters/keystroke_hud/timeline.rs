@@ -79,8 +79,10 @@ struct Entry {
 /// 2. One entry is one box. A press joins the current entry when the entry is
 ///    open and the press is before `last + duration`. `last` is the time of
 ///    the last press of the entry. A press of `Enter` joins (or starts) an
-///    entry and then closes it, so the next press starts a new entry. Any
-///    other press starts a new entry.
+///    entry and then closes it, so the next press starts a new entry. A press
+///    at `last` joins the entry also when the entry is closed. One input event
+///    gives all of its keys one time, so the keys of a paste such as
+///    `ls\rpwd\r` stay in one box. Any other press starts a new entry.
 /// 3. An entry starts at its first press. Its natural end is `last +
 ///    duration`. Its end is the least of the natural end, the start of the
 ///    next entry, and `limit`. The entry is cut when its end is before its
@@ -109,11 +111,12 @@ impl Timeline {
         let mut groups: Vec<Vec<Press>> = Vec::new();
         let mut open = false;
         for press in presses {
-            let joins = open
-                && groups
-                    .last()
-                    .and_then(|group| group.last())
-                    .is_some_and(|last| press.time < last.time + timing.duration);
+            let joins = groups
+                .last()
+                .and_then(|group| group.last())
+                .is_some_and(|last| {
+                    press.time == last.time || (open && press.time < last.time + timing.duration)
+                });
             let closes = press.key == Key::Special(CLOSING_KEY.to_string());
             if joins {
                 if let Some(group) = groups.last_mut() {
