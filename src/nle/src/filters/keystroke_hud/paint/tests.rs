@@ -401,3 +401,19 @@ fn the_label_is_ascii_when_the_program_uses_the_line_drawing_set() {
     assert_eq!(rig.viewer.get_grid()[0][0].ch, '─');
     assert_eq!(rig.viewer.get_grid()[0][0], rig.reference.get_grid()[0][0]);
 }
+
+#[test]
+fn the_repair_selects_a_character_set_only_when_the_sets_differ() {
+    let screen = size(20, 8);
+    let mut rig = Rig::new(screen, &TerminalTheme::auto());
+    let overlay = box_of(screen, Position::TopRight, "ls");
+    rig.feed("\x1b7\x1b[5;5H");
+    rig.paint(Some(&overlay));
+    rig.paint(None);
+    // The recording restores its own save at the home position. The viewer
+    // restores the save of the last paint.
+    rig.feed("\x1b8");
+    let repair = rig.paint(None).expect("the cursors differ");
+    assert!(!repair.contains("\x1b("), "{repair:?}");
+    rig.assert_viewer_is_reference();
+}
