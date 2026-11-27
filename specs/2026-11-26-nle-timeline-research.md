@@ -20,8 +20,7 @@ library, and do not use a canvas for the first version.
    vis-timeline, keeps its own copy of the clips, and issue #149 makes the Rust
    `Editor` the one source of truth.
 2. **Draw the clips as RSX elements.** Each clip is one `div` with an absolute
-   position and `overflow: hidden`. A move changes only its
-   `transform: translate3d(...)`. A trim also changes its width (see rule 7).
+   position and `overflow: hidden`.
 3. **Divide each clip into tiles of 512 px, and render only the tiles in the
    window and in an overscan of 600 px.** A `Tile` component takes only the
    clip, the tile index, and the pixels per second as props. Thus Dioxus skips
@@ -395,9 +394,8 @@ What the results show:
   load. The two rounds agree within a few frames.
 - The driver sends synthetic DOM events. A real mouse adds the input latency
   of the system, which is the same for each way.
-- The driver moves a clip, and it trims no clip. A trim also changes the
-  width of the clip, and a trim of the start edge also moves the tiles inside
-  the clip. No frame time of a trim was measured.
+- The driver moves a clip, and it trims no clip. No frame time of a trim was
+  measured.
 - The prototype draws no ruler, no handles, no playhead, and no text. The
   recommendation makes these RSX elements in each way, thus they add the same
   cost to each way.
