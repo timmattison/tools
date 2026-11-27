@@ -399,3 +399,18 @@ fn a_typo_inside_a_range_goes_and_the_events_after_the_range_move_earlier() {
     let rendered = render_in(80, 24, events, range(1.0, 3.0)).unwrap();
     assert_eq!(rendered.events, expected);
 }
+
+#[test]
+fn a_black_cell_is_not_a_blank_cell() {
+    // With `TerminalTheme::auto()`, black is the background, so the space on
+    // `CSI 40 m` equals a blank cell. In another theme the viewer sees a black
+    // cell, so the pair must stay.
+    let events = vec![
+        out(0.0, "$ "),
+        input(1.0, "x"),
+        out(1.0, "x"),
+        input(2.0, "\x7f"),
+        out(2.0, "\x08\x1b[40m \x1b[0m\x08"),
+    ];
+    assert_eq!(run(events.clone()), events);
+}
