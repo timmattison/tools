@@ -175,6 +175,10 @@ const MAX_SETTLE_ROUNDS: usize = 50;
 const SETTLE_ROUND_TIMEOUT: Duration = Duration::from_millis(100);
 /// The text of the Open Recording button.
 const OPEN_LABEL: &str = "Open Recording";
+/// The text of the Undo button.
+const UNDO_TEXT: &str = "Undo";
+/// The text of the Redo button.
+const REDO_TEXT: &str = "Redo";
 /// The markup before the label of the first transport button.
 const TRANSPORT_START: &str = "class=\"transport\">";
 /// The markup before the text of the time readout.
@@ -369,10 +373,29 @@ impl Window {
         self.note_listeners(&edits);
     }
 
-    /// The Open Recording button. It is the one click listener of the first render.
+    /// The button of the menu bar at `position`. The first render creates the
+    /// click listeners of the menu bar in this order: Open Recording, Undo,
+    /// Redo.
+    fn menu_button(&self, position: usize, name: &str) -> ElementId {
+        self.first_render
+            .get(position)
+            .copied()
+            .unwrap_or_else(|| panic!("no {name} button in {:?}", self.first_render))
+    }
+
+    /// The Open Recording button. It is the first click listener of the first render.
     fn open_button(&self) -> ElementId {
-        assert_eq!(self.first_render.len(), 1, "{:?}", self.first_render);
-        self.first_render[0]
+        self.menu_button(0, OPEN_LABEL)
+    }
+
+    /// The Undo button. It is the second click listener of the first render.
+    fn undo_button(&self) -> ElementId {
+        self.menu_button(1, UNDO_TEXT)
+    }
+
+    /// The Redo button. It is the third click listener of the first render.
+    fn redo_button(&self) -> ElementId {
+        self.menu_button(2, REDO_TEXT)
     }
 
     /// The Dismiss button. It is the one click listener of the render that showed the banner.
@@ -553,12 +576,22 @@ impl Window {
 
     /// Whether the start tag of the Open Recording button holds `disabled`.
     fn open_is_disabled(&self) -> bool {
+        self.button_is_disabled(OPEN_LABEL)
+    }
+
+    /// Whether the start tag of the button with the text `label` holds `disabled`.
+    fn button_is_disabled(&self, label: &str) -> bool {
         let page = self.html();
         let (before, _) = page
-            .split_once(&format!(">{OPEN_LABEL}</button>"))
-            .unwrap_or_else(|| panic!("no Open Recording button in {page}"));
+            .split_once(&format!(">{label}</button>"))
+            .unwrap_or_else(|| panic!("no {label} button in {page}"));
         let (_, tag) = before.rsplit_once("<button").expect("a button start tag");
         tag.split([' ', '>', '=']).any(|word| word == "disabled")
+    }
+
+    /// Whether the Undo button and the Redo button are disabled, in this order.
+    fn history_disabled(&self) -> [bool; 2] {
+        [UNDO_TEXT, REDO_TEXT].map(|label| self.button_is_disabled(label))
     }
 
     /// Whether the start tag of the input after the text `label` holds `disabled`.
@@ -700,7 +733,8 @@ async fn app_with_no_recording_has_an_enabled_open_button_and_no_dialog() {
     let fakes = Fakes::new();
     let window = Window::open(&fakes);
     assert!(!window.open_is_disabled(), "{}", window.html());
-    assert_eq!(window.first_render.len(), 1);
+    // Open Recording, Undo, and Redo.
+    assert_eq!(window.first_render.len(), 3);
     assert_eq!((fakes.picks(), fakes.loads().len()), (0, 0));
 }
 
@@ -1609,4 +1643,138 @@ fn the_style_sheet_fits_the_grid_to_the_pane() {
              calc(100cqh / (var(--rows) * {line_height})))"
         )
     );
+}
+
+// The Undo and Redo buttons of the menu bar.
+
+/// The page markup of a run of `count` asterisks: the run ends at the cursor.
+fn asterisk_run(count: usize) -> String {
+    format!(">{}</span>", "*".repeat(count))
+}
+
+/// The row of the speed change from 0 s to 10 s at twice the speed.
+fn first_ten_seconds_row() -> String {
+    speed_row("0 s to 10 s", "2")
+}
+
+/// Opens the fixture with the playhead at one second, and doubles the speed of
+/// the first ten seconds. The preview then shows 21 events, not 11.
+async fn open_with_a_speed_change() -> Window {
+    let mut window = open_recording().await;
+    window.type_into(window.playhead_control(), "1.0");
+    window.apply_speed("0", "10", "2");
+    window
+}
+
+/// Asserts that the window shows the project with the speed change of
+/// `open_with_a_speed_change`: its row, its preview, its edited duration, and
+/// the end of its timeline.
+fn assert_sped_up(window: &Window) {
+    let page = window.html();
+    assert!(page.contains(&first_ten_seconds_row()), "{page}");
+    assert!(page.contains(&x_run(21)), "{page}");
+    assert!(!page.contains(&x_run(22)), "{page}");
+    assert!(page.contains(&edited_row("1m 0.3s")), "{page}");
+    assert!(!page.contains("max=\"65.3\""), "{page}");
+}
+
+/// Asserts that the window shows the project with no speed change.
+fn assert_original_speed(window: &Window) {
+    let page = window.html();
+    assert!(!page.contains(&first_ten_seconds_row()), "{page}");
+    assert!(page.contains(&x_run(11)), "{page}");
+    assert!(!page.contains(&x_run(12)), "{page}");
+    assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
+    assert!(page.contains("max=\"65.3\""), "{page}");
+}
+
+#[test]
+fn undo_and_redo_are_disabled_with_no_recording() {
+    let window = Window::open(&Fakes::new());
+    assert_eq!(window.history_disabled(), [true, true], "{}", window.html());
+}
+
+#[tokio::test]
+async fn undo_and_redo_are_enabled_only_when_the_editor_has_a_step() {
+    let mut window = open_recording().await;
+    assert_eq!(window.history_disabled(), [true, true], "{}", window.html());
+
+    window.apply_speed("10", "20", "2");
+    assert_eq!(window.history_disabled(), [false, true], "{}", window.html());
+
+    window.click(window.undo_button());
+    assert_eq!(window.history_disabled(), [true, false], "{}", window.html());
+
+    window.click(window.redo_button());
+    assert_eq!(window.history_disabled(), [false, true], "{}", window.html());
+}
+
+#[tokio::test]
+async fn undo_and_redo_of_a_speed_change_update_the_preview_the_timeline_and_the_row() {
+    let mut window = open_with_a_speed_change().await;
+    assert_sped_up(&window);
+
+    window.click(window.undo_button());
+    assert_original_speed(&window);
+
+    window.click(window.redo_button());
+    assert_sped_up(&window);
+}
+
+#[tokio::test]
+async fn undo_and_redo_of_a_redaction_update_the_preview_and_the_row() {
+    let mut window = open_recording().await;
+    window.type_into(window.playhead_control(), "1.0");
+    window.apply_redaction("text", "x", "asterisks", "", "output");
+    let row = redaction_row("text \u{201c}x\u{201d} \u{2192} asterisks (output)");
+    let assert_redacted = |window: &Window| {
+        let page = window.html();
+        assert!(page.contains(&row), "{page}");
+        assert!(page.contains(&asterisk_run(11)), "{page}");
+        assert!(!page.contains(&x_run(11)), "{page}");
+    };
+    assert_redacted(&window);
+
+    window.click(window.undo_button());
+    let page = window.html();
+    assert!(!page.contains(&row), "{page}");
+    assert!(page.contains(&x_run(11)), "{page}");
+    assert!(!page.contains(&asterisk_run(11)), "{page}");
+
+    window.click(window.redo_button());
+    assert_redacted(&window);
+}
+
+#[tokio::test]
+async fn undo_and_redo_of_a_removed_row_put_it_back_and_take_it_away() {
+    let mut window = open_with_a_speed_change().await;
+    window.click(window.remove_button());
+    assert_original_speed(&window);
+
+    window.click(window.undo_button());
+    assert_sped_up(&window);
+    assert_eq!(window.history_disabled(), [false, false], "{}", window.html());
+
+    window.click(window.redo_button());
+    assert_original_speed(&window);
+}
+
+#[tokio::test]
+async fn an_undo_removes_the_banner_of_a_failed_edit() {
+    let mut window = open_with_a_speed_change().await;
+    window.apply_speed("10", "5", "2");
+    assert!(
+        window.html().contains("role=\"alert\""),
+        "{}",
+        window.html()
+    );
+
+    window.click(window.undo_button());
+
+    assert!(
+        !window.html().contains("role=\"alert\""),
+        "{}",
+        window.html()
+    );
+    assert_original_speed(&window);
 }
