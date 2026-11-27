@@ -2,7 +2,7 @@
 
 use wdid::command_words::{
     command_words, parse_line, simple_command, split_words, AliasDefinition, AliasKind, AliasUse,
-    Aliases, CommandWord, Parsed, WrapperRun, COMMAND,
+    Aliases, Argument, CommandWord, Parsed, WrapperRun, COMMAND,
 };
 
 /// Runs every row of a table. Each row is a line and the value that
@@ -1269,24 +1269,38 @@ fn definitions_keep_a_multibyte_name_and_value() {
     );
 }
 
-/// Makes the expected value of `split_words` from its words.
-fn split<const N: usize>(words: [&str; N]) -> Option<Vec<String>> {
-    Some(words.iter().map(|word| (*word).to_owned()).collect())
+/// Makes a literal word.
+fn lit(text: &str) -> Argument {
+    Argument::Literal(text.to_owned())
+}
+
+/// Makes a word that holds an expansion.
+fn exp(text: &str) -> Argument {
+    Argument::Expansion(text.to_owned())
+}
+
+/// Makes an operator.
+fn op(text: &str) -> Argument {
+    Argument::Operator(text.to_owned())
 }
 
 #[test]
 fn split_words_gives_the_words_in_argument_form() {
     let rows = [
-        ("git  status", split(["git", "status"])),
-        ("'git' status", split(["git", "status"])),
-        ("ls | less", split(["ls", "|", "less"])),
-        ("echo \"$HOME\"", split(["echo", "\"$HOME\""])),
-        ("\\ls -G", split(["ls", "-G"])),
-        ("echo 'a b'", split(["echo", "a b"])),
-        ("", split([])),
+        ("git  status", vec![lit("git"), lit("status")]),
+        ("'git' status", vec![lit("git"), lit("status")]),
+        ("ls | less", vec![lit("ls"), op("|"), lit("less")]),
+        ("echo \"$HOME\"", vec![lit("echo"), exp("\"$HOME\"")]),
+        ("\\ls -G", vec![lit("ls"), lit("-G")]),
+        ("echo 'a b'", vec![lit("echo"), lit("a b")]),
+        ("echo '$HOME'", vec![lit("echo"), lit("$HOME")]),
+        ("echo $HOME", vec![lit("echo"), exp("$HOME")]),
+        ("ls ~", vec![lit("ls"), exp("~")]),
+        ("ls '|' less", vec![lit("ls"), lit("|"), lit("less")]),
+        ("", vec![]),
     ];
     for (text, expected) in rows {
-        assert_eq!(split_words(text), expected, "text: {text:?}");
+        assert_eq!(split_words(text), Some(expected), "text: {text:?}");
     }
 }
 
@@ -1297,23 +1311,36 @@ fn split_words_refuses_an_unterminated_quote() {
 
 #[test]
 fn split_words_gives_a_newline_as_the_operator_that_the_tokenizer_gives() {
-    assert_eq!(split_words("a\nb"), split(["a", "\n", "b"]));
+    assert_eq!(
+        split_words("a\nb"),
+        Some(vec![lit("a"), op("\n"), lit("b")])
+    );
 }
 
 #[test]
 fn simple_command_gives_the_words_of_one_simple_command() {
     let rows = [
-        ("\tgit status \"$@\"", split(["git", "status", "\"$@\""])),
+        (
+            "\tgit status \"$@\"",
+            vec![lit("git"), lit("status"), exp("\"$@\"")],
+        ),
         (
             "{ \n    git status \"$@\"\n}",
-            split(["git", "status", "\"$@\""]),
+            vec![lit("git"), lit("status"), exp("\"$@\"")],
         ),
-        ("FOO=1 git status", split(["FOO=1", "git", "status"])),
-        ("'git' status", split(["git", "status"])),
-        ("{ { git status; }; }", split(["git", "status"])),
+        (
+            "FOO=1 git status",
+            vec![lit("FOO=1"), lit("git"), lit("status")],
+        ),
+        ("'git' status", vec![lit("git"), lit("status")]),
+        ("{ { git status; }; }", vec![lit("git"), lit("status")]),
+        (
+            "\tgit log '\"$@\"'",
+            vec![lit("git"), lit("log"), lit("\"$@\"")],
+        ),
     ];
     for (text, expected) in rows {
-        assert_eq!(simple_command(text), expected, "text: {text:?}");
+        assert_eq!(simple_command(text), Some(expected), "text: {text:?}");
     }
 }
 

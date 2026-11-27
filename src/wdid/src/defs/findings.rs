@@ -12,8 +12,8 @@ use std::path::PathBuf;
 
 use super::{Kind, Usage};
 use crate::command_words::{
-    parse_line, simple_command, split_words, AliasDefinition, AliasKind, Aliases, WrapperRun,
-    COMMAND,
+    parse_line, simple_command, split_words, AliasDefinition, AliasKind, Aliases, Argument,
+    WrapperRun, COMMAND,
 };
 use crate::origin::{Origin, Places};
 use crate::shell::Definitions;
@@ -144,7 +144,7 @@ impl<'a> Entries<'a> {
 /// that have the same words. A suffix alias takes no part, because each one
 /// names different files.
 fn same_expansion(entries: &Entries<'_>) -> Vec<Finding> {
-    let mut groups: BTreeMap<(Kind, Vec<String>), Vec<&Usage>> = BTreeMap::new();
+    let mut groups: BTreeMap<(Kind, Vec<Argument>), Vec<&Usage>> = BTreeMap::new();
     for (alias, usage) in &entries.aliases {
         let kind = usage.kind;
         if kind == Kind::SuffixAlias {
@@ -163,7 +163,7 @@ fn same_expansion(entries: &Entries<'_>) -> Vec<Finding> {
             Finding {
                 kind: FindingKind::SameExpansion,
                 definitions: members.into_iter().map(Member::of).collect(),
-                words: shared,
+                words: texts_of(&shared),
                 places: Vec::new(),
                 program: None,
             }
@@ -171,12 +171,17 @@ fn same_expansion(entries: &Entries<'_>) -> Vec<Finding> {
         .collect()
 }
 
+/// Gives the text of each word of `words`.
+fn texts_of(words: &[Argument]) -> Vec<String> {
+    words.iter().map(|word| word.text().to_string()).collect()
+}
+
 /// Gives the words that the body of a function runs before it passes on its
 /// arguments, or `None` when the body does something else. The body must be
 /// one simple command that ends with `"$@"` and has a word before it.
-fn passed_on_words(body: &str) -> Option<Vec<String>> {
+fn passed_on_words(body: &str) -> Option<Vec<Argument>> {
     let mut words = simple_command(body)?;
-    if words.pop().as_deref() != Some(ALL_ARGUMENTS) || words.is_empty() {
+    if words.pop() != Some(Argument::Expansion(ALL_ARGUMENTS.to_string())) || words.is_empty() {
         return None;
     }
     Some(words)
@@ -211,7 +216,7 @@ fn alias_and_function(definitions: &Definitions, entries: &Entries<'_>) -> Vec<F
         found.push(Finding {
             kind: FindingKind::AliasAndFunction,
             definitions: matching.into_iter().map(Member::of).collect(),
-            words: shared,
+            words: texts_of(&shared),
             places: Vec::new(),
             program: None,
         });
@@ -258,7 +263,7 @@ fn defined_more_than_once(definitions: &Definitions, entries: &Entries<'_>) -> V
 fn starts_with_own_name(alias: &AliasDefinition) -> bool {
     split_words(&alias.value)
         .and_then(|split| split.into_iter().next())
-        .is_some_and(|first| first == alias.name)
+        .is_some_and(|first| first == Argument::Literal(alias.name.clone()))
 }
 
 /// Finds each regular or global alias that has the name of a function. An

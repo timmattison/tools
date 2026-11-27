@@ -1602,23 +1602,66 @@ pub fn parse_line(line: &str, aliases: &Aliases) -> Option<Line> {
     }
 }
 
+/// One word of a text in argument form, as [`split_words`] and
+/// [`simple_command`] give it.
+///
+/// The kind keeps apart two words with the same text. `'$HOME'` is the
+/// literal `$HOME`, but `$HOME` is an expansion. `'|'` is the literal `|`,
+/// but `|` is an operator.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Argument {
+    /// A word with no expansion: its text after quote removal.
+    Literal(String),
+    /// A word that holds an expansion, a tilde included: its raw text,
+    /// quotes included.
+    Expansion(String),
+    /// An operator of the tokenizer, for example `|` or a newline.
+    Operator(String),
+}
+
+impl Argument {
+    /// Gives the text of the word, whatever its kind.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Literal(text) | Self::Expansion(text) | Self::Operator(text) => text,
+        }
+    }
+}
+
+/// Gives the [`Argument`] of a word with the raw text `raw` and the top-level
+/// `pieces`. A tilde expansion makes an [`Argument::Expansion`], so `~` is not
+/// the literal `'~'`. This is the one place of that rule.
+fn argument_from(raw: &str, pieces: &[WordPieceWithSource]) -> Argument {
+    let has_tilde = pieces
+        .iter()
+        .any(|piece| matches!(piece.piece, WordPiece::TildeExpansion(_)));
+    if has_tilde {
+        return Argument::Expansion(raw.to_string());
+    }
+    match literal_of(pieces) {
+        Some(text) => Argument::Literal(text),
+        None => Argument::Expansion(raw.to_string()),
+    }
+}
+
 /// Gives the words of `text` as the shell splits it. Pure.
 ///
-/// A word has its argument form: its literal text after quote removal, or its
-/// raw text when it holds an expansion. An operator gives its text, for
-/// example `|`. Gives `None` when the tokenizer refuses the text or a word
-/// does not parse.
+/// A word is an [`Argument::Literal`] with its text after quote removal, or an
+/// [`Argument::Expansion`] with its raw text when it holds an expansion. An
+/// operator is an [`Argument::Operator`], for example `|`. Gives `None` when
+/// the tokenizer refuses the text or a word does not parse.
 #[must_use]
-pub fn split_words(text: &str) -> Option<Vec<String>> {
+pub fn split_words(text: &str) -> Option<Vec<Argument>> {
     let tokens =
         tokenize_str_with_options(text, &ParserOptions::default().tokenizer_options()).ok()?;
     tokens
         .iter()
         .map(|token| match token {
-            Token::Operator(operator, _) => Some(operator.clone()),
+            Token::Operator(operator, _) => Some(Argument::Operator(operator.clone())),
             Token::Word(raw, _) => {
                 let pieces = word::parse(raw, &ParserOptions::default()).ok()?;
-                Some(literal_of(&pieces).unwrap_or_else(|| raw.clone()))
+                Some(argument_from(raw, &pieces))
             }
         })
         .collect()
@@ -1631,9 +1674,9 @@ pub fn split_words(text: &str) -> Option<Vec<String>> {
 /// pipeline, a list, a background command, a redirect, a process substitution,
 /// a negation, a timer, and any other compound command give `None`. So does a
 /// command that has no command word. The words are the prefix assignments, the
-/// command word, and the suffix words, each in argument form.
+/// command word, and the suffix words, each an [`Argument`].
 #[must_use]
-pub fn simple_command(text: &str) -> Option<Vec<String>> {
+pub fn simple_command(text: &str) -> Option<Vec<Argument>> {
     let options = ParserOptions::default();
     let program = Parser::new(BufReader::new(text.as_bytes()), &options)
         .parse_program()
@@ -1646,7 +1689,10 @@ pub fn simple_command(text: &str) -> Option<Vec<String>> {
 
 /// Gives the words of `list` when it holds exactly one item, that item ends
 /// with `;` or a newline, and it is one simple command. See [`simple_command`].
-fn words_of_single_list(list: &ast::CompoundList, options: &ParserOptions) -> Option<Vec<String>> {
+fn words_of_single_list(
+    list: &ast::CompoundList,
+    options: &ParserOptions,
+) -> Option<Vec<Argument>> {
     let [ast::CompoundListItem(and_or, ast::SeparatorOperator::Sequence)] = list.0.as_slice()
     else {
         return None;
@@ -1670,10 +1716,10 @@ fn words_of_single_list(list: &ast::CompoundList, options: &ParserOptions) -> Op
     }
 }
 
-/// Gives the words of a simple command in source order, in argument form.
+/// Gives the words of a simple command in source order, each an [`Argument`].
 /// Gives `None` when it has a redirect, a process substitution, or no command
 /// word, or when a word does not parse.
-fn words_of_simple(simple: &ast::SimpleCommand, options: &ParserOptions) -> Option<Vec<String>> {
+fn words_of_simple(simple: &ast::SimpleCommand, options: &ParserOptions) -> Option<Vec<Argument>> {
     let command = simple.word_or_name.as_ref()?;
     let mut words = Vec::new();
     for item in simple.prefix.iter().flat_map(|prefix| &prefix.0) {
@@ -1686,9 +1732,12 @@ fn words_of_simple(simple: &ast::SimpleCommand, options: &ParserOptions) -> Opti
     Some(words)
 }
 
-/// Gives the argument form of one prefix or suffix item. Gives `None` for a
+/// Gives the [`Argument`] of one prefix or suffix item. Gives `None` for a
 /// redirect or a process substitution.
-fn item_argument(item: &ast::CommandPrefixOrSuffixItem, options: &ParserOptions) -> Option<String> {
+fn item_argument(
+    item: &ast::CommandPrefixOrSuffixItem,
+    options: &ParserOptions,
+) -> Option<Argument> {
     match item {
         ast::CommandPrefixOrSuffixItem::Word(word)
         | ast::CommandPrefixOrSuffixItem::AssignmentWord(_, word) => argument_of(word, options),
@@ -1696,9 +1745,9 @@ fn item_argument(item: &ast::CommandPrefixOrSuffixItem, options: &ParserOptions)
     }
 }
 
-/// Gives the argument form of `word`: its literal text, or its raw text when
-/// it holds an expansion. Gives `None` when the word does not parse.
-fn argument_of(word: &ast::Word, options: &ParserOptions) -> Option<String> {
+/// Gives the [`Argument`] of `word`: a literal, or an expansion with its raw
+/// text. Gives `None` when the word does not parse.
+fn argument_of(word: &ast::Word, options: &ParserOptions) -> Option<Argument> {
     let pieces = word::parse(&word.value, options).ok()?;
-    Some(literal_of(&pieces).unwrap_or_else(|| word.value.clone()))
+    Some(argument_from(&word.value, &pieces))
 }
