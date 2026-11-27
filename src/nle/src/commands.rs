@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use tokio::io::AsyncBufReadExt;
 
 use crate::error::NleError;
-use crate::export::{parse_progress_line, ExportProgress};
+use crate::export::{output_path_text, parse_progress_line, ExportProgress};
 use crate::types::{ExportFormat, ExportOptions, LoadedRecording, Recording, RecordingMetadata};
 
 /// Run blocking file work on the blocking pool of the tokio runtime that the
@@ -255,7 +255,8 @@ fn validate_export_input(input_path: &str) -> Result<PathBuf, NleError> {
 /// the canonical input path, and the resolved output path.
 /// The output file name must end in one of `output_endings`. If the output
 /// path is a symbolic link, `beta` gets the file at the end of the link, and
-/// that file name must have the same ending as the output path.
+/// that file name must have the same ending as the output path. `beta` takes
+/// the resolved output path as text, thus that path must be valid UTF-8.
 fn base_export_args(
     subcommand: &str,
     input_path: &str,
@@ -269,14 +270,15 @@ fn base_export_args(
         subcommand.to_string(),
         canonical_input.to_string_lossy().to_string(),
         "--output".to_string(),
-        resolved_output.to_string_lossy().to_string(),
+        output_path_text(&resolved_output)?.to_owned(),
     ])
 }
 
 /// Build the full `beta` argument list for a video export.
 /// It fails if the format is not Video, the input file is missing, the output
 /// file name does not end in `.mp4` or `.gif`, the file that it links to does
-/// not have the same ending, or the output directory does not exist.
+/// not have the same ending, the resolved output path is not valid UTF-8, or
+/// the output directory does not exist.
 pub(crate) fn video_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
     if !matches!(options.format, ExportFormat::Video) {
         return Err(NleError::ExportError(
@@ -311,7 +313,8 @@ pub(crate) fn video_export_args(options: &ExportOptions) -> Result<Vec<String>, 
 /// Build the full `beta` argument list for a web export.
 /// It fails if the format is not Web, the input file is missing, or the
 /// output file name, or the file that it links to, does not end in `.html`, or
-/// the output directory does not exist.
+/// the resolved output path is not valid UTF-8, or the output directory does
+/// not exist.
 pub(crate) fn web_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
     if !matches!(options.format, ExportFormat::Web) {
         return Err(NleError::ExportError(

@@ -176,6 +176,8 @@ pub struct ExportRequest {
 ///
 /// The output path goes to `beta` and to the writer of a recording as text.
 /// Thus an output path that is not valid UTF-8 is refused before the first
+/// stage. `beta` gets the file at the end of a link as text too, thus a web
+/// page or a video whose link ends at such a path is refused before the first
 /// stage.
 ///
 /// # Errors
