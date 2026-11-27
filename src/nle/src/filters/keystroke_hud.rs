@@ -16,7 +16,8 @@ pub use options::{
     FADE_OPTION, POSITION_OPTION, TEXT_OPTION, THEME_OPTION,
 };
 
-use crate::types::{AppliedFilter, FilterKind, FilterRegion};
+use crate::pipeline::{FilterRegistry, Screen, Span};
+use crate::types::{AppliedFilter, Event, FilterKind, FilterOptions, FilterRegion};
 
 /// The kind of the keystroke HUD filter.
 pub const KIND: &str = "keystroke-hud";
@@ -54,3 +55,20 @@ mod timeline;
     )
 )]
 mod paint;
+
+/// The most cells of a screen that the HUD replays. A larger size fails the
+/// render, so that a header with a bad size does not take all the memory.
+pub const MAX_CELLS: usize = 1_000_000;
+
+/// Add the keystroke HUD filter to `registry`.
+pub fn register(registry: &mut FilterRegistry) {
+    registry.register_screen(kind(), draw);
+}
+
+/// The screen filter of the HUD.
+fn draw(_screen: &Screen<'_>, span: Span, _options: &FilterOptions) -> Result<Vec<Event>, String> {
+    Ok(span.events)
+}
+
+#[cfg(test)]
+mod tests;
