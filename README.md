@@ -6516,13 +6516,15 @@ and the default-color values of an OSC 10 or 11 list. After a reset of the
 terminal (RIS) in the recording, it sets the default colors of the theme
 again.
 
-On a range, the filter writes OSC 110 and OSC 111 at the end, then the default
-colors and the SGR colors that the recording set inside the range. Thus the
-text after the range has the colors of the recording. The filter sees only its
-range, thus a color that the recording set before the start of the range stays
-as the recording wrote it, until the next SGR in the range. The filter does not
-read OSC 4. A terminal that shows bold text in the bright colors does not do so
-for a converted base color, because that color is a 24-bit color.
+At the end of a range, the filter writes OSC 110, then the default foreground
+that the recording set, then OSC 111, then the default background that the
+recording set, and then the SGR colors that the recording set inside the range.
+Thus the text after the range has the colors of the recording. The filter sees
+only its range, thus a color that the recording set before the start of the
+range stays as the recording wrote it, until the next SGR in the range. The
+filter does not read OSC 4. A terminal that shows bold text in the bright colors
+does not do so for a converted base color, because that color is a 24-bit
+color.
 
 The export functions run `beta` with the PATH of the app, then
 `$CARGO_HOME/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.

@@ -53,11 +53,11 @@
 //! - A full reset (RIS, `ESC c`) of the recording stays. The filter then
 //!   writes OSC 10 and OSC 11 of the theme again, right after the reset.
 //! - A range that is not the end of the timeline ends with a restore. The
-//!   filter writes OSC 110 and OSC 111, and then the OSC 10 and OSC 11 values
-//!   that the recording set. Then it writes one SGR that sets the foreground,
-//!   the background, and the underline color that the recording set and that
-//!   the filter converted. The text after the range thus has the colors that
-//!   the recording gave it.
+//!   filter writes OSC 110, then the OSC 10 value that the recording set, then
+//!   OSC 111, then the OSC 11 value that the recording set. Then it writes one
+//!   SGR that sets the foreground, the background, and the underline color
+//!   that the recording set and that the filter converted. The text after the
+//!   range thus has the colors that the recording gave it.
 //! - The filter sees only its region. An SGR color that the recording set
 //!   before the start of the range stays as the recording wrote it until the
 //!   next SGR in the range. The restore does not know such a color.
@@ -944,10 +944,10 @@ impl SchemeEditor {
         }
     }
 
-    /// The sequences for the end of a region that is not open: the default
-    /// colors of the recording, and one SGR for each slot that the filter
-    /// changed, so the text after the range has the colors that the recording
-    /// gave it.
+    /// The sequences for the end of a region that is not open: OSC 110, the
+    /// OSC 10 of the recording, OSC 111, the OSC 11 of the recording, and one
+    /// SGR that sets each slot that the filter changed, so the text after the
+    /// range has the colors that the recording gave it.
     fn restore(&self) -> String {
         let mut text = format!("\x1b]{RESET_FOREGROUND}{ST}");
         if let DefaultColor::Spec(value) = &self.recording_foreground {
