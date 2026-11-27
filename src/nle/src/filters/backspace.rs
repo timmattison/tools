@@ -81,8 +81,8 @@ pub fn register(registry: &mut FilterRegistry) {
 /// only input events and the output events that follow them. It removes the
 /// time of each removed run, so the viewer sees no pause for the typo.
 ///
-/// The filter does not parse options, and it does not replay the events
-/// before the region.
+/// The filter does not parse options. It replays the output events before
+/// the region into the screen first.
 fn remove_backspacing(
     span: Span,
     context: SpanContext<'_>,
@@ -93,6 +93,13 @@ fn remove_backspacing(
         usize::from(context.size.height),
         TerminalTheme::auto(),
     );
+    for event in context
+        .before
+        .iter()
+        .filter(|event| event.event_type == EventType::Output)
+    {
+        feed(&mut screen, event)?;
+    }
     let removed = mark_removed(&span.events, &mut screen)?;
     Ok(cut_removed(span, removed))
 }
