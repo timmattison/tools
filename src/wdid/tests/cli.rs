@@ -432,9 +432,11 @@ fn a_shell_that_wdid_cannot_read_stops_the_run_and_names_no_shell() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1), "{output:?}");
-    let message = stderr(&output);
-    assert!(message.starts_with("wdid: "), "{message}");
-    assert!(message.contains("--no-shell"), "{message}");
+    assert_eq!(
+        stderr(&output),
+        "wdid: wdid reads aliases and functions from zsh and bash only, \
+         and SHELL is /usr/bin/fish (wdid --no-shell skips the aliases and functions)\n"
+    );
 }
 
 #[test]
@@ -624,4 +626,245 @@ fn outside_each_work_tree_without_a_record_the_error_names_repo_and_the_reason()
         message.contains("there is no record of the install"),
         "{message}"
     );
+}
+
+/// The `.zshrc` of the `wdid defs` tests: four kinds of alias, a function
+/// that calls another function, a function that nothing calls, and a private
+/// function that the report leaves out.
+const DEFS_ZSHRC: &str = "alias wt='echo wt'\n\
+alias wtf='wt -f'\n\
+alias -g G='| cat'\n\
+alias -s md=cat\n\
+myf() { helper \"$@\" }\n\
+helper() { echo hi }\n\
+unused() { true }\n\
+_private() { true }\n";
+
+/// Writes [`DEFS_ZSHRC`] into the home directory of `setup`.
+fn write_defs_zshrc(setup: &Setup) {
+    std::fs::write(setup.home.path().join(".zshrc"), DEFS_ZSHRC).unwrap();
+}
+
+/// The command `wdid defs` with the real zsh, which reads the `.zshrc` of the
+/// home directory of `setup`.
+fn defs_command(setup: &Setup) -> Command {
+    let mut command = setup.command();
+    command
+        .env("SHELL", ZSH)
+        .env("ZDOTDIR", setup.home.path())
+        .arg("defs");
+    command
+}
+
+/// The entry of the definition `name` in the `definitions` array of
+/// `document`.
+fn definition<'a>(document: &'a Value, name: &str) -> &'a Value {
+    document["definitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == name)
+        .unwrap_or_else(|| panic!("no definition {name} in {document}"))
+}
+
+/// Says if `document` holds a definition `name`.
+fn has_definition(document: &Value, name: &str) -> bool {
+    document["definitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["name"] == name)
+}
+
+#[test]
+fn defs_outside_each_work_tree_prints_the_report_and_starts_no_cargo_and_no_git() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "wtf x"), row(2, "myf")]));
+    let log_dir = tempfile::tempdir().unwrap();
+    let log = log_dir.path().join("spawned.log");
+    let body = format!(
+        "printf '%s\\n' \"$*\" >> {}\nexit 1\n",
+        shellquote::shell_quote(&log.to_string_lossy())
+    );
+    write_script(setup.stubs.path(), "cargo", &body);
+    write_script(setup.stubs.path(), "git", &body);
+    write_defs_zshrc(&setup);
+    let cwd = gitscratch::testing::not_a_repository();
+
+    let output = defs_command(&setup)
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let text = stdout(&output);
+    assert!(text.contains("History: 2 rows."), "{text}");
+    assert!(
+        text.lines().any(|line| line.starts_with("Shell: /bin/zsh")),
+        "{text}"
+    );
+    let wt = text
+        .lines()
+        .find(|line| {
+            line.trim_start_matches(['\u{2502}', ' '])
+                .starts_with("wt ")
+        })
+        .unwrap_or_else(|| panic!("no row of wt in {text}"));
+    assert!(wt.contains("wtf 1"), "{wt}");
+    let lines: Vec<&str> = text.lines().collect();
+    let heading = lines
+        .iter()
+        .position(|line| line.starts_with("Never used:"))
+        .unwrap_or_else(|| panic!("no Never used heading in {text}"));
+    assert!(
+        lines[heading + 1..].contains(&"  unused (function)"),
+        "{text}"
+    );
+    assert!(!text.contains("_private"), "{text}");
+    assert!(
+        !log.exists(),
+        "wdid defs started cargo or git: {}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+}
+
+#[test]
+fn defs_json_holds_each_definition_also_the_ones_with_zero_uses() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let rows = [
+        row(1, "wtf x"),
+        row(40, "myf"),
+        row(1, "ls G"),
+        row(1, "README.md"),
+        row(1, "echo \"wt\""),
+        Row {
+            days_ago: 1,
+            exit: 127,
+            command: "wt",
+        },
+    ];
+    let setup = Setup::new(&Atuin::Rows(&rows));
+    write_defs_zshrc(&setup);
+    let cwd = gitscratch::testing::not_a_repository();
+
+    let output = defs_command(&setup)
+        .args(["--json", "--idle-days", "30"])
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+
+    let document = json(&output);
+    assert_eq!(document["idle_days"], 30, "{document}");
+    let unused = definition(&document, "unused");
+    assert_eq!(unused["uses"], 0, "{document}");
+    assert_eq!(unused["kind"], "function", "{document}");
+    assert_eq!(unused["classification"], "never_used", "{document}");
+    assert!(!has_definition(&document, "_private"), "{document}");
+    let wt = definition(&document, "wt");
+    assert_eq!(wt["typed"], 0, "{document}");
+    assert_eq!(
+        wt["through"],
+        serde_json::json!([{ "name": "wtf", "uses": 1 }]),
+        "{document}"
+    );
+    let helper = definition(&document, "helper");
+    assert_eq!(
+        helper["through"],
+        serde_json::json!([{ "name": "myf", "uses": 1 }]),
+        "{document}"
+    );
+    assert_eq!(helper["classification"], "idle", "{document}");
+    let global = definition(&document, "G");
+    assert_eq!(global["kind"], "global_alias", "{document}");
+    assert_eq!(global["uses"], 1, "{document}");
+    let suffix = definition(&document, "*.md");
+    assert_eq!(suffix["kind"], "suffix_alias", "{document}");
+    assert_eq!(suffix["uses"], 1, "{document}");
+    assert_eq!(document["history"]["not_found"], 1, "{document}");
+    assert!(
+        document["never_used"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!({ "name": "unused", "kind": "function" })),
+        "{document}"
+    );
+    let idle = document["idle"].as_array().unwrap();
+    for name in ["myf", "helper"] {
+        assert!(idle.iter().any(|entry| entry["name"] == name), "{document}");
+    }
+    assert_eq!(document["shell"]["path"], ZSH, "{document}");
+}
+
+#[test]
+fn defs_since_drops_the_earlier_rows() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let setup = Setup::new(&Atuin::Rows(&[row(10, "myf"), row(1, "wtf x")]));
+    write_defs_zshrc(&setup);
+    let cwd = gitscratch::testing::not_a_repository();
+    let since = (Utc::now() - Duration::days(5))
+        .format(DATE_FORMAT)
+        .to_string();
+
+    let output = defs_command(&setup)
+        .args(["--json", "--since", &since])
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+
+    let document = json(&output);
+    assert_eq!(document["history"]["before_since"], 1, "{document}");
+    assert_eq!(document["since"], since.as_str(), "{document}");
+    assert_eq!(definition(&document, "myf")["uses"], 0, "{document}");
+}
+
+#[test]
+fn a_flag_of_the_tools_report_before_defs_is_a_usage_error() {
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "ls")]));
+    let output = setup.command().args(["--json", "defs"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(stdout(&output).is_empty());
+}
+
+#[test]
+fn defs_with_a_shell_that_wdid_cannot_read_stops_the_run() {
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "ls")]));
+    let output = setup
+        .command()
+        .env("SHELL", "/usr/bin/fish")
+        .arg("defs")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(stdout(&output).is_empty());
+    assert_eq!(
+        stderr(&output),
+        "wdid: wdid reads aliases and functions from zsh and bash only, \
+         and SHELL is /usr/bin/fish\n",
+        "wdid defs has no --no-shell, thus its message names no such flag"
+    );
+}
+
+#[test]
+fn the_help_texts_name_defs_and_the_flags_of_defs() {
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "ls")]));
+    let top = setup.command().arg("--help").output().unwrap();
+    assert!(top.status.success(), "{top:?}");
+    assert!(stdout(&top).contains("defs"), "{}", stdout(&top));
+
+    let defs = setup.command().args(["defs", "--help"]).output().unwrap();
+    assert!(defs.status.success(), "{defs:?}");
+    let text = stdout(&defs);
+    for flag in ["--since", "--json", "--idle-days"] {
+        assert!(text.contains(flag), "{text}");
+    }
+    assert!(!text.contains("--repo"), "{text}");
 }
