@@ -337,6 +337,7 @@ impl Parser {
             ']' if !at_end => self.skip_osc(),
             'P' | '_' if !at_end => self.skip_string(),
             c if c.is_control() => self.push_control(c, Mods::NONE.with_alt()),
+            ' ' => self.push_special(Mods::NONE.with_alt().label(SPACE)),
             c => self.push_special(Mods::NONE.with_alt().label(c.encode_utf8(&mut [0; 4]))),
         }
     }
