@@ -1605,6 +1605,71 @@ pub fn split_words(text: &str) -> Option<Vec<String>> {
 /// command word, and the suffix words, each in argument form.
 #[must_use]
 pub fn simple_command(text: &str) -> Option<Vec<String>> {
-    let _ = text;
-    None
+    let options = ParserOptions::default();
+    let program = Parser::new(BufReader::new(text.as_bytes()), &options)
+        .parse_program()
+        .ok()?;
+    let [list] = program.complete_commands.as_slice() else {
+        return None;
+    };
+    words_of_single_list(list, &options)
+}
+
+/// Gives the words of `list` when it holds exactly one item, that item ends
+/// with `;` or a newline, and it is one simple command. See [`simple_command`].
+fn words_of_single_list(list: &ast::CompoundList, options: &ParserOptions) -> Option<Vec<String>> {
+    let [ast::CompoundListItem(and_or, ast::SeparatorOperator::Sequence)] = list.0.as_slice()
+    else {
+        return None;
+    };
+    if !and_or.additional.is_empty() {
+        return None;
+    }
+    let pipeline = &and_or.first;
+    if pipeline.timed.is_some() || pipeline.bang {
+        return None;
+    }
+    let [command] = pipeline.seq.as_slice() else {
+        return None;
+    };
+    match command {
+        ast::Command::Simple(simple) => words_of_simple(simple, options),
+        ast::Command::Compound(ast::CompoundCommand::BraceGroup(group), None) => {
+            words_of_single_list(&group.list, options)
+        }
+        _ => None,
+    }
+}
+
+/// Gives the words of a simple command in source order, in argument form.
+/// Gives `None` when it has a redirect, a process substitution, or no command
+/// word, or when a word does not parse.
+fn words_of_simple(simple: &ast::SimpleCommand, options: &ParserOptions) -> Option<Vec<String>> {
+    let command = simple.word_or_name.as_ref()?;
+    let mut words = Vec::new();
+    for item in simple.prefix.iter().flat_map(|prefix| &prefix.0) {
+        words.push(item_argument(item, options)?);
+    }
+    words.push(argument_of(command, options)?);
+    for item in simple.suffix.iter().flat_map(|suffix| &suffix.0) {
+        words.push(item_argument(item, options)?);
+    }
+    Some(words)
+}
+
+/// Gives the argument form of one prefix or suffix item. Gives `None` for a
+/// redirect or a process substitution.
+fn item_argument(item: &ast::CommandPrefixOrSuffixItem, options: &ParserOptions) -> Option<String> {
+    match item {
+        ast::CommandPrefixOrSuffixItem::Word(word)
+        | ast::CommandPrefixOrSuffixItem::AssignmentWord(_, word) => argument_of(word, options),
+        _ => None,
+    }
+}
+
+/// Gives the argument form of `word`: its literal text, or its raw text when
+/// it holds an expansion. Gives `None` when the word does not parse.
+fn argument_of(word: &ast::Word, options: &ParserOptions) -> Option<String> {
+    let pieces = word::parse(&word.value, options).ok()?;
+    Some(literal_of(&pieces).unwrap_or_else(|| word.value.clone()))
 }
