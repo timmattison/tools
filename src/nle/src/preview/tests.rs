@@ -177,12 +177,24 @@ fn the_names_and_labels_are_the_beta_values() {
     let names: Vec<_> = PreviewTheme::ALL.iter().map(|t| t.name()).collect();
     assert_eq!(
         names,
-        ["auto", "dracula", "monokai", "solarized-dark", "solarized-light"]
+        [
+            "auto",
+            "dracula",
+            "monokai",
+            "solarized-dark",
+            "solarized-light"
+        ]
     );
     let labels: Vec<_> = PreviewTheme::ALL.iter().map(|t| t.label()).collect();
     assert_eq!(
         labels,
-        ["Auto", "Dracula", "Monokai", "Solarized Dark", "Solarized Light"]
+        [
+            "Auto",
+            "Dracula",
+            "Monokai",
+            "Solarized Dark",
+            "Solarized Light"
+        ]
     );
 }
 

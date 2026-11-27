@@ -6,6 +6,17 @@ use termstate::{TerminalState, TerminalTheme};
 
 use crate::types::{EventType, Recording, Seconds};
 
+/// The `--theme` value of `beta` for `PreviewTheme::Auto`.
+const THEME_NAME_AUTO: &str = "auto";
+/// The `--theme` value of `beta` for `PreviewTheme::Dracula`.
+const THEME_NAME_DRACULA: &str = "dracula";
+/// The `--theme` value of `beta` for `PreviewTheme::Monokai`.
+const THEME_NAME_MONOKAI: &str = "monokai";
+/// The `--theme` value of `beta` for `PreviewTheme::SolarizedDark`.
+const THEME_NAME_SOLARIZED_DARK: &str = "solarized-dark";
+/// The `--theme` value of `beta` for `PreviewTheme::SolarizedLight`.
+const THEME_NAME_SOLARIZED_LIGHT: &str = "solarized-light";
+
 /// One theme of the preview: one palette of `beta export --theme`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PreviewTheme {
@@ -35,25 +46,43 @@ impl PreviewTheme {
     /// The `--theme` value of `beta` for this theme.
     #[must_use]
     pub fn name(self) -> &'static str {
-        ""
+        match self {
+            Self::Auto => THEME_NAME_AUTO,
+            Self::Dracula => THEME_NAME_DRACULA,
+            Self::Monokai => THEME_NAME_MONOKAI,
+            Self::SolarizedDark => THEME_NAME_SOLARIZED_DARK,
+            Self::SolarizedLight => THEME_NAME_SOLARIZED_LIGHT,
+        }
     }
 
     /// The text that a person reads for this theme.
     #[must_use]
     pub fn label(self) -> &'static str {
-        ""
+        match self {
+            Self::Auto => "Auto",
+            Self::Dracula => "Dracula",
+            Self::Monokai => "Monokai",
+            Self::SolarizedDark => "Solarized Dark",
+            Self::SolarizedLight => "Solarized Light",
+        }
     }
 
     /// The theme with this exact `name`, or `None`.
     #[must_use]
-    pub fn from_name(_name: &str) -> Option<Self> {
-        None
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|theme| theme.name() == name)
     }
 
     /// The palette of the emulator for this theme.
     #[must_use]
     pub fn palette(self) -> TerminalTheme {
-        TerminalTheme::auto()
+        match self {
+            Self::Auto => TerminalTheme::auto(),
+            Self::Dracula => TerminalTheme::dracula(),
+            Self::Monokai => TerminalTheme::monokai(),
+            Self::SolarizedDark => TerminalTheme::solarized_dark(),
+            Self::SolarizedLight => TerminalTheme::solarized_light(),
+        }
     }
 }
 
