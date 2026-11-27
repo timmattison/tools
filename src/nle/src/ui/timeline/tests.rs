@@ -18,14 +18,10 @@ use dioxus_core::{ElementId, Mutation};
 use super::*;
 use crate::editor::Edit;
 use crate::timeline::{Extent, ZOOM_STEP};
-use crate::types::{
-    ClipId, Event, EventType, LoadedRecording, Recording, RecordingMetadata, Seconds, TrackId,
-};
+use crate::types::{ClipId, Event, EventType, LoadedRecording, Recording, Seconds, TrackId};
 
 /// The length of the fixture recording, in seconds.
 const LENGTH: f64 = 60.0;
-/// The width of the view before a resize event, in pixels.
-const START_WIDTH: f64 = 1200.0;
 /// The title of the fixture recording.
 const TITLE: &str = "Demo";
 

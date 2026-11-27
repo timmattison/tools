@@ -311,6 +311,8 @@ struct Window {
     play: Option<ElementId>,
     /// The Stop button, when a test noted it.
     stop: Option<ElementId>,
+    /// The Zoom in button of the timeline, when a test noted it.
+    zoom_in: Option<ElementId>,
 }
 
 impl Window {
@@ -333,6 +335,7 @@ impl Window {
             redact: None,
             play: None,
             stop: None,
+            zoom_in: None,
         };
         window.note_listeners(&edits);
         window.first_render = window.clicks.clone();
@@ -477,18 +480,19 @@ impl Window {
         self.click(self.redact_button());
     }
 
-    /// Notes the four click listeners that the render of an open recording
+    /// Notes the seven click listeners that the render of an open recording
     /// created. The render creates them in this order: Apply Speed, Apply
-    /// Redaction, Play, Stop. The properties panel mounts before the preview
-    /// toolbar, as it does for the input listeners, the speed panel comes
-    /// before the redaction panel, and the Play button comes before the Stop
-    /// button.
+    /// Redaction, the Zoom out, Zoom in, and Fit buttons of the timeline,
+    /// Play, Stop. The properties panel mounts before the timeline, and the
+    /// timeline before the preview toolbar. The speed panel comes before the
+    /// redaction panel, and the Play button comes before the Stop button.
     fn note_open_buttons(&mut self) {
-        let [apply, redact, play, stop] = self.newest[..] else {
+        let [apply, redact, _, zoom_in, _, play, stop] = self.newest[..] else {
             panic!("the open render made {:?}", self.newest)
         };
         self.apply = Some(apply);
         self.redact = Some(redact);
+        self.zoom_in = Some(zoom_in);
         self.play = Some(play);
         self.stop = Some(stop);
     }
