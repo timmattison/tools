@@ -6986,21 +6986,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 
 [[package]]
-name = "localnext"
-version = "0.1.0"
-dependencies = [
- "buildinfo",
- "childenv",
- "clap",
- "httpfile",
- "percent-encoding",
- "portplz-core",
- "tempfile",
- "thiserror 2.0.21",
- "tiny_http",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7621,6 +7606,7 @@ dependencies = [
  "dioxus-ssr",
  "flate2",
  "gitscratch",
+ "regex",
  "rfd 0.17.2",
  "serde",
  "serde_json",
@@ -7629,6 +7615,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "toml 0.8.23",
+ "unicode-width",
 ]
 
 [[package]]

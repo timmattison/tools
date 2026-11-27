@@ -132,6 +132,18 @@ pub struct AliasDefinition {
     pub value: String,
 }
 
+impl AliasDefinition {
+    /// Gives the suffix of a suffix alias, without its marker: `md` for
+    /// `*.md`. Gives `None` for a regular and a global alias.
+    #[must_use]
+    pub fn suffix(&self) -> Option<&str> {
+        match self.kind {
+            AliasKind::Suffix => self.name.strip_prefix(SUFFIX_MARKER),
+            AliasKind::Regular | AliasKind::Global => None,
+        }
+    }
+}
+
 /// The character that comes before the suffix of a word.
 const SUFFIX_DOT: char = '.';
 
