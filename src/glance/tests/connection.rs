@@ -3,13 +3,13 @@
 //! Tests of the connection to a second Mac. A fake script stands in for `ssh`
 //! and runs the built `glance --stream`, so no test changes `PATH`.
 
+use gitscratch::testing::executable::write_executable;
 use glance::connection::{
     Connection, Destination, Event, Feed, HostNaming, Remote, RemoteBinary, FIRST_RETRY_DELAY,
 };
 use glance::host::HostName;
 use glance::interval::Interval;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Once;
@@ -23,9 +23,6 @@ const INTERVAL: &str = "0.25";
 
 /// The destination that the fake `ssh` gets.
 const DESTINATION: &str = "m1-ts";
-
-/// The mode of a script.
-const EXECUTABLE: u32 = 0o755;
 
 /// The number of samples that a finite stream gives.
 const THREE: usize = 3;
@@ -82,9 +79,7 @@ fn write_script(path: &Path, body: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("the directory is made");
     }
-    fs::write(path, format!("#!/bin/sh\n{body}\n")).expect("the script is written");
-    fs::set_permissions(path, fs::Permissions::from_mode(EXECUTABLE))
-        .expect("the script is executable");
+    write_executable(path, format!("#!/bin/sh\n{body}\n")).expect("the script is written");
 }
 
 /// The path as quoted text for a script.

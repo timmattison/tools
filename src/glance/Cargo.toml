@@ -70,6 +70,9 @@ objc2-foundation = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+# `write_executable` writes the fake `ssh` of the tests. On Linux, a script
+# that the test process held open for writing gives ETXTBSY at its run.
+gitscratch = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 testcolor.workspace = true
 
