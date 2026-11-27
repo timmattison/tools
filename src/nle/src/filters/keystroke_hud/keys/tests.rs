@@ -375,11 +375,7 @@ fn a_string_and_its_terminator_split_over_events_give_no_key() {
 fn a_string_start_whose_rest_comes_after_the_timeout_is_an_alt_key() {
     assert_eq!(
         read(&[(1.0, "\x1b]ab"), (1.5, "c")]),
-        vec![
-            (1.0, special("Alt+]")),
-            (1.0, text("ab")),
-            (1.5, text("c"))
-        ]
+        vec![(1.0, special("Alt+]")), (1.0, text("ab")), (1.5, text("c"))]
     );
 }
 
