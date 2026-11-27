@@ -188,6 +188,11 @@ pub struct Definitions {
     pub aliases: Aliases,
     /// The command words of the body of each function that parsed, by name.
     pub functions: BTreeMap<String, Vec<CommandWord>>,
+    /// The first line of the body of each function, parsed or not, by name.
+    /// It is the first line whose text is not blank and is not `{` alone,
+    /// without the blanks at its start and at its end. It is empty when the
+    /// body has no such line.
+    pub function_lines: BTreeMap<String, String>,
     /// The names of the functions whose body did not parse, sorted.
     pub unparsed_functions: Vec<String>,
     /// The alias lines that did not parse, in output order.
@@ -198,16 +203,16 @@ pub struct Definitions {
 #[derive(Debug, thiserror::Error)]
 pub enum ShellError {
     /// The variable `SHELL` does not exist.
-    #[error("SHELL is not set, so wdid cannot read the aliases and functions (wdid --no-shell skips the aliases and functions)")]
+    #[error("SHELL is not set, so wdid cannot read the aliases and functions")]
     NotSet,
     /// The shell is not zsh and not bash.
-    #[error("wdid reads aliases and functions from zsh and bash only, and SHELL is {shell} (wdid --no-shell skips the aliases and functions)")]
+    #[error("wdid reads aliases and functions from zsh and bash only, and SHELL is {shell}")]
     NotSupported {
         /// The value of `SHELL`.
         shell: String,
     },
     /// The system cannot start the shell.
-    #[error("cannot start {shell}: {source} (wdid --no-shell skips the aliases and functions)")]
+    #[error("cannot start {shell}: {source}")]
     Spawn {
         /// The shell program.
         shell: String,
@@ -215,15 +220,13 @@ pub enum ShellError {
         source: std::io::Error,
     },
     /// The shell ran for too long.
-    #[error("the shell did not stop in {seconds} seconds (wdid --no-shell skips the aliases and functions)")]
+    #[error("the shell did not stop in {seconds} seconds")]
     TimedOut {
         /// The bound, in seconds.
         seconds: u64,
     },
     /// The shell ended with a non-zero status.
-    #[error(
-        "the shell failed ({status}): {stderr} (wdid --no-shell skips the aliases and functions)"
-    )]
+    #[error("the shell failed ({status}): {stderr}")]
     Failed {
         /// The text of the exit status.
         status: String,
@@ -231,7 +234,7 @@ pub enum ShellError {
         stderr: String,
     },
     /// The output has no start marker or no end marker.
-    #[error("the shell output does not hold the start and end markers of wdid (wdid --no-shell skips the aliases and functions)")]
+    #[error("the shell output does not hold the start and end markers of wdid")]
     NoMarkers,
 }
 
@@ -275,12 +278,27 @@ pub fn parse_output(stdout: &str, marker: &Marker) -> Result<Definitions, ShellE
     }
 }
 
-/// Reads the body of one function into `definitions`.
+/// Gives the first line of a function body whose text is not blank and is not
+/// `{` alone, without the blanks at its start and at its end. Gives an empty
+/// text when the body has no such line. A bash body starts with a line `{`.
+fn first_line(body: &str) -> String {
+    body.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && *line != "{")
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// Reads the body of one function into `definitions`. It keeps the first line
+/// of the body for each function, also for a body that does not parse.
 ///
 /// The shell expanded the aliases of the body when it read the definition,
 /// the global and the suffix aliases included. Thus the parse of the body uses
 /// an empty alias table.
 fn read_function(name: &str, body: &str, definitions: &mut Definitions) {
+    definitions
+        .function_lines
+        .insert(name.to_owned(), first_line(body));
     match command_words(body, &Aliases::new()) {
         Parsed::Words(words) => {
             definitions.functions.insert(name.to_owned(), words);

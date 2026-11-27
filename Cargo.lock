@@ -13283,6 +13283,7 @@ dependencies = [
  "tempfile",
  "termsize",
  "thiserror 2.0.21",
+ "unicode-width",
  "url",
  "wait-timeout",
 ]
