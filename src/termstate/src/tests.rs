@@ -313,7 +313,7 @@ fn a_cleared_cell_has_the_default_source() {
 
 #[test]
 fn an_erased_cell_has_the_default_source_while_the_pen_stays() {
-    let state = feed_text("\x1b[31;41mABC\x1b[1;1H\x1b[X\x1b[1;2H\x1b[K");
+    let state = feed_text("\x1b[31;41mABC\x1b[1;1H\x1b[1X\x1b[1;2H\x1b[K");
     assert_eq!(
         sources_at(&state, 0),
         (ColorSource::Default, ColorSource::Default)
@@ -327,7 +327,7 @@ fn an_erased_cell_has_the_default_source_while_the_pen_stays() {
 
 #[test]
 fn a_scroll_up_keeps_the_sources_of_the_moved_cell() {
-    let state = feed_text("\r\n\x1b[38;5;9;48;2;7;8;9mB\x1b[S");
+    let state = feed_text("\r\n\x1b[38;5;9;48;2;7;8;9mB\x1b[1S");
     assert_eq!(state.get_grid()[0][0].ch, 'B');
     assert_eq!(
         sources_at(&state, 0),
@@ -354,7 +354,7 @@ fn a_line_feed_at_the_bottom_keeps_the_sources_of_the_moved_cell() {
 
 #[test]
 fn an_inserted_line_has_default_sources_and_the_moved_line_keeps_its_own() {
-    let state = feed_text("\x1b[31;42mA\x1b[1;1H\x1b[L");
+    let state = feed_text("\x1b[31;42mA\x1b[1;1H\x1b[1L");
     assert_eq!(
         sources_at(&state, 0),
         (ColorSource::Default, ColorSource::Default)
@@ -368,7 +368,7 @@ fn an_inserted_line_has_default_sources_and_the_moved_line_keeps_its_own() {
 
 #[test]
 fn an_inserted_blank_character_has_default_sources() {
-    let state = feed_text("\x1b[31;42mAB\x1b[1;1H\x1b[@");
+    let state = feed_text("\x1b[31;42mAB\x1b[1;1H\x1b[1@");
     assert_eq!(
         sources_at(&state, 0),
         (ColorSource::Default, ColorSource::Default)
@@ -381,7 +381,7 @@ fn an_inserted_blank_character_has_default_sources() {
 
 #[test]
 fn a_deleted_character_pulls_its_neighbor_with_its_own_sources() {
-    let state = feed_text("\x1b[0mA\x1b[31;42mB\x1b[1;1H\x1b[P");
+    let state = feed_text("\x1b[0mA\x1b[31;42mB\x1b[1;1H\x1b[1P");
     assert_eq!(
         sources_at(&state, 0),
         (ColorSource::Base(1), ColorSource::Base(2))
@@ -394,9 +394,21 @@ fn a_deleted_character_pulls_its_neighbor_with_its_own_sources() {
 
 #[test]
 fn a_deleted_line_pulls_its_neighbor_with_its_own_sources() {
-    let state = feed_text("A\r\n\x1b[31;42mB\x1b[1;1H\x1b[M");
+    let state = feed_text("A\r\n\x1b[31;42mB\x1b[1;1H\x1b[1M");
     assert_eq!(
         sources_at(&state, 0),
         (ColorSource::Base(1), ColorSource::Base(2))
+    );
+}
+
+#[test]
+fn a_clone_keeps_the_pen_sources_and_the_cell_sources() {
+    let state = feed_text("\x1b[31;48;5;17mA\x1b[38;2;1;2;3m");
+    let copy = state.clone();
+    assert_eq!(copy.current_fg_source, ColorSource::Rgb(1, 2, 3));
+    assert_eq!(copy.current_bg_source, ColorSource::Indexed(17));
+    assert_eq!(
+        sources_at(&copy, 0),
+        (ColorSource::Base(1), ColorSource::Indexed(17))
     );
 }

@@ -742,8 +742,8 @@ impl TerminalState {
                 ch: display_char,
                 fg_color: self.current_fg,
                 bg_color: self.current_bg,
-                fg_source: ColorSource::Default,
-                bg_source: ColorSource::Default,
+                fg_source: self.current_fg_source,
+                bg_source: self.current_bg_source,
                 bold: self.bold,
                 italic: self.italic,
                 underline: self.underline,
@@ -816,6 +816,8 @@ impl TerminalState {
                     // Reset
                     self.current_fg = self.theme.foreground;
                     self.current_bg = self.theme.background;
+                    self.current_fg_source = ColorSource::Default;
+                    self.current_bg_source = ColorSource::Default;
                     self.bold = false;
                     self.italic = false;
                     self.underline = false;
@@ -830,6 +832,7 @@ impl TerminalState {
                     // Foreground colors
                     let color_index = sgr_palette_index(param - 30);
                     self.current_fg = self.theme.get_color(color_index);
+                    self.current_fg_source = ColorSource::Base(color_index);
                 }
                 38
                     // Extended foreground color
@@ -845,6 +848,7 @@ impl TerminalState {
                                     } else {
                                         self.current_fg = TerminalTheme::get_256_color(color_index);
                                     }
+                                    self.current_fg_source = ColorSource::Indexed(color_index);
                                     i += 2; // Skip the 5 and color index
                                 }
                             2
@@ -854,6 +858,7 @@ impl TerminalState {
                                     let g = sgr_color_byte(param_vec[i + 3]);
                                     let b = sgr_color_byte(param_vec[i + 4]);
                                     self.current_fg = (r, g, b);
+                                    self.current_fg_source = ColorSource::Rgb(r, g, b);
                                     i += 4; // Skip the 2, r, g, b
                                 }
                             _ => {}
@@ -863,6 +868,7 @@ impl TerminalState {
                     // Background colors
                     let color_index = sgr_palette_index(param - 40);
                     self.current_bg = self.theme.get_color(color_index);
+                    self.current_bg_source = ColorSource::Base(color_index);
                 }
                 48
                     // Extended background color
@@ -878,6 +884,7 @@ impl TerminalState {
                                     } else {
                                         self.current_bg = TerminalTheme::get_256_color(color_index);
                                     }
+                                    self.current_bg_source = ColorSource::Indexed(color_index);
                                     i += 2; // Skip the 5 and color index
                                 }
                             2
@@ -887,6 +894,7 @@ impl TerminalState {
                                     let g = sgr_color_byte(param_vec[i + 3]);
                                     let b = sgr_color_byte(param_vec[i + 4]);
                                     self.current_bg = (r, g, b);
+                                    self.current_bg_source = ColorSource::Rgb(r, g, b);
                                     i += 4; // Skip the 2, r, g, b
                                 }
                             _ => {}
@@ -896,11 +904,13 @@ impl TerminalState {
                     // Bright foreground colors
                     let color_index = sgr_palette_index(param - 90 + 8);
                     self.current_fg = self.theme.get_color(color_index);
+                    self.current_fg_source = ColorSource::Base(color_index);
                 }
                 100..=107 => {
                     // Bright background colors
                     let color_index = sgr_palette_index(param - 100 + 8);
                     self.current_bg = self.theme.get_color(color_index);
+                    self.current_bg_source = ColorSource::Base(color_index);
                 }
                 _ => {}
             }
@@ -1510,6 +1520,8 @@ impl TerminalState {
                 self.clear_screen();
                 self.current_fg = self.theme.foreground;
                 self.current_bg = self.theme.background;
+                self.current_fg_source = ColorSource::Default;
+                self.current_bg_source = ColorSource::Default;
                 self.bold = false;
                 self.italic = false;
                 self.underline = false;
