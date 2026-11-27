@@ -187,3 +187,63 @@ fn the_replay_buffer_holds_only_an_unfinished_sequence() {
     state.process_output("1mX").unwrap();
     assert!(state.pending.is_empty());
 }
+
+/// Feeds `text` to a new terminal of 20 columns and 12 rows.
+fn feed_new(text: &str) -> TerminalState {
+    let mut state = TerminalState::new(20, 12, TerminalTheme::auto());
+    state.process_output(text).unwrap();
+    state
+}
+
+/// Checks that a save and a restore bring back the red color and clear flags.
+fn assert_red_plain_x(state: &TerminalState) {
+    let red = state.theme.get_color(1);
+    let cell = &state.get_grid()[0][0];
+    assert_eq!(cell.ch, 'x');
+    assert_eq!(cell.fg_color, red);
+    assert!(!cell.bold);
+    assert!(!cell.italic);
+    assert!(!cell.underline);
+}
+
+#[test]
+fn decrc_restores_the_colors_and_the_flags_that_decsc_saved() {
+    let state = feed_new("\x1b[31m\x1b7\x1b[32;1;3;4m\x1b8x");
+    assert_red_plain_x(&state);
+}
+
+#[test]
+fn csi_s_and_csi_u_save_and_restore_like_decsc() {
+    let state = feed_new("\x1b[31m\x1b[s\x1b[32;1;3;4m\x1b[ux");
+    assert_red_plain_x(&state);
+}
+
+#[test]
+fn decrc_restores_the_character_set_that_decsc_saved() {
+    let state = feed_new("\x1b7\x1b(0\x1b8q");
+    assert_eq!(state.get_grid()[0][0].ch, 'q');
+    let state = feed_new("\x1b(0\x1b7\x1b(B\x1b8q");
+    assert_eq!(state.get_grid()[0][0].ch, '─');
+}
+
+#[test]
+fn the_alternate_screen_has_its_own_save_slot() {
+    let mut state = feed_new("\x1b[3;5H\x1b[?1049h\x1b[10;10H\x1b7\x1b[1;1H\x1b8");
+    assert_eq!(state.get_cursor_position(), (9, 9));
+    state.process_output("\x1b[?1049l").unwrap();
+    assert_eq!(state.get_cursor_position(), (4, 2));
+}
+
+#[test]
+fn leaving_the_alternate_screen_restores_the_attributes_of_the_normal_screen() {
+    let state = feed_new("\x1b[31m\x1b[?1049h\x1b[32m\x1b[?1049lx");
+    assert_eq!(state.get_grid()[0][0].fg_color, state.theme.get_color(1));
+}
+
+#[test]
+fn ris_resets_the_save_slots() {
+    let state = feed_new("\x1b[5;5H\x1b[31m\x1b7\x1bc\x1b8x");
+    let cell = &state.get_grid()[0][0];
+    assert_eq!(cell.ch, 'x');
+    assert_eq!(cell.fg_color, state.theme.foreground);
+}
