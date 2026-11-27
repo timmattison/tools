@@ -303,7 +303,7 @@ impl FilterRegistry {
                     length,
                 };
                 let context = SpanContext {
-                    before: &[],
+                    before: &before,
                     size: TerminalSize::VT100,
                 };
                 let answer = filter(span, context, &applied.options).map_err(|message| {
