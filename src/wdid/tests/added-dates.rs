@@ -186,6 +186,39 @@ fn the_oldest_date_wins_in_each_order_of_the_records() {
     }
 }
 
+/// zsh and bash take more than one `name=value` in one `alias` command, thus
+/// `alias gs='git status' gd='git diff'` defines `gd` too. Each such name gets
+/// the date of the commit that adds the line. A word after `#` or after an
+/// operator belongs to no alias of the line, and a value that the line leaves
+/// open does not give a false name.
+#[test]
+fn each_name_of_an_alias_command_gets_the_date() {
+    let added = [
+        "alias gs='git status' gd='git diff'",
+        "alias -g G='| grep' L='| less'",
+        "alias -s md=glow txt=less",
+        "alias shown gp='git push'",
+        "alias h=\"echo $HOME\" w=z",
+        "alias c1=x # c2=y",
+        "alias s1=x; s2=y",
+        "alias q1='open q2=z",
+    ];
+    let hunk: String = added.iter().map(|line| format!("+{line}\n")).collect();
+    let log = format!("\u{0}2025-01-01\n\ndiff --git a/f b/f\n@@ -0,0 +1,8 @@\n{hunk}");
+    let dates = added_dates(&log);
+    let names: BTreeSet<Defined> = dates.keys().cloned().collect();
+    let expected: BTreeSet<Defined> = [
+        "gs", "gd", "G", "L", "*.md", "*.txt", "gp", "h", "w", "c1", "s1", "q1",
+    ]
+    .into_iter()
+    .map(Defined::alias)
+    .collect();
+    assert_eq!(names, expected);
+    for (defined, day) in &dates {
+        assert_eq!(*day, date(2025, 1, 1), "{defined:?}");
+    }
+}
+
 #[test]
 fn a_record_without_a_date_and_a_rename_add_nothing() {
     let log = "\u{0}not a date\n\ndiff --git a/f b/f\n@@ -0,0 +1 @@\n+alias x=y\n\
