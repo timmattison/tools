@@ -437,8 +437,9 @@ is not an error, because the request succeeded.
 | `-y`, `--yes` | Deletes without asking. Intended for scripts.                                    |
 | `--dry-run` | Lists the matches and stops. Nothing is deleted and nothing is asked.              |
 
-The list of matches is the document, on standard output. Under `--output json` it is `[]` when the
-filter matches nothing. The sentence that says what the command did — deleted, dry run, aborted, or
+The list of matches is the document, on standard output. Under `--output json` it holds the
+vouchers as the API reported them, in the shape of `ufa vouchers list --all --output json`, and it
+is `[]` when the filter matches nothing. The sentence that says what the command did — deleted, dry run, aborted, or
 no matches — goes to standard error, so `--output json` stays one document that a program can read.
 
 A filter that matches nothing says so and asks nothing. With stdin not attached to a terminal and
@@ -534,8 +535,8 @@ $ ufa devices list --output json | jq '.data[] | select(.state == "OFFLINE")'
 
 These commands answer with a bare array instead, because none of them gives one page: each list
 command with `--all` (`ufa sites --all`, `ufa devices list --all`, `ufa clients list --all` and
-`ufa vouchers list --all`), `ufa cloud hosts` and `ufa devices stats --all`. Read their items with
-`jq '.[]'`:
+`ufa vouchers list --all`), `ufa cloud hosts`, `ufa devices stats --all` and
+`ufa vouchers delete-filtered`. Read their items with `jq '.[]'`:
 
 ```bash
 $ ufa devices list --all --output json | jq '.[] | select(.state == "OFFLINE")'

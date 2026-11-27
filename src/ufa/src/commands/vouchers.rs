@@ -8,7 +8,7 @@ use crate::{
     http::{failed_answer, FailedAnswer},
     listing::{list_collection, Selection},
     models::{Voucher, VoucherCreateRequest, VoucherCreateResponse, VoucherDeletionResults},
-    output::{print_output, print_vec_table, render_collection, OutputFormat, Report},
+    output::{print_output, print_vec_table, render_whole_listing, OutputFormat, Report},
     pagination::fetch_all_matching,
     prompt::{self, Approval, Console},
     site_helper::get_site_id_or_prompt,
@@ -571,8 +571,10 @@ async fn delete_vouchers_filtered(
         .await
         .context("Failed to list the vouchers the filter matches")?;
 
-    let rows: Vec<VoucherRow> = matches.iter().map(VoucherRow::from).collect();
-    show(render_collection(&rows, output_format)?);
+    show(render_whole_listing::<Voucher, VoucherRow>(
+        &matches,
+        output_format,
+    )?);
 
     let outcome = confirm_then_delete(matches.len(), options, console, || async {
         Ok(delete_listed_vouchers(client, site_id, &matches).await)
