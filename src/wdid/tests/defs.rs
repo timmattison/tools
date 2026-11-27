@@ -835,6 +835,34 @@ fn a_private_hook_function_gives_its_reason_to_its_callee() {
     );
 }
 
+/// Two triggers that run two functions with one callee give the callee two
+/// reasons, each through the function that its trigger runs.
+#[test]
+fn a_callee_of_two_triggers_gets_both_reasons() {
+    let mut defs = definitions(
+        &[],
+        &[],
+        &[],
+        &[
+            ("my_precmd", "\thelper"),
+            ("my_chpwd", "\thelper"),
+            ("helper", "\ttrue"),
+        ],
+    );
+    defs.starts.functions = vec![
+        (hook("precmd"), "my_precmd".to_owned()),
+        (hook("chpwd"), "my_chpwd".to_owned()),
+    ];
+    let result = run(&[], &defs);
+    assert_eq!(
+        function(&result, "helper").reasons,
+        [
+            runs_through(hook("chpwd"), "my_chpwd"),
+            runs_through(hook("precmd"), "my_precmd"),
+        ]
+    );
+}
+
 /// The reasons of a definition are sorted, and each reason is there one time.
 #[test]
 fn the_reasons_are_sorted_and_unique() {
