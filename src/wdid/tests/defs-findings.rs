@@ -339,7 +339,11 @@ fn each_unknown_place_stays() {
         set_places(&mut defs, "ll", &places);
         let found = findings(&[], &defs);
         let finding = only(&found, FindingKind::DefinedMoreThanOnce);
-        assert_eq!(finding.map(|f| &f.places), Some(&places), "places {places:?}");
+        assert_eq!(
+            finding.map(|f| &f.places),
+            Some(&places),
+            "places {places:?}"
+        );
     }
 }
 
@@ -529,6 +533,34 @@ fn a_finding_is_mine_when_one_definition_is_mine() {
         .map(|finding| (finding.definitions[0].name.as_str(), finding.mine()))
         .collect();
     assert_eq!(mine, [("ga", false), ("gs", true)]);
+}
+
+/// An alias of my startup file that a plugin defines again is a mine finding,
+/// although the member of the definition in effect is not mine.
+#[test]
+fn a_finding_is_mine_when_a_place_before_the_last_is_mine() {
+    let mut defs = empty();
+    alias(&mut defs, "ll", "ls -l", GIT_PLUGIN, 30);
+    set_places(
+        &mut defs,
+        "ll",
+        &[
+            Some(origin(ZSHRC, Some(12))),
+            Some(origin(GIT_PLUGIN, Some(30))),
+        ],
+    );
+    let result = tally(&[], &defs, &window(false));
+    assert_eq!(result.findings.len(), 1, "{:?}", result.findings);
+    let found = &result.findings[0];
+    assert_eq!(found.kind, FindingKind::DefinedMoreThanOnce);
+    assert!(!found.definitions[0].mine);
+    let document: serde_json::Value = serde_json::from_str(&wdid::defs::render::json(
+        &result,
+        &window(false),
+        "/bin/zsh",
+    ))
+    .unwrap();
+    assert_eq!(document["findings"][0]["mine"], true, "{document}");
 }
 
 /// The findings are sorted by kind, then by the name of the first

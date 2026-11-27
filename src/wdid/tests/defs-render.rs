@@ -849,6 +849,46 @@ fn a_defined_more_than_once_entry_counts_the_places_and_marks_the_last() {
     );
 }
 
+/// An alias of my startup file that a plugin defines again is mine, although
+/// the definition in effect is the plugin's.
+#[test]
+fn a_defined_more_than_once_entry_with_my_place_first_shows_without_all() {
+    let found = Finding {
+        places: vec![
+            Some(Origin {
+                file: PathBuf::from("/home/me/.zshrc"),
+                line: Some(12),
+            }),
+            Some(Origin {
+                file: PathBuf::from(GIT_PLUGIN),
+                line: Some(30),
+            }),
+        ],
+        ..finding(
+            FindingKind::DefinedMoreThanOnce,
+            vec![Member {
+                mine: false,
+                ..member("ll", Kind::Alias, Some((GIT_PLUGIN, Some(30))), 4)
+            }],
+        )
+    };
+    let counts = with_findings(vec![found]);
+    let report = text(&counts, &window(), "/bin/zsh", None);
+    assert!(
+        findings_block(&report).contains(
+            "\n  Defined 2 times: ll (alias, 4 uses) at ~/.zshrc:12, ~/omz/plugins/git/git.plugin.zsh:30 (in effect)\n"
+        ),
+        "{report}"
+    );
+    let document: serde_json::Value =
+        serde_json::from_str(&json(&counts, &window(), "/bin/zsh")).unwrap();
+    assert_eq!(document["findings"][0]["mine"], true, "{document}");
+    assert_eq!(
+        document["findings"][0]["definitions"][0]["mine"], false,
+        "{document}"
+    );
+}
+
 #[test]
 fn an_alias_hides_function_entry_names_both_members() {
     let found = finding(
