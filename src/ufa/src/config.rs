@@ -718,10 +718,17 @@ impl Config {
             op_path: Some(String::new()),
             sm_op_path: Some(String::new()),
         };
-        let table =
-            toml::Table::try_from(&every_field).context("Failed to serialize configuration")?;
+        // `toml::Table` sorts its keys by name, and a `toml_edit` document
+        // keeps the order of the text, which is the order of the fields.
+        let serialized =
+            toml::to_string(&every_field).context("Failed to serialize configuration")?;
+        let document = serialized
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|error| {
+                unparsable_toml("the serialized configuration", &serialized, error.span())
+            })?;
 
-        Ok(table.keys().cloned().collect())
+        Ok(document.iter().map(|(key, _)| key.to_owned()).collect())
     }
 
     /// Save configuration to an explicit path, creating parent directories.
