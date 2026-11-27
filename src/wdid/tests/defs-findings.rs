@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use chrono::{NaiveDate, NaiveDateTime};
+use wdid::command_words::{command_words, Aliases, Parsed};
 use wdid::defs::{tally, Finding, FindingKind, Kind, Member, Tally, Window};
 use wdid::history::{Exit, HistoryEntry};
 use wdid::origin::{Origin, Places};
@@ -67,6 +68,23 @@ fn alias(defs: &mut Definitions, name: &str, value: &str, file: &str, line: u32)
     defs.aliases.insert(name, value);
     defs.alias_origins
         .insert(name.to_string(), origin(file, Some(line)));
+}
+
+/// Adds the function `name` with `body`, defined at `file`.
+fn function(defs: &mut Definitions, name: &str, body: &str, file: &str) {
+    defs.function_bodies
+        .insert(name.to_string(), body.to_string());
+    let line = body.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    defs.function_lines
+        .insert(name.to_string(), line.trim().to_string());
+    match command_words(body, &Aliases::new()) {
+        Parsed::Words(found) => {
+            defs.functions.insert(name.to_string(), found);
+        }
+        Parsed::Unparsed => defs.unparsed_functions.push(name.to_string()),
+    }
+    defs.function_origins
+        .insert(name.to_string(), origin(file, None));
 }
 
 /// Runs the count and gives the findings.
@@ -158,4 +176,88 @@ fn two_global_aliases_with_one_value_are_one_finding() {
         .definitions
         .iter()
         .all(|m| m.kind == Kind::GlobalAlias));
+}
+
+/// Gives the kinds of `found`.
+fn kinds(found: &[Finding]) -> Vec<FindingKind> {
+    found.iter().map(|finding| finding.kind).collect()
+}
+
+/// An alias and a function that does the same thing are one finding, for the
+/// zsh body and for the bash body.
+#[test]
+fn an_alias_and_a_function_that_do_the_same_thing_are_one_finding() {
+    for body in ["\tgit log \"$@\"", "{ \n    git log \"$@\"\n}"] {
+        let mut defs = empty();
+        alias(&mut defs, "gl", "git log", ZSHRC, 2);
+        function(&mut defs, "glog", body, GIT_PLUGIN);
+        let found = findings(&[row("gl"), row("glog"), row("glog")], &defs);
+        assert_eq!(
+            found,
+            vec![Finding {
+                kind: FindingKind::AliasAndFunction,
+                definitions: vec![
+                    member("gl", Kind::Alias, Some(origin(ZSHRC, Some(2))), 1, true),
+                    member(
+                        "glog",
+                        Kind::Function,
+                        Some(origin(GIT_PLUGIN, None)),
+                        2,
+                        false
+                    ),
+                ],
+                words: words(&["git", "log"]),
+                places: Vec::new(),
+                program: None,
+            }],
+            "body {body:?}"
+        );
+    }
+}
+
+/// A function that does something else than the alias is not a finding.
+#[test]
+fn a_function_that_does_something_else_is_not_a_finding() {
+    for body in [
+        "\tgit log",
+        "\tgit log \"$@\" | cat",
+        "\tgit log --oneline \"$@\"",
+    ] {
+        let mut defs = empty();
+        alias(&mut defs, "gl", "git log", ZSHRC, 2);
+        function(&mut defs, "glog", body, ZSHRC);
+        assert_eq!(kinds(&findings(&[], &defs)), Vec::new(), "body {body:?}");
+    }
+}
+
+/// Each alias that matches the function is in the finding, sorted by name,
+/// and a global alias matches too.
+#[test]
+fn each_matching_alias_is_in_the_finding() {
+    let mut defs = empty();
+    alias(&mut defs, "z", "git log", ZSHRC, 1);
+    defs.aliases.insert_global("A", "git log");
+    alias(&mut defs, "other", "git show", ZSHRC, 2);
+    function(&mut defs, "glog", "\tgit log \"$@\"", ZSHRC);
+    let found = findings(&[], &defs);
+    let alias_and_function: Vec<&Finding> = found
+        .iter()
+        .filter(|finding| finding.kind == FindingKind::AliasAndFunction)
+        .collect();
+    assert_eq!(alias_and_function.len(), 1);
+    let names: Vec<&str> = alias_and_function[0]
+        .definitions
+        .iter()
+        .map(|m| m.name.as_str())
+        .collect();
+    assert_eq!(names, ["A", "z", "glog"]);
+}
+
+/// A function with no body, and a suffix alias, take no part.
+#[test]
+fn a_function_with_no_body_takes_no_part() {
+    let mut defs = empty();
+    alias(&mut defs, "gl", "git log", ZSHRC, 2);
+    defs.functions.insert("glog".to_string(), Vec::new());
+    assert_eq!(findings(&[], &defs), Vec::new());
 }
