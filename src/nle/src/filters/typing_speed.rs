@@ -26,11 +26,17 @@
 //!    after the last key of the region, and the end of the region, move by
 //!    the change of that key. The pipeline then moves each event after the
 //!    region by the same change.
+//! 7. A mark of an earlier filter moves as an event that is not a key. The
+//!    key before it is the last key at or before its time, and the key after
+//!    it is the first key after its time. Thus a mark inside a burst moves
+//!    with the keys around it, and it never comes after the new end of the
+//!    region.
 //!
-//! Each event keeps its data, its type, and its place in the list.
+//! Each event keeps its data, its type, and its place in the list. Each mark
+//! keeps its text.
 
 use crate::error::NleError;
-use crate::pipeline::{FilterRegistry, Span};
+use crate::pipeline::{FilterRegistry, Mark, Span};
 use crate::types::{
     AppliedFilter, Event, EventType, FilterKind, FilterOptions, FilterRegion, Seconds,
 };
@@ -182,12 +188,20 @@ impl Normalization {
     }
 }
 
-/// Put the keys of each burst at the rate, and move the other events with
-/// them, by the rules of the module doc.
+/// Put the keys of each burst at the rate, and move the other events and the
+/// marks with them, by the rules of the module doc.
 fn normalize(span: Span, options: &FilterOptions) -> Result<Span, String> {
     let settings = Normalization::from_options(options)?;
     let keys = new_keys(&span.events, &settings);
     let length = new_time(span.length, keys.last().copied(), None);
+    let marks = span
+        .marks
+        .into_iter()
+        .map(|mark| Mark {
+            time: new_mark_time(mark.time, &keys),
+            ..mark
+        })
+        .collect();
     let mut upcoming = keys.into_iter().peekable();
     let mut before = None;
     let events = span
@@ -213,7 +227,7 @@ fn normalize(span: Span, options: &FilterOptions) -> Result<Span, String> {
     Ok(Span {
         events,
         length,
-        marks: span.marks,
+        marks,
     })
 }
 
@@ -284,6 +298,18 @@ fn new_time(time: f64, before: Option<Key>, after: Option<Key>) -> f64 {
     };
     // `max` and `min`, not `clamp`: `clamp` panics when its bounds cross.
     (before.new + delay * ratio).max(before.new).min(after.new)
+}
+
+/// The new time of a mark at `time`: the new time of an event at `time` that
+/// is not a key, between the last key at or before `time` and the first key
+/// after it.
+///
+/// The keys are in time order. A mark comes only from an earlier filter, and
+/// the pipeline puts the events in time order after each filter.
+fn new_mark_time(time: f64, keys: &[Key]) -> f64 {
+    let after = keys.partition_point(|key| key.old <= time);
+    let before = after.checked_sub(1).and_then(|index| keys.get(index));
+    new_time(time, before.copied(), keys.get(after).copied())
 }
 
 /// The multiplier of SplitMix64: the golden ratio in 64 bits.

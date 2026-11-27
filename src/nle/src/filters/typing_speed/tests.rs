@@ -460,3 +460,46 @@ fn mark_times(marks: &[crate::pipeline::Mark]) -> Vec<f64> {
 fn mark_labels(marks: &[crate::pipeline::Mark]) -> Vec<&str> {
     marks.iter().map(|mark| mark.label.as_str()).collect()
 }
+
+#[test]
+fn a_mark_at_the_time_of_a_key_moves_with_that_key() {
+    use crate::pipeline::{Mark, Span};
+    let mut registry = filters::registry();
+    registry.register_span(
+        FilterKind::new("mark"),
+        |mut span: Span, _: &FilterOptions| {
+            span.marks.push(Mark {
+                time: 0.125,
+                label: "m".to_string(),
+            });
+            Ok(span)
+        },
+    );
+    let recording = Recording {
+        version: 2,
+        width: 80,
+        height: 24,
+        timestamp: 0.0,
+        duration: 1.0,
+        command: String::new(),
+        title: String::new(),
+        env: BTreeMap::new(),
+        events: vec![key(0.0, "a"), key(0.125, "b")],
+    };
+    let mut project = EditProject::from_recording(Arc::new(recording)).unwrap();
+    project.filters = vec![
+        AppliedFilter {
+            kind: FilterKind::new("mark"),
+            region: FilterRegion::All,
+            options: FilterOptions::new(),
+        },
+        applied(FilterRegion::All, typing(4.0)),
+    ];
+
+    let rendered = registry.render_with_marks(&project).unwrap();
+
+    // "b" was typed faster than the rate, so it moves from 0.125 s to 0.25 s.
+    // The mark at its time moves with it, and does not stay between the keys.
+    assert_eq!(times(&rendered.recording.events), vec![0.0, 0.25]);
+    assert_eq!(mark_times(&rendered.marks), vec![0.25]);
+}

@@ -6426,10 +6426,11 @@ option is missing) keeps its length, and so does the gap after a key that
 holds a line end. Thus each hesitation inside a command goes away, and each
 pause between two commands stays. An output keeps its delay after the key
 before it, so the echo of a key follows the key. When the gap to the next key
-becomes shorter, the delay becomes shorter by the same ratio. The option
-`jitter` (0 when missing, and below 1) changes each interval by up to that
-fraction, so the typing does not look mechanical. Each render gives the same
-times. The window cannot add the filter to a project yet.
+becomes shorter, the delay becomes shorter by the same ratio. A mark of an
+earlier filter, for example the start of an idle period, moves as an output
+does. The option `jitter` (0 when missing, and below 1) changes each interval
+by up to that fraction, so the typing does not look mechanical. Each render
+gives the same times. The window cannot add the filter to a project yet.
 
 The crate also has functions that save the rendered recording
 (`Editor::save_recording`), list the recordings in a directory, and export a
