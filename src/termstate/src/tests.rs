@@ -247,3 +247,39 @@ fn ris_resets_the_save_slots() {
     assert_eq!(cell.ch, 'x');
     assert_eq!(cell.fg_color, state.theme.foreground);
 }
+
+#[test]
+fn modes_47_and_1047_switch_to_the_save_slot_of_the_alternate_screen() {
+    for mode in ["47", "1047"] {
+        let mut state = feed_new(&format!(
+            "\x1b[3;5H\x1b7\x1b[?{mode}h\x1b[10;10H\x1b7\x1b[1;1H\x1b8"
+        ));
+        assert_eq!(state.get_cursor_position(), (9, 9), "mode {mode}");
+        state
+            .process_output(&format!("\x1b[?{mode}l\x1b8"))
+            .unwrap();
+        assert_eq!(state.get_cursor_position(), (4, 2), "mode {mode}");
+    }
+}
+
+#[test]
+fn mode_1048_saves_and_restores_in_the_slot_of_the_current_screen() {
+    let state = feed_new("\x1b[3;5H\x1b[?1048h\x1b[1;1H\x1b[?1048l");
+    assert_eq!(state.get_cursor_position(), (4, 2));
+    // The save of 1048 and the restore of DECRC use one slot: 1048 does not
+    // switch the screen.
+    let state = feed_new("\x1b[3;5H\x1b[?1048h\x1b[1;1H\x1b8");
+    assert_eq!(state.get_cursor_position(), (4, 2));
+}
+
+#[test]
+fn ris_on_the_alternate_screen_resets_its_save_slot() {
+    let state = feed_new("\x1b[?1049h\x1b[10;10H\x1b7\x1bc\x1b[?1049h\x1b8");
+    assert_eq!(state.get_cursor_position(), (0, 0));
+}
+
+#[test]
+fn ris_on_the_alternate_screen_returns_to_the_normal_screen() {
+    let state = feed_new("\x1b[?1049h\x1bc\x1b[3;5H\x1b7\x1b[1;1H\x1b[?1049l");
+    assert_eq!(state.get_cursor_position(), (4, 2));
+}
