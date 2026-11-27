@@ -405,13 +405,18 @@ const ADDED_MARK: char = '+';
 ///
 /// A function line is `name()`, `name ()`, or `function name`. A function
 /// name holds no blank, no quote, no `$`, and no operator of the shell. A
-/// function line defines one name. A comment line defines nothing, because
-/// `#` is not in a name.
+/// function line defines one name. A line that starts with `alias` and
+/// defines no alias can still be a function line, thus `alias () {` defines
+/// the function `alias`. A comment line defines nothing, because `#` is not in
+/// a name.
 #[must_use]
 pub fn defined_names(line: &str) -> Vec<Defined> {
     let text = line.trim_start();
-    if let Some(rest) = after_word(text, ALIAS_WORD) {
-        return alias_names(rest);
+    if let Some(names) = after_word(text, ALIAS_WORD)
+        .map(alias_names)
+        .filter(|names| !names.is_empty())
+    {
+        return names;
     }
     let single = if let Some(rest) = after_word(text, FUNCTION_WORD) {
         keyword_function_name(rest)
