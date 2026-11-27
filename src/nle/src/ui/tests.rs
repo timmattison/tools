@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
 use crate::format::format_recorded;
+use crate::preview::PreviewTheme;
 use crate::types::{Event, EventType, Recording, RecordingMetadata};
 use dioxus_core::{ElementId, Mutation};
 use std::collections::BTreeMap;
@@ -248,6 +249,8 @@ struct Window {
     first_render: Vec<ElementId>,
     /// The id of each element that got an input listener, in creation order.
     inputs: Vec<ElementId>,
+    /// The id of each element that got a change listener, in creation order.
+    changes: Vec<ElementId>,
     /// The Apply Speed button, when a test noted it.
     apply: Option<ElementId>,
     /// The Play and Pause button, when a test noted it.
@@ -271,6 +274,7 @@ impl Window {
             newest: Vec::new(),
             first_render: Vec::new(),
             inputs: Vec::new(),
+            changes: Vec::new(),
             apply: None,
             play: None,
             stop: None,
@@ -296,6 +300,11 @@ impl Window {
         self.inputs
             .extend(edits.iter().filter_map(|edit| match edit {
                 Mutation::NewEventListener { name, id } if name == "input" => Some(*id),
+                _ => None,
+            }));
+        self.changes
+            .extend(edits.iter().filter_map(|edit| match edit {
+                Mutation::NewEventListener { name, id } if name == "change" => Some(*id),
                 _ => None,
             }));
     }
@@ -339,6 +348,22 @@ impl Window {
         let event = dioxus::prelude::Event::new(data as Rc<dyn Any>, true);
         self.dom.runtime().handle_event("input", event, id);
         self.render();
+    }
+
+    /// Sends the value to the select element, as if the user chose it, and renders.
+    fn choose(&mut self, id: ElementId, value: &str) {
+        let form = dioxus::html::SerializedFormData::new(value.to_string(), Vec::new());
+        let data = Rc::new(PlatformEventData::new(Box::new(form)));
+        let event = dioxus::prelude::Event::new(data as Rc<dyn Any>, true);
+        self.dom.runtime().handle_event("change", event, id);
+        self.render();
+    }
+
+    /// The theme menu of the preview toolbar. It is the one change listener of
+    /// the open render.
+    fn theme_menu(&self) -> ElementId {
+        assert_eq!(self.changes.len(), 1, "{:?}", self.changes);
+        self.changes[0]
     }
 
     /// The input listeners that the open render created, in creation order:
@@ -1160,4 +1185,29 @@ async fn a_new_recording_opens_stopped() {
 
     assert_eq!(window.play_label(), "Play");
     assert_eq!(window.readout(), READOUT_AT_ZERO);
+}
+
+/// The page markup of the option of `choice`, selected or not.
+fn theme_option(choice: PreviewTheme, selected: bool) -> String {
+    let flag = if selected { " selected=true" } else { "" };
+    format!(
+        "<option value=\"{}\"{flag}>{}</option>",
+        choice.name(),
+        choice.label()
+    )
+}
+
+#[tokio::test]
+async fn the_theme_menu_lists_the_five_themes() {
+    let window = open_recording().await;
+    let page = window.html();
+    assert!(page.contains("Theme"), "{page}");
+    assert_eq!(page.matches("<select").count(), 1, "{page}");
+    assert_eq!(page.matches("<option").count(), 5, "{page}");
+    let menu = text_between(&page, "<select", "</select>");
+    let listed: String = PreviewTheme::ALL
+        .into_iter()
+        .map(|choice| theme_option(choice, choice == PreviewTheme::Auto))
+        .collect();
+    assert!(menu.ends_with(&listed), "{menu}");
 }
