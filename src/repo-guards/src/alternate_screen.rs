@@ -133,7 +133,7 @@ pub struct Exemption {
 ///
 /// Public so a test can measure the list against what the repository holds. An
 /// entry that matches nothing is reported by [`Report::unused_exemptions`].
-pub const EXEMPTIONS: [Exemption; 5] = [
+pub const EXEMPTIONS: [Exemption; 6] = [
     Exemption {
         file: "src/altscreen/src/lib.rs",
         spelling: "EnterAlternateScreen",
@@ -155,6 +155,12 @@ pub const EXEMPTIONS: [Exemption; 5] = [
         spelling: "CSI ?1049 h",
         reason: "the tests feed the entry sequence to the emulator as data; \
                  they write to no user terminal",
+    },
+    Exemption {
+        file: "src/termstate/src/tests.rs",
+        spelling: "CSI ?47 h",
+        reason: "the tests feed mode 47 to the emulator as data, because it sets only the \
+                 flag of the alternate screen; they write to no user terminal",
     },
     Exemption {
         file: "src/nle/src/filters/keystroke_hud/tests.rs",
