@@ -297,6 +297,36 @@ fn a_bright_color_uses_the_bright_half_of_the_palette() {
 }
 
 #[test]
+fn each_end_of_a_range_of_base_codes_becomes_a_color_of_the_theme() {
+    let palette = solarized_light_palette();
+
+    assert_eq!(rewrite("30"), Some(rgb_text(38, palette[0])));
+    assert_eq!(rewrite("37"), Some(rgb_text(38, palette[7])));
+    assert_eq!(rewrite("40"), Some(rgb_text(48, palette[0])));
+    assert_eq!(rewrite("47"), Some(rgb_text(48, palette[7])));
+    assert_eq!(rewrite("90"), Some(rgb_text(38, palette[8])));
+    assert_eq!(rewrite("107"), Some(rgb_text(48, palette[15])));
+}
+
+#[test]
+fn each_end_of_an_index_class_follows_the_rule_of_its_class() {
+    let palette = solarized_light_palette();
+    let nearest_rule = converter(CubeRule::Nearest, GrayscaleRule::Keep, TruecolorRule::Keep);
+
+    assert_eq!(rewrite("38;5;15"), Some(rgb_text(38, palette[15])));
+    assert_eq!(rewrite("38;5;16"), None);
+    assert_eq!(
+        nearest_rule.rewrite("38;5;16"),
+        Some(rgb_text(38, nearest(&palette, (0, 0, 0))))
+    );
+    assert_eq!(
+        nearest_rule.rewrite("38;5;231"),
+        Some(rgb_text(38, nearest(&palette, (255, 255, 255))))
+    );
+    assert_eq!(nearest_rule.rewrite("38;5;232"), None);
+}
+
+#[test]
 fn an_indexed_base_color_becomes_a_24_bit_color() {
     let palette = solarized_light_palette();
 
