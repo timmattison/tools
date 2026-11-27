@@ -1113,12 +1113,14 @@ fn each_place_of_an_alias_is_read_in_order_and_for_its_kind() {
     assert!(!definitions.alias_places.contains_key("md"));
 }
 
-/// The lines of a real zsh that define aliases in more than one place.
+/// The lines of a real zsh that define aliases in more than one place. The
+/// last line sources a file by a relative path, and zsh then gives a place
+/// that is not an absolute path. (`eval` gives the file that holds it.)
 const PLACES_ZSHRC: &str = "alias ll='ls -l'\n\
 source $HOME/more.zsh\n\
 alias -s md=cat\n\
 alias -s md=less\n\
-eval \"alias ev=true\"\n";
+cd \"$HOME\" && source ./relative.zsh\n";
 
 #[test]
 fn a_real_zsh_gives_each_place_of_an_alias() {
@@ -1129,6 +1131,7 @@ fn a_real_zsh_gives_each_place_of_an_alias() {
     let home = tempfile::tempdir().unwrap();
     write_file(home.path(), ".zshrc", PLACES_ZSHRC);
     write_file(home.path(), "more.zsh", "alias ll='ls -la'\n");
+    write_file(home.path(), "relative.zsh", "alias ev=true\n");
     let definitions = read(
         real_shell(&zsh, home.path()),
         ShellKind::Zsh,

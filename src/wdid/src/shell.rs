@@ -64,6 +64,15 @@ const ALIAS_ORIGIN_LABEL: &str = "ALIAS_ORIGIN";
 /// suffix alias. The suffix follows this text.
 const SUFFIX_ORIGIN_LABEL: &str = "SUFFIX_ORIGIN";
 
+/// The text that follows the marker on the line that starts one place that
+/// defined a regular or a global alias. The name of the alias follows this
+/// text.
+const ALIAS_PLACE_LABEL: &str = "ALIAS_PLACE";
+
+/// The text that follows the marker on the line that starts one place that
+/// defined a suffix alias. The suffix follows this text.
+const SUFFIX_PLACE_LABEL: &str = "SUFFIX_PLACE";
+
 /// The text that follows the marker on the line that gives the origin of the
 /// alias or the function that the line before it names. The origin follows
 /// this text: `file:line` for an alias, the file for a function, or nothing
@@ -135,6 +144,23 @@ pub(crate) const ALIAS_ORIGINS_TABLE: &str = "__wdid_alias_origins";
 /// The zsh table that the wrapper function `alias` fills: the `file:line` of
 /// each suffix alias, by suffix.
 pub(crate) const SUFFIX_ORIGINS_TABLE: &str = "__wdid_suffix_origins";
+
+/// The zsh array that the wrapper function `alias` fills: the name and the
+/// `file:line` of each definition of a regular or a global alias, as pairs, in
+/// the order of the definitions.
+pub(crate) const ALIAS_PLACES_ARRAY: &str = "__wdid_alias_places";
+
+/// The zsh array that the wrapper function `alias` fills: the suffix and the
+/// `file:line` of each definition of a suffix alias, as pairs, in the order of
+/// the definitions.
+pub(crate) const SUFFIX_PLACES_ARRAY: &str = "__wdid_suffix_places";
+
+/// The first loop variable of the loops of the zsh script that print the
+/// places of the aliases: the name or the suffix.
+const PLACE_NAME_VARIABLE: &str = "__wdid_place_name";
+
+/// The second loop variable of those loops: the `file:line`.
+const PLACE_TRACE_VARIABLE: &str = "__wdid_place_trace";
 
 /// The loop variable of the loops of the zsh script that print the origins of
 /// the aliases.
@@ -288,7 +314,9 @@ impl Marker {
 ///
 /// Each script gives the origin of each function, and the home directory. The
 /// zsh script also gives the origin of each alias that the wrapper function
-/// recorded, and the oh-my-zsh directories. Bash keeps no origin for an alias.
+/// recorded, each place that defined each alias (a name that two files define
+/// has two places), and the oh-my-zsh directories. Bash keeps no origin and no
+/// place for an alias.
 /// Each script also gives the code that the shell runs without a typed name.
 /// The zsh script gives its hooks, its trap functions, its handler of a
 /// command that it does not find, its widgets and their keys, and the widgets
@@ -314,6 +342,8 @@ pub fn script(kind: ShellKind, marker: &Marker) -> String {
              print -r -- \"{marker} {ZSH_CUSTOM_LABEL} ${{ZSH_CUSTOM-}}\"\n\
              {alias_origins}\
              {suffix_origins}\
+             {alias_places}\
+             {suffix_places}\
              autoload +X -m '{AUTOLOAD_PATTERN}' 2>/dev/null || :\n\
              autoload -Ur -m '{PRIVATE_AUTOLOAD_PATTERN}' >/dev/null 2>&1 || :\n\
              {starts}\
@@ -325,6 +355,8 @@ pub fn script(kind: ShellKind, marker: &Marker) -> String {
              print -r -- '{marker} {END_LABEL}'\n",
             alias_origins = zsh_origin_loop(marker, ALIAS_ORIGINS_TABLE, ALIAS_ORIGIN_LABEL),
             suffix_origins = zsh_origin_loop(marker, SUFFIX_ORIGINS_TABLE, SUFFIX_ORIGIN_LABEL),
+            alias_places = zsh_places_loop(marker, ALIAS_PLACES_ARRAY, ALIAS_PLACE_LABEL),
+            suffix_places = zsh_places_loop(marker, SUFFIX_PLACES_ARRAY, SUFFIX_PLACE_LABEL),
             starts = zsh_starts(marker),
         ),
         ShellKind::Bash => format!(
@@ -401,6 +433,21 @@ fn zsh_origin_loop(marker: &str, table: &str, label: &str) -> String {
          \x20 for {ORIGIN_LOOP_VARIABLE} in ${{(ok){table}}}; do\n\
          \x20   print -r -- \"{marker} {label} ${ORIGIN_LOOP_VARIABLE}\"\n\
          \x20   print -r -- \"{marker} {ORIGIN_LABEL} ${{{table}[${ORIGIN_LOOP_VARIABLE}]}}\"\n\
+         \x20 done\n\
+         fi\n"
+    )
+}
+
+/// Gives the zsh lines that print each pair of the array `array`, in array
+/// order: a line with `label` and the name, then a line with the origin. The
+/// lines do nothing when the array does not exist, for example in a shell that
+/// started without the wrapper function `alias`.
+fn zsh_places_loop(marker: &str, array: &str, label: &str) -> String {
+    format!(
+        "if (( ${{+{array}}} )); then\n\
+         \x20 for {PLACE_NAME_VARIABLE} {PLACE_TRACE_VARIABLE} in \"${{{array}[@]}}\"; do\n\
+         \x20   print -r -- \"{marker} {label} ${PLACE_NAME_VARIABLE}\"\n\
+         \x20   print -r -- \"{marker} {ORIGIN_LABEL} ${PLACE_TRACE_VARIABLE}\"\n\
          \x20 done\n\
          fi\n"
     )
@@ -535,6 +582,11 @@ enum Record<'a> {
     AliasOrigin(&'a str),
     /// The start of the origin of a suffix alias, with its suffix.
     SuffixOrigin(&'a str),
+    /// The start of one place that defined a regular or a global alias, with
+    /// its name.
+    AliasPlace(&'a str),
+    /// The start of one place that defined a suffix alias, with its suffix.
+    SuffixPlace(&'a str),
     /// The origin of the definition that the record before it started.
     Origin(&'a str),
     /// The home directory.
@@ -589,6 +641,8 @@ fn record<'a>(line: &'a str, marker: &str) -> Option<Record<'a>> {
         FUNCTION_LABEL => Some(Record::Function(value)),
         ALIAS_ORIGIN_LABEL => Some(Record::AliasOrigin(value)),
         SUFFIX_ORIGIN_LABEL => Some(Record::SuffixOrigin(value)),
+        ALIAS_PLACE_LABEL => Some(Record::AliasPlace(value)),
+        SUFFIX_PLACE_LABEL => Some(Record::SuffixPlace(value)),
         ORIGIN_LABEL => Some(Record::Origin(value)),
         HOME_LABEL => Some(Record::Home(value)),
         ZSH_LABEL => Some(Record::Zsh(value)),
@@ -602,6 +656,14 @@ fn record<'a>(line: &'a str, marker: &str) -> Option<Record<'a>> {
 enum Section<'a> {
     /// The alias listing, before the first start record.
     Aliases,
+    /// One place that defined an alias. `suffix` is true for a suffix alias.
+    AliasPlace {
+        /// The name of a regular or a global alias, or the suffix of a suffix
+        /// alias.
+        name: &'a str,
+        /// True for a suffix alias.
+        suffix: bool,
+    },
     /// The origin of an alias. `suffix` is true for a suffix alias.
     AliasOrigin {
         /// The name of a regular or a global alias, or the suffix of a suffix
@@ -647,7 +709,7 @@ impl<'a> Section<'a> {
     fn push(&mut self, line: &'a str, definitions: &mut Definitions) {
         match self {
             Self::Aliases => read_alias_line(line, definitions),
-            Self::AliasOrigin { .. } => {}
+            Self::AliasOrigin { .. } | Self::AliasPlace { .. } => {}
             Self::Widgets => definitions.starts.read_widget_line(line),
             Self::Keys => definitions.starts.read_key_line(line),
             Self::KeyCommands => definitions.starts.read_key_command_line(line),
@@ -676,6 +738,17 @@ impl<'a> Section<'a> {
                     table.insert((*name).to_owned(), origin);
                 }
             }
+            Self::AliasPlace { name, suffix } => {
+                let table = if *suffix {
+                    &mut definitions.suffix_places
+                } else {
+                    &mut definitions.alias_places
+                };
+                table
+                    .entry((*name).to_owned())
+                    .or_default()
+                    .push(Origin::from_trace(text));
+            }
             Self::Function { name, .. } => {
                 if let Some(origin) = Origin::from_file(text) {
                     definitions
@@ -697,6 +770,7 @@ impl<'a> Section<'a> {
                 .add_code(Trigger::PromptCommand, &lines.join("\n")),
             Self::Aliases
             | Self::AliasOrigin { .. }
+            | Self::AliasPlace { .. }
             | Self::Widgets
             | Self::Keys
             | Self::KeyCommands => {}
@@ -736,6 +810,11 @@ pub fn parse_output(stdout: &str, marker: &Marker) -> Result<Definitions, ShellE
                 suffix: false,
             },
             Record::SuffixOrigin(name) => Section::AliasOrigin { name, suffix: true },
+            Record::AliasPlace(name) => Section::AliasPlace {
+                name,
+                suffix: false,
+            },
+            Record::SuffixPlace(name) => Section::AliasPlace { name, suffix: true },
             Record::Origin(text) => {
                 section.set_origin(text, &mut definitions);
                 continue;
@@ -897,6 +976,7 @@ fn read_alias_line(line: &str, definitions: &mut Definitions) {
 fn zshenv() -> String {
     format!(
         "typeset -gA {ALIAS_ORIGINS_TABLE} {SUFFIX_ORIGINS_TABLE}\n\
+         typeset -ga {ALIAS_PLACES_ARRAY} {SUFFIX_PLACES_ARRAY}\n\
          function {ALIAS_COMMAND} {{\n\
          \x20 emulate -L zsh\n\
          \x20 local __wdid_word\n\
@@ -912,8 +992,10 @@ fn zshenv() -> String {
          \x20   [[ $__wdid_word == *=* ]] || continue\n\
          \x20   if (( __wdid_suffix )); then\n\
          \x20     {SUFFIX_ORIGINS_TABLE}[${{__wdid_word%%=*}}]=${{funcfiletrace[1]}}\n\
+         \x20     {SUFFIX_PLACES_ARRAY}+=(\"${{__wdid_word%%=*}}\" \"${{funcfiletrace[1]}}\")\n\
          \x20   else\n\
          \x20     {ALIAS_ORIGINS_TABLE}[${{__wdid_word%%=*}}]=${{funcfiletrace[1]}}\n\
+         \x20     {ALIAS_PLACES_ARRAY}+=(\"${{__wdid_word%%=*}}\" \"${{funcfiletrace[1]}}\")\n\
          \x20   fi\n\
          \x20 done\n\
          \x20 builtin {ALIAS_COMMAND} \"$@\"\n\
