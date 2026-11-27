@@ -22,6 +22,8 @@ const PLAY_LABEL: &str = "Play";
 const PAUSE_LABEL: &str = "Pause";
 /// The label of the button that stops playback and returns to the start.
 const STOP_LABEL: &str = "Stop";
+/// The label of the menu that picks the theme of the preview.
+const THEME_LABEL: &str = "Theme";
 /// The time between two moves of the playhead during playback. It gives about
 /// 30 frames each second.
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
@@ -100,8 +102,10 @@ fn use_ticker(
 }
 
 /// The preview of the open recording: the terminal at the playhead, and the
-/// transport toolbar. The pane keeps one `Preview` engine between renders. It
-/// replaces the engine when the rendered recording changes.
+/// transport toolbar with its theme menu. The pane keeps one `Preview` engine
+/// between renders. It replaces the engine when the rendered recording or the
+/// theme changes. The theme is a choice of the viewer, so it stays when a new
+/// recording opens.
 #[component]
 pub(super) fn PreviewPane(
     rendered: ReadSignal<RenderedState>,
@@ -109,13 +113,14 @@ pub(super) fn PreviewPane(
     mut playing: Signal<bool>,
 ) -> Element {
     use_ticker(rendered, playhead, playing);
+    let mut theme = use_signal(PreviewTheme::default);
     let end = end_of(&rendered.read());
     // The engine is not reactive. A write to it never starts a render.
     let engine = use_hook(|| Rc::new(RefCell::new(None::<Preview>)));
     let screen = match &*rendered.read() {
         Some(Ok(recording)) => {
             let at = playhead();
-            let theme = PreviewTheme::default();
+            let theme = theme();
             let mut slot = engine.borrow_mut();
             let current = slot.take().filter(|preview| {
                 Arc::ptr_eq(preview.recording(), &recording.0) && preview.theme() == theme
@@ -173,6 +178,24 @@ pub(super) fn PreviewPane(
                             {STOP_LABEL}
                         }
                         span { class: "preview-time", "{shown}" }
+                        label { class: "preview-theme",
+                            {THEME_LABEL}
+                            select {
+                                onchange: move |event| {
+                                    if let Some(chosen) = PreviewTheme::from_name(&event.value()) {
+                                        theme.set(chosen);
+                                    }
+                                },
+                                for choice in PreviewTheme::ALL {
+                                    option {
+                                        key: "{choice.name()}",
+                                        value: choice.name(),
+                                        selected: choice == theme(),
+                                        {choice.label()}
+                                    }
+                                }
+                            }
+                        }
                     }
                     div {
                         class: "preview-screen",

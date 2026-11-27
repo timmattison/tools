@@ -225,3 +225,21 @@ h3 {
   font-size: 13px;
   color: #a6adc8;
 }
+
+.preview-theme {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #a6adc8;
+}
+
+.preview-theme select {
+  background: #1e1e2e;
+  color: #cdd6f4;
+  border: 1px solid #585b70;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 12px;
+}
