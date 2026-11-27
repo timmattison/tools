@@ -40,7 +40,8 @@ Each row number below starts at 0, as `scroll_region()` gives it.
 
 ### 1. RIS keeps the scrolling region
 
-- **Finding:** R-20261127T195703Z#N1.
+- **Findings:** R-20261127T195703Z#N1, and R-20261127T201651Z#N2, which
+  reports the same defect again.
 - **Location:** `src/termstate/src/lib.rs:1995-2015`, the arm `b'c'` (RIS) of
   the escape dispatch. The arm resets the pen, the attributes, autowrap, the
   pending wrap and the line-drawing set, but not `scroll_top` and
