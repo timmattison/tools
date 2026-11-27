@@ -128,3 +128,21 @@ fn the_number_of_snapshots_has_a_limit() {
     assert!(preview.snapshot_count() > 1);
     assert!(preview.snapshot_count() <= 2 * 256 + 1);
 }
+
+#[test]
+fn a_zero_size_recording_gives_a_one_cell_grid() {
+    let events = vec![event(0.0, EventType::Output, "ab\r\ncd")];
+    let mut preview = Preview::new(recording(0, 0, events), PreviewTheme::Auto);
+    let grid = preview.seek(secs(1.0)).get_grid();
+    assert_eq!(grid.len(), 1);
+    assert_eq!(grid[0].len(), 1);
+}
+
+#[test]
+fn a_huge_recording_size_is_clamped() {
+    let events = vec![event(0.0, EventType::Output, "ab\r\ncd")];
+    let mut preview = Preview::new(recording(60_000, 60_000, events), PreviewTheme::Auto);
+    let grid = preview.seek(secs(1.0)).get_grid();
+    assert_eq!(grid.len(), 500);
+    assert_eq!(grid[0].len(), 500);
+}
