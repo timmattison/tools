@@ -34,14 +34,15 @@ pub const MATCHES_PER_ESTIMATE: usize = 5;
 /// estimate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Remaining {
-    /// The time that the job has left before it reaches its estimate. It is
-    /// zero when the job is exactly at its estimate.
+    /// The time that the job or the run has left before it reaches its
+    /// estimate. It is zero when the job or the run is exactly at its estimate.
     Left(Duration),
     /// The least time that an active run has left. The latest end of the run
     /// comes from a job that waits for a runner, and the start of that job is
     /// unknown. Thus the run can take longer. Only a run row gets this value.
     AtLeast(Duration),
-    /// The time that the job ran past its estimate. It is never zero.
+    /// The time that the job or the run ran past its estimate. It is never
+    /// zero.
     Over(Duration),
 }
 
