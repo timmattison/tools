@@ -209,15 +209,74 @@ impl ColorScheme {
     /// Read and check the options of a filter.
     ///
     /// # Errors
-    /// Returns a message when the options are not valid.
-    pub fn parse(_options: &FilterOptions) -> Result<Self, String> {
-        Err(String::new())
+    /// Returns a message when the `theme` is missing or unknown, when a key is
+    /// unknown, or when a value has the wrong type or is not one of the values
+    /// of its option.
+    pub fn parse(options: &FilterOptions) -> Result<Self, String> {
+        let value = serde_json::to_value(options).map_err(|error| error.to_string())?;
+        let Value::Object(map) = value else {
+            return Err("the options are not an object".to_string());
+        };
+        const KEYS: [&str; 5] = [
+            THEME_OPTION,
+            SWAP_OPTION,
+            CUBE_OPTION,
+            GRAYSCALE_OPTION,
+            TRUECOLOR_OPTION,
+        ];
+        if let Some(key) = map.keys().find(|key| !KEYS.contains(&key.as_str())) {
+            return Err(format!("the option \"{key}\" is not known"));
+        }
+        let theme_name = match map.get(THEME_OPTION) {
+            None => return Err(format!("the option \"{THEME_OPTION}\" is missing")),
+            Some(Value::String(name)) => name,
+            Some(_) => return Err(format!("the option \"{THEME_OPTION}\" is not a string")),
+        };
+        let theme = PreviewTheme::from_name(theme_name).ok_or_else(|| {
+            let names: Vec<&str> = PreviewTheme::ALL.iter().map(|theme| theme.name()).collect();
+            format!(
+                "the theme \"{theme_name}\" is not one of {}",
+                names.join(", ")
+            )
+        })?;
+        let swap = match map.get(SWAP_OPTION) {
+            None => false,
+            Some(Value::Bool(swap)) => *swap,
+            Some(_) => return Err(format!("the option \"{SWAP_OPTION}\" is not a boolean")),
+        };
+        Ok(Self {
+            theme,
+            swap,
+            cube: read_rule(
+                &map,
+                CUBE_OPTION,
+                CubeRule::from_name,
+                &CubeRule::ALL.map(CubeRule::name),
+            )?,
+            grayscale: read_rule(
+                &map,
+                GRAYSCALE_OPTION,
+                GrayscaleRule::from_name,
+                &GrayscaleRule::ALL.map(GrayscaleRule::name),
+            )?,
+            truecolor: read_rule(
+                &map,
+                TRUECOLOR_OPTION,
+                TruecolorRule::from_name,
+                &TruecolorRule::ALL.map(TruecolorRule::name),
+            )?,
+        })
     }
 
     /// The options of the filter: all five keys, always.
     #[must_use]
     pub fn options(&self) -> FilterOptions {
         FilterOptions::new()
+            .with(THEME_OPTION, self.theme.name())
+            .with(SWAP_OPTION, self.swap)
+            .with(CUBE_OPTION, self.cube.name())
+            .with(GRAYSCALE_OPTION, self.grayscale.name())
+            .with(TRUECOLOR_OPTION, self.truecolor.name())
     }
 
     /// The default foreground that the filter sets: the foreground of the
@@ -225,7 +284,11 @@ impl ColorScheme {
     #[must_use]
     pub fn foreground(&self) -> Rgb {
         let theme = self.theme.palette();
-        theme.foreground
+        if self.swap {
+            theme.background
+        } else {
+            theme.foreground
+        }
     }
 
     /// The default background that the filter sets: the background of the
@@ -233,7 +296,11 @@ impl ColorScheme {
     #[must_use]
     pub fn background(&self) -> Rgb {
         let theme = self.theme.palette();
-        theme.background
+        if self.swap {
+            theme.foreground
+        } else {
+            theme.background
+        }
     }
 }
 
@@ -272,8 +339,11 @@ pub fn applied(region: FilterRegion, scheme: &ColorScheme) -> AppliedFilter {
 /// The scheme of a color scheme filter. It is `None` when the filter is of
 /// another kind, or when its options do not parse.
 #[must_use]
-pub fn scheme_of(_filter: &AppliedFilter) -> Option<ColorScheme> {
-    None
+pub fn scheme_of(filter: &AppliedFilter) -> Option<ColorScheme> {
+    if filter.kind != kind() {
+        return None;
+    }
+    ColorScheme::parse(&filter.options).ok()
 }
 
 /// The target of an SGR color: the codes 38, 48, and 58 set it, and 39, 49,
