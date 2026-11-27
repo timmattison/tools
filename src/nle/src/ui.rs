@@ -19,6 +19,7 @@ use crate::error::NleError;
 use crate::filters::redaction::{self, Find, Preset, Redaction, Replacement};
 use crate::filters::time_dilation::{self, Speed};
 use crate::pipeline::FilterRegistry;
+use crate::timeline::View;
 use crate::types::{AppliedFilter, EditProject, FilterRegion, Seconds};
 
 use crate::format::{file_name, format_duration, format_recorded};
@@ -26,6 +27,8 @@ use crate::types::{LoadedRecording, RecordingMetadata};
 
 mod preview;
 use preview::{end_of, render_of, PreviewPane, RenderedState};
+mod timeline;
+use timeline::TimelineView;
 
 /// The style sheet of the window. The `style` element at the top of `App` holds
 /// it, so the webview needs no extra file.
@@ -244,6 +247,7 @@ pub(crate) fn App() -> Element {
     let mut error = use_signal(|| None::<String>);
     let mut playhead = use_signal(|| Seconds::ZERO);
     let mut playing = use_signal(|| false);
+    let view = use_signal(View::default);
     let rendered = use_memo(move || render_of(&loaded.read()));
 
     rsx! {
@@ -269,7 +273,7 @@ pub(crate) fn App() -> Element {
                 }
             }
             PreviewPane { rendered, playhead, playing }
-            Timeline { loaded, rendered, playhead }
+            Timeline { loaded, rendered, playhead, view }
             PropertiesPanel {
                 loaded,
                 on_result: move |result: Result<(), String>| error.set(result.err()),
@@ -311,22 +315,29 @@ fn MenuBar(on_loaded: EventHandler<LoadedRecording>, on_error: EventHandler<Stri
     }
 }
 
-/// The timeline of the open recording.
+/// The timeline of the open recording: its heading and summary, the playhead
+/// control, and the view of the tracks. `view` holds the zoom and the scroll
+/// of the view.
 ///
-/// The playhead control is a plain range input. Issue #150 replaces it with
-/// the real timeline and its playhead.
+/// The playhead control is a plain range input in the time of the render,
+/// after the filters. The view of the tracks shows project time, before the
+/// filters. A playhead on the view waits for a map between the two times.
 #[component]
 fn Timeline(
     loaded: ReadSignal<Option<Document>>,
     rendered: ReadSignal<RenderedState>,
     mut playhead: Signal<Seconds>,
+    view: Signal<View>,
 ) -> Element {
-    let loaded = loaded.read();
+    let document = loaded.read();
     let end = end_of(&rendered.read());
     rsx! {
         div { class: "timeline",
-            if let Some(open) = loaded.as_ref() {
-                h3 { "Timeline" }
+            if let Some(open) = document.as_ref() {
+                div { class: "timeline-header",
+                    h3 { "Timeline" }
+                    span { class: "timeline-summary", "{summary(open)}" }
+                }
                 input {
                     class: "playhead",
                     r#type: "range",
@@ -341,11 +352,7 @@ fn Timeline(
                         }
                     },
                 }
-                div { class: "placeholder",
-                    "Timeline editor \u{2014} coming in #150"
-                    br {}
-                    "{summary(open)}"
-                }
+                TimelineView { loaded, view }
             } else {
                 div { class: "placeholder", "No recording loaded" }
             }

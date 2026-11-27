@@ -107,9 +107,10 @@ fn panels_root() -> Element {
     let playhead = use_signal(|| Seconds::ZERO);
     let playing = use_signal(|| false);
     let rendered = use_memo(move || preview::render_of(&loaded.read()));
+    let view = use_signal(View::default);
     rsx! {
         PreviewPane { rendered, playhead, playing }
-        Timeline { loaded, rendered, playhead }
+        Timeline { loaded, rendered, playhead, view }
         PropertiesPanel { loaded, on_result: |_| {} }
     }
 }
@@ -648,7 +649,8 @@ fn properties_show_the_file_name_of_a_windows_path() {
 fn timeline_shows_the_event_count_and_the_duration() {
     let page = render_panels(fixture());
     assert!(page.contains("42 events"), "{page}");
-    assert!(page.contains("Timeline editor"), "{page}");
+    assert!(page.contains("class=\"timeline-clip\""), "{page}");
+    assert!(!page.contains("coming in #150"), "{page}");
 }
 
 #[test]
