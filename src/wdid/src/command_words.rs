@@ -965,8 +965,10 @@ fn is_assignment(text: &str) -> bool {
 /// candidate. A wrapper hands the candidate to the word after its options, and
 /// the loop repeats for a wrapper inside a wrapper. Gives `None` when nothing
 /// runs: no word is left, the candidate holds an expansion, or the wrapper
-/// looks a name up.
-fn unwrap_command(words: &[&ReadWord]) -> Option<usize> {
+/// looks a name up. For each wrapper hop, `runs` gets the name of the wrapper
+/// and the literal text of the word that the wrapper runs, when that word
+/// exists and has a literal.
+fn unwrap_command(words: &[&ReadWord], runs: &mut Vec<WrapperRun>) -> Option<usize> {
     let mut index = 0;
     loop {
         let literal = words.get(index)?.literal()?;
@@ -974,6 +976,12 @@ fn unwrap_command(words: &[&ReadWord]) -> Option<usize> {
             return Some(index);
         };
         index = wrapper.skip(words, index + 1)?;
+        if let Some(word) = words.get(index).and_then(|word| word.literal()) {
+            runs.push(WrapperRun {
+                wrapper: literal,
+                word,
+            });
+        }
     }
 }
 
@@ -992,6 +1000,8 @@ struct Walker<'a> {
     words: Vec<CommandWord>,
     /// The alias expansions found so far, in walk order.
     uses: Vec<AliasUse>,
+    /// The runs of a word by a wrapper found so far, in walk order.
+    wrapped: Vec<WrapperRun>,
 }
 
 impl<'a> Walker<'a> {
@@ -1002,6 +1012,7 @@ impl<'a> Walker<'a> {
             options: ParserOptions::default(),
             words: Vec::new(),
             uses: Vec::new(),
+            wrapped: Vec::new(),
         }
     }
 
@@ -1297,7 +1308,7 @@ impl<'a> Walker<'a> {
             let sequence: Vec<&ReadWord> = std::iter::once(command)
                 .chain(suffix.iter().filter_map(|(_, read)| read.as_ref()))
                 .collect();
-            if let Some(index) = unwrap_command(&sequence) {
+            if let Some(index) = unwrap_command(&sequence, &mut self.wrapped) {
                 if let (Some(runs), Some(rest)) = (sequence.get(index), sequence.get(index + 1..)) {
                     if let Some(literal) = runs.literal() {
                         let args = rest.iter().map(|word| word.argument());
@@ -1584,7 +1595,7 @@ pub fn parse_line(line: &str, aliases: &Aliases) -> Option<Line> {
         Ok(()) => Some(Line {
             words: walker.words,
             aliases: walker.uses,
-            wrapped: Vec::new(),
+            wrapped: walker.wrapped,
         }),
         Err(Refused) => None,
     }
