@@ -643,8 +643,11 @@ impl Config {
     ///
     /// Each field of `Config` that holds a value is written in place, with the
     /// comment that the person wrote beside it. Each field that holds nothing
-    /// leaves the file. Each other comment, and each key that `Config` does
-    /// not name, stays as the person wrote it.
+    /// leaves the file, with the comment lines directly above it: `toml_edit`
+    /// keeps those lines in the decor of the key. When that field is the first
+    /// key, the comment lines at the top of the file leave too. Each other
+    /// comment, and each key that `Config` does not name, stays as the person
+    /// wrote it.
     ///
     /// # Arguments
     ///
@@ -734,8 +737,8 @@ impl Config {
     /// Save configuration to an explicit path, creating parent directories.
     ///
     /// The save writes each field of `Config` over the file that is there, as
-    /// [`Config::written_over`] says, so a comment and a key that `Config`
-    /// does not name stay.
+    /// [`Config::written_over`] says, so a key that `Config` does not name
+    /// stays, and each comment stays except the ones that doc names.
     ///
     /// Private on purpose: callers go through [`Config::edit`], which reads
     /// what is already on disk first, so no command can blank out a field it

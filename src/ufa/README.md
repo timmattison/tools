@@ -147,6 +147,9 @@ per-user ACL of `%APPDATA%`.
 `ufa` never rewrites a field it did not ask about. `ufa config cloud` changes only the Site Manager
 credential and leaves the controller URL, key and TLS choice exactly as they were. A save writes
 each field in place, so your comments, and a key that `ufa` does not know, stay as you wrote them.
+One exception: when a save removes a field, for example `op_path` after you paste a key, the comment
+lines directly above that field leave with it. If that field is the first key of the file, the
+comment lines at the top of the file leave too.
 
 ### `ufa config setup`
 
