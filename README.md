@@ -6288,8 +6288,12 @@ sequences:
 - An escape sequence never changes, and a search never matches inside one. A
   search for `31` does not change the color code `ESC [ 31 m`.
 - The text of an OSC sequence, for example a window title, is searched, but a
-  match never crosses from the visible text into an OSC sequence. Image data
-  (DCS and APC strings) is not searched.
+  match never crosses from the visible text into an OSC sequence. The text
+  starts after the number of the sequence and its `;`, thus a search for `0`
+  does not change the title sequence `ESC ] 0 ;`. Image data (DCS and APC
+  strings, and the iTerm2 sequence OSC 1337) is not searched. The clipboard
+  data of OSC 52 is not searched either, because it is base64, and a text
+  search cannot read it.
 - A mask keeps the control characters of a match, for example a line feed, so
   the layout of the screen stays the same.
 - In a regular expression, a capture group named `redact` replaces only its

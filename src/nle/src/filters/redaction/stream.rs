@@ -18,7 +18,7 @@ use crate::types::{Event, EventType};
 const BOUNDARY_ERROR: &str = "a match does not fall on a character boundary";
 
 /// A run of text in the joined string. The segment 0 is the visible text.
-/// Each other segment is the payload of one OSC sequence.
+/// Each other segment is the text of one OSC sequence, see [`osc_text`].
 struct Run {
     segment: usize,
     range: Range<usize>,
@@ -114,8 +114,13 @@ const SUB: u8 = 0x1A;
 /// The segment of the visible text.
 const VISIBLE: usize = 0;
 
+/// The OSC command numbers whose text is base64 data: the clipboard (52) and
+/// the iTerm2 commands (1337), which carry images. A text search cannot read
+/// the data, and a match corrupts it.
+const ENCODED_OSC_COMMANDS: [u32; 2] = [52, 1337];
+
 /// Cut the joined string into runs of text. Escape sequences are not text.
-/// The payload of an OSC sequence is a run of its own segment. `event_type` is
+/// The text of an OSC sequence is a run of its own segment. `event_type` is
 /// the type of the stream: in the input stream, a string introducer is a key.
 fn runs(joined: &str, event_type: &EventType) -> Vec<Run> {
     let bytes = joined.as_bytes();
@@ -149,8 +154,9 @@ fn runs(joined: &str, event_type: &EventType) -> Vec<Run> {
 }
 
 /// Read the escape sequence that starts at `at`, where `bytes[at]` is ESC.
-/// The answer is the range of the payload when the sequence is an OSC
-/// sequence, and the end of the sequence. The end is always above `at`.
+/// The answer is the range of the text when the sequence is an OSC sequence
+/// with text, see [`osc_text`], and the end of the sequence. The end is always
+/// above `at`.
 ///
 /// An OSC sequence or a control string ends where a terminal ends it, see
 /// [`string_end`]. In the input stream, `ESC ]`, `ESC P`, `ESC X`, `ESC ^`,
@@ -177,7 +183,7 @@ fn escape_sequence(
         Some(b']') => {
             let start = at + 2;
             let (payload_end, end) = string_end(bytes, start, true);
-            (Some(start..payload_end), end)
+            (osc_text(bytes, start..payload_end), end)
         }
         Some(b'P' | b'X' | b'^' | b'_') => (None, string_end(bytes, at + 2, false).1),
         Some(_) => {
@@ -192,6 +198,29 @@ fn escape_sequence(
         }
         None => (None, length),
     }
+}
+
+/// The range of the text in the OSC payload at `payload`. The payload is
+/// `Ps ; Pt`, where `Ps` is the command number, and only `Pt` is text. Thus a
+/// match never changes the kind of the sequence. A payload with no `;` after
+/// its number has no text, for example `104`, which resets the colors. The
+/// numbers of [`ENCODED_OSC_COMMANDS`] have no text either. A terminal reads
+/// leading zeros, thus `01337` is 1337.
+fn osc_text(bytes: &[u8], payload: Range<usize>) -> Option<Range<usize>> {
+    let content = bytes.get(payload.clone())?;
+    let digits = content
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if content.get(digits) != Some(&b';') {
+        return None;
+    }
+    let encoded = content
+        .get(..digits)
+        .and_then(|number| std::str::from_utf8(number).ok())
+        .and_then(|number| number.parse::<u32>().ok())
+        .is_some_and(|number| ENCODED_OSC_COMMANDS.contains(&number));
+    (!encoded).then_some(payload.start + digits + 1..payload.end)
 }
 
 /// Find the end of an OSC payload or a control string that starts at `start`.

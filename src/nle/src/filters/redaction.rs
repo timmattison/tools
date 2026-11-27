@@ -21,8 +21,11 @@
 //!
 //! - `ESC [` starts a CSI sequence. Parameter bytes (0x20 to 0x3F) follow, and
 //!   one final byte (0x40 to 0x7E) ends it.
-//! - `ESC ]` starts an OSC sequence, for example a window title. Its payload
-//!   is text, and it is a segment of its own.
+//! - `ESC ]` starts an OSC sequence `Ps ; Pt`, for example a window title.
+//!   The command number `Ps` and its `;` are not text, thus a match never
+//!   changes the kind of the sequence. `Pt` is text, and it is a segment of
+//!   its own. A payload with no `;` after its number has no text. The base64
+//!   data of OSC 52 (the clipboard) and OSC 1337 (iTerm2 images) is not text.
 //! - `ESC P`, `ESC X`, `ESC ^`, and `ESC _` start a DCS, SOS, PM, or APC
 //!   string. Nothing in it is text, because it can hold image data.
 //! - An OSC sequence or a string ends where a terminal ends it: at `ESC \`, at
@@ -40,11 +43,11 @@
 //!   line feed, tab, and BEL are text.
 //!
 //! A sequence that the terminal split across two events is still one
-//! sequence. The visible text is all text outside OSC payloads, joined across
+//! sequence. The visible text is all text outside OSC sequences, joined across
 //! escape sequences and across events. Thus `hun`, then `ESC [ 1 m`, then
-//! `ter2` reads `hunter2`. Each OSC payload is a segment of its own. A match
-//! never spans two segments. A search for `31` does not match inside
-//! `ESC [ 31 m`.
+//! `ter2` reads `hunter2`. The text of each OSC sequence is a segment of its
+//! own. A match never spans two segments. A search for `31` does not match
+//! inside `ESC [ 31 m`.
 //!
 //! # What the filter changes
 //!
