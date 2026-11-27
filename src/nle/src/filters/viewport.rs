@@ -20,10 +20,11 @@
 //!
 //! The visible rows are the rows of the crop that are not hidden. The visible
 //! columns are the same for columns. An unknown key fails the render. A start
-//! that is not before its end, an end after the edge of the screen, a hidden
-//! index that is not on the screen, no visible row, and no visible column each
-//! fail the render, with a message that names the option. A screen of width 0
-//! or height 0, or larger than the limits of the preview, fails the render.
+//! that is not before its end, an end after the edge of the screen, a start
+//! below 0, a hidden index that is not on the screen, no visible row, and no
+//! visible column each fail the render, with a message that names the option.
+//! The checks run in this order. A screen of width 0 or height 0, or larger
+//! than the limits of the preview, fails the render.
 //! Thus a bad header cannot cause a panic or a very large allocation.
 //!
 //! A wide character (for example 日) covers two cells. When a crop, a hidden
@@ -116,9 +117,20 @@ pub fn register(registry: &mut FilterRegistry) {
     registry.register_screen(FilterKind::new(VIEWPORT), filter);
 }
 
-/// A crop on one axis: the start is in the crop, and the end is not.
+/// A crop on one axis, as the project file gives it. The numbers are `i64`,
+/// so a number that is not on the screen reaches the checks, and the message
+/// of a check names the option. Serde gives no path for a number that does
+/// not fit in `u16`.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RawCrop {
+    start: i64,
+    end: i64,
+}
+
+/// A crop on one axis that the checks accepted: the start is in the crop, and
+/// the end is not.
+#[derive(Debug, Clone, Copy)]
 struct Crop {
     start: u16,
     end: u16,
@@ -128,12 +140,12 @@ struct Crop {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Options {
-    rows: Option<Crop>,
-    columns: Option<Crop>,
+    rows: Option<RawCrop>,
+    columns: Option<RawCrop>,
     #[serde(default)]
-    hide_rows: Vec<u16>,
+    hide_rows: Vec<i64>,
     #[serde(default)]
-    hide_columns: Vec<u16>,
+    hide_columns: Vec<i64>,
 }
 
 /// The viewport filter.
@@ -156,10 +168,10 @@ fn filter(
     let (rows_axis, columns_axis) = (Axis::ROWS, Axis::COLUMNS);
     let rows_crop = rows_axis.check_crop(options.rows, height)?;
     let columns_crop = columns_axis.check_crop(options.columns, width)?;
-    rows_axis.check_hidden(&options.hide_rows, height)?;
-    columns_axis.check_hidden(&options.hide_columns, width)?;
-    let rows = rows_axis.visible(rows_crop, &options.hide_rows)?;
-    let columns = columns_axis.visible(columns_crop, &options.hide_columns)?;
+    let hidden_rows = rows_axis.check_hidden(&options.hide_rows, height)?;
+    let hidden_columns = columns_axis.check_hidden(&options.hide_columns, width)?;
+    let rows = rows_axis.visible(rows_crop, &hidden_rows)?;
+    let columns = columns_axis.visible(columns_crop, &hidden_columns)?;
     if rows.len() == usize::from(height) && columns.len() == usize::from(width) {
         return Ok(Screen {
             events: events.to_vec(),
@@ -223,35 +235,59 @@ impl Axis {
     ///
     /// # Errors
     ///
-    /// The crop does not start before its end, or it ends after the screen.
-    fn check_crop(&self, crop: Option<Crop>, len: u16) -> Result<Crop, String> {
+    /// The crop does not start before its end, it ends after the screen, or
+    /// it starts below 0.
+    fn check_crop(&self, crop: Option<RawCrop>, len: u16) -> Result<Crop, String> {
         let plural = self.plural;
-        match crop {
-            Some(Crop { start, end }) if start >= end => Err(format!(
+        let Some(RawCrop { start, end }) = crop else {
+            return Ok(Crop { start: 0, end: len });
+        };
+        if start >= end {
+            return Err(format!(
                 "{plural}: the start {start} is not before the end {end}"
-            )),
-            Some(Crop { end, .. }) if end > len => Err(format!(
+            ));
+        }
+        if end > i64::from(len) {
+            return Err(format!(
                 "{plural}: the end {end} is after the last {} of the screen ({len} {plural})",
                 self.unit
-            )),
-            Some(crop) => Ok(crop),
-            None => Ok(Crop { start: 0, end: len }),
+            ));
         }
+        if start < 0 {
+            return Err(format!(
+                "{plural}: the start {start} is not on the screen ({len} {plural})"
+            ));
+        }
+        let narrow = |value: i64| {
+            u16::try_from(value)
+                .map_err(|_| format!("{plural}: the number {value} is not on the screen"))
+        };
+        Ok(Crop {
+            start: narrow(start)?,
+            end: narrow(end)?,
+        })
     }
 
-    /// Check that each hidden index is on an axis of `len` cells.
+    /// The hidden indexes as `u16`, when each is on an axis of `len` cells.
     ///
     /// # Errors
     ///
-    /// A hidden index is not below `len`.
-    fn check_hidden(&self, hidden: &[u16], len: u16) -> Result<(), String> {
-        match hidden.iter().find(|index| **index >= len) {
-            Some(index) => Err(format!(
-                "{}: the {} {index} is not on the screen ({len} {})",
-                self.hide_key, self.unit, self.plural
-            )),
-            None => Ok(()),
-        }
+    /// A hidden index is below 0 or not below `len`.
+    fn check_hidden(&self, hidden: &[i64], len: u16) -> Result<Vec<u16>, String> {
+        hidden
+            .iter()
+            .map(|index| {
+                u16::try_from(*index)
+                    .ok()
+                    .filter(|narrow| *narrow < len)
+                    .ok_or_else(|| {
+                        format!(
+                            "{}: the {} {index} is not on the screen ({len} {})",
+                            self.hide_key, self.unit, self.plural
+                        )
+                    })
+            })
+            .collect()
     }
 
     /// The indexes of `crop` that `hidden` does not name, in order.
