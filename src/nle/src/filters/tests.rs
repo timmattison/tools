@@ -621,6 +621,21 @@ fn pause_removal_moves_a_mark_after_the_last_event_back_by_the_removed_time() {
 }
 
 #[test]
+fn pause_removal_keeps_the_time_of_a_mark_before_the_first_event() {
+    // The first event at 2 s keeps its time, so the mark at 1 s before it
+    // keeps its time too. The gap from 3 s to 8 s becomes 1 s long, so the
+    // mark at 5.5 s goes to 3.5 s.
+    let marks = moved_marks(
+        &[1.0, 5.5],
+        outputs(&[2.0, 3.0, 8.0]),
+        10.0,
+        all(PAUSE_REMOVAL, removal(2.0, 1.0)),
+    );
+
+    assert_eq!(marks, vec![1.0, 3.5]);
+}
+
+#[test]
 fn pause_insertion_moves_each_mark_at_or_after_the_point_later_by_the_duration() {
     let marks = moved_marks(
         &[1.0, 2.0, 4.5],
