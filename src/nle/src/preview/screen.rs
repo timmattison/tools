@@ -148,6 +148,10 @@ type ColorPair = (Rgb, Rgb);
 /// each pair resolves one time.
 struct Colors<'a> {
     state: &'a termstate::TerminalState,
+    /// The last pair and its answer. Cells next to each other mostly share them.
+    last: Option<(ColorPair, ColorPair)>,
+    /// Each pair that resolved, and its answer.
+    resolved: HashMap<ColorPair, ColorPair>,
     /// The count of calls of `resolve_cell_colors`.
     #[cfg(test)]
     resolutions: usize,
@@ -158,6 +162,8 @@ impl<'a> Colors<'a> {
     fn new(state: &'a termstate::TerminalState) -> Self {
         Self {
             state,
+            last: None,
+            resolved: HashMap::new(),
             #[cfg(test)]
             resolutions: 0,
         }
@@ -165,11 +171,26 @@ impl<'a> Colors<'a> {
 
     /// The foreground and the background that `cell` draws with.
     fn of(&mut self, cell: &termstate::Cell) -> ColorPair {
-        #[cfg(test)]
-        {
-            self.resolutions += 1;
+        let pair = (cell.fg_color, cell.bg_color);
+        if let Some((last_pair, answer)) = self.last {
+            if last_pair == pair {
+                return answer;
+            }
         }
-        self.state.resolve_cell_colors(cell)
+        let answer = match self.resolved.get(&pair) {
+            Some(&answer) => answer,
+            None => {
+                #[cfg(test)]
+                {
+                    self.resolutions += 1;
+                }
+                let answer = self.state.resolve_cell_colors(cell);
+                self.resolved.insert(pair, answer);
+                answer
+            }
+        };
+        self.last = Some((pair, answer));
+        answer
     }
 
     /// The count of calls of `resolve_cell_colors` so far.
