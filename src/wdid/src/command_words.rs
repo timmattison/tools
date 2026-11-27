@@ -1847,3 +1847,31 @@ fn argument_of(word: &ast::Word, options: &ParserOptions) -> Option<Argument> {
     let pieces = word::parse(&word.value, options).ok()?;
     Some(argument_from(&word.value, &pieces))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Gives the [`Argument`] of the raw text `raw` as one word, through
+    /// [`argument_from`] and not through the tokenizer.
+    fn argument(raw: &str) -> Option<Argument> {
+        let pieces = word::parse(raw, &ParserOptions::default()).ok()?;
+        Some(argument_from(raw, &pieces))
+    }
+
+    /// The shell removes a line join, so a line join does not divide a
+    /// pattern, and it is not a piece of the probe. The tokenizer removes an
+    /// unquoted line join before a word parses, but [`argument_from`] reads
+    /// the pieces of each raw text that it gets.
+    #[test]
+    fn a_line_join_does_not_divide_a_pattern() {
+        let rows = [
+            ("{1.\\\n.3}", Argument::Expansion("{1.\\\n.3}".to_owned())),
+            ("\\\n=ls", Argument::Expansion("\\\n=ls".to_owned())),
+            ("a\\\nb", Argument::Literal("ab".to_owned())),
+        ];
+        for (raw, expected) in rows {
+            assert_eq!(argument(raw), Some(expected), "raw: {raw:?}");
+        }
+    }
+}
