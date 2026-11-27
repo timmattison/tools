@@ -6490,6 +6490,41 @@ speed changes above it. The panel shows the duration of the edited recording.
 The panel refuses a change after which the recording does not render, and it
 shows the reason in the banner.
 
+The redaction panel under the speed panel finds text on the whole timeline and
+replaces it, for example to remove API keys, tokens, hostnames, or user names
+from a recording. **Find** takes an exact text, a regular expression, or a
+preset: email addresses, IP addresses, AWS keys, tokens, or hostnames.
+**Replace with** takes asterisks or blocks (`█`), one for each terminal column
+of the match, or a text. **Events** selects the output events, or the output
+and the input events. Then click **Apply Redaction**. Each redaction gets a row
+with a **Remove** button.
+
+A redaction does not change the time of an event, and it knows escape
+sequences:
+
+- A match can cross events and escape sequences, because the terminal can
+  split a word across writes, or color part of it.
+- An escape sequence never changes, and a search never matches inside one. A
+  search for `31` does not change the color code `ESC [ 31 m`.
+- The text of an OSC sequence, for example a window title, is searched, but a
+  match never crosses from the visible text into an OSC sequence. The text
+  starts after the number of the sequence and its `;`, thus a search for `0`
+  does not change the title sequence `ESC ] 0 ;`. Image data (DCS and APC
+  strings) is not searched. The clipboard data of OSC 52 is not searched
+  either, because it is base64, and a text search cannot read it.
+- The iTerm2 sequence OSC 1337 holds a command `Key=value`. The value is
+  searched, thus a redaction of a user name also changes the host and the
+  directory that the shell integration writes as `RemoteHost=user@host` and
+  `CurrentDir=/Users/user`. The key is not searched. The base64 value of a
+  key such as `File` (an image) or `SetUserVar` is not searched.
+- A mask keeps the control characters of a match, for example a line feed, so
+  the layout of the screen stays the same.
+- In a regular expression, a capture group named `redact` replaces only its
+  own text. The AWS key preset uses it to keep the name of a key visible, and
+  the token preset uses it to keep the word `Bearer`.
+
+The timeline (issue #150) does not show where the redactions are yet.
+
 The application is one Rust crate on Dioxus 0.7, with the desktop (webview)
 renderer. Its components call the Rust code directly, and the open project is
 Dioxus state, thus no IPC layer and no frontend package exist.
@@ -6516,6 +6551,9 @@ The editing engine of the crate has five parts:
     the cursor looks. [The cursor filter](#the-cursor-filter) below gives its
     options.
   - `time-dilation` (`speed`, issue #153): plays its region faster or slower.
+  - `redaction` (`find`, `replace`, `input`, issue #156): replaces text in the
+    data of the events and keeps each time. The paragraphs on the redaction
+    panel above give its rules.
   - `typing-speed` (`chars_per_second`, `pause`, `jitter`, issue #155): plays
     each burst of typing at one rate. The paragraph on this filter below gives
     its rules.
@@ -6532,7 +6570,7 @@ The editing engine of the crate has five parts:
   The filters of issue #154 parse their options as a Rust type, so the render
   refuses a missing option, a value of the wrong type, and a key that the
   filter does not know. The window cannot add them yet (issue #150). Issues
-  #152 and #156 to #167 add more filters.
+  #152 and #157 to #167 add more filters.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
