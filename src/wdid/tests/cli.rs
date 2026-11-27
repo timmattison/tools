@@ -1059,3 +1059,163 @@ fn the_tools_report_counts_through_the_zshenv_and_the_zshrc() {
         "{document}"
     );
 }
+
+/// The bash of the tests of `wdid defs` that read a `.bashrc`.
+const BASH: &str = "/bin/bash";
+
+/// The `.zshrc` of the tests of the definitions that zsh runs without a typed
+/// name. Each block defines one start, and `unused` has none.
+const STARTS_ZSHRC: &str = "precmd() { prompt_helper }\n\
+prompt_helper() { true }\n\
+mychpwd() { true }\n\
+autoload -Uz add-zsh-hook\n\
+add-zsh-hook chpwd mychpwd\n\
+TRAPINT() { return 128 }\n\
+searchfn() { true }\n\
+zle -N history-search-wdid searchfn\n\
+bindkey '^R' history-search-wdid\n\
+lonelyfn() { true }\n\
+zle -N lonely-widget lonelyfn\n\
+zle-line-init() { true }\n\
+zle -N zle-line-init\n\
+kmsel() { true }\n\
+autoload -Uz add-zle-hook-widget\n\
+add-zle-hook-widget keymap-select kmsel\n\
+unused() { true }\n";
+
+/// The `.bashrc` of the test of the definitions that bash runs without a
+/// typed name.
+const STARTS_BASHRC: &str = "pcfn() { pc_helper; }\n\
+pc_helper() { true; }\n\
+PROMPT_COMMAND='pcfn'\n\
+trapfn() { true; }\n\
+trap 'trapfn' EXIT\n\
+unused() { true; }\n";
+
+/// Gives the reasons of the definition `name` in `document`, as text.
+fn reasons_of(document: &Value, name: &str) -> Vec<String> {
+    definition(document, name)["reasons"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no reasons of {name} in {document}"))
+        .iter()
+        .map(|reason| reason.as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Says if the list `group` of `document` holds the definition `name`.
+fn listed_in(document: &Value, group: &str, name: &str) -> bool {
+    document[group]
+        .as_array()
+        .unwrap_or_else(|| panic!("no list {group} in {document}"))
+        .iter()
+        .any(|entry| entry["name"] == name)
+}
+
+/// Gives the lines of the group `heading` of the text report: the lines after
+/// the heading line that start with two spaces.
+fn group_of<'a>(text: &'a str, heading: &str) -> Vec<&'a str> {
+    text.lines()
+        .skip_while(|line| !line.starts_with(heading))
+        .skip(1)
+        .take_while(|line| line.starts_with("  "))
+        .collect()
+}
+
+#[test]
+fn defs_gives_the_functions_that_zsh_runs_without_a_typed_name_their_state() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "ls")]));
+    std::fs::write(setup.home.path().join(".zshrc"), STARTS_ZSHRC).unwrap();
+    let cwd = gitscratch::testing::not_a_repository();
+
+    let output = defs_command(&setup)
+        .arg("--json")
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+
+    let document = json(&output);
+    for (name, reason) in [
+        ("precmd", "precmd hook"),
+        ("prompt_helper", "precmd hook, through precmd"),
+        ("mychpwd", "chpwd hook"),
+        ("TRAPINT", "INT trap"),
+        ("searchfn", "widget history-search-wdid, key ^R"),
+        ("zle-line-init", "widget zle-line-init"),
+        ("kmsel", "widget zle-keymap-select"),
+    ] {
+        let entry = definition(&document, name);
+        assert_eq!(
+            entry["classification"], "runs_without_typing",
+            "{name}: {document}"
+        );
+        assert_eq!(reasons_of(&document, name), [reason], "{name}: {document}");
+        assert!(listed_in(&document, "runs_without_typing", name), "{name}");
+        assert!(!listed_in(&document, "never_used", name), "{name}");
+        assert!(!listed_in(&document, "idle", name), "{name}");
+    }
+    let lonely = definition(&document, "lonelyfn");
+    assert_eq!(lonely["classification"], "never_used", "{document}");
+    assert_eq!(reasons_of(&document, "lonelyfn"), ["widget, no key"]);
+    assert!(listed_in(&document, "never_used", "lonelyfn"), "{document}");
+    assert!(reasons_of(&document, "unused").is_empty(), "{document}");
+    assert!(listed_in(&document, "never_used", "unused"), "{document}");
+
+    let output = defs_command(&setup)
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = stdout(&output);
+    let never = group_of(&text, "Never used:");
+    assert!(never.contains(&"  lonelyfn (function, widget, no key)"), "{text}");
+    assert!(never.contains(&"  unused (function)"), "{text}");
+    assert!(!never.iter().any(|line| line.contains("precmd")), "{text}");
+    let starts = group_of(&text, "Runs without typing:");
+    assert!(starts.contains(&"  precmd (function, precmd hook)"), "{text}");
+    assert!(
+        starts.contains(&"  searchfn (function, widget history-search-wdid, key ^R)"),
+        "{text}"
+    );
+}
+
+#[test]
+fn defs_gives_the_functions_that_bash_runs_without_a_typed_name_their_state() {
+    if !Path::new(BASH).exists() {
+        eprintln!("skipped: bash is not installed");
+        return;
+    }
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "ls")]));
+    std::fs::write(setup.home.path().join(".bashrc"), STARTS_BASHRC).unwrap();
+    let cwd = gitscratch::testing::not_a_repository();
+    // The script of bash runs `tail`, which the stub directory does not hold.
+    let search_path = format!("{}:/usr/bin:/bin", setup.stubs.path().display());
+
+    let output = setup
+        .command()
+        .env("SHELL", BASH)
+        .env("PATH", search_path)
+        .args(["defs", "--json"])
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+
+    let document = json(&output);
+    for (name, reason) in [
+        ("pcfn", "PROMPT_COMMAND"),
+        ("pc_helper", "PROMPT_COMMAND, through pcfn"),
+        ("trapfn", "EXIT trap"),
+    ] {
+        let entry = definition(&document, name);
+        assert_eq!(
+            entry["classification"], "runs_without_typing",
+            "{name}: {document}"
+        );
+        assert_eq!(reasons_of(&document, name), [reason], "{name}: {document}");
+        assert!(!listed_in(&document, "never_used", name), "{name}");
+    }
+    assert!(listed_in(&document, "never_used", "unused"), "{document}");
+}
