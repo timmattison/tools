@@ -420,3 +420,83 @@ fn a_region_that_ends_inside_a_sequence_of_the_program_takes_its_box_away() {
     let result = run(&events, &plain(), region, WIDE);
     assert_same_screen(&replay(&result, 3.0, WIDE), &replay(&events, 3.0, WIDE));
 }
+
+/// A password that the presenter types. No other text on its screen holds one
+/// of its characters: not the prompt, not the label `Enter`, and not the box.
+const PASSWORD: &str = "xyzzy42";
+
+/// A password prompt. The presenter types `PASSWORD` one key each 0.1 s from
+/// 1.0 s, and presses Enter at 1.8 s. The terminal does not echo the keys.
+fn password_typing() -> Vec<Event> {
+    let mut events = vec![out(0.0, "Password: ")];
+    let mut time = 1.0;
+    for key in PASSWORD.chars() {
+        events.push(inp(time, &key.to_string()));
+        time += 0.1;
+    }
+    events.push(inp(1.8, "\r"));
+    events.push(out(1.81, "\r\n$ "));
+    ended(events)
+}
+
+/// A redaction that puts asterisks in place of `PASSWORD`, in the input
+/// events too.
+fn password_redaction() -> AppliedFilter {
+    let redaction = filters::redaction::Redaction::new(
+        filters::redaction::Find::Text(PASSWORD.to_string()),
+        filters::redaction::Replacement::Asterisks,
+        true,
+    )
+    .unwrap();
+    filters::redaction::applied(FilterRegion::All, &redaction)
+}
+
+/// The rows of the screen of `events` at the time of each event.
+fn screens(events: &[Event], size: TerminalSize) -> Vec<(f64, Vec<String>)> {
+    events
+        .iter()
+        .map(|event| {
+            let screen = replay(events, event.time, size);
+            let rows = (0..usize::from(size.rows))
+                .map(|row| text(&screen, row, 0, usize::from(size.columns)))
+                .collect();
+            (event.time, rows)
+        })
+        .collect()
+}
+
+#[test]
+fn a_redaction_of_input_before_the_hud_hides_the_typed_keys() {
+    let result = filters::registry()
+        .run_on(
+            password_typing(),
+            &[password_redaction(), applied(FilterRegion::All, &plain())],
+            WIDE,
+        )
+        .unwrap();
+    assert_eq!(
+        text(&replay(&result, 1.85, WIDE), 2, 22, 39),
+        "│ ******* Enter │"
+    );
+    for (time, rows) in screens(&result, WIDE) {
+        for (row, shown) in rows.iter().enumerate() {
+            assert!(
+                !shown.contains(|ch| PASSWORD.contains(ch)),
+                "row {row} at {time} s shows a typed key: {shown:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_redaction_of_input_after_the_hud_does_not_hide_the_typed_keys() {
+    let result = filters::registry()
+        .run_on(
+            password_typing(),
+            &[applied(FilterRegion::All, &plain()), password_redaction()],
+            WIDE,
+        )
+        .unwrap();
+    assert_eq!(text(&replay(&result, 1.05, WIDE), 2, 34, 39), "│ x │");
+    assert_eq!(text(&replay(&result, 1.55, WIDE), 2, 29, 39), "│ xyzzy4 │");
+}
