@@ -6665,7 +6665,8 @@ The editing engine of the crate has five parts:
     the terminal emulator of the `termstate` crate. The idle panel below gives
     its rules.
   - `backspace-removal` (no options, issue #152): removes each typo, the erase
-    key after it, their output, and their time.
+    key after it, their output, and their time. A mark moves as a kept event
+    at its time does, and a mark inside the removed time moves to the cut.
     [The backspace removal filter](#the-backspace-removal-filter) below gives
     its rules.
 
@@ -6744,7 +6745,10 @@ The `backspace-removal` filter removes the typing errors of a recording. It
 removes a typed key, the key that erased it, and the output of both, so the
 recording shows the text that the typist meant. It also removes their time, so
 no pause shows where the error was. For example, `h`, `r`, Backspace, `e`
-becomes `h`, `e`, and the `e` comes at the time of the `r`.
+becomes `h`, `e`, and the `e` comes at the time of the `r`. A mark of an
+earlier filter, for example the start of a compressed idle stretch, moves
+earlier by the removed time before it. A mark inside the removed time moves to
+the place of the cut, where the `e` goes.
 
 The filter removes keys only when the screen proves that the removal changes
 nothing that a viewer sees after it. The filter keeps a model of the screen,
