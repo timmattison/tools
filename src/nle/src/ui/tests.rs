@@ -987,6 +987,29 @@ async fn a_bad_frame_rate_shows_the_banner_and_asks_no_dialog() {
 }
 
 #[tokio::test]
+async fn a_bad_setting_after_a_success_removes_the_status() {
+    let fakes = fakes_with_recording()
+        .dialog(Answer::Ready(Some(PathBuf::from(EXPORT_PICKED))))
+        .export(Vec::new(), Answer::Ready(Ok(PathBuf::from(EXPORT_WRITTEN))));
+    let mut window = window_with_recording(&fakes).await;
+    window.click(window.export_button());
+    window.settle().await;
+    assert!(
+        window.html().contains("Exported to /tmp/out.json"),
+        "{}",
+        window.html()
+    );
+    window.change(window.kind_select(), "mp4");
+    window.input(window.fps_input(), "0");
+    window.click(window.export_button());
+    window.settle().await;
+    let page = window.html();
+    assert_eq!(page.matches("role=\"alert\"").count(), 1, "{page}");
+    assert!(!page.contains("role=\"status\""), "{page}");
+    assert_eq!(fakes.dialogs().len(), 1);
+}
+
+#[tokio::test]
 async fn a_cancelled_save_dialog_exports_nothing() {
     let fakes = fakes_with_recording().dialog(Answer::Ready(None));
     let mut window = window_with_recording(&fakes).await;
