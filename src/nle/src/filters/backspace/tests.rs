@@ -209,3 +209,38 @@ fn a_backspace_that_changes_nothing_on_the_screen_goes_with_its_output() {
         vec![out(0.0, "$ "), input(1.0, "l"), out(1.0, "l")]
     );
 }
+
+#[test]
+fn a_backspace_that_changes_nothing_keeps_the_stack() {
+    // Mutant that was run: the rule for a key that changes nothing clears the
+    // stack. Then the second backspace stays, and the test fails.
+    let events = vec![
+        out(0.0, "$ "),
+        input(1.0, "a"),
+        out(1.0, "a"),
+        input(1.25, "\x7f"),
+        out(1.25, "\x07"),
+        input(1.5, "\x7f"),
+        out(1.5, "\x08 \x08"),
+        input(1.75, "b"),
+        out(1.75, "b"),
+    ];
+    assert_eq!(
+        run(events),
+        vec![out(0.0, "$ "), input(1.0, "b"), out(1.0, "b")]
+    );
+}
+
+#[test]
+fn with_no_echo_a_backspace_erases_the_newest_typed_key() {
+    // Mutant that was run: the rule for a key that changes nothing runs before
+    // the rule for the newest typed key. Then the backspace goes alone and the
+    // typed key `a` stays, and the test fails.
+    let events = vec![
+        out(0.0, "Password: "),
+        input(1.0, "a"),
+        input(1.25, "\x7f"),
+        input(1.5, "b"),
+    ];
+    assert_eq!(run(events), vec![out(0.0, "Password: "), input(1.0, "b")]);
+}
