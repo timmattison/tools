@@ -95,6 +95,39 @@ pub struct RegionView {
 pub type InPlaceFilterFn =
     dyn Fn(&[Event], RegionView, &FilterOptions) -> Result<Vec<Event>, String> + Send + Sync;
 
+/// The size of a terminal, in cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalSize {
+    /// The number of columns.
+    pub width: u16,
+    /// The number of rows.
+    pub height: u16,
+}
+
+impl TerminalSize {
+    /// The size of a VT100: 80 columns and 24 rows.
+    pub const VT100: Self = Self {
+        width: 80,
+        height: 24,
+    };
+}
+
+/// What a span filter knows about the timeline outside its region.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpanContext<'a> {
+    /// The events before the region, at their times on the timeline, in the
+    /// order that they play. A filter that keeps a model of the screen replays
+    /// them to get the screen at the start of the region.
+    pub before: &'a [Event],
+    /// The events after the region, at their times on the timeline before
+    /// the pipeline moves them, in the order that they play. A filter that
+    /// reads the output of each input event finds from them if the end of the
+    /// region cuts the output of its last input event.
+    pub after: &'a [Event],
+    /// The size of the terminal that the events draw on.
+    pub size: TerminalSize,
+}
+
 /// A region of the timeline as a span filter sees it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Span {
@@ -117,8 +150,9 @@ pub struct Span {
 ///    zero, so a region that starts after the end of the timeline has the
 ///    length 0. For the region `All`, the length is the end of the timeline.
 /// 2. The filter gets a `Span` with the events inside the region, relative to
-///    its start, and the length. It answers `Ok` with a new `Span`, or `Err`
-///    with a message.
+///    its start, and the length. It also gets a `SpanContext`: the events
+///    before the region, the events after it, and the size of the terminal.
+///    It answers `Ok` with a new `Span`, or `Err` with a message.
 /// 3. An `Err` fails the pipeline with a render error. Its text names the kind
 ///    and holds the message.
 /// 4. Each answered time is checked as in step 5 of `FilterFn`, with the same
@@ -134,7 +168,8 @@ pub struct Span {
 ///    answered length after it. Thus a chapter in a region with no event
 ///    scales from the start of the region, and a chapter after the last event
 ///    of the region keeps its place between that event and the end.
-pub type SpanFilterFn = dyn Fn(Span, &FilterOptions) -> Result<Span, String> + Send + Sync;
+pub type SpanFilterFn =
+    dyn Fn(Span, SpanContext<'_>, &FilterOptions) -> Result<Span, String> + Send + Sync;
 
 /// A filter in one of its three forms.
 #[derive(Clone)]
@@ -275,7 +310,10 @@ impl FilterRegistry {
     pub fn register_span(
         &mut self,
         kind: FilterKind,
-        filter: impl Fn(Span, &FilterOptions) -> Result<Span, String> + Send + Sync + 'static,
+        filter: impl Fn(Span, SpanContext<'_>, &FilterOptions) -> Result<Span, String>
+            + Send
+            + Sync
+            + 'static,
     ) {
         self.filters
             .insert(kind, Registered::Span(Arc::new(filter)));
@@ -299,13 +337,15 @@ impl FilterRegistry {
 
     /// One filter step: the steps on `FilterFn`, on `InPlaceFilterFn`, or on
     /// `SpanFilterFn`. `chapters` holds the chapter times. Each one moves by
-    /// `move_chapter`, but an in-place filter moves none.
+    /// `move_chapter`, but an in-place filter moves none. The events draw on a
+    /// terminal of `size`.
     fn apply(
         &self,
         events: Vec<Event>,
         applied: &AppliedFilter,
         end: &mut f64,
         chapters: &mut [f64],
+        size: TerminalSize,
     ) -> Result<Vec<Event>, NleError> {
         let filter = self.lookup(&applied.kind)?;
         let (start, region_end) = match &applied.region {
@@ -361,7 +401,12 @@ impl FilterRegistry {
                     events: inside,
                     length,
                 };
-                let answer = filter(span, &applied.options).map_err(|message| {
+                let context = SpanContext {
+                    before: &before,
+                    after: &after,
+                    size,
+                };
+                let answer = filter(span, context, &applied.options).map_err(|message| {
                     NleError::RenderError(format!("filter \"{kind}\" failed: {message}"))
                 })?;
                 let largest = last_time(&answer.events);
@@ -446,6 +491,10 @@ impl FilterRegistry {
     /// Run `filters` in order over `events`, by the steps of their form. The
     /// end of the timeline starts at the time of the last event.
     ///
+    /// The events have no recording, so a span filter gets the size of a
+    /// VT100 (`TerminalSize::VT100`). `render` gives the size of the
+    /// recording.
+    ///
     /// # Errors
     /// Returns `NleError::RenderError` when a filter kind is not registered,
     /// when a filter answers a time that is not finite or is below zero on
@@ -459,14 +508,15 @@ impl FilterRegistry {
         filters: &[AppliedFilter],
     ) -> Result<Vec<Event>, NleError> {
         let end = last_time(&events);
-        self.run_with_end(events, filters, end, &mut [])
+        self.run_with_end(events, filters, end, &mut [], TerminalSize::VT100)
             .map(|(events, _end)| events)
     }
 
-    /// Run `filters` in order, and follow the end of the timeline, which
-    /// starts at `end`. The chapter times in `chapters` move through the
-    /// filters. A chapter time can become infinite, and the caller drops it
-    /// with the chapters after the end. Returns the events and the final end.
+    /// Run `filters` in order on a terminal of `size`, and follow the end of
+    /// the timeline, which starts at `end`. The chapter times in `chapters`
+    /// move through the filters. A chapter time can become infinite, and the
+    /// caller drops it with the chapters after the end. Returns the events and
+    /// the final end.
     ///
     /// # Errors
     /// Returns `NleError::RenderError` when a filter fails, when a span
@@ -478,11 +528,12 @@ impl FilterRegistry {
         filters: &[AppliedFilter],
         end: f64,
         chapters: &mut [f64],
+        size: TerminalSize,
     ) -> Result<(Vec<Event>, f64), NleError> {
         let mut events = events;
         let mut end = end;
         for applied in filters {
-            events = self.apply(events, applied, &mut end, chapters)?;
+            events = self.apply(events, applied, &mut end, chapters, size)?;
         }
         // A shift or the arithmetic of a clip can still overflow to infinity.
         for event in &events {
@@ -510,7 +561,8 @@ impl FilterRegistry {
     ///    track and clip by clip, in a stable time order. Events at one time
     ///    keep track order, then clip order.
     /// 3. The filters of the project run on them by the steps of their form,
-    ///    with the end of the timeline starting at `EditProject::duration`.
+    ///    with the end of the timeline starting at `EditProject::duration`. A
+    ///    span filter gets the terminal size of the clip that starts first.
     /// 4. The header (`version`, `width`, `height`, `timestamp`, `command`,
     ///    `title`, `env`) is the header of the source of the clip that starts
     ///    first on the timeline. A tie goes to the clip that comes first in
@@ -558,6 +610,11 @@ impl FilterRegistry {
             .collect();
         // A stable sort keeps track order, then clip order, on a tie.
         events.sort_by(|a, b| a.time.total_cmp(&b.time));
+        let header = &first.source;
+        let size = TerminalSize {
+            width: header.width,
+            height: header.height,
+        };
         let markers = project.chapters_in_order();
         let mut chapter_times: Vec<f64> = markers.iter().map(|marker| marker.time.get()).collect();
         let (events, end) = self.run_with_end(
@@ -565,6 +622,7 @@ impl FilterRegistry {
             &project.filters,
             project.duration(),
             &mut chapter_times,
+            size,
         )?;
         let mut chapters: Vec<Chapter> = markers
             .iter()
@@ -578,7 +636,6 @@ impl FilterRegistry {
         // A stable sort: two chapters at one time keep their order.
         chapters.sort_by(|a, b| a.time.total_cmp(&b.time));
 
-        let header = &first.source;
         Ok(Recording {
             version: header.version,
             width: header.width,

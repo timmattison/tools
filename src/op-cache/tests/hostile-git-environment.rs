@@ -10,9 +10,9 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
+use gitscratch::testing::executable::write_executable;
 use gitscratch::testing::{DecoyRepository, TestRepo};
 
 /// The fake secret that the fake `op` prints. It is not a real credential.
@@ -24,12 +24,11 @@ const CACHE_FILENAME: &str = ".op-cache.json";
 /// Writes a fake `op` into `dir`. It prints the fake secret for `op read <path>`.
 fn write_fake_op(dir: &Path) {
     let script = dir.join("op");
-    fs::write(
+    write_executable(
         &script,
         format!("#!/bin/sh\nprintf '%s' '{FAKE_SECRET}'\nexit 0\n"),
     )
     .expect("write the fake op");
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("make the fake op run");
 }
 
 #[test]

@@ -20,6 +20,8 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use gitscratch::testing::executable::write_executable;
+
 /// The owner in the path of each remote.
 pub const OWNER: &str = "fixture-owner";
 
@@ -346,17 +348,19 @@ impl Fixture {
     }
 
     /// Writes the fake `gh` and makes it executable.
+    ///
+    /// The script is written with `write_executable` and not with
+    /// [`Self::write`], because the tests run it. On Linux, a script that
+    /// this process held open for writing gives `ETXTBSY` at its run.
     fn write_fake_gh(&self) {
-        use std::os::unix::fs::PermissionsExt;
-
         let script = FAKE_GH.replace(
             "@ROOT@",
             &shellquote::shell_quote(&self.root.to_string_lossy()),
         );
         let path = self.root.join("bin").join("gh");
-        self.write(&path, &script);
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
-            .expect("make the fake gh executable");
+        fs::create_dir_all(path.parent().expect("a path has a parent"))
+            .expect("make the directory of the fake gh");
+        write_executable(&path, script).expect("write the fake gh");
     }
 
     /// Makes the bare remote of the host from a scratch repository.

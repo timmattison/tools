@@ -1150,8 +1150,10 @@ fn an_in_place_filter_cannot_answer_a_time_outside_its_region() {
 // Tests of the span filter: the length and the shift.
 
 /// A span filter that multiplies each time and the length by `factor`.
-fn scale_span(factor: f64) -> impl Fn(Span, &FilterOptions) -> Result<Span, String> + Send + Sync {
-    move |span, _| {
+fn scale_span(
+    factor: f64,
+) -> impl Fn(Span, SpanContext<'_>, &FilterOptions) -> Result<Span, String> + Send + Sync {
+    move |span, _, _| {
         Ok(Span {
             events: span
                 .events
@@ -1172,7 +1174,7 @@ fn span_spy_registry() -> (FilterRegistry, TestArc<Mutex<Vec<f64>>>) {
     let seen = TestArc::new(Mutex::new(Vec::new()));
     let captured = TestArc::clone(&seen);
     let mut registry = FilterRegistry::new();
-    registry.register_span(kind("spy"), move |span, _| {
+    registry.register_span(kind("spy"), move |span, _, _| {
         captured.lock().unwrap().push(span.length);
         Ok(span)
     });
@@ -1280,7 +1282,7 @@ fn render_moves_the_duration_by_the_change_of_the_length_of_a_span_filter() {
 #[test]
 fn a_span_filter_that_answers_an_error_fails_the_run_with_the_kind_and_the_message() {
     let mut registry = FilterRegistry::new();
-    registry.register_span(kind("speed"), |_, _| Err("bad speed".to_string()));
+    registry.register_span(kind("speed"), |_, _, _| Err("bad speed".to_string()));
 
     let result = registry.run(events(&[1.0]), &[all("speed")]);
 
@@ -1299,7 +1301,7 @@ fn a_span_filter_that_answers_a_bad_length_fails_and_names_the_kind() {
     let bad_lengths = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 2.5];
     for length in bad_lengths {
         let mut registry = FilterRegistry::new();
-        registry.register_span(kind("len"), move |span, _| {
+        registry.register_span(kind("len"), move |span, _, _| {
             Ok(Span {
                 events: span.events,
                 length,
@@ -1320,7 +1322,7 @@ fn a_span_filter_that_answers_a_bad_length_fails_and_names_the_kind() {
 #[test]
 fn a_span_filter_may_answer_a_length_equal_to_its_largest_time() {
     let mut registry = FilterRegistry::new();
-    registry.register_span(kind("len"), |span, _| {
+    registry.register_span(kind("len"), |span, _, _| {
         Ok(Span {
             events: span.events,
             length: 3.0,
@@ -1410,8 +1412,8 @@ fn a_span_filter_that_drops_an_event_scales_a_chapter_by_the_length_of_its_regio
     // count of times before the filter is not the count after it.
     let mut registry = FilterRegistry::new();
     let halve = scale_span(0.5);
-    registry.register_span(kind("halve-and-drop"), move |span, options| {
-        let mut answer = halve(span, options)?;
+    registry.register_span(kind("halve-and-drop"), move |span, context, options| {
+        let mut answer = halve(span, context, options)?;
         answer.events.pop();
         Ok(answer)
     });
@@ -1425,4 +1427,92 @@ fn a_span_filter_that_drops_an_event_scales_a_chapter_by_the_length_of_its_regio
     let rendered = registry.render(&project).unwrap();
 
     assert_close(&chapter_times(&rendered), &[13.0]);
+}
+
+// Tests of the context of a span filter.
+
+/// The contexts that a spy got: the events before its region and the size.
+type SeenContexts = TestArc<Mutex<Vec<(Vec<Event>, TerminalSize)>>>;
+
+/// Registers a span filter under "look" that records each context that it
+/// gets, as the events before its region and the size, and answers with the
+/// span that it got.
+fn context_spy_registry() -> (FilterRegistry, SeenContexts) {
+    let seen = TestArc::new(Mutex::new(Vec::new()));
+    let captured = TestArc::clone(&seen);
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("look"), move |span, context, _| {
+        captured
+            .lock()
+            .unwrap()
+            .push((context.before.to_vec(), context.size));
+        Ok(span)
+    });
+    (registry, seen)
+}
+
+#[test]
+fn a_span_filter_on_a_range_gets_the_events_before_the_range_at_their_times() {
+    let (registry, seen) = context_spy_registry();
+
+    registry
+        .run(events(&[0.5, 1.5, 2.5, 5.0]), &[range("look", 2.0, 3.0)])
+        .unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, events(&[0.5, 1.5]));
+}
+
+#[test]
+fn a_span_filter_on_a_range_gets_the_events_after_the_range_at_their_times() {
+    let seen = TestArc::new(Mutex::new(Vec::new()));
+    let captured = TestArc::clone(&seen);
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("look"), move |span, context, _| {
+        captured.lock().unwrap().push(context.after.to_vec());
+        Ok(span)
+    });
+
+    // The event at the end of the region is after the region.
+    registry
+        .run(events(&[0.5, 1.5, 2.0, 5.0]), &[range("look", 1.0, 2.0)])
+        .unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), vec![events(&[2.0, 5.0])]);
+}
+
+#[test]
+fn run_gives_a_span_filter_the_size_of_a_vt100() {
+    let (registry, seen) = context_spy_registry();
+
+    registry.run(events(&[1.0]), &[all("look")]).unwrap();
+
+    assert_eq!(seen.lock().unwrap()[0].1, TerminalSize::VT100);
+}
+
+#[test]
+fn render_gives_a_span_filter_the_size_of_the_clip_that_starts_first() {
+    let (registry, seen) = context_spy_registry();
+    let mut project = two_clip_project();
+    // The clip "early" starts first. A size of "late" must not reach the filter.
+    let mut late = (*project.clips[0].source).clone();
+    late.width = 132;
+    late.height = 43;
+    project.clips[0].source = Arc::new(late);
+    let mut early = (*project.clips[1].source).clone();
+    early.width = 120;
+    early.height = 40;
+    project.clips[1].source = Arc::new(early);
+    project.filters.push(all("look"));
+
+    registry.render(&project).unwrap();
+
+    assert_eq!(
+        seen.lock().unwrap()[0].1,
+        TerminalSize {
+            width: 120,
+            height: 40
+        }
+    );
 }
