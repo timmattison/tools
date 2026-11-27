@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use super::*;
 use crate::error::NleError;
-use crate::types::{AppliedFilter, EditProject, Event, EventType, FilterRegion, Recording};
+use crate::types::{
+    AppliedFilter, EditProject, Event, EventType, FilterRegion, Recording, Seconds,
+};
 
 /// An output event.
 fn out(time: f64, data: &str) -> Event {
@@ -24,12 +26,25 @@ fn input(time: f64, data: &str) -> Event {
     }
 }
 
-/// The filter on the region `All` of `events`.
+/// The filter on the region `All`, with no option.
 fn applied_to_all() -> AppliedFilter {
+    applied_to(FilterRegion::All)
+}
+
+/// The filter on `region`, with no option.
+fn applied_to(region: FilterRegion) -> AppliedFilter {
     AppliedFilter {
         kind: kind(),
-        region: FilterRegion::All,
+        region,
         options: FilterOptions::new(),
+    }
+}
+
+/// The region from `start` to `end`, in seconds.
+fn range(start: f64, end: f64) -> FilterRegion {
+    FilterRegion::Range {
+        start: Seconds::new(start).unwrap(),
+        end: Seconds::new(end).unwrap(),
     }
 }
 
@@ -41,15 +56,26 @@ fn run(events: Vec<Event>) -> Vec<Event> {
 }
 
 /// Render a recording of `width` by `height` with `events` through the
-/// filter. The duration of the source is the largest event time.
+/// filter on the region `All`. The duration of the source is the largest event
+/// time.
 fn render(width: u16, height: u16, events: Vec<Event>) -> Result<Recording, NleError> {
+    render_in(width, height, events, FilterRegion::All)
+}
+
+/// Render like `render`, with the filter on `region`.
+fn render_in(
+    width: u16,
+    height: u16,
+    events: Vec<Event>,
+    region: FilterRegion,
+) -> Result<Recording, NleError> {
     let mut source = Recording::test_fixture();
     source.width = width;
     source.height = height;
     source.duration = events.iter().map(|event| event.time).fold(0.0, f64::max);
     source.events = events;
     let mut project = EditProject::from_recording(Arc::new(source))?;
-    project.filters.push(applied_to_all());
+    project.filters.push(applied_to(region));
     let mut registry = FilterRegistry::new();
     register(&mut registry);
     registry.render(&project)
@@ -326,4 +352,20 @@ fn a_ctrl_w_that_changes_nothing_goes() {
         run(events),
         vec![out(0.0, "$ "), input(1.0, "l"), out(1.0, "l")]
     );
+}
+
+#[test]
+fn on_a_range_the_screen_before_the_region_counts() {
+    // The `x` overwrites the `a` of the text before the region. The erase
+    // leaves a space where the `a` was, so the screen differs from the screen
+    // before the `x`.
+    let events = vec![
+        out(0.5, "$ abc\x08\x08\x08"),
+        input(2.0, "x"),
+        out(2.0, "x"),
+        input(3.0, "\x7f"),
+        out(3.0, "\x08 \x08"),
+    ];
+    let rendered = render_in(80, 24, events.clone(), range(1.0, 10.0)).unwrap();
+    assert_eq!(rendered.events, events);
 }
