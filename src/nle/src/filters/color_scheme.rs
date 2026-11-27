@@ -29,8 +29,9 @@
 //!   above.
 //! - The filter writes each new color in the form `38;2;r;g;b` or `38;5;n`,
 //!   with the codes 48 and 58 for the background and the underline. It always
-//!   uses the semicolon form, because the emulator of `termstate` reads only
-//!   that form.
+//!   uses the semicolon form. The emulator of `termstate` puts the
+//!   sub-parameters of a colon form in one flat list, thus it misreads a colon
+//!   form with a color space id (`38:2::r:g:b`).
 //! - The filter reads the colon form (`38:5:n`, `38:2::r:g:b`) and rewrites it
 //!   in the semicolon form.
 //! - A parameter that is not a color stays as written. An incomplete color
