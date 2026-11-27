@@ -464,7 +464,9 @@ fn RedactionPanel(
     let mut replace = use_signal(|| REPLACE_ASTERISKS.to_owned());
     let mut replacement = use_signal(String::new);
     let mut events = use_signal(|| EVENTS_OUTPUT.to_owned());
-    let rows = redaction_rows(&loaded.read());
+    // A keystroke in a field renders the panel again. The memo builds the rows,
+    // and compiles the pattern of each one, only when the project changes.
+    let rows = use_memo(move || redaction_rows(&loaded.read()));
     rsx! {
         div { class: "redaction-panel",
             h3 { {REDACTION_HEADING} }
@@ -535,7 +537,7 @@ fn RedactionPanel(
                 },
                 {APPLY_REDACTION_LABEL}
             }
-            for (index , text) in rows {
+            for (index, text) in rows() {
                 div { class: "redaction-row", key: "{index}",
                     span { "{text}" }
                     button {
