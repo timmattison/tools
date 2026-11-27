@@ -6705,9 +6705,13 @@ The editing engine of the crate has five parts:
   a new length, and the later events move by the change in the length. A span
   filter also gets the events before and after its region and the size of the
   terminal: the size of the clip that starts first, or 80 by 24 in
-  `FilterRegistry::run`.
+  `FilterRegistry::run`. A cut filter (`register_cut`) gets the events of its
+  region and the same events and size as a span filter. It marks each event
+  to keep or to remove. The pipeline removes the marked events and their time,
+  and the later events move earlier by that time.
   `filters::registry()` holds the filters that ship. The cursor filter is an
-  in-place filter, and each other one is a span filter:
+  in-place filter, the backspace removal filter is a cut filter, and each other
+  one is a span filter:
   - `cursor` (`visibility`, `shape`, `blink`, `color`, issue #168): sets how
     the cursor looks. [The cursor filter](#the-cursor-filter) below gives its
     options.
