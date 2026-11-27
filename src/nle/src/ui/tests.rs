@@ -13,7 +13,7 @@ use crate::format::format_recorded;
 use crate::preview::PreviewTheme;
 use crate::types::{Event, EventType, Recording, RecordingMetadata};
 use dioxus_core::{ElementId, Mutation};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use tokio::sync::oneshot;
 
@@ -640,6 +640,54 @@ fn app_renders_the_style_sheet_first() {
             .is_some_and(|at| at < page.find("menu-bar\"").unwrap_or(0)),
         "{page}"
     );
+}
+
+/// Each selector of each rule of the style sheet, with its spaces made single.
+/// The text of a comment is not a selector.
+fn style_selectors() -> BTreeSet<String> {
+    let uncommented: String = STYLE
+        .split("/*")
+        .enumerate()
+        .map(|(at, part)| match at {
+            0 => part,
+            _ => part.split_once("*/").map_or("", |(_, after)| after),
+        })
+        .collect();
+    uncommented
+        .split('}')
+        .filter_map(|rule| rule.split_once('{').map(|(selectors, _)| selectors))
+        .flat_map(|selectors| selectors.split(','))
+        .map(|selector| selector.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|selector| !selector.is_empty())
+        .collect()
+}
+
+/// A field of a panel that holds an input or a menu gets a rule of the style
+/// sheet for that control. Else the control shows the default white style of
+/// the webview.
+#[tokio::test]
+async fn each_control_of_a_field_has_a_rule_of_the_style_sheet() {
+    let page = open_recording().await.html();
+    let selectors = style_selectors();
+    let mut controls = 0;
+    let mut unstyled = Vec::new();
+    for label in page.split("<label class=\"").skip(1) {
+        let (class, rest) = label.split_once('"').expect("a closed class attribute");
+        let body = rest.split_once("</label>").map_or(rest, |(body, _)| body);
+        for control in ["input", "select"] {
+            if body.contains(&format!("<{control}")) {
+                controls += 1;
+                let styled = class
+                    .split_whitespace()
+                    .any(|one| selectors.contains(&format!(".{one} {control}")));
+                if !styled {
+                    unstyled.push(format!(".{class} {control}"));
+                }
+            }
+        }
+    }
+    assert!(controls > 0, "no field holds a control in {page}");
+    assert!(unstyled.is_empty(), "no rule for {unstyled:?}");
 }
 
 #[test]
