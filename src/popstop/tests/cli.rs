@@ -25,7 +25,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::mem::{self, MaybeUninit};
 use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::{symlink, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{symlink, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -33,6 +33,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use device_turn::DeviceTurn;
+use gitscratch::testing::executable::write_executable;
 use popstop::background::{CHILD_FLAG, HANDSHAKE_BOUND};
 use popstop::handshake::Handshake;
 use popstop::lock::{acquire, current_holder, HolderRecord, Mode, StartTime, StateDir};
@@ -65,10 +66,6 @@ const LATE_BY: Duration = Duration::from_secs(1);
 
 /// The name of the program that a late copy runs from.
 const PROGRAM_NAME: &str = "popstop";
-
-/// The mode of the script of a late copy. The owner can write it, and each
-/// user can read it and run it.
-const SCRIPT_MODE: u32 = 0o755;
 
 /// The longest time that a test waits for a line of a copy.
 ///
@@ -502,9 +499,11 @@ impl LateCopy {
             shellquote::shell_quote(env!("CARGO_BIN_EXE_popstop"))
         );
         let staged = self.program.with_extension("late");
-        fs::write(&staged, script).expect("write the script");
-        fs::set_permissions(&staged, fs::Permissions::from_mode(SCRIPT_MODE))
-            .expect("let the script run");
+        // `write_executable`, because the copy runs the script. The rename
+        // below does not close the race: a descriptor that a fork copied
+        // still names the file after the rename. On Linux, a script that this
+        // process held open for writing gives `ETXTBSY` at its run.
+        write_executable(&staged, script).expect("write the script");
         // A rename puts the script in place of the link in one step.
         fs::rename(&staged, &self.program).expect("put the script at the path of the program");
         // A read end that opens with O_NONBLOCK opens at once, also when no
