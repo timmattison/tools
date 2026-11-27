@@ -1680,6 +1680,23 @@ fn the_widget_lines_give_the_function_of_each_widget() {
     );
 }
 
+/// zsh writes `--` after the option of `zle` when the name of the widget
+/// starts with `-`. The widget and its function stay the same.
+#[test]
+fn the_widget_lines_skip_the_end_of_the_options() {
+    let starts = starts_of(&[
+        "M WIDGETS",
+        "zle -N -- -x g",
+        "zle -N -- -y",
+        "zle -C -- -c complete-word f",
+        "zle -N -- --",
+    ]);
+    assert_eq!(
+        starts.widgets,
+        text_map(&[("-x", "g"), ("-y", "-y"), ("-c", "f"), ("--", "--")])
+    );
+}
+
 /// `bindkey -M <keymap> -L` writes one `bindkey` command for each key. The
 /// key is the word before the widget, without its quotes. A key in two
 /// keymaps is one key. A string binding (`-s`) starts no widget.
