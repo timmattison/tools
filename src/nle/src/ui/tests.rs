@@ -1236,3 +1236,24 @@ async fn a_chosen_theme_recolors_the_preview() {
     assert!(page.contains(&x_run(11)), "{page}");
     assert!(!page.contains(&x_run(12)), "{page}");
 }
+
+#[tokio::test]
+async fn an_unknown_theme_name_changes_nothing() {
+    let mut window = open_recording().await;
+    let menu = window.theme_menu();
+
+    for name in ["black", "Dracula", ""] {
+        window.choose(menu, name);
+        let page = window.html();
+        assert!(
+            page.contains("class=\"preview-screen\" style=\"background-color:#000000\""),
+            "{name}: {page}"
+        );
+        assert!(
+            page.contains("style=\"color:#ffffff;background-color:#000000\""),
+            "{name}: {page}"
+        );
+        assert!(page.contains(&theme_option(PreviewTheme::Auto, true)));
+        assert!(page.contains(&theme_option(PreviewTheme::Dracula, false)));
+    }
+}
