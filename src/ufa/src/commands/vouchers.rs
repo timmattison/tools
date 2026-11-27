@@ -1794,6 +1794,40 @@ mod creation_tests {
             }),
         );
     }
+
+    /// A creation that the controller answers with a success status and a
+    /// body that `ufa` cannot read can have made the vouchers. The failure
+    /// says so, and names the command that lists them, so that the user does
+    /// not make the vouchers a second time.
+    #[tokio::test]
+    async fn an_unreadable_answer_to_a_creation_says_that_the_vouchers_can_exist() {
+        let controller = TestServer::replying(&json_response("{}")).await;
+        let client = UnifiClient::new(controller.origin(), API_KEY, false)
+            .expect("a loopback URL must build a client");
+
+        let error = handle_vouchers_command(
+            VouchersCommand::Create {
+                count: 1,
+                name: "lobby café".to_string(),
+                time_limit_minutes: 1440,
+                authorized_guest_limit: None,
+                data_usage_limit_mbytes: None,
+                rx_rate_limit_kbps: None,
+                tx_rate_limit_kbps: None,
+            },
+            Some(Uuid::new_v4()),
+            &client,
+            OutputFormat::Json,
+        )
+        .await
+        .expect_err("an answer with no vouchers is a fault");
+
+        let report = format!("{error:#}");
+        assert!(
+            report.contains("can have made the vouchers") && report.contains("ufa vouchers list"),
+            "the failure must say that the vouchers can exist, got {report}"
+        );
+    }
 }
 
 #[cfg(test)]
