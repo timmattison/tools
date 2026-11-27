@@ -329,6 +329,20 @@ fn one_place_is_not_a_finding() {
     }
 }
 
+/// Two unknown places are not known to be one place, thus each one stays.
+#[test]
+fn each_unknown_place_stays() {
+    let a = Some(origin(ZSHRC, Some(1)));
+    for places in [vec![None, None], vec![None, a.clone(), None], vec![None, a]] {
+        let mut defs = empty();
+        alias(&mut defs, "ll", "ls -l", ZSHRC, 1);
+        set_places(&mut defs, "ll", &places);
+        let found = findings(&[], &defs);
+        let finding = only(&found, FindingKind::DefinedMoreThanOnce);
+        assert_eq!(finding.map(|f| &f.places), Some(&places), "places {places:?}");
+    }
+}
+
 /// A suffix alias with two places is a finding, and its name is its marker.
 #[test]
 fn a_suffix_alias_defined_twice_is_a_finding() {
