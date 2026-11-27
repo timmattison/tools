@@ -369,3 +369,33 @@ fn on_a_range_the_screen_before_the_region_counts() {
     let rendered = render_in(80, 24, events.clone(), range(1.0, 10.0)).unwrap();
     assert_eq!(rendered.events, events);
 }
+
+#[test]
+fn a_typo_inside_a_range_goes_and_the_events_after_the_range_move_earlier() {
+    // Mutant that was run: the filter answers `length: span.length`. Then the
+    // events after the range stay at their old times and the test fails.
+    let events = vec![
+        out(0.0, "$ "),
+        input(1.0, "h"),
+        out(1.0, "h"),
+        input(1.5, "r"),
+        out(1.5, "r"),
+        input(2.0, "\x7f"),
+        out(2.0, "\x08 \x08"),
+        input(2.5, "e"),
+        out(2.5, "e"),
+        input(4.0, "\r"),
+        out(4.0, "\r\n"),
+    ];
+    let expected = vec![
+        out(0.0, "$ "),
+        input(1.0, "h"),
+        out(1.0, "h"),
+        input(1.5, "e"),
+        out(1.5, "e"),
+        input(3.0, "\r"),
+        out(3.0, "\r\n"),
+    ];
+    let rendered = render_in(80, 24, events, range(1.0, 3.0)).unwrap();
+    assert_eq!(rendered.events, expected);
+}
