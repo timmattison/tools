@@ -261,3 +261,86 @@ fn a_function_with_no_body_takes_no_part() {
     defs.functions.insert("glog".to_string(), Vec::new());
     assert_eq!(findings(&[], &defs), Vec::new());
 }
+
+/// The second startup file of the tests.
+const MORE: &str = "/home/me/more.zsh";
+
+/// Gives the finding of one kind, which the test expects to be the only one.
+fn only(found: &[Finding], kind: FindingKind) -> Option<&Finding> {
+    let mut of_kind = found.iter().filter(|finding| finding.kind == kind);
+    let first = of_kind.next();
+    assert!(of_kind.next().is_none(), "more than one {kind:?}");
+    first
+}
+
+/// Sets the places that defined the alias `name`.
+fn set_places(defs: &mut Definitions, name: &str, places: &[Option<Origin>]) {
+    defs.alias_places.insert(name.to_string(), places.to_vec());
+}
+
+/// An alias that two startup files define is one finding with each place.
+#[test]
+fn an_alias_defined_twice_is_one_finding_with_both_places() {
+    let mut defs = empty();
+    alias(&mut defs, "ll", "ls -l", MORE, 1);
+    let places = [Some(origin(ZSHRC, Some(1))), Some(origin(MORE, Some(1)))];
+    set_places(&mut defs, "ll", &places);
+    let found = findings(&[row("ll")], &defs);
+    assert_eq!(
+        found,
+        vec![Finding {
+            kind: FindingKind::DefinedMoreThanOnce,
+            definitions: vec![member(
+                "ll",
+                Kind::Alias,
+                Some(origin(MORE, Some(1))),
+                1,
+                true
+            )],
+            words: Vec::new(),
+            places: places.to_vec(),
+            program: None,
+        }]
+    );
+}
+
+/// A place that a later place repeats is dropped, and the last one stays.
+#[test]
+fn a_repeated_place_keeps_its_last_occurrence() {
+    let a = Some(origin(ZSHRC, Some(1)));
+    let b = Some(origin(MORE, Some(1)));
+    let mut defs = empty();
+    alias(&mut defs, "ll", "ls -l", ZSHRC, 1);
+    set_places(&mut defs, "ll", &[a.clone(), b.clone(), a.clone()]);
+    let found = findings(&[], &defs);
+    let finding = only(&found, FindingKind::DefinedMoreThanOnce).unwrap();
+    assert_eq!(finding.places, vec![b, a]);
+}
+
+/// One place, and the same place twice, are not findings.
+#[test]
+fn one_place_is_not_a_finding() {
+    let a = Some(origin(ZSHRC, Some(1)));
+    for places in [vec![a.clone()], vec![a.clone(), a], Vec::new()] {
+        let mut defs = empty();
+        alias(&mut defs, "ll", "ls -l", ZSHRC, 1);
+        set_places(&mut defs, "ll", &places);
+        assert_eq!(findings(&[], &defs), Vec::new(), "places {places:?}");
+    }
+}
+
+/// A suffix alias with two places is a finding, and its name is its marker.
+#[test]
+fn a_suffix_alias_defined_twice_is_a_finding() {
+    let mut defs = empty();
+    defs.aliases.insert_suffix("md", "glow");
+    defs.suffix_places.insert(
+        "md".to_string(),
+        vec![Some(origin(ZSHRC, Some(1))), Some(origin(MORE, Some(2)))],
+    );
+    let found = findings(&[], &defs);
+    let finding = only(&found, FindingKind::DefinedMoreThanOnce).unwrap();
+    assert_eq!(finding.definitions[0].name, "*.md");
+    assert_eq!(finding.definitions[0].kind, Kind::SuffixAlias);
+    assert_eq!(finding.places.len(), 2);
+}
