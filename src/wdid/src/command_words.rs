@@ -1572,3 +1572,15 @@ pub fn parse_line(line: &str, aliases: &Aliases) -> Option<Line> {
         Err(Refused) => None,
     }
 }
+
+/// Gives the words of `text` as the shell splits it. Pure.
+///
+/// A word has its argument form: its literal text after quote removal, or its
+/// raw text when it holds an expansion. An operator gives its text, for
+/// example `|`. Gives `None` when the tokenizer refuses the text or a word
+/// does not parse.
+#[must_use]
+pub fn split_words(text: &str) -> Option<Vec<String>> {
+    let _ = text;
+    None
+}

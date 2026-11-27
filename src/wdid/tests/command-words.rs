@@ -1,7 +1,8 @@
 //! Tests of the command words of one command line.
 
 use wdid::command_words::{
-    command_words, parse_line, AliasDefinition, AliasKind, AliasUse, Aliases, CommandWord, Parsed,
+    command_words, parse_line, split_words, AliasDefinition, AliasKind, AliasUse, Aliases,
+    CommandWord, Parsed,
 };
 
 /// Runs every row of a table. Each row is a line and the value that
@@ -1266,4 +1267,30 @@ fn definitions_keep_a_multibyte_name_and_value() {
             value: "echo 日本語 🎉".to_owned(),
         }]
     );
+}
+
+/// Makes the expected value of `split_words` from its words.
+fn split<const N: usize>(words: [&str; N]) -> Option<Vec<String>> {
+    Some(words.iter().map(|word| (*word).to_owned()).collect())
+}
+
+#[test]
+fn split_words_gives_the_words_in_argument_form() {
+    let rows = [
+        ("git  status", split(["git", "status"])),
+        ("'git' status", split(["git", "status"])),
+        ("ls | less", split(["ls", "|", "less"])),
+        ("echo \"$HOME\"", split(["echo", "\"$HOME\""])),
+        ("\\ls -G", split(["ls", "-G"])),
+        ("echo 'a b'", split(["echo", "a b"])),
+        ("", split([])),
+    ];
+    for (text, expected) in rows {
+        assert_eq!(split_words(text), expected, "text: {text:?}");
+    }
+}
+
+#[test]
+fn split_words_refuses_an_unterminated_quote() {
+    assert_eq!(split_words("echo 'x"), None);
 }
