@@ -135,6 +135,26 @@ impl Writer {
         }
     }
 
+    /// Write to `bytes` the cell at column `x` and row `y` again, with its look.
+    ///
+    /// The write gives the real terminal a pending wrap when the cell is in
+    /// the last column. The pen goes back to the pen before the write. The
+    /// model does not know the place of the cursor after it.
+    pub(super) fn rewrite(&mut self, x: usize, y: usize, glyph: Glyph, bytes: &mut String) {
+        push_cup(bytes, x, y);
+        let pen = self.pen;
+        if pen != Some(glyph.look) {
+            bytes.push_str(&sgr(&glyph.look));
+        }
+        bytes.push(glyph.ch);
+        match pen {
+            Some(pen) if pen != glyph.look => bytes.push_str(&sgr(&pen)),
+            Some(_) => {}
+            None => self.pen = Some(glyph.look),
+        }
+        self.cursor = None;
+    }
+
     /// Write to `bytes` the sequences that bring the cursor to `cursor`, a
     /// `(column, row)` place or `None` for a hidden cursor, and update the
     /// model.

@@ -460,6 +460,8 @@ impl Clone for TerminalState {
             scroll_top: self.scroll_top,
             scroll_bottom: self.scroll_bottom,
             use_acs: self.use_acs,
+            autowrap: self.autowrap,
+            wrap_pending: self.wrap_pending,
             cursor_visible: self.cursor_visible,
             dynamic_palette: self.dynamic_palette.clone(),
             selection_fg: self.selection_fg,
@@ -541,6 +543,10 @@ pub struct TerminalState {
     scroll_bottom: usize,
     // Character set state
     use_acs: bool,
+    // Autowrap mode (DECAWM, mode 7)
+    autowrap: bool,
+    // A character went into the last column with autowrap on
+    wrap_pending: bool,
     // Cursor visibility
     cursor_visible: bool,
     // Dynamic color palette for OSC sequences
@@ -603,6 +609,8 @@ impl TerminalState {
             scroll_top: 0,
             scroll_bottom: height - 1,
             use_acs: false,
+            autowrap: true,
+            wrap_pending: false,
             cursor_visible: true,
             dynamic_palette,
             selection_fg: Some((0, 0, 0)), // Default selection: black on yellow
@@ -687,6 +695,19 @@ impl TerminalState {
     /// on, and `ESC ( B` turns it off.
     pub fn uses_line_drawing(&self) -> bool {
         self.use_acs
+    }
+
+    /// Returns whether autowrap is on (mode 7, DECAWM). `CSI ? 7 h` turns it
+    /// on, and `CSI ? 7 l` turns it off. It is on after `new` and after RIS.
+    pub fn uses_autowrap(&self) -> bool {
+        self.autowrap
+    }
+
+    /// Returns whether a wrap is pending. A character went into the last
+    /// column with autowrap on, and the next printed character goes to the
+    /// start of the next row.
+    pub fn is_wrap_pending(&self) -> bool {
+        self.wrap_pending
     }
 
     /// Returns whether the application has the cursor visible.
@@ -786,7 +807,25 @@ fn is_light_color_terminal(color: (u8, u8, u8)) -> bool {
 }
 
 impl TerminalState {
+    /// Moves the cursor down one row. At the bottom of the scrolling region,
+    /// the region scrolls up.
+    fn line_feed(&mut self) {
+        self.cursor_y += 1;
+        // Check if we need to scroll within the scrolling region
+        if self.cursor_y > self.scroll_bottom {
+            self.scroll_up();
+            self.cursor_y = self.scroll_bottom;
+        }
+    }
+
     fn put_char(&mut self, ch: char) {
+        // A character after the last column goes to the start of the next row.
+        if self.wrap_pending {
+            self.wrap_pending = false;
+            self.cursor_x = 0;
+            self.line_feed();
+        }
+
         // Convert ACS characters to Unicode box drawing if needed
         let display_char = if self.use_acs {
             match ch {
@@ -823,11 +862,12 @@ impl TerminalState {
                 hidden: self.hidden,
                 strikethrough: self.strikethrough,
             };
-            self.cursor_x += 1;
-
-            // Don't auto-wrap at line end - just stop at the edge
-            if self.cursor_x >= self.width {
+            if self.cursor_x + 1 >= self.width {
+                // Stay in the last column. The wrap happens at the next character.
                 self.cursor_x = self.width - 1;
+                self.wrap_pending = self.autowrap;
+            } else {
+                self.cursor_x += 1;
             }
         }
     }
@@ -1092,23 +1132,18 @@ impl TerminalState {
     }
 
     fn execute(&mut self, byte: u8) {
+        // LF, CR, BS and HT move the cursor, so they end a pending wrap.
+        if matches!(byte, b'\n' | b'\r' | b'\x08' | b'\t') {
+            self.wrap_pending = false;
+        }
         match byte {
-            b'\n' => {
-                self.cursor_y += 1;
-                // Check if we need to scroll within the scrolling region
-                if self.cursor_y > self.scroll_bottom {
-                    self.scroll_up();
-                    self.cursor_y = self.scroll_bottom;
-                }
-            }
+            b'\n' => self.line_feed(),
             b'\r' => {
                 self.cursor_x = 0;
             }
             b'\t' => {
-                let spaces = 8 - (self.cursor_x % 8);
-                for _ in 0..spaces {
-                    self.put_char(' ');
-                }
+                // A tab moves the cursor and writes no cell.
+                self.cursor_x = ((self.cursor_x / 8 + 1) * 8).min(self.width - 1);
             }
             b'\x08'
                 // Backspace
@@ -1234,6 +1269,10 @@ impl TerminalState {
                     // DECSET - Set Mode
                     for param in params.iter().flatten() {
                         match *param {
+                            7 => {
+                                self.autowrap = true;
+                                self.wrap_pending = false;
+                            }
                             25 => self.cursor_visible = true,
                             1049 => {
                                 self.saved_cursor_x = self.cursor_x;
@@ -1248,8 +1287,13 @@ impl TerminalState {
                     // DECRST - Reset Mode
                     for param in params.iter().flatten() {
                         match *param {
+                            7 => {
+                                self.autowrap = false;
+                                self.wrap_pending = false;
+                            }
                             25 => self.cursor_visible = false,
                             1049 => {
+                                self.wrap_pending = false;
                                 self.cursor_x = self.saved_cursor_x;
                                 self.cursor_y = self.saved_cursor_y;
                             }
@@ -1260,6 +1304,33 @@ impl TerminalState {
                 _ => {}
             }
             return;
+        }
+
+        // Each cursor move and each edit ends a pending wrap. SGR, save
+        // cursor, scroll, and the device attributes request do not.
+        if matches!(
+            action,
+            'H' | 'f'
+                | 'A'
+                | 'B'
+                | 'C'
+                | 'D'
+                | 'E'
+                | 'F'
+                | 'G'
+                | '`'
+                | 'd'
+                | 'J'
+                | 'K'
+                | 'X'
+                | 'P'
+                | '@'
+                | 'L'
+                | 'M'
+                | 'r'
+                | 'u'
+        ) {
+            self.wrap_pending = false;
         }
 
         match action {
@@ -1529,6 +1600,10 @@ impl TerminalState {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        // DECRC, IND, NEL, RI and RIS move the cursor, so they end a pending wrap.
+        if matches!(byte, b'8' | b'D' | b'E' | b'M' | b'c') {
+            self.wrap_pending = false;
+        }
         match byte {
             b'7' => {
                 // Save cursor position (DECSC)
@@ -1600,6 +1675,8 @@ impl TerminalState {
                 self.strikethrough = false;
                 self.cursor_visible = true;
                 self.use_acs = false;
+                self.autowrap = true;
+                self.wrap_pending = false;
             }
             _ => {
                 // Ignore unhandled escape sequences

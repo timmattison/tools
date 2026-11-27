@@ -767,12 +767,15 @@ fn a_line_longer_than_the_screen_wraps_to_the_next_row() {
     assert_eq!(row_text(&state, 0), "abcde");
     assert_eq!(row_text(&state, 1), "fg");
     assert_eq!(state.get_cursor_position(), (2, 1));
+    assert!(state.uses_autowrap());
+    assert!(!state.is_wrap_pending());
 }
 
 #[test]
 fn a_character_in_the_last_column_keeps_the_cursor_there_until_the_next_character() {
     let state = feed_on(5, 3, "abcde");
     assert_eq!(state.get_cursor_position(), (4, 0));
+    assert!(state.is_wrap_pending());
 
     let state = feed_on(5, 3, "abcde\r\nX");
     assert_eq!(row_text(&state, 0), "abcde");
@@ -807,6 +810,8 @@ fn with_autowrap_off_each_character_after_the_last_column_overwrites_it() {
     assert_eq!(row_text(&state, 0), "abcdg");
     assert_eq!(row_text(&state, 1), "");
     assert_eq!(state.get_cursor_position(), (4, 0));
+    assert!(!state.is_wrap_pending());
+    assert!(!state.uses_autowrap());
 }
 
 #[test]
@@ -815,6 +820,24 @@ fn ris_turns_autowrap_on_again() {
 
     assert_eq!(row_text(&state, 0), "abcde");
     assert_eq!(row_text(&state, 1), "fg");
+    assert!(state.uses_autowrap());
+}
+
+#[test]
+fn a_clone_keeps_the_autowrap_mode_and_the_pending_wrap() {
+    let state = feed_on(5, 3, "\x1b[?7labcde");
+    let copy = state.clone();
+    assert_eq!(copy.uses_autowrap(), state.uses_autowrap());
+    assert_eq!(copy.is_wrap_pending(), state.is_wrap_pending());
+    assert!(!copy.uses_autowrap());
+    assert!(!copy.is_wrap_pending());
+
+    let state = feed_on(5, 3, "abcde");
+    let copy = state.clone();
+    assert_eq!(copy.uses_autowrap(), state.uses_autowrap());
+    assert_eq!(copy.is_wrap_pending(), state.is_wrap_pending());
+    assert!(copy.uses_autowrap());
+    assert!(copy.is_wrap_pending());
 }
 
 #[test]

@@ -6506,8 +6506,9 @@ On the region `All`, the rendered recording gets the size of the visible cells:
 a hidden row or column goes out, and the cells after it move up or left. On a
 range, the size stays, each cell keeps its place, and each cell that is not
 visible is blank during the range. At the end of the range, the filter writes
-the full screen again, and it sets the scrolling region, the pen, the saved
-cursor, the character set, and the cursor back to the state of the recording.
+the full screen again, and it sets the scrolling region, the autowrap mode, the
+pen, the saved cursor, a pending wrap, the character set, and the cursor back to
+the state of the recording.
 
 An unknown key fails the render. A crop that does not start before its end, a
 crop or a hidden number that is not on the screen, and options that leave no

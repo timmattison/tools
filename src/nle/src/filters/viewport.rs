@@ -49,11 +49,14 @@
 //! - At the end of a range that is not open (time `view.region.length`), it
 //!   writes one output event that gives the full screen back and sets the
 //!   state of the terminal to the state of the emulator, in this order: the
-//!   cells that differ, the scrolling region (DECSTBM), the pen (one SGR),
-//!   the saved cursor position (a CUP, then `ESC 7`), the line-drawing
-//!   character set (`ESC ( 0`, when the emulator uses it), the cursor (a CUP,
-//!   then mode 25), and last the start of the escape sequence that is open at
-//!   the end of the range. Thus an event after the range that finishes the
+//!   cells that differ, the scrolling region (DECSTBM), the autowrap mode
+//!   (mode 7), the pen (one SGR), the saved cursor position (a CUP, then
+//!   `ESC 7`), the pending wrap (the cell at the cursor again, when the
+//!   emulator has a wrap pending), the line-drawing character set
+//!   (`ESC ( 0`, when the emulator uses it), the cursor (a CUP, then mode 25),
+//!   and last the start of the escape sequence that is open at the end of the
+//!   range. The cursor gets a CUP only when no wrap is pending, because a CUP
+//!   ends a pending wrap. Thus an event after the range that finishes the
 //!   sequence finishes it in the real terminal too. A range that is open has
 //!   no restore.
 //!
@@ -95,6 +98,10 @@ const ASCII_SET: &str = "\x1b(B";
 const LINE_DRAWING_SET: &str = "\x1b(0";
 /// The sequence that saves the cursor position.
 const SAVE_CURSOR: &str = "\x1b7";
+/// The sequence that turns autowrap on (mode 7, DECAWM).
+const AUTOWRAP_ON: &str = "\x1b[?7h";
+/// The sequence that turns autowrap off (mode 7, DECAWM).
+const AUTOWRAP_OFF: &str = "\x1b[?7l";
 
 /// The kind of the viewport filter.
 pub const VIEWPORT: &str = "viewport";
@@ -425,17 +432,40 @@ impl Replay {
             top.saturating_add(1),
             bottom.saturating_add(1)
         ));
+        data.push_str(if self.terminal.uses_autowrap() {
+            AUTOWRAP_ON
+        } else {
+            AUTOWRAP_OFF
+        });
         let pen = pen_of(&self.terminal);
         data.push_str(&writer::sgr(&pen));
         self.writer.set_pen(pen);
         let (saved_x, saved_y) = self.terminal.saved_cursor_position();
         data.push_str(&writer::cup(saved_x, saved_y));
         data.push_str(SAVE_CURSOR);
+        let (cursor_x, cursor_y) = self.terminal.get_cursor_position();
+        // The real terminal holds a pending wrap only after it writes the
+        // character in the last column again. This step comes before the
+        // line-drawing set, because the real terminal is in the ASCII set.
+        let wrap_pending = self.terminal.is_wrap_pending();
+        if wrap_pending {
+            let glyph = self
+                .terminal
+                .get_grid()
+                .get(cursor_y)
+                .and_then(|cells| cells.get(cursor_x))
+                .map(glyph_of);
+            if let Some(glyph) = glyph {
+                self.writer.rewrite(cursor_x, cursor_y, glyph, &mut data);
+            }
+        }
         if self.terminal.uses_line_drawing() {
             data.push_str(LINE_DRAWING_SET);
         }
-        let (cursor_x, cursor_y) = self.terminal.get_cursor_position();
-        data.push_str(&writer::cup(cursor_x, cursor_y));
+        // A CUP ends a pending wrap, so a pending wrap gets none.
+        if !wrap_pending {
+            data.push_str(&writer::cup(cursor_x, cursor_y));
+        }
         data.push_str(if self.terminal.is_cursor_visible() {
             SHOW_CURSOR
         } else {

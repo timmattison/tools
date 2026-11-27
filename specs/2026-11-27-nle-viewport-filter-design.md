@@ -133,11 +133,15 @@ sets the state of the terminal back to the state of the emulator:
 
 1. The cells that differ from the full screen.
 2. The scrolling region, with DECSTBM.
-3. The pen, with one SGR.
-4. The saved cursor position: CUP to it, then `ESC 7`.
-5. The line-drawing character set, with `ESC ( 0`, when the emulator uses it.
-6. The cursor position, with CUP, and the visibility, with mode 25.
-7. The start of the escape sequence that is open at the end of the range.
+3. The autowrap mode (mode 7): `CSI ? 7 h` or `CSI ? 7 l`.
+4. The pen, with one SGR.
+5. The saved cursor position: CUP to it, then `ESC 7`.
+6. The pending wrap, when the emulator has one: the cell at the cursor again,
+   with its look. Then the real terminal holds the pending wrap too.
+7. The line-drawing character set, with `ESC ( 0`, when the emulator uses it.
+8. The cursor position, with CUP, but not when a wrap is pending, because a
+   CUP ends a pending wrap. Then the visibility, with mode 25.
+9. The start of the escape sequence that is open at the end of the range.
    Thus an event after the range that finishes the sequence finishes it in
    the real terminal too.
 
