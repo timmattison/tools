@@ -188,3 +188,59 @@ fn a_filter_with_bad_options_has_no_scheme() {
 
     assert_eq!(scheme_of(&filter), None);
 }
+
+// Tests of the color math.
+
+/// The palette of Solarized Light.
+fn solarized_light_palette() -> [Rgb; THEME_COLORS] {
+    Converter::new(&ColorScheme::new(PreviewTheme::SolarizedLight)).palette
+}
+
+#[test]
+fn the_nearest_color_is_the_palette_color_at_the_smallest_distance() {
+    let palette = solarized_light_palette();
+
+    assert_eq!(nearest(&palette, (255, 0, 0)), (220, 50, 47));
+    assert_eq!(nearest(&palette, (38, 139, 210)), (38, 139, 210));
+    assert_eq!(nearest(&palette, (0, 0, 0)), palette[0]);
+}
+
+#[test]
+fn a_tie_in_the_nearest_color_goes_to_the_lower_index() {
+    let mut palette = [(200, 200, 200); THEME_COLORS];
+    palette[2] = (0, 0, 0);
+    palette[5] = (10, 0, 0);
+
+    assert_eq!(nearest(&palette, (5, 0, 0)), (0, 0, 0));
+}
+
+#[test]
+fn inverting_the_lightness_of_white_and_black_swaps_them() {
+    assert_eq!(invert_lightness((255, 255, 255)), (0, 0, 0));
+    assert_eq!(invert_lightness((0, 0, 0)), (255, 255, 255));
+}
+
+#[test]
+fn inverting_the_lightness_keeps_a_pure_hue() {
+    assert_eq!(invert_lightness((255, 0, 0)), (255, 0, 0));
+}
+
+#[test]
+fn inverting_the_lightness_of_a_dark_color_gives_a_light_one() {
+    assert_eq!(invert_lightness((40, 42, 54)), (201, 203, 215));
+}
+
+#[test]
+fn inverting_the_lightness_twice_gives_the_color_back() {
+    for color in [(40, 42, 54), (1, 2, 3), (250, 100, 7), (128, 128, 128)] {
+        assert_eq!(invert_lightness(invert_lightness(color)), color);
+    }
+}
+
+#[test]
+fn a_gray_index_mirrors_inside_the_ramp() {
+    assert_eq!(invert_gray(232), 255);
+    assert_eq!(invert_gray(255), 232);
+    assert_eq!(invert_gray(243), 244);
+    assert_eq!(invert_gray(244), 243);
+}
