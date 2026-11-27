@@ -194,3 +194,18 @@ fn a_backspace_that_erases_text_no_typed_key_wrote_stays() {
     let events = vec![out(0.0, "$ abc"), input(1.0, "\x7f"), out(1.0, "\x08 \x08")];
     assert_eq!(run(events.clone()), events);
 }
+
+#[test]
+fn a_backspace_that_changes_nothing_on_the_screen_goes_with_its_output() {
+    let events = vec![
+        out(0.0, "$ "),
+        input(1.0, "\x7f"),
+        out(1.0, "\x07"),
+        input(2.0, "l"),
+        out(2.0, "l"),
+    ];
+    assert_eq!(
+        run(events),
+        vec![out(0.0, "$ "), input(1.0, "l"), out(1.0, "l")]
+    );
+}
