@@ -105,10 +105,10 @@ const MIN_SNAPSHOT_INTERVAL: f64 = 1.0;
 const MIN_EVENTS_PER_SNAPSHOT: usize = 1000;
 
 /// The most columns that a preview draws.
-const MAX_COLUMNS: usize = 500;
+pub(crate) const MAX_COLUMNS: usize = 500;
 
 /// The most rows that a preview draws.
-const MAX_ROWS: usize = 500;
+pub(crate) const MAX_ROWS: usize = 500;
 
 /// The grid size of the preview for `recording`, as `(columns, rows)`.
 ///

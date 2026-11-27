@@ -3,6 +3,7 @@
 pub mod cursor;
 pub mod time_dilation;
 pub mod typing_speed;
+pub mod viewport;
 
 use crate::pipeline::FilterRegistry;
 
@@ -14,6 +15,7 @@ pub fn registry() -> FilterRegistry {
     cursor::register(&mut registry);
     time_dilation::register(&mut registry);
     typing_speed::register(&mut registry);
+    viewport::register(&mut registry);
     registry
 }
 
