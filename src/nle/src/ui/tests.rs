@@ -1211,3 +1211,28 @@ async fn the_theme_menu_lists_the_five_themes() {
         .collect();
     assert!(menu.ends_with(&listed), "{menu}");
 }
+
+#[tokio::test]
+async fn a_chosen_theme_recolors_the_preview() {
+    let mut window = open_recording().await;
+    let control = window.playhead_control();
+    window.type_into(control, "1.0");
+
+    window.choose(window.theme_menu(), "dracula");
+
+    let page = window.html();
+    assert!(
+        page.contains("class=\"preview-screen\" style=\"background-color:#282a36\""),
+        "{page}"
+    );
+    assert!(
+        page.contains("style=\"color:#f8f8f2;background-color:#282a36\""),
+        "{page}"
+    );
+    let terminal = text_between(&page, "class=\"terminal\"", "<div class=\"timeline\">");
+    assert!(!terminal.contains("background-color:#000000"), "{terminal}");
+    assert!(page.contains(&theme_option(PreviewTheme::Dracula, true)));
+    assert!(page.contains(&theme_option(PreviewTheme::Auto, false)));
+    assert!(page.contains(&x_run(11)), "{page}");
+    assert!(!page.contains(&x_run(12)), "{page}");
+}
