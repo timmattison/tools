@@ -4,6 +4,8 @@ pub mod cursor;
 pub mod time_dilation;
 pub mod typing_speed;
 
+mod splice;
+
 use crate::pipeline::FilterRegistry;
 
 /// A registry that holds every filter that ships with the app, under its

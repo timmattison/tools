@@ -26,7 +26,8 @@
 
 use serde::Deserialize;
 
-use crate::ansi::{Scanner, Sequence, Step};
+use super::splice::{SequenceEditor, Splicer, ST};
+use crate::ansi::Sequence;
 use crate::pipeline::{FilterRegistry, RegionView};
 use crate::types::{Event, EventType, FilterKind, FilterOptions, Seconds};
 
@@ -61,8 +62,6 @@ const RESET_CURSOR_COLOR: usize = 112;
 /// The OSC numbers of the dynamic colors. A list of values after one of them
 /// sets that color and the next ones, so a list can reach `CURSOR_COLOR`.
 const DYNAMIC_COLORS: std::ops::RangeInclusive<usize> = 10..=19;
-/// The terminator of each OSC that the filter writes.
-const ST: &str = "\x1b\\";
 
 /// The cursor filter.
 ///
@@ -88,7 +87,46 @@ fn filter(
     if cursor.owns_nothing() {
         return Ok(events.to_vec());
     }
-    Ok(Rewriter::new(&cursor).run(events, region))
+    // An event at the start of such a region sets nothing that a frame
+    // shows.
+    if events.is_empty() && (region.open || region.length <= 0.0) {
+        return Ok(Vec::new());
+    }
+    let mut editor = CursorEditor::new(&cursor);
+    let start = editor.emissions(Target::Wanted);
+    let mut splicer = Splicer::new();
+    for (event, linked) in events.iter().zip(burst_links(events, cursor.show)) {
+        match event.event_type {
+            EventType::Input => splicer.pass(event),
+            EventType::Output => {
+                let index = splicer.open_output(event.time);
+                if linked && !editor.in_burst {
+                    editor.in_burst = true;
+                    splicer.settle(index, &mut editor);
+                }
+                splicer.read(index, &event.data, &mut editor);
+                if !linked && editor.in_burst {
+                    editor.in_burst = false;
+                    splicer.settle(index, &mut editor);
+                }
+            }
+        }
+    }
+    Ok(splicer.finish(
+        start,
+        |open| {
+            let mut text = if open {
+                editor.emissions(Target::Wanted)
+            } else {
+                String::new()
+            };
+            if !region.open {
+                text.push_str(&editor.emissions(Target::Recording));
+            }
+            text
+        },
+        region.length,
+    ))
 }
 
 /// The visibility in the project file.
@@ -306,10 +344,10 @@ enum Target {
     Recording,
 }
 
-/// The rewrite of the events of one region.
-struct Rewriter<'a> {
+/// The cursor state that the filter follows while a `Splicer` rewrites the
+/// events of one region.
+struct CursorEditor<'a> {
     cursor: &'a Cursor,
-    scanner: Scanner,
     /// The state that the recording sets.
     recording: CursorState,
     /// The visibility that the answer set last, or `None` when it is not
@@ -323,24 +361,12 @@ struct Rewriter<'a> {
     /// True from the start of the first event of a burst to the end of its
     /// last event.
     in_burst: bool,
-    /// The answer.
-    out: Vec<Event>,
-    /// Where each piece of the open sequence starts: the index of its event
-    /// in `out`, and the byte offset in the data of that event. Each piece
-    /// runs to the end of that data.
-    pieces: Vec<(usize, usize)>,
-    /// Where the last character went, as a piece.
-    last: (usize, usize),
-    /// True when the start of the open sequence ended an earlier sequence of
-    /// the stream, through a restart or a break of an OSC or a string.
-    ends_open: bool,
 }
 
-impl<'a> Rewriter<'a> {
+impl<'a> CursorEditor<'a> {
     fn new(cursor: &'a Cursor) -> Self {
         Self {
             cursor,
-            scanner: Scanner::new(),
             recording: CursorState::default(),
             // Smart starts where the recording is, so it sets nothing at the
             // start.
@@ -351,237 +377,6 @@ impl<'a> Rewriter<'a> {
             shown_style: None,
             shown_color: None,
             in_burst: false,
-            out: Vec::new(),
-            pieces: Vec::new(),
-            last: (0, 0),
-            ends_open: false,
-        }
-    }
-
-    /// The answer of the filter for `events`.
-    fn run(mut self, events: &[Event], region: RegionView) -> Vec<Event> {
-        // An event at the start of such a region sets nothing that a frame
-        // shows.
-        if events.is_empty() && (region.open || region.length <= 0.0) {
-            return Vec::new();
-        }
-        let start = self.emissions(Target::Wanted);
-        let links = burst_links(events, self.cursor.show);
-        for (event, linked) in events.iter().zip(links) {
-            match event.event_type {
-                EventType::Input => self.out.push(event.clone()),
-                EventType::Output => self.output(event, linked),
-            }
-        }
-
-        if let Some(&(index, offset)) = self.pieces.first() {
-            // A sequence is open at the end, so nothing could go after it.
-            // Put the rest before it.
-            let mut rest = self.emissions(Target::Wanted);
-            if !region.open {
-                rest.push_str(&self.emissions(Target::Recording));
-            }
-            if let Some(event) = self.out.get_mut(index) {
-                event.data.insert_str(offset, &rest);
-            }
-        } else if !region.open {
-            let restore = self.emissions(Target::Recording);
-            if !restore.is_empty() {
-                self.out.push(output_event(region.length, restore));
-            }
-        }
-        if !start.is_empty() {
-            self.out.insert(0, output_event(0.0, start));
-        }
-        self.out
-    }
-
-    /// Rewrite one output event into `out`. `linked` is true when the event
-    /// is in a burst with the next output event.
-    fn output(&mut self, event: &Event, linked: bool) {
-        let index = self.out.len();
-        self.out.push(output_event(event.time, String::new()));
-        if linked && !self.in_burst {
-            self.in_burst = true;
-            self.sync(index);
-        }
-        for c in event.data.chars() {
-            let step = self.scanner.feed(c);
-            self.take(step, c, index);
-        }
-        if !linked && self.in_burst {
-            self.in_burst = false;
-            self.sync(index);
-        }
-    }
-
-    /// Bring the end of the event at `index` to the wanted state. While a
-    /// sequence is open, nothing goes out, because a sequence inside it would
-    /// break it. The change then waits for the end of that sequence, or for
-    /// the end of the region.
-    fn sync(&mut self, index: usize) {
-        if self.scanner.is_pending() {
-            return;
-        }
-        let wanted = self.emissions(Target::Wanted);
-        if let Some(data) = self.data(index) {
-            data.push_str(&wanted);
-        }
-    }
-
-    /// Put `c` into the event at `index` of `out`, by its `step`.
-    fn take(&mut self, step: Step, c: char, index: usize) {
-        match step {
-            Step::Text => self.push(index, c),
-            Step::Pending => {
-                self.mark(index);
-                self.push(index, c);
-            }
-            Step::Done(sequence) => {
-                self.mark(index);
-                self.push(index, c);
-                self.finish(&sequence, index);
-                self.ends_open = false;
-                self.sync(index);
-            }
-            Step::Ignored => {
-                self.push(index, c);
-                self.ends_open = false;
-                self.pieces.clear();
-                self.sync(index);
-            }
-            Step::Aborted => {
-                self.ends_open = false;
-                self.pieces.clear();
-                self.push(index, c);
-                self.sync(index);
-            }
-            Step::Restarted => {
-                self.ends_open = true;
-                self.pieces.clear();
-                self.mark(index);
-                self.push(index, c);
-            }
-            Step::EscapeBreak(inner) => {
-                // The ESC before `c` starts the new sequence.
-                self.ends_open = true;
-                self.pieces.clear();
-                self.pieces.push(self.last);
-                self.take(*inner, c, index);
-            }
-        }
-    }
-
-    /// The data of the event at `index` of `out`.
-    fn data(&mut self, index: usize) -> Option<&mut String> {
-        self.out.get_mut(index).map(|event| &mut event.data)
-    }
-
-    /// Append `c` to the event at `index`.
-    fn push(&mut self, index: usize, c: char) {
-        if let Some(event) = self.out.get_mut(index) {
-            self.last = (index, event.data.len());
-            event.data.push(c);
-        }
-    }
-
-    /// Start a piece of the open sequence in the event at `index`, when the
-    /// sequence has no piece there yet.
-    fn mark(&mut self, index: usize) {
-        if self.pieces.last().map(|piece| piece.0) != Some(index) {
-            let offset = self.data(index).map_or(0, |data| data.len());
-            self.pieces.push((index, offset));
-        }
-    }
-
-    /// The sequence that completed in the event at `index`: rewrite it when
-    /// it sets a part of the cursor that the filter owns.
-    fn finish(&mut self, sequence: &Sequence, index: usize) {
-        let pieces = std::mem::take(&mut self.pieces);
-        if let Some(replacement) = self.rewrite(sequence) {
-            for &(piece, offset) in &pieces {
-                if let Some(data) = self.data(piece) {
-                    data.truncate(offset);
-                }
-            }
-            // The start of the dropped sequence ended an earlier one. An ST
-            // where that start was ends an open OSC or string, and the
-            // rest of the stream stays outside it.
-            if self.ends_open {
-                if let Some(&(first, _)) = pieces.first() {
-                    if let Some(data) = self.data(first) {
-                        data.push_str(ST);
-                    }
-                }
-            }
-            if let Some(data) = self.data(index) {
-                data.push_str(&replacement);
-            }
-        }
-    }
-
-    /// Follow the state that `sequence` sets in the recording. Returns the
-    /// text that replaces the sequence, or `None` when it stays.
-    fn rewrite(&mut self, sequence: &Sequence) -> Option<String> {
-        match sequence {
-            // A DEC private mode set (h), reset (l), save (s), or restore
-            // (r).
-            Sequence::Csi {
-                params,
-                intermediates,
-                final_char: final_char @ ('h' | 'l' | 's' | 'r'),
-                controls,
-            } if intermediates.is_empty() => {
-                let modes = params.strip_prefix('?')?;
-                self.dec_modes(modes, *final_char, controls)
-            }
-            // DECSTR, the soft reset, shows the cursor.
-            Sequence::Csi {
-                params,
-                intermediates,
-                final_char: 'p',
-                ..
-            } if params.is_empty() && intermediates == "!" => {
-                self.recording.visible = true;
-                self.shown_visible = Some(true);
-                None
-            }
-            // DECSCUSR.
-            Sequence::Csi {
-                params,
-                intermediates,
-                final_char: 'q',
-                controls,
-            } if intermediates == " " && self.cursor.owns_style() => {
-                // A terminal reads the first parameter. A value that it does
-                // not know changes nothing, but the filter drops it too.
-                let first = params.split(';').next().unwrap_or_default();
-                let value: Option<u64> = if first.is_empty() {
-                    Some(0)
-                } else {
-                    first.parse().ok()
-                };
-                if let Some(style) = value
-                    .and_then(|value| u16::try_from(value).ok())
-                    .filter(|style| *style <= LAST_STYLE)
-                {
-                    self.recording.style = style;
-                    self.recording.blink_mode = None;
-                }
-                Some(controls.clone())
-            }
-            Sequence::Osc { text, terminator } if self.cursor.color.is_some() => {
-                self.osc_colors(text, terminator)
-            }
-            // RIS, the full reset.
-            Sequence::Escape('c') => {
-                self.recording = CursorState::default();
-                self.shown_visible = Some(true);
-                self.shown_style = Some(0);
-                self.shown_color = Some(CursorColor::Default);
-                None
-            }
-            _ => None,
         }
     }
 
@@ -763,6 +558,79 @@ impl<'a> Rewriter<'a> {
     }
 }
 
+/// The cursor filter reads the sequences of the recording through this
+/// editor, and its restore is what the splicer settles.
+impl SequenceEditor for CursorEditor<'_> {
+    /// Follow the state that `sequence` sets in the recording. Returns the
+    /// text that replaces the sequence, or `None` when it stays.
+    fn rewrite(&mut self, sequence: &Sequence) -> Option<String> {
+        match sequence {
+            // A DEC private mode set (h), reset (l), save (s), or restore
+            // (r).
+            Sequence::Csi {
+                params,
+                intermediates,
+                final_char: final_char @ ('h' | 'l' | 's' | 'r'),
+                controls,
+            } if intermediates.is_empty() => {
+                let modes = params.strip_prefix('?')?;
+                self.dec_modes(modes, *final_char, controls)
+            }
+            // DECSTR, the soft reset, shows the cursor.
+            Sequence::Csi {
+                params,
+                intermediates,
+                final_char: 'p',
+                ..
+            } if params.is_empty() && intermediates == "!" => {
+                self.recording.visible = true;
+                self.shown_visible = Some(true);
+                None
+            }
+            // DECSCUSR.
+            Sequence::Csi {
+                params,
+                intermediates,
+                final_char: 'q',
+                controls,
+            } if intermediates == " " && self.cursor.owns_style() => {
+                // A terminal reads the first parameter. A value that it does
+                // not know changes nothing, but the filter drops it too.
+                let first = params.split(';').next().unwrap_or_default();
+                let value: Option<u64> = if first.is_empty() {
+                    Some(0)
+                } else {
+                    first.parse().ok()
+                };
+                if let Some(style) = value
+                    .and_then(|value| u16::try_from(value).ok())
+                    .filter(|style| *style <= LAST_STYLE)
+                {
+                    self.recording.style = style;
+                    self.recording.blink_mode = None;
+                }
+                Some(controls.clone())
+            }
+            Sequence::Osc { text, terminator } if self.cursor.color.is_some() => {
+                self.osc_colors(text, terminator)
+            }
+            // RIS, the full reset.
+            Sequence::Escape('c') => {
+                self.recording = CursorState::default();
+                self.shown_visible = Some(true);
+                self.shown_style = Some(0);
+                self.shown_color = Some(CursorColor::Default);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn settle(&mut self) -> String {
+        self.emissions(Target::Wanted)
+    }
+}
+
 /// For each event, true when it is an output event in a burst with the next
 /// output event: that event comes less than the burst gap after it, and no
 /// input event comes between them. All false unless `show` is smart.
@@ -789,15 +657,6 @@ fn burst_links(events: &[Event], show: Show) -> Vec<bool> {
         }
     }
     links
-}
-
-/// An output event at `time` with `data`.
-fn output_event(time: f64, data: String) -> Event {
-    Event {
-        time,
-        event_type: EventType::Output,
-        data,
-    }
 }
 
 #[cfg(test)]
