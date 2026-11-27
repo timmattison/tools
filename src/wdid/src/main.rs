@@ -136,7 +136,8 @@ struct DefsArgs {
     /// flag, the text report also shows the others, grouped by the file that
     /// defined them, and the functions whose name starts with `_`. Without
     /// this flag, the duplicates and shadows show only a finding that holds
-    /// one or more of my definitions. With it, they show each finding.
+    /// one or more of my definitions or one of my places. With it, they show
+    /// each finding.
     #[arg(long)]
     all: bool,
 }
