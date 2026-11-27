@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use wait_timeout::ChildExt;
 
 use crate::command_words::{command_words, AliasDefinition, Aliases, CommandWord, Parsed};
-use crate::origin::{Origin, Places};
+use crate::origin::{place, Origin, Places};
 use crate::rules::{runs, Run};
 use crate::tool::{ToolName, ToolNames};
 
@@ -39,6 +39,47 @@ const FUNCTION_LABEL: &str = "FUNCTION";
 /// The text that follows the marker on the line that ends the output.
 const END_LABEL: &str = "END";
 
+/// The text that follows the marker on the line that gives the home directory
+/// of the shell after its start. The path follows this text.
+const HOME_LABEL: &str = "HOME";
+
+/// The text that follows the marker on the line that gives the oh-my-zsh
+/// directory (`$ZSH`). The path follows this text.
+const ZSH_LABEL: &str = "ZSH";
+
+/// The text that follows the marker on the line that gives the custom
+/// directory of oh-my-zsh (`$ZSH_CUSTOM`). The path follows this text.
+const ZSH_CUSTOM_LABEL: &str = "ZSH_CUSTOM";
+
+/// The text that follows the marker on the line that starts the origin of a
+/// regular or a global alias. The name of the alias follows this text.
+const ALIAS_ORIGIN_LABEL: &str = "ALIAS_ORIGIN";
+
+/// The text that follows the marker on the line that starts the origin of a
+/// suffix alias. The suffix follows this text.
+const SUFFIX_ORIGIN_LABEL: &str = "SUFFIX_ORIGIN";
+
+/// The text that follows the marker on the line that gives the origin of the
+/// alias or the function that the line before it names. The origin follows
+/// this text: `file:line` for an alias, the file for a function, or nothing
+/// when the shell keeps no origin.
+const ORIGIN_LABEL: &str = "ORIGIN";
+
+/// The zsh table that the wrapper function `alias` fills: the `file:line` of
+/// each regular and each global alias, by name.
+pub(crate) const ALIAS_ORIGINS_TABLE: &str = "__wdid_alias_origins";
+
+/// The zsh table that the wrapper function `alias` fills: the `file:line` of
+/// each suffix alias, by suffix.
+pub(crate) const SUFFIX_ORIGINS_TABLE: &str = "__wdid_suffix_origins";
+
+/// The loop variable of the loops of the zsh script that print the origins of
+/// the aliases.
+const ORIGIN_LOOP_VARIABLE: &str = "__wdid_alias";
+
+/// The variable of the bash script that holds the text of `declare -F`.
+const BASH_ORIGIN_VARIABLE: &str = "__wdid_origin";
+
 /// The name of the loop variable in the script. It is unlikely to clash with a
 /// name that the person uses.
 const LOOP_VARIABLE: &str = "__wdid_function";
@@ -51,6 +92,14 @@ const LOOP_VARIABLE: &str = "__wdid_function";
 /// registers those functions, nobody types them, and their bodies do not
 /// parse by the hundred.
 const AUTOLOAD_PATTERN: &str = "[^_]*";
+
+/// The pattern of the autoloaded zsh functions whose file the script finds
+/// without a load: the names that [`AUTOLOAD_PATTERN`] skips.
+///
+/// zsh gives no file for a stub until it finds the file. `autoload -Ur -m`
+/// finds the file of each stub, loads no body, and keeps each defined
+/// function as it is.
+const PRIVATE_AUTOLOAD_PATTERN: &str = "_*";
 
 /// The command word of every alias line.
 const ALIAS_COMMAND: &str = "alias";
@@ -149,37 +198,78 @@ impl Marker {
 ///
 /// The zsh script lists the regular and the global aliases with `alias -L`,
 /// and the suffix aliases with `alias -sL`, because `alias -L` does not list
-/// them. Bash has no global or suffix alias.
+/// them. Bash has no global or suffix alias. Before the listing, the zsh
+/// script removes the wrapper function `alias` that [`read`] defines, so the
+/// listing holds no such function and the builtin lists the aliases.
 ///
 /// The zsh script loads the autoloaded functions first, so a function that
 /// the shell did not load yet counts through its body. This runs no code. The
 /// script skips the functions whose name starts with `_` (see
-/// [`AUTOLOAD_PATTERN`]). Bash has no autoload, so its script does not change.
+/// [`AUTOLOAD_PATTERN`]), and it finds only their files. Bash has no
+/// autoload.
+///
+/// Each script gives the origin of each function, and the home directory. The
+/// zsh script also gives the origin of each alias that the wrapper function
+/// recorded, and the oh-my-zsh directories. Bash keeps no origin for an alias.
+/// The bash script turns off the `DEBUG` trap before `extdebug`, because
+/// `extdebug` skips the next command when that trap fails.
 #[must_use]
 pub fn script(kind: ShellKind, marker: &Marker) -> String {
     let marker = marker.as_str();
     match kind {
         ShellKind::Zsh => format!(
             "print -r -- '{marker} {ALIASES_LABEL}'\n\
+             if (( ${{+functions[{ALIAS_COMMAND}]}} )); then unfunction {ALIAS_COMMAND}; fi\n\
+             zmodload zsh/parameter 2>/dev/null || :\n\
              alias -L\n\
              alias -sL\n\
+             print -r -- \"{marker} {HOME_LABEL} ${{HOME-}}\"\n\
+             print -r -- \"{marker} {ZSH_LABEL} ${{ZSH-}}\"\n\
+             print -r -- \"{marker} {ZSH_CUSTOM_LABEL} ${{ZSH_CUSTOM-}}\"\n\
+             {alias_origins}\
+             {suffix_origins}\
              autoload +X -m '{AUTOLOAD_PATTERN}' 2>/dev/null || :\n\
+             autoload -Ur -m '{PRIVATE_AUTOLOAD_PATTERN}' >/dev/null 2>&1 || :\n\
              for {LOOP_VARIABLE} in ${{(ok)functions}}; do\n\
              \x20 print -r -- \"{marker} {FUNCTION_LABEL} ${LOOP_VARIABLE}\"\n\
+             \x20 print -r -- \"{marker} {ORIGIN_LABEL} ${{functions_source[${LOOP_VARIABLE}]-}}\"\n\
              \x20 print -r -- \"${{functions[${LOOP_VARIABLE}]}}\"\n\
              done\n\
-             print -r -- '{marker} {END_LABEL}'\n"
+             print -r -- '{marker} {END_LABEL}'\n",
+            alias_origins = zsh_origin_loop(marker, ALIAS_ORIGINS_TABLE, ALIAS_ORIGIN_LABEL),
+            suffix_origins = zsh_origin_loop(marker, SUFFIX_ORIGINS_TABLE, SUFFIX_ORIGIN_LABEL),
         ),
         ShellKind::Bash => format!(
             "printf '%s\\n' '{marker} {ALIASES_LABEL}'\n\
              alias -p\n\
+             printf '%s\\n' \"{marker} {HOME_LABEL} ${{HOME-}}\"\n\
+             trap - DEBUG\n\
+             shopt -s extdebug\n\
              for {LOOP_VARIABLE} in $(compgen -A function); do\n\
              \x20 printf '%s\\n' \"{marker} {FUNCTION_LABEL} ${LOOP_VARIABLE}\"\n\
+             \x20 {BASH_ORIGIN_VARIABLE}=$(declare -F -- \"${LOOP_VARIABLE}\")\n\
+             \x20 {BASH_ORIGIN_VARIABLE}=${{{BASH_ORIGIN_VARIABLE}#\"${LOOP_VARIABLE}\" }}\n\
+             \x20 printf '%s\\n' \"{marker} {ORIGIN_LABEL} ${{{BASH_ORIGIN_VARIABLE}#* }}\"\n\
              \x20 declare -f -- \"${LOOP_VARIABLE}\" | tail -n +2\n\
              done\n\
              printf '%s\\n' '{marker} {END_LABEL}'\n"
         ),
     }
+}
+
+/// Gives the zsh lines that print each entry of the origin table `table`: a
+/// line with `label` and the name, then a line with the origin. The lines do
+/// nothing when the table does not exist, for example in a shell that started
+/// without the wrapper function `alias`.
+fn zsh_origin_loop(marker: &str, table: &str, label: &str) -> String {
+    format!(
+        "if (( ${{+{table}}} )); then\n\
+         \x20 for {ORIGIN_LOOP_VARIABLE} in ${{(ok){table}}}; do\n\
+         \x20   print -r -- \"{marker} {label} ${ORIGIN_LOOP_VARIABLE}\"\n\
+         \x20   print -r -- \"{marker} {ORIGIN_LABEL} ${{{table}[${ORIGIN_LOOP_VARIABLE}]}}\"\n\
+         \x20 done\n\
+         fi\n"
+    )
 }
 
 /// The aliases and the functions that the shell defines.
@@ -211,16 +301,21 @@ pub struct Definitions {
 }
 
 impl Definitions {
-    /// Gives the origin of `alias`.
+    /// Gives the origin of `alias`, or `None` when it is unknown. A suffix
+    /// alias has its origin by its suffix, and a regular or a global alias by
+    /// its name.
     #[must_use]
-    pub fn alias_origin(&self, _alias: &AliasDefinition) -> Option<&Origin> {
-        None
+    pub fn alias_origin(&self, alias: &AliasDefinition) -> Option<&Origin> {
+        match alias.suffix() {
+            Some(suffix) => self.suffix_origins.get(suffix),
+            None => self.alias_origins.get(&alias.name),
+        }
     }
 
-    /// Gives the origin of the function `name`.
+    /// Gives the origin of the function `name`, or `None` when it is unknown.
     #[must_use]
-    pub fn function_origin(&self, _name: &str) -> Option<&Origin> {
-        None
+    pub fn function_origin(&self, name: &str) -> Option<&Origin> {
+        self.function_origins.get(name)
     }
 }
 
@@ -263,6 +358,114 @@ pub enum ShellError {
     NoMarkers,
 }
 
+/// One line of the output that starts with the marker, without the marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Record<'a> {
+    /// The end of the output.
+    End,
+    /// The start of a function, with its name.
+    Function(&'a str),
+    /// The start of the origin of a regular or a global alias, with its name.
+    AliasOrigin(&'a str),
+    /// The start of the origin of a suffix alias, with its suffix.
+    SuffixOrigin(&'a str),
+    /// The origin of the definition that the record before it started.
+    Origin(&'a str),
+    /// The home directory.
+    Home(&'a str),
+    /// The oh-my-zsh directory.
+    Zsh(&'a str),
+    /// The custom directory of oh-my-zsh.
+    ZshCustom(&'a str),
+}
+
+/// Reads `line` as a record of `marker`. Gives `None` for a line that is not
+/// a record: the marker, one space, a label, then one space and the value.
+/// The end record has no value.
+fn record<'a>(line: &'a str, marker: &str) -> Option<Record<'a>> {
+    let rest = line.strip_prefix(marker)?.strip_prefix(' ')?;
+    let Some((label, value)) = rest.split_once(' ') else {
+        return (rest == END_LABEL).then_some(Record::End);
+    };
+    match label {
+        FUNCTION_LABEL => Some(Record::Function(value)),
+        ALIAS_ORIGIN_LABEL => Some(Record::AliasOrigin(value)),
+        SUFFIX_ORIGIN_LABEL => Some(Record::SuffixOrigin(value)),
+        ORIGIN_LABEL => Some(Record::Origin(value)),
+        HOME_LABEL => Some(Record::Home(value)),
+        ZSH_LABEL => Some(Record::Zsh(value)),
+        ZSH_CUSTOM_LABEL => Some(Record::ZshCustom(value)),
+        _ => None,
+    }
+}
+
+/// The part of the output that the lines after the last start record belong
+/// to.
+enum Section<'a> {
+    /// The alias listing, before the first start record.
+    Aliases,
+    /// The origin of an alias. `suffix` is true for a suffix alias.
+    AliasOrigin {
+        /// The name of a regular or a global alias, or the suffix of a suffix
+        /// alias.
+        name: &'a str,
+        /// True for a suffix alias.
+        suffix: bool,
+    },
+    /// A function and the lines of its body so far.
+    Function {
+        /// The name of the function.
+        name: &'a str,
+        /// The lines of the body so far.
+        body: Vec<&'a str>,
+    },
+}
+
+impl<'a> Section<'a> {
+    /// Adds a line that is not a record. The alias listing reads it as an
+    /// alias line, and a function adds it to its body. The origin of an alias
+    /// has no more lines, thus it ignores the line.
+    fn push(&mut self, line: &'a str, definitions: &mut Definitions) {
+        match self {
+            Self::Aliases => read_alias_line(line, definitions),
+            Self::AliasOrigin { .. } => {}
+            Self::Function { body, .. } => body.push(line),
+        }
+    }
+
+    /// Keeps the origin `text` for the definition of this section. An origin
+    /// that is not known, and an origin in the alias listing, change nothing.
+    fn set_origin(&self, text: &str, definitions: &mut Definitions) {
+        match self {
+            Self::Aliases => {}
+            Self::AliasOrigin { name, suffix } => {
+                if let Some(origin) = Origin::from_trace(text) {
+                    let table = if *suffix {
+                        &mut definitions.suffix_origins
+                    } else {
+                        &mut definitions.alias_origins
+                    };
+                    table.insert((*name).to_owned(), origin);
+                }
+            }
+            Self::Function { name, .. } => {
+                if let Some(origin) = Origin::from_file(text) {
+                    definitions
+                        .function_origins
+                        .insert((*name).to_owned(), origin);
+                }
+            }
+        }
+    }
+
+    /// Ends the section. A function reads its body.
+    fn finish(self, definitions: &mut Definitions) {
+        if let Self::Function { name, body } = self {
+            read_function(name, &body.join("\n"), definitions);
+        }
+    }
+}
+
 /// Parses the standard output of the script. Pure.
 ///
 /// # Errors
@@ -271,36 +474,55 @@ pub enum ShellError {
 pub fn parse_output(stdout: &str, marker: &Marker) -> Result<Definitions, ShellError> {
     let marker = marker.as_str();
     let aliases_line = format!("{marker} {ALIASES_LABEL}");
-    let end_line = format!("{marker} {END_LABEL}");
-    let function_prefix = format!("{marker} {FUNCTION_LABEL} ");
     let mut lines = stdout.lines().skip_while(|line| *line != aliases_line);
     lines.next().ok_or(ShellError::NoMarkers)?;
     let mut definitions = Definitions::default();
+    let mut section = Section::Aliases;
     let mut ended = false;
-    let mut function: Option<(&str, Vec<&str>)> = None;
     for line in lines {
-        let starts_function = line.strip_prefix(function_prefix.as_str());
-        if starts_function.is_some() || line == end_line {
-            if let Some((name, body)) = function.take() {
-                read_function(name, &body.join("\n"), &mut definitions);
+        let Some(found) = record(line, marker) else {
+            section.push(line, &mut definitions);
+            continue;
+        };
+        let next = match found {
+            Record::End => {
+                ended = true;
+                break;
             }
-        }
-        if line == end_line {
-            ended = true;
-            break;
-        }
-        match (starts_function, function.as_mut()) {
-            (Some(name), _) => function = Some((name, Vec::new())),
-            (None, Some((_, body))) => body.push(line),
-            (None, None) => read_alias_line(line, &mut definitions),
-        }
+            Record::Function(name) => Section::Function {
+                name,
+                body: Vec::new(),
+            },
+            Record::AliasOrigin(name) => Section::AliasOrigin {
+                name,
+                suffix: false,
+            },
+            Record::SuffixOrigin(name) => Section::AliasOrigin { name, suffix: true },
+            Record::Origin(text) => {
+                section.set_origin(text, &mut definitions);
+                continue;
+            }
+            Record::Home(text) => {
+                definitions.places.home = place(text);
+                continue;
+            }
+            Record::Zsh(text) => {
+                definitions.places.zsh = place(text);
+                continue;
+            }
+            Record::ZshCustom(text) => {
+                definitions.places.zsh_custom = place(text);
+                continue;
+            }
+        };
+        std::mem::replace(&mut section, next).finish(&mut definitions);
     }
-    if ended {
-        definitions.unparsed_functions.sort();
-        Ok(definitions)
-    } else {
-        Err(ShellError::NoMarkers)
+    if !ended {
+        return Err(ShellError::NoMarkers);
     }
+    section.finish(&mut definitions);
+    definitions.unparsed_functions.sort();
+    Ok(definitions)
 }
 
 /// Gives the first line of a function body whose text is not blank and is not
