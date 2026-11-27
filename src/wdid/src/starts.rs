@@ -83,6 +83,38 @@ const BACKSLASH: char = '\\';
 /// than 5.3.
 const KEY_END: char = ':';
 
+/// The byte that starts each escape in the command that `bind -X` writes.
+const ESCAPE_START: u8 = b'\\';
+
+/// The byte of the quote in the command that `bind -X` writes.
+const QUOTE_BYTE: u8 = b'"';
+
+/// The text after [`ESCAPE_START`] that gives a byte with its high bit:
+/// `\M-x`.
+const META_PREFIX: &[u8] = b"M-";
+
+/// The high bit, which `\M-` adds to the byte after it.
+const META_BIT: u8 = 0x80;
+
+/// The text after [`ESCAPE_START`] that gives a control character: `\C-x`.
+const CONTROL_PREFIX: &[u8] = b"C-";
+
+/// The bits of a byte that its control character keeps.
+const CONTROL_MASK: u8 = 0x1f;
+
+/// The character after `\C-` that gives DEL.
+const DELETE_LETTER: u8 = b'?';
+
+/// The byte DEL.
+const DELETE: u8 = 0x7f;
+
+/// The character after [`ESCAPE_START`] that gives the escape character:
+/// `\e`.
+const ESCAPE_LETTER: u8 = b'e';
+
+/// The escape character.
+const ESCAPE: u8 = 0x1b;
+
 /// One event of the shell that runs code without a typed name.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Trigger {
@@ -202,26 +234,57 @@ fn double_quoted(text: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// Removes one level of backslashes from `text`: a backslash before a
-/// backslash or a quote goes away. A different backslash stays.
-fn unescape(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut characters = text.chars();
-    while let Some(character) = characters.next() {
-        if character != BACKSLASH {
-            result.push(character);
-            continue;
-        }
-        match characters.next() {
-            Some(next) if next == BACKSLASH || next == DOUBLE_QUOTE => result.push(next),
-            Some(next) => {
-                result.push(BACKSLASH);
-                result.push(next);
-            }
-            None => result.push(BACKSLASH),
-        }
+/// Gives back the command `text` that `bind -X` wrote. readline writes each
+/// byte of the command in one of these forms, and the decode reverses each
+/// form:
+///
+/// - `\\` and `\"`: a backslash and a quote.
+/// - `\e`: the escape character.
+/// - `\C-?`: DEL, and `\C-x`: the control character of `x`, for example
+///   `\C-j` for a newline.
+/// - `\M-` before the form of the byte without its high bit, for example
+///   `\M-C\M-)` for the two bytes of `é`.
+///
+/// Each other byte stays, and so does a backslash before a different
+/// character. The bytes give UTF-8 text, and a byte that is not UTF-8 gives
+/// U+FFFD.
+fn decode_key_command(text: &str) -> String {
+    let mut rest = text.as_bytes();
+    let mut bytes = Vec::with_capacity(rest.len());
+    while let Some((byte, after)) = decode_byte(rest) {
+        bytes.push(byte);
+        rest = after;
     }
-    result
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Gives the first byte that the form at the start of `input` stands for, and
+/// the input after that form. See [`decode_key_command`] for the forms. Gives
+/// `None` when `input` is empty.
+fn decode_byte(input: &[u8]) -> Option<(u8, &[u8])> {
+    let (&first, rest) = input.split_first()?;
+    if first != ESCAPE_START {
+        return Some((first, rest));
+    }
+    if let Some((byte, after)) = rest.strip_prefix(META_PREFIX).and_then(decode_byte) {
+        return Some((byte | META_BIT, after));
+    }
+    if let Some((&letter, after)) = rest
+        .strip_prefix(CONTROL_PREFIX)
+        .and_then(<[u8]>::split_first)
+    {
+        let byte = if letter == DELETE_LETTER {
+            DELETE
+        } else {
+            letter & CONTROL_MASK
+        };
+        return Some((byte, after));
+    }
+    match rest.split_first() {
+        Some((&ESCAPE_LETTER, after)) => Some((ESCAPE, after)),
+        Some((&next, after)) if next == ESCAPE_START || next == QUOTE_BYTE => Some((next, after)),
+        _ => Some((first, rest)),
+    }
 }
 
 impl Starts {
@@ -318,8 +381,8 @@ impl Starts {
     /// Reads one line of the bash `bind -X`: the key and the command, each in
     /// double quotes. bash 5.3 divides them with a space, and an older bash
     /// with a colon and a space. The key stays as bash writes it, and the
-    /// command loses one level of backslashes. A line of a different form
-    /// changes nothing.
+    /// command gets back each byte that readline wrote as an escape (see
+    /// [`decode_key_command`]). A line of a different form changes nothing.
     pub(crate) fn read_key_command_line(&mut self, line: &str) {
         let Some((key, rest)) = double_quoted(line) else {
             return;
@@ -328,6 +391,6 @@ impl Starts {
         let Some((command, _)) = double_quoted(rest) else {
             return;
         };
-        self.add_code(Trigger::KeyCommand(key.to_owned()), &unescape(command));
+        self.add_code(Trigger::KeyCommand(key.to_owned()), &decode_key_command(command));
     }
 }
