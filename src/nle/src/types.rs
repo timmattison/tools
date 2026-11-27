@@ -87,6 +87,14 @@ impl Seconds {
     /// The time zero.
     pub const ZERO: Seconds = Seconds(0.0);
 
+    /// Make a time from a whole number of seconds. A `u32` always gives a
+    /// finite time that is not below zero, so this constructor cannot fail,
+    /// and a `const` can use it.
+    #[must_use]
+    pub const fn from_whole_seconds(value: u32) -> Self {
+        Seconds(value as f64)
+    }
+
     /// Make a time from a number of seconds.
     ///
     /// # Errors
