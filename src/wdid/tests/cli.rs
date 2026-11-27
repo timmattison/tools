@@ -36,6 +36,11 @@ const TWO_COMMIT_DATE: &str = "2026-03-04T12:00:00Z";
 /// The width that the table gets, so that no line wraps.
 const WIDE: &str = "200";
 
+/// The start of the names of the oh-my-zsh variables, for example `ZSH` and
+/// `ZSH_CUSTOM`. `wdid defs` reads them from the shell, thus a run sheds each
+/// one that the environment of `cargo test` holds.
+const OH_MY_ZSH_PREFIX: &str = "ZSH";
+
 /// The format that atuin prints for the time of a row.
 const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
@@ -222,9 +227,17 @@ impl Setup {
     }
 
     /// The command for `wdid`, with the stub `PATH` and the width of the
-    /// table. The shell is zsh. The caller adds the flags.
+    /// table. The shell is zsh. The command has no variable whose name starts
+    /// with [`OH_MY_ZSH_PREFIX`], so the origins that `wdid defs` calls mine
+    /// do not depend on the shell that starts `cargo test`. The caller adds
+    /// the flags.
     fn command(&self) -> Command {
         let mut command = childenv::fixture_command(BIN);
+        for (name, _) in std::env::vars_os() {
+            if name.to_string_lossy().starts_with(OH_MY_ZSH_PREFIX) {
+                command.env_remove(name);
+            }
+        }
         command
             .env("PATH", self.stubs.path())
             .env("HOME", self.home.path())
@@ -863,8 +876,186 @@ fn the_help_texts_name_defs_and_the_flags_of_defs() {
     let defs = setup.command().args(["defs", "--help"]).output().unwrap();
     assert!(defs.status.success(), "{defs:?}");
     let text = stdout(&defs);
-    for flag in ["--since", "--json", "--idle-days"] {
+    for flag in ["--since", "--json", "--idle-days", "--all"] {
         assert!(text.contains(flag), "{text}");
     }
     assert!(!text.contains("--repo"), "{text}");
+    assert!(
+        text.contains("ZSH_CUSTOM"),
+        "the help of --all names each place that Places::is_mine calls mine: {text}"
+    );
+}
+
+/// The `.zshrc` of the origin tests of `wdid defs`: an alias of mine on line
+/// 2, a stand-in of oh-my-zsh in `$HOME/omz` with one plugin, and a private
+/// function.
+const ORIGIN_ZSHRC: &str = "export ZSH=$HOME/omz\n\
+alias wt='echo wt'\n\
+source $ZSH/plugins/git/git.plugin.zsh\n\
+_private() { true }\n";
+
+/// The plugin file of [`ORIGIN_ZSHRC`], below the home directory.
+const ORIGIN_PLUGIN: &str = "omz/plugins/git/git.plugin.zsh";
+
+/// Writes [`ORIGIN_ZSHRC`] and its plugin into the home directory of
+/// `setup`.
+fn write_origin_home(setup: &Setup) {
+    std::fs::write(setup.home.path().join(".zshrc"), ORIGIN_ZSHRC).unwrap();
+    let plugin = setup.home.path().join(ORIGIN_PLUGIN);
+    std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+    std::fs::write(plugin, "alias gst='git status'\n").unwrap();
+}
+
+/// Runs `wdid defs` with `args` on the home of [`write_origin_home`], outside
+/// each work tree. The history has one use of `gst` and one of `wt`.
+fn run_origin_defs(args: &[&str]) -> (Setup, Output) {
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "gst"), row(1, "wt")]));
+    write_origin_home(&setup);
+    let cwd = gitscratch::testing::not_a_repository();
+    let output = defs_command(&setup)
+        .args(args)
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+    (setup, output)
+}
+
+/// Gives the first table row of `text` whose name cell is `name`.
+fn table_row<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    text.lines().find(|line| {
+        line.strip_prefix('\u{2502}')
+            .and_then(|line| line.split('\u{2506}').next())
+            .is_some_and(|cell| cell.trim() == name)
+    })
+}
+
+#[test]
+fn defs_shows_only_my_definitions_with_their_origins() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let (_setup, output) = run_origin_defs(&[]);
+    assert!(output.status.success(), "{output:?}");
+    let text = stdout(&output);
+    let wt = table_row(&text, "wt").unwrap_or_else(|| panic!("no row of wt in {text}"));
+    assert!(wt.contains("~/.zshrc:2"), "{wt}");
+    assert!(table_row(&text, "gst").is_none(), "{text}");
+    assert!(!text.contains("git.plugin.zsh"), "{text}");
+    assert!(!text.contains("_private"), "{text}");
+    assert!(
+        text.lines().any(|line| line.starts_with("Definitions: ")
+            && line.ends_with(" others (--all shows the others).")),
+        "{text}"
+    );
+}
+
+#[test]
+fn defs_all_groups_the_others_by_origin_and_shows_the_private_functions() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let (_setup, output) = run_origin_defs(&["--all"]);
+    assert!(output.status.success(), "{output:?}");
+    let text = stdout(&output);
+    assert!(
+        text.lines().any(|line| line.starts_with("Mine: ")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("\n~/{ORIGIN_PLUGIN}: 1 definition\n")),
+        "{text}"
+    );
+    let gst = table_row(&text, "gst").unwrap_or_else(|| panic!("no row of gst in {text}"));
+    assert!(gst.contains(&format!("~/{ORIGIN_PLUGIN}:1")), "{gst}");
+    assert!(table_row(&text, "_private").is_some(), "{text}");
+    assert!(table_row(&text, "wt").is_some(), "{text}");
+}
+
+#[test]
+fn defs_json_gives_the_origin_and_mine_of_each_definition() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let (setup, output) = run_origin_defs(&["--json"]);
+    let document = json(&output);
+    let home = setup.home.path();
+    let wt = definition(&document, "wt");
+    assert_eq!(
+        wt["origin"],
+        serde_json::json!({ "file": home.join(".zshrc"), "line": 2 }),
+        "{document}"
+    );
+    assert_eq!(wt["mine"], true, "{document}");
+    let gst = definition(&document, "gst");
+    assert_eq!(
+        gst["origin"],
+        serde_json::json!({ "file": home.join(ORIGIN_PLUGIN), "line": 1 }),
+        "{document}"
+    );
+    assert_eq!(gst["mine"], false, "{document}");
+    assert_eq!(gst["uses"], 1, "{document}");
+    assert!(!has_definition(&document, "_private"), "{document}");
+    let entries = document["definitions"].as_array().unwrap();
+    let mine = entries.iter().filter(|entry| entry["mine"] == true).count();
+    assert_eq!(document["shell"]["mine"], mine, "{document}");
+    assert_eq!(
+        document["shell"]["others"],
+        entries.len() - mine,
+        "{document}"
+    );
+}
+
+/// The temporary `ZDOTDIR` and the wrapper function `alias` change no count
+/// of the tools report. An alias in `.zshenv`, an alias and a function in
+/// `.zshrc`, and a typed tool each count as they did before them.
+#[test]
+fn the_tools_report_counts_through_the_zshenv_and_the_zshrc() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let setup = Setup::new(&Atuin::Rows(&[
+        row(1, "envone"),
+        row(1, "one x"),
+        row(1, "two"),
+        row(1, "wdid-fixture-one"),
+    ]));
+    std::fs::write(
+        setup.home.path().join(".zshenv"),
+        format!("alias envone='{TOOL_ONE}'\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        setup.home.path().join(".zshrc"),
+        format!("alias one='{TOOL_ONE} --flag'\ntwo() {{ {TOOL_TWO} \"$@\" }}\n"),
+    )
+    .unwrap();
+    let output = setup
+        .command()
+        .env("SHELL", ZSH)
+        .env("ZDOTDIR", setup.home.path())
+        .arg("--json")
+        .arg("--repo")
+        .arg(setup.workspace.path())
+        .output()
+        .unwrap();
+    let document = json(&output);
+    let one = tool(&document, TOOL_ONE);
+    assert_eq!(one["uses"], 3, "{document}");
+    assert_eq!(one["typed"], 1, "{document}");
+    assert_eq!(
+        one["through"],
+        serde_json::json!([{ "name": "envone", "uses": 1 }, { "name": "one", "uses": 1 }]),
+        "{document}"
+    );
+    let two = tool(&document, TOOL_TWO);
+    assert_eq!(two["uses"], 1, "{document}");
+    assert_eq!(
+        two["through"],
+        serde_json::json!([{ "name": "two", "uses": 1 }]),
+        "{document}"
+    );
 }

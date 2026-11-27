@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use wdid::command_words::{command_words, AliasKind, Aliases, CommandWord, Parsed};
+use wdid::command_words::{
+    command_words, AliasDefinition, AliasKind, Aliases, CommandWord, Parsed,
+};
+use wdid::origin::{Origin, Places};
 use wdid::shell::{
     parse_output, read, script, Definitions, Marker, Resolver, ShellError, ShellKind,
 };
@@ -467,6 +470,9 @@ fn no_error_message_names_a_flag_of_one_report() {
             stderr: "boom".to_owned(),
         },
         ShellError::NoMarkers,
+        ShellError::Zdotdir {
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        },
     ];
     let texts: Vec<String> = errors.iter().map(ToString::to_string).collect();
     assert_eq!(
@@ -478,6 +484,7 @@ fn no_error_message_names_a_flag_of_one_report() {
             "the shell did not stop in 30 seconds",
             "the shell failed (exit status: 3): boom",
             "the shell output does not hold the start and end markers of wdid",
+            "cannot make the temporary ZDOTDIR for zsh: permission denied",
         ]
     );
 }
@@ -930,4 +937,668 @@ fn a_function_that_did_not_parse_has_no_entry_and_adds_no_tool() {
 fn an_empty_resolver_has_no_entry() {
     let resolver = Resolver::new(&Definitions::default(), &tools());
     assert_eq!(tools_of(&resolver, "wt"), None);
+}
+
+/// Wraps lines in the markers of `M`, with noise before the start marker.
+fn records(lines: &[&str]) -> String {
+    let mut text = String::from("noise\nM ALIASES\n");
+    for line in lines {
+        text.push_str(line);
+        text.push('\n');
+    }
+    text.push_str("M END\n");
+    text
+}
+
+/// Makes an origin in `file`, at `line` when it is given.
+fn origin(file: impl Into<PathBuf>, line: Option<u32>) -> Origin {
+    Origin {
+        file: file.into(),
+        line,
+    }
+}
+
+/// Gives the alias `name` of the kind `kind` in `definitions`.
+fn alias_named(definitions: &Definitions, name: &str, kind: AliasKind) -> AliasDefinition {
+    definitions
+        .aliases
+        .definitions()
+        .into_iter()
+        .find(|alias| alias.name == name && alias.kind == kind)
+        .unwrap_or_else(|| panic!("no {kind:?} alias {name}"))
+}
+
+/// Gives the origin of the alias `name` of the kind `kind`.
+fn alias_origin(definitions: &Definitions, name: &str, kind: AliasKind) -> Option<Origin> {
+    definitions
+        .alias_origin(&alias_named(definitions, name, kind))
+        .cloned()
+}
+
+#[test]
+fn the_places_of_the_shell_are_read() {
+    let definitions = parsed(&records(&[
+        "alias a=b",
+        "M HOME /home/me",
+        "M ZSH /home/me/.oh-my-zsh",
+        "M ZSH_CUSTOM /home/me/.oh-my-zsh/custom",
+    ]));
+    assert_eq!(
+        definitions.places,
+        Places {
+            home: Some(PathBuf::from("/home/me")),
+            zsh: Some(PathBuf::from("/home/me/.oh-my-zsh")),
+            zsh_custom: Some(PathBuf::from("/home/me/.oh-my-zsh/custom")),
+        }
+    );
+    assert_eq!(definitions.aliases.len(), 1);
+    assert!(definitions.unparsed_aliases.is_empty());
+}
+
+#[test]
+fn an_empty_or_relative_place_is_no_place() {
+    let definitions = parsed(&records(&[
+        "M HOME /home/me",
+        "M ZSH ",
+        "M ZSH_CUSTOM custom",
+    ]));
+    assert_eq!(definitions.places.home, Some(PathBuf::from("/home/me")));
+    assert_eq!(definitions.places.zsh, None);
+    assert_eq!(definitions.places.zsh_custom, None);
+    assert!(definitions.unparsed_aliases.is_empty());
+}
+
+/// A suffix alias has a namespace of its own, thus the origin of the suffix
+/// alias `md` is not the origin of the regular alias `md`.
+#[test]
+fn the_origin_of_an_alias_is_read_for_its_kind() {
+    let definitions = parsed(&records(&[
+        "alias wt=cwt",
+        "alias -g G='| grep'",
+        "alias -s md=glow",
+        "alias md=other",
+        "M ALIAS_ORIGIN wt",
+        "M ORIGIN /home/me/.zshrc:3",
+        "M ALIAS_ORIGIN G",
+        "M ORIGIN /home/me/.zshrc:4",
+        "M SUFFIX_ORIGIN md",
+        "M ORIGIN /home/me/.zshrc:5",
+    ]));
+    assert_eq!(
+        alias_origin(&definitions, "wt", AliasKind::Regular),
+        Some(origin("/home/me/.zshrc", Some(3)))
+    );
+    assert_eq!(
+        alias_origin(&definitions, "G", AliasKind::Global),
+        Some(origin("/home/me/.zshrc", Some(4)))
+    );
+    assert_eq!(
+        alias_origin(&definitions, "*.md", AliasKind::Suffix),
+        Some(origin("/home/me/.zshrc", Some(5)))
+    );
+    assert_eq!(alias_origin(&definitions, "md", AliasKind::Regular), None);
+    assert!(definitions.unparsed_aliases.is_empty());
+}
+
+#[test]
+fn an_alias_without_a_known_origin_has_no_origin() {
+    let definitions = parsed(&records(&[
+        "alias a=b",
+        "alias c=d",
+        "M ALIAS_ORIGIN c",
+        "M ORIGIN (eval):1",
+    ]));
+    assert_eq!(alias_origin(&definitions, "a", AliasKind::Regular), None);
+    assert_eq!(alias_origin(&definitions, "c", AliasKind::Regular), None);
+}
+
+#[test]
+fn the_origin_of_a_function_is_not_a_line_of_its_body() {
+    let stdout = "M ALIASES\nM FUNCTION wt\nM ORIGIN /home/me/.zshrc\n\tcwt \"$@\"\n\
+                  M FUNCTION f\nM ORIGIN \n\tprcp\nM END\n";
+    let definitions = parsed(stdout);
+    assert_eq!(
+        definitions.function_origin("wt"),
+        Some(&origin("/home/me/.zshrc", None))
+    );
+    assert_eq!(definitions.function_origin("f"), None);
+    assert_eq!(
+        definitions.functions["wt"],
+        vec![CommandWord::new("cwt", ["\"$@\""])]
+    );
+    assert_eq!(definitions.function_lines["wt"], "cwt \"$@\"");
+    assert_eq!(
+        definitions.functions["f"],
+        vec![CommandWord::new("prcp", [] as [&str; 0])]
+    );
+}
+
+#[test]
+fn an_origin_before_each_header_is_ignored() {
+    let definitions = parsed(&records(&["M ORIGIN /home/me/.zshrc:1", "alias a=b"]));
+    assert_eq!(alias_origin(&definitions, "a", AliasKind::Regular), None);
+    assert_eq!(definitions.aliases.len(), 1);
+    assert!(definitions.unparsed_aliases.is_empty());
+}
+
+/// The wrapper function `alias` must not be in the listing, and the builtin
+/// lists the aliases.
+#[test]
+fn the_zsh_script_removes_the_alias_function_before_it_lists_the_aliases() {
+    let zsh = script(ShellKind::Zsh, &Marker::new("M"));
+    let remove = zsh.find("unfunction alias").expect(&zsh);
+    let list = zsh.find("alias -L\n").expect(&zsh);
+    assert!(remove < list, "{zsh}");
+}
+
+/// Writes `text` into the file `relative` under `home`, and makes its
+/// directories.
+fn write_file(home: &Path, relative: &str, text: &str) {
+    let path = home.join(relative);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+/// The `.zshrc` of a home with a stand-in of oh-my-zsh in `$HOME/omz`. Each
+/// line defines one thing that the origin tests read.
+const OMZ_ZSHRC: &str = "export ZSH=$HOME/omz\n\
+ZSH_CUSTOM=$ZSH/custom\n\
+alias wt='cwt'\n\
+source $HOME/sourced.zsh\n\
+source $ZSH/plugins/git/git.plugin.zsh\n\
+source $ZSH_CUSTOM/mine.zsh\n\
+eval 'evalfn() { prcp \"$@\" }'\n\
+source <(print -r -- 'procfn() { prhash }')\n\
+builtin alias sneaky=ls\n\
+myfn() { cwt }\n\
+alias -g G='| grep'\n\
+alias -s md=glow\n\
+alias -- -='cd -'\n\
+source <(print -r -- 'alias procalias=y')\n";
+
+/// Makes a home with [`OMZ_ZSHRC`], the file that it sources, a plugin of the
+/// stand-in of oh-my-zsh, and a file in its custom directory.
+fn omz_home() -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    write_file(home.path(), ".zshrc", OMZ_ZSHRC);
+    write_file(home.path(), "sourced.zsh", "alias fromsourced='echo s'\n");
+    write_file(
+        home.path(),
+        "omz/plugins/git/git.plugin.zsh",
+        "alias gst='git status'\ngfun() { git log }\n",
+    );
+    write_file(
+        home.path(),
+        "omz/custom/mine.zsh",
+        "alias cust='echo custom'\n",
+    );
+    home
+}
+
+/// Reads the definitions of a real zsh in [`omz_home`]. Gives `None` when zsh
+/// is not installed.
+fn omz_definitions() -> Option<(tempfile::TempDir, Definitions)> {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return None;
+    };
+    let home = omz_home();
+    let definitions = read(
+        real_shell(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    Some((home, definitions))
+}
+
+#[test]
+fn a_real_zsh_gives_its_places_after_its_start() {
+    let Some((home, definitions)) = omz_definitions() else {
+        return;
+    };
+    assert_eq!(
+        definitions.places,
+        Places {
+            home: Some(home.path().to_path_buf()),
+            zsh: Some(home.path().join("omz")),
+            zsh_custom: Some(home.path().join("omz/custom")),
+        }
+    );
+}
+
+#[test]
+fn a_function_in_zshrc_has_zshrc_as_its_origin_and_is_mine() {
+    let Some((home, definitions)) = omz_definitions() else {
+        return;
+    };
+    let found = definitions.function_origin("myfn");
+    assert_eq!(found, Some(&origin(home.path().join(".zshrc"), None)));
+    assert!(definitions.places.is_mine(found));
+}
+
+/// A function that an `eval` in `.zshrc` makes is mine, because my file chose
+/// to run the `eval`.
+#[test]
+fn a_function_from_an_eval_has_the_file_of_the_eval_and_is_mine() {
+    let Some((home, definitions)) = omz_definitions() else {
+        return;
+    };
+    let found = definitions.function_origin("evalfn");
+    assert_eq!(found, Some(&origin(home.path().join(".zshrc"), None)));
+    assert!(definitions.places.is_mine(found));
+}
+
+/// The directory of the file that zsh gives a process substitution, `<(…)`.
+/// The build of zsh picks `/proc/self/fd` where it works, as on Linux, and
+/// else `/dev/fd`, as on macOS.
+const PROCESS_SUBSTITUTION_DIRECTORY: &str = if cfg!(target_os = "linux") {
+    "/proc/self/fd"
+} else {
+    "/dev/fd"
+};
+
+#[test]
+fn a_function_from_a_process_substitution_is_in_the_descriptor_directory_and_is_not_mine() {
+    let Some((_home, definitions)) = omz_definitions() else {
+        return;
+    };
+    let found = definitions.function_origin("procfn").expect("an origin");
+    assert!(
+        found.file.starts_with(PROCESS_SUBSTITUTION_DIRECTORY),
+        "{found:?}"
+    );
+    assert!(!definitions.places.is_mine(Some(found)));
+}
+
+#[test]
+fn a_function_of_an_oh_my_zsh_plugin_is_not_mine() {
+    let Some((home, definitions)) = omz_definitions() else {
+        return;
+    };
+    let found = definitions.function_origin("gfun");
+    assert_eq!(
+        found,
+        Some(&origin(
+            home.path().join("omz/plugins/git/git.plugin.zsh"),
+            None
+        ))
+    );
+    assert!(!definitions.places.is_mine(found));
+}
+
+/// The script resolves the file of each autoload stub whose name starts with
+/// `_`, without a load of its body, so `--all` can group it by its file.
+#[test]
+fn an_autoloaded_function_and_a_private_stub_get_their_files() {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    let directory = home.path().join("functions");
+    write_file(home.path(), "functions/wdidfn", "prcp \"$@\"\n");
+    write_file(home.path(), "functions/_wdidcomp", "prhash\n");
+    write_file(
+        home.path(),
+        ".zshrc",
+        &format!(
+            "fpath=({} $fpath)\nautoload -Uz wdidfn _wdidcomp\n",
+            shellquote::shell_quote(&directory.to_string_lossy())
+        ),
+    );
+    let definitions = read(
+        real_shell(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    for name in ["wdidfn", "_wdidcomp"] {
+        assert_eq!(
+            definitions.function_origin(name),
+            Some(&origin(directory.join(name), None)),
+            "{name}"
+        );
+    }
+}
+
+/// bash gives the file of a function through `declare -F`, and keeps no
+/// origin for an alias.
+#[test]
+fn a_real_bash_gives_the_file_of_a_function_and_no_origin_for_an_alias() {
+    let Some(bash) = find_shell("bash") else {
+        eprintln!("skipped: bash is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    write_file(
+        home.path(),
+        ".bashrc",
+        "alias wtm='wt --main'\nwt() { cwt \"$@\"; }\nsource \"$HOME/lib.sh\"\n",
+    );
+    write_file(home.path(), "lib.sh", "libfn() {\n  prcp\n}\n");
+    let definitions = read(
+        real_shell(&bash, home.path()),
+        ShellKind::Bash,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert_eq!(
+        definitions.function_origin("wt"),
+        Some(&origin(home.path().join(".bashrc"), None))
+    );
+    assert_eq!(
+        definitions.function_origin("libfn"),
+        Some(&origin(home.path().join("lib.sh"), None))
+    );
+    assert_eq!(alias_origin(&definitions, "wtm", AliasKind::Regular), None);
+    assert_eq!(definitions.places.home, Some(home.path().to_path_buf()));
+    assert_eq!(definitions.places.zsh, None);
+}
+
+/// The start of the name of each temporary `ZDOTDIR`.
+const ZDOTDIR_PREFIX: &str = "wdid-zdotdir-";
+
+/// Says if `directory` has the name of a temporary `ZDOTDIR`.
+fn is_temporary_zdotdir(directory: &Path) -> bool {
+    directory
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with(ZDOTDIR_PREFIX))
+}
+
+/// Asserts that the alias `name` of the kind `kind` in [`omz_home`] has
+/// `expected` as its origin, and that it is mine when `mine` is true.
+fn assert_omz_alias(name: &str, kind: AliasKind, expected: Option<(&str, u32)>, mine: bool) {
+    let Some((home, definitions)) = omz_definitions() else {
+        return;
+    };
+    let found = alias_origin(&definitions, name, kind);
+    let expected = expected.map(|(file, line)| origin(home.path().join(file), Some(line)));
+    assert_eq!(found, expected, "{name}");
+    assert_eq!(definitions.places.is_mine(found.as_ref()), mine, "{name}");
+}
+
+#[test]
+fn an_alias_in_zshrc_has_its_file_and_its_line_and_is_mine() {
+    assert_omz_alias("wt", AliasKind::Regular, Some((".zshrc", 3)), true);
+}
+
+#[test]
+fn an_alias_in_a_file_that_zshrc_sources_is_mine() {
+    assert_omz_alias(
+        "fromsourced",
+        AliasKind::Regular,
+        Some(("sourced.zsh", 1)),
+        true,
+    );
+}
+
+#[test]
+fn an_alias_of_an_oh_my_zsh_plugin_is_not_mine() {
+    assert_omz_alias(
+        "gst",
+        AliasKind::Regular,
+        Some(("omz/plugins/git/git.plugin.zsh", 1)),
+        false,
+    );
+}
+
+#[test]
+fn an_alias_in_the_custom_directory_of_oh_my_zsh_is_mine() {
+    assert_omz_alias(
+        "cust",
+        AliasKind::Regular,
+        Some(("omz/custom/mine.zsh", 1)),
+        true,
+    );
+}
+
+/// `builtin alias` goes around the wrapper function, thus zsh keeps no
+/// origin. An unknown origin is mine.
+#[test]
+fn an_alias_from_builtin_alias_has_no_origin_and_is_mine() {
+    let Some((_home, definitions)) = omz_definitions() else {
+        return;
+    };
+    assert_eq!(definitions.aliases.get("sneaky"), Some("ls"));
+    assert_omz_alias("sneaky", AliasKind::Regular, None, true);
+}
+
+#[test]
+fn a_global_alias_a_suffix_alias_and_an_alias_after_two_dashes_get_their_lines() {
+    assert_omz_alias("G", AliasKind::Global, Some((".zshrc", 11)), true);
+    assert_omz_alias("*.md", AliasKind::Suffix, Some((".zshrc", 12)), true);
+    assert_omz_alias("-", AliasKind::Regular, Some((".zshrc", 13)), true);
+}
+
+#[test]
+fn an_alias_from_a_process_substitution_is_in_the_descriptor_directory_and_is_not_mine() {
+    let Some((_home, definitions)) = omz_definitions() else {
+        return;
+    };
+    let found = alias_origin(&definitions, "procalias", AliasKind::Regular).expect("an origin");
+    assert!(
+        found.file.starts_with(PROCESS_SUBSTITUTION_DIRECTORY),
+        "{found:?}"
+    );
+    assert_eq!(found.line, Some(1));
+    assert!(!definitions.places.is_mine(Some(&found)));
+}
+
+/// The wrapper function `alias` records the origins, and the script removes
+/// it before the listing. It is not a definition of the person.
+#[test]
+fn the_wrapper_of_alias_is_not_a_function_of_the_shell() {
+    let Some((_home, definitions)) = omz_definitions() else {
+        return;
+    };
+    assert!(!definitions.functions.contains_key("alias"));
+    assert!(!definitions.function_lines.contains_key("alias"));
+    assert!(!definitions.unparsed_functions.contains(&"alias".to_owned()));
+    assert_eq!(definitions.aliases.get("wt"), Some("cwt"));
+}
+
+#[test]
+fn the_real_zshenv_still_runs_and_its_alias_has_its_origin() {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    write_file(home.path(), ".zshenv", "alias envalias='echo env'\n");
+    write_file(home.path(), ".zshrc", "alias rc=x\n");
+    let definitions = read(
+        real_shell(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert_eq!(definitions.aliases.get("envalias"), Some("echo env"));
+    assert_eq!(definitions.aliases.get("rc"), Some("x"));
+    assert_eq!(
+        alias_origin(&definitions, "envalias", AliasKind::Regular),
+        Some(origin(home.path().join(".zshenv"), Some(1)))
+    );
+}
+
+/// Makes a command for a real zsh with `HOME` in `home` and no `ZDOTDIR`, so
+/// zsh reads its files from `HOME`.
+fn zsh_without_zdotdir(path: &Path, home: &Path) -> Command {
+    let mut command = childenv::fixture_command(path);
+    command
+        .env("HOME", home)
+        .env_remove("ZDOTDIR")
+        .env("TERM", "dumb");
+    command
+}
+
+/// The real `.zshenv` can set `ZDOTDIR`. zsh then reads `.zshrc` from that
+/// directory, not from `HOME`.
+#[test]
+fn a_zshenv_that_moves_zdotdir_loads_the_zshrc_of_the_new_directory() {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    write_file(home.path(), ".zshenv", "ZDOTDIR=$HOME/config\n");
+    write_file(home.path(), "config/.zshrc", "alias moved='echo moved'\n");
+    write_file(home.path(), ".zshrc", "alias stale=x\n");
+    let definitions = read(
+        zsh_without_zdotdir(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert_eq!(definitions.aliases.get("moved"), Some("echo moved"));
+    assert_eq!(definitions.aliases.get("stale"), None);
+    assert_eq!(
+        alias_origin(&definitions, "moved", AliasKind::Regular),
+        Some(origin(home.path().join("config/.zshrc"), Some(1)))
+    );
+}
+
+/// The `.zshrc` of the tests that read `ZDOTDIR` in the startup files.
+const ZDOTDIR_ZSHRC: &str = "alias zd=\"${ZDOTDIR-unset}\"\n\
+alias leak=\"${__WDID_REAL_ZDOTDIR-none}\"\n";
+
+/// The startup files see the `ZDOTDIR` of the environment: the same value
+/// when it is set, and no value when it is not set. The variable that carries
+/// the real value does not stay.
+#[test]
+fn the_startup_files_see_the_zdotdir_of_the_environment() {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    write_file(home.path(), ".zshrc", ZDOTDIR_ZSHRC);
+    let set = read(
+        real_shell(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert_eq!(
+        set.aliases.get("zd"),
+        Some(home.path().to_string_lossy().as_ref())
+    );
+    assert_eq!(set.aliases.get("leak"), Some("none"));
+    let unset = read(
+        zsh_without_zdotdir(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert_eq!(unset.aliases.get("zd"), Some("unset"));
+    assert_eq!(unset.aliases.get("leak"), Some("none"));
+}
+
+#[test]
+fn the_temporary_zdotdir_is_gone_after_a_run() {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    write_file(
+        home.path(),
+        ".zshrc",
+        "zmodload zsh/parameter\nprint -r -- \"${functions_source[alias]-}\" > \"$HOME/record\"\n",
+    );
+    read(
+        real_shell(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let recorded = std::fs::read_to_string(home.path().join("record")).unwrap();
+    let zshenv = PathBuf::from(recorded.trim_end());
+    assert_eq!(
+        zshenv.file_name().and_then(|name| name.to_str()),
+        Some(".zshenv"),
+        "{recorded:?}"
+    );
+    let directory = zshenv.parent().unwrap();
+    assert!(is_temporary_zdotdir(directory), "{directory:?}");
+    assert!(!directory.exists(), "{directory:?} is still there");
+}
+
+#[test]
+fn the_temporary_zdotdir_is_gone_after_a_timeout() {
+    let records = tempfile::tempdir().unwrap();
+    let record = records.path().join("record");
+    let copy = records.path().join("zshenv");
+    let (_dir, path) = stub(&format!(
+        "printf '%s' \"$ZDOTDIR\" > {record}\ncp \"$ZDOTDIR/.zshenv\" {copy}\nexec sleep 60",
+        record = shellquote::shell_quote(&record.to_string_lossy()),
+        copy = shellquote::shell_quote(&copy.to_string_lossy()),
+    ));
+    let result = read(
+        childenv::fixture_command(&path),
+        ShellKind::Zsh,
+        Duration::from_secs(1),
+    );
+    assert!(
+        matches!(result, Err(ShellError::TimedOut { seconds: 1 })),
+        "{result:?}"
+    );
+    let directory = PathBuf::from(std::fs::read_to_string(&record).unwrap());
+    assert!(is_temporary_zdotdir(&directory), "{directory:?}");
+    assert!(!directory.exists(), "{directory:?} is still there");
+    let zshenv = std::fs::read_to_string(&copy).unwrap();
+    assert!(zshenv.contains("function alias"), "{zshenv}");
+    assert!(zshenv.contains("builtin alias \"$@\""), "{zshenv}");
+}
+
+#[test]
+fn each_run_has_a_temporary_zdotdir_of_its_own() {
+    let records = tempfile::tempdir().unwrap();
+    let record = records.path().join("record");
+    let (_dir, path) = stub(&format!(
+        "printf '%s\\n' \"$ZDOTDIR\" >> {}\nexit 1",
+        shellquote::shell_quote(&record.to_string_lossy()),
+    ));
+    for _ in 0..2 {
+        let result = read(
+            childenv::fixture_command(&path),
+            ShellKind::Zsh,
+            Duration::from_secs(10),
+        );
+        assert!(
+            matches!(result, Err(ShellError::Failed { .. })),
+            "{result:?}"
+        );
+    }
+    let text = std::fs::read_to_string(&record).unwrap();
+    let directories: Vec<PathBuf> = text.lines().map(PathBuf::from).collect();
+    assert_eq!(directories.len(), 2, "{text}");
+    assert_ne!(directories[0], directories[1], "{text}");
+    for directory in &directories {
+        assert!(is_temporary_zdotdir(directory), "{directory:?}");
+        assert!(!directory.exists(), "{directory:?} is still there");
+    }
+}
+
+/// bash does not read `ZDOTDIR`, thus a bash shell gets the `ZDOTDIR` of its
+/// command unchanged.
+#[test]
+fn a_bash_shell_gets_no_temporary_zdotdir() {
+    let records = tempfile::tempdir().unwrap();
+    let record = records.path().join("record");
+    let (_dir, path) = stub(&format!(
+        "printf '%s' \"$ZDOTDIR\" > {}\nexit 1",
+        shellquote::shell_quote(&record.to_string_lossy()),
+    ));
+    let mut command = childenv::fixture_command(&path);
+    command.env("ZDOTDIR", "/nowhere/zdotdir");
+    let result = read(command, ShellKind::Bash, Duration::from_secs(10));
+    assert!(
+        matches!(result, Err(ShellError::Failed { .. })),
+        "{result:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&record).unwrap(),
+        "/nowhere/zdotdir"
+    );
 }

@@ -5561,7 +5561,7 @@ atuin search --filter-mode global --include-duplicates --print0 --timezone +0 \
 
 It does not use `atuin history list`. That command obeys `filter_mode` of your atuin config, and a config with `filter_mode = "session"` gives one row. The search above always gives every row. The times are in UTC.
 
-`wdid` reads the aliases and the functions from your interactive shell (`$SHELL`, zsh or bash). It starts `$SHELL -i -c` with a script that prints them between two unique markers, so text from your startup files does no damage. The shell has 30 seconds. `--no-shell` skips this step.
+`wdid` reads the aliases and the functions from your interactive shell (`$SHELL`, zsh or bash). It starts `$SHELL -i -c` with a script that prints them between two unique markers, so text from your startup files does no damage. The shell has 30 seconds. `--no-shell` skips this step. zsh starts with a temporary `ZDOTDIR` that records the file of each alias, and your startup files run as before (see [The origin and my definitions](#the-origin-and-my-definitions)).
 
 ### What counts
 
@@ -5695,12 +5695,15 @@ The excerpt leaves out rows of the table and entries of the groups. The run was 
 
 ### wdid defs: the aliases and the functions
 
-`wdid defs` reports on each alias and each function of your interactive shell. Use it to find the definitions that you use, the definitions that you can remove, and the definitions that you forgot. The tools report shows an alias or a function only through a tool of the workspace that it runs. `wdid defs` shows each definition, also an alias that runs `git` and a definition with zero uses.
+`wdid defs` reports on each alias and each function of your interactive shell. Use it to find the definitions that you use, the definitions that you can remove, and the definitions that you forgot. The tools report shows an alias or a function only through a tool of the workspace that it runs. `wdid defs` shows each of your definitions, also an alias that runs `git` and a definition with zero uses.
+
+Each definition gets its origin: the file that defined it. By default, the text report shows only your own definitions. A shell with oh-my-zsh has hundreds of aliases and functions from its plugins and its `lib` files, and those are not yours. `--all` shows each definition, and groups the others by the file that defined them.
 
 `wdid defs` reads the history and the shell definitions as the tools report does. It needs no cargo workspace, and it starts no `cargo` process and no `git` process. Thus it runs in any directory.
 
 ```bash
 wdid defs
+wdid defs --all
 wdid defs --json
 wdid defs --since 2026-01-01 --idle-days 90
 ```
@@ -5718,13 +5721,31 @@ A use through other definitions names the definition that you typed. With `a` th
 
 - An alias in the body of a function. zsh and bash expand each alias in a function body when they read the definition. Thus the body that `wdid` gets holds the value of the alias, not its name, and the alias gets no use from the function.
 - A name in quoted text, a row with exit code 127, and a line that does not parse, as in the tools report.
-- A function whose name starts with `_`. The completion system makes these functions by the hundred, and nobody types them. The report does not show them. A call through such a function still counts: with `f() { _helper }` and `_helper() { g }`, a typed `f` is a use of `g` through `f`.
+- A function whose name starts with `_`. The completion system makes these functions by the hundred, and nobody types them. Only `--all` shows them. A call through such a function still counts: with `f() { _helper }` and `_helper() { g }`, a typed `f` is a use of `g` through `f`.
+
+#### The origin and my definitions
+
+The origin of an alias is `file:line`. The origin of a function is its file.
+
+- **A zsh function.** zsh keeps the file of each function in `$functions_source`. A function from an `eval` gets the file that holds the `eval`. A function from `source <(…)` gets `/dev/fd/N` on macOS and `/proc/self/fd/N` on Linux. `wdid` loads each autoloaded function first, and a loaded function gets its file too. For a function whose name starts with `_`, `autoload -Ur` finds the file and loads no body.
+- **A zsh alias.** zsh keeps no origin for an alias. Thus `wdid` starts zsh with `ZDOTDIR` set to a new temporary directory. The `.zshenv` of that directory defines a shell function named `alias`. For each definition, the function records the file and the line of the call (`$funcfiletrace`), and then it runs `builtin alias "$@"`. Then the file sets `ZDOTDIR` back to its value in your environment, or removes it when your environment has none, and it sources your real `.zshenv`. zsh then reads your other startup files from your real `ZDOTDIR`, also when your `.zshenv` changes `ZDOTDIR`. Before `wdid` lists the aliases, it removes the function. The temporary directory has a unique name, and `wdid` removes it after the run, also after an error or a timeout.
+- **An alias from `builtin alias`.** This command goes around the function, thus its origin is unknown.
+- **bash.** `shopt -s extdebug` and `declare -F` give the file of each function. bash keeps no origin for an alias, thus the origin of each bash alias is unknown.
+
+An origin that is not an absolute path is unknown, for example `(eval)`, or `environment` for a bash function from the environment.
+
+A definition is mine when its origin is unknown, when its file is under `$ZSH_CUSTOM`, or when its file is under `$HOME` and not under the oh-my-zsh directory (`$ZSH`). `wdid` reads `HOME`, `ZSH`, and `ZSH_CUSTOM` from the shell, after your startup files ran. Thus:
+
+- A definition in `~/.zshrc`, in a file under `$HOME` that `~/.zshrc` sources, or in `$ZSH_CUSTOM` is mine.
+- A definition that an `eval` in `~/.zshrc` makes is mine, for example a function from `eval "$(tsm shell-init)"`. Your file chose to run it.
+- A definition with an unknown origin is mine, so that the default report never hides it. zsh itself defines the aliases `run-help` and `which-command`, which have no file.
+- A definition from `$ZSH`, from `/usr/share/zsh`, from `/dev/fd` or `/proc/self/fd`, or from a different file outside `$HOME` is not mine. A definition from `source <(tsm shell-init)` is in `/dev/fd` on macOS and in `/proc/self/fd` on Linux, thus it is not mine.
 
 #### The report
 
-Two header lines start the report. The first line gives the history rows, the rows with exit code 127, and the rows that did not parse. The second line gives the shell, the number of aliases, and the number of functions.
+Three header lines start the report. The first line gives the history rows, the rows with exit code 127, and the rows that did not parse. The second line gives the shell, the number of aliases, and the number of functions. The third line gives the number of my definitions and the number of the others.
 
-The table has one row for each definition, the most used first:
+The table has one row for each of my definitions, the most used first:
 
 - `Name`: the name. A suffix alias has its marker (`*.md`).
 - `Kind`: `alias`, `global alias`, `suffix alias`, or `function`.
@@ -5732,47 +5753,82 @@ The table has one row for each definition, the most used first:
 - `Typed`: the uses where you typed the name.
 - `Through`: the definitions that gave the other uses, each with its count. When `COLUMNS` or the terminal gives a width, a cell longer than 30 columns wraps. With no width, the cell is one line.
 - `First use` and `Last use`: the dates of the first and the last counted use.
+- `Origin`: the origin, with `~` for your home directory: `file:line` for an alias, the file for a function, or `-` when the origin is unknown.
 - `Definition`: the value of an alias, or the first line of a function body. The cell is one line. When `COLUMNS` or the terminal gives a width, `wdid` cuts the cell to fit that width and ends it with `…`.
 
 An alias and a function can have the same name. They are two rows.
 
-Two groups follow the table:
+With `--all`, the table of my definitions gets the heading `Mine` and a count. After it, the report has one table for each file that defined the others, in path order. The heading of each table is the file and its count of definitions, for example `~/.oh-my-zsh/plugins/git/git.plugin.zsh: 208 definitions`. The tables also hold the functions whose names start with `_`. Each completion function has a file of its own, thus a shell with the completion system gives one table for each completion function.
+
+Two groups follow the tables:
 
 - **Never used.** The definitions with zero uses, each with its kind.
 - **Idle.** The definitions whose last use is older than `--idle-days` days, each with its kind, its uses, and the date of its last use.
 
+Without `--all`, the two groups hold only my definitions. With `--all`, they hold each definition.
+
 #### Options of wdid defs
 
 - `--since <YYYY-MM-DD>`: Count only the rows from this date on. A row on this date counts.
-- `--json`: Print the report as one JSON document. `definitions` holds each definition, also the ones with zero uses, and its `definition` is never cut. `never_used` and `idle` hold the name and the kind of each entry of the two groups.
+- `--all`: Show each definition. The text report also shows the others, grouped by the file that defined them, and the functions whose names start with `_`.
+- `--json`: Print the report as one JSON document. `definitions` holds each definition, also the ones with zero uses and the ones that are not mine, and its `definition` is never cut. Each entry has `origin` and `mine`. `origin` holds `file` and `line`, or it is `null` when the origin is unknown. A function has no line, thus its `line` is `null`. `shell.mine` and `shell.others` give the two counts. `never_used` and `idle` hold the name and the kind of each entry of the two groups, also the entries that are not mine. With `--all`, the document also holds the functions whose names start with `_`.
 - `--idle-days <DAYS>`: A definition is idle when its last use is older than this. Defaults to 180.
 
 The options of the tools report (`--repo`, `--no-shell`, `--unparsed`, `--new-days`) do not apply. An option of the tools report before `defs` is a usage error.
 
 #### Example of wdid defs
 
-A run on a small history. zsh itself defines `run-help` and `which-command`.
+A run on a small history, with a stand-in of oh-my-zsh in `~/.oh-my-zsh`. Its git plugin defines `gst` and `gco`. zsh itself defines `run-help` and `which-command`.
 
 ```text
-History: 12 rows. 1 not counted (exit 127). 0 did not parse.
-Shell: /bin/zsh, 7 aliases, 3 functions (0 did not parse).
+History: 14 rows. 1 not counted (exit 127). 0 did not parse.
+Shell: /bin/zsh, 9 aliases, 3 functions (0 did not parse).
+Definitions: 10 mine, 2 others (--all shows the others).
 
-┌───────────────┬──────────────┬──────┬───────┬─────────┬────────────┬────────────┬─────────────────────────┐
-│ Name          ┆ Kind         ┆ Uses ┆ Typed ┆ Through ┆ First use  ┆ Last use   ┆ Definition              │
-╞═══════════════╪══════════════╪══════╪═══════╪═════════╪════════════╪════════════╪═════════════════════════╡
-│ wt            ┆ alias        ┆    4 ┆     1 ┆ wtf 3   ┆ 2026-11-23 ┆ 2026-11-25 ┆ cwt                     │
-│ gs            ┆ alias        ┆    3 ┆     3 ┆         ┆ 2026-11-20 ┆ 2026-11-22 ┆ git status              │
-│ wtf           ┆ alias        ┆    3 ┆     3 ┆         ┆ 2026-11-23 ┆ 2026-11-25 ┆ wt -f                   │
-│ *.md          ┆ suffix alias ┆    1 ┆     1 ┆         ┆ 2026-11-24 ┆ 2026-11-24 ┆ glow                    │
-│ G             ┆ global alias ┆    1 ┆     1 ┆         ┆ 2026-11-23 ┆ 2026-11-23 ┆ | grep                  │
-│ helper        ┆ function     ┆    1 ┆     0 ┆ myf 1   ┆ 2026-11-25 ┆ 2026-11-25 ┆ echo "helping $1"       │
-│ myf           ┆ function     ┆    1 ┆     1 ┆         ┆ 2026-11-25 ┆ 2026-11-25 ┆ helper "$@"             │
-│ oldfn         ┆ function     ┆    1 ┆     1 ┆         ┆ 2026-03-21 ┆ 2026-03-21 ┆ tar czf backup.tgz "$@" │
-│ run-help      ┆ alias        ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ man                     │
-│ which-command ┆ alias        ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ whence                  │
-└───────────────┴──────────────┴──────┴───────┴─────────┴────────────┴────────────┴─────────────────────────┘
+┌───────────────┬──────────────┬──────┬───────┬─────────┬────────────┬────────────┬────────────┬─────────────────────────┐
+│ Name          ┆ Kind         ┆ Uses ┆ Typed ┆ Through ┆ First use  ┆ Last use   ┆ Origin     ┆ Definition              │
+╞═══════════════╪══════════════╪══════╪═══════╪═════════╪════════════╪════════════╪════════════╪═════════════════════════╡
+│ wt            ┆ alias        ┆    4 ┆     1 ┆ wtf 3   ┆ 2026-11-23 ┆ 2026-11-25 ┆ ~/.zshrc:2 ┆ cwt                     │
+│ gs            ┆ alias        ┆    3 ┆     3 ┆         ┆ 2026-11-20 ┆ 2026-11-22 ┆ ~/.zshrc:3 ┆ git status              │
+│ wtf           ┆ alias        ┆    3 ┆     3 ┆         ┆ 2026-11-23 ┆ 2026-11-25 ┆ ~/.zshrc:4 ┆ wt -f                   │
+│ *.md          ┆ suffix alias ┆    1 ┆     1 ┆         ┆ 2026-11-24 ┆ 2026-11-24 ┆ ~/.zshrc:5 ┆ glow                    │
+│ G             ┆ global alias ┆    1 ┆     1 ┆         ┆ 2026-11-23 ┆ 2026-11-23 ┆ ~/.zshrc:6 ┆ | grep                  │
+│ helper        ┆ function     ┆    1 ┆     0 ┆ myf 1   ┆ 2026-11-25 ┆ 2026-11-25 ┆ ~/.zshrc   ┆ echo "helping $1"       │
+│ myf           ┆ function     ┆    1 ┆     1 ┆         ┆ 2026-11-25 ┆ 2026-11-25 ┆ ~/.zshrc   ┆ helper "$@"             │
+│ oldfn         ┆ function     ┆    1 ┆     1 ┆         ┆ 2026-03-21 ┆ 2026-03-21 ┆ ~/.zshrc   ┆ tar czf backup.tgz "$@" │
+│ run-help      ┆ alias        ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ -          ┆ man                     │
+│ which-command ┆ alias        ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ -          ┆ whence                  │
+└───────────────┴──────────────┴──────┴───────┴─────────┴────────────┴────────────┴────────────┴─────────────────────────┘
 
 Never used:
+  run-help (alias)
+  which-command (alias)
+Idle (no use in the last 180 days):
+  oldfn (function, 1 use, last use 2026-03-21)
+```
+
+The same run with `--all` adds a table for the git plugin after the table of my definitions. This excerpt leaves out rows of the first table:
+
+```text
+Definitions: 10 mine, 2 others.
+
+Mine: 10 definitions
+┌───────────────┬──────────────┬──────┬───────┬─────────┬────────────┬────────────┬────────────┬─────────────────────────┐
+│ Name          ┆ Kind         ┆ Uses ┆ Typed ┆ Through ┆ First use  ┆ Last use   ┆ Origin     ┆ Definition              │
+╞═══════════════╪══════════════╪══════╪═══════╪═════════╪════════════╪════════════╪════════════╪═════════════════════════╡
+│ wt            ┆ alias        ┆    4 ┆     1 ┆ wtf 3   ┆ 2026-11-23 ┆ 2026-11-25 ┆ ~/.zshrc:2 ┆ cwt                     │
+└───────────────┴──────────────┴──────┴───────┴─────────┴────────────┴────────────┴────────────┴─────────────────────────┘
+
+~/.oh-my-zsh/plugins/git/git.plugin.zsh: 2 definitions
+┌──────┬───────┬──────┬───────┬─────────┬────────────┬────────────┬───────────────────────────────────────────┬──────────────┐
+│ Name ┆ Kind  ┆ Uses ┆ Typed ┆ Through ┆ First use  ┆ Last use   ┆ Origin                                    ┆ Definition   │
+╞══════╪═══════╪══════╪═══════╪═════════╪════════════╪════════════╪═══════════════════════════════════════════╪══════════════╡
+│ gst  ┆ alias ┆    2 ┆     2 ┆         ┆ 2026-11-26 ┆ 2026-11-26 ┆ ~/.oh-my-zsh/plugins/git/git.plugin.zsh:1 ┆ git status   │
+│ gco  ┆ alias ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ ~/.oh-my-zsh/plugins/git/git.plugin.zsh:2 ┆ git checkout │
+└──────┴───────┴──────┴───────┴─────────┴────────────┴────────────┴───────────────────────────────────────────┴──────────────┘
+
+Never used:
+  gco (alias)
   run-help (alias)
   which-command (alias)
 Idle (no use in the last 180 days):
@@ -5791,7 +5847,9 @@ One entry of the `--json` document:
   "through": [{ "name": "wtf", "uses": 3 }],
   "first_use": "2026-11-23",
   "last_use": "2026-11-25",
-  "classification": "used"
+  "classification": "used",
+  "origin": { "file": "/Users/me/.zshrc", "line": 2 },
+  "mine": true
 }
 ```
 

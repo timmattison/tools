@@ -104,8 +104,9 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Report on each alias and each function of the interactive shell: the
-    /// uses, the definitions that gave the other uses, and the definitions
-    /// never used or idle. Needs no cargo workspace.
+    /// file that defined it, the uses, the definitions that gave the other
+    /// uses, and the definitions never used or idle. Needs no cargo
+    /// workspace.
     Defs(DefsArgs),
 }
 
@@ -124,6 +125,15 @@ struct DefsArgs {
     /// A definition is idle when its last use is older than this many days.
     #[arg(long, value_name = "DAYS", default_value = DEFAULT_IDLE_DAYS)]
     idle_days: u32,
+
+    /// Show each definition. Without this flag, the text report shows only
+    /// my definitions. A definition is mine when its origin is unknown, or
+    /// when its file is under `ZSH_CUSTOM`. It is also mine when its file is
+    /// under HOME and not under `ZSH`, the oh-my-zsh directory. With this
+    /// flag, the text report also shows the others, grouped by the file that
+    /// defined them, and the functions whose name starts with `_`.
+    #[arg(long)]
+    all: bool,
 }
 
 /// Reads a date in the form `YYYY-MM-DD`.
@@ -233,6 +243,7 @@ fn run_defs(args: &DefsArgs) -> Result<String, Error> {
         today,
         since: args.since,
         idle_days: args.idle_days,
+        all: args.all,
     };
     let tally = defs::tally(&entries, &definitions, &window);
     Ok(if args.json {
