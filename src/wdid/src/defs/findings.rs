@@ -205,6 +205,36 @@ fn alias_and_function(definitions: &Definitions, entries: &Entries<'_>) -> Vec<F
     found
 }
 
+/// Gives `places` without each place that a later place repeats. The order
+/// stays, and the last occurrence of a place stays.
+fn last_occurrences(places: &[Option<Origin>]) -> Vec<Option<Origin>> {
+    places
+        .iter()
+        .enumerate()
+        .filter(|(index, place)| !places.iter().skip(index + 1).any(|later| later == *place))
+        .map(|(_, place)| place.clone())
+        .collect()
+}
+
+/// Finds each alias of any kind that the startup files define in two or more
+/// places.
+fn defined_more_than_once(definitions: &Definitions, entries: &Entries<'_>) -> Vec<Finding> {
+    entries
+        .aliases
+        .iter()
+        .filter_map(|(alias, usage)| {
+            let places = last_occurrences(definitions.alias_places(alias));
+            (places.len() >= 2).then(|| Finding {
+                kind: FindingKind::DefinedMoreThanOnce,
+                definitions: vec![Member::of(usage)],
+                words: Vec::new(),
+                places,
+                program: None,
+            })
+        })
+        .collect()
+}
+
 /// Gives the findings among `usages`, sorted by kind, then by the name and the
 /// kind of the first definition. Pure.
 ///
@@ -214,6 +244,7 @@ pub(super) fn find(definitions: &Definitions, usages: &[Usage]) -> Vec<Finding> 
     let entries = Entries::new(definitions, usages);
     let mut found = same_expansion(&entries);
     found.extend(alias_and_function(definitions, &entries));
+    found.extend(defined_more_than_once(definitions, &entries));
     found.sort_by(|left, right| sort_key(left).cmp(&sort_key(right)));
     found
 }
