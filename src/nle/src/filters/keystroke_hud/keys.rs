@@ -50,6 +50,9 @@ pub(crate) struct KeyReader {
     paste_tail: Option<Vec<char>>,
     /// The time and the characters of an unfinished sequence.
     pending: Option<(f64, Vec<char>)>,
+    /// The sum of the `steps` of each parse that the reader ran.
+    #[cfg(test)]
+    steps: usize,
 }
 
 impl KeyReader {
@@ -58,6 +61,8 @@ impl KeyReader {
         Self {
             paste_tail: None,
             pending: None,
+            #[cfg(test)]
+            steps: 0,
         }
     }
 
@@ -84,10 +89,10 @@ impl KeyReader {
                 joined.extend(chars);
                 chars = joined;
             } else {
-                keys.extend(parse_final(pending_time, joined));
+                keys.extend(self.parse_final(pending_time, joined));
             }
         }
-        let parser = Parser::run_on(chars, false);
+        let parser = self.parse(chars, false);
         keys.extend(parser.keys.into_iter().map(|key| (time, key)));
         self.paste_tail = parser.paste_tail;
         self.pending = parser.unfinished.map(|chars| (time, chars));
@@ -98,19 +103,29 @@ impl KeyReader {
     pub(crate) fn finish(&mut self) -> Vec<(f64, Key)> {
         self.paste_tail = None;
         match self.pending.take() {
-            Some((time, chars)) => parse_final(time, chars),
+            Some((time, chars)) => self.parse_final(time, chars),
             None => Vec::new(),
         }
     }
-}
 
-/// The keys of `chars` as the whole of the input, each with `time`.
-fn parse_final(time: f64, chars: Vec<char>) -> Vec<(f64, Key)> {
-    Parser::run_on(chars, true)
-        .keys
-        .into_iter()
-        .map(|key| (time, key))
-        .collect()
+    /// The keys of `chars` as the whole of the input, each with `time`.
+    fn parse_final(&mut self, time: f64, chars: Vec<char>) -> Vec<(f64, Key)> {
+        self.parse(chars, true)
+            .keys
+            .into_iter()
+            .map(|key| (time, key))
+            .collect()
+    }
+
+    /// Parse all of `chars`, and add the steps of the parse to `steps`.
+    fn parse(&mut self, chars: Vec<char>, final_input: bool) -> Parser {
+        let parser = Parser::run_on(chars, final_input);
+        #[cfg(test)]
+        {
+            self.steps += parser.steps;
+        }
+        parser
+    }
 }
 
 /// The index after the first end marker of a paste in `chars`.
@@ -395,6 +410,10 @@ struct Parser {
     unfinished: Option<Vec<char>>,
     /// The last characters of a paste that the data does not end.
     paste_tail: Option<Vec<char>>,
+    /// The number of characters that the scans for the terminator of a string
+    /// read, and that `defer` copied.
+    #[cfg(test)]
+    steps: usize,
 }
 
 impl Parser {
@@ -407,6 +426,8 @@ impl Parser {
             final_input,
             unfinished: None,
             paste_tail: None,
+            #[cfg(test)]
+            steps: 0,
         };
         parser.run();
         parser
@@ -418,6 +439,10 @@ impl Parser {
     fn defer(&mut self, start: usize) -> bool {
         if self.final_input {
             return false;
+        }
+        #[cfg(test)]
+        {
+            self.steps += self.chars.len().saturating_sub(start);
         }
         self.unfinished = Some(self.chars.get(start..).unwrap_or_default().to_vec());
         self.pos = self.chars.len();
@@ -528,6 +553,10 @@ impl Parser {
                 None
             }
         });
+        #[cfg(test)]
+        {
+            self.steps += end.unwrap_or(rest.len());
+        }
         match end {
             Some(length) => {
                 self.pos += length;

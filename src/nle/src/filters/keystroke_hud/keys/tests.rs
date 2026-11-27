@@ -372,6 +372,31 @@ fn a_string_and_its_terminator_split_over_events_give_no_key() {
 }
 
 #[test]
+fn a_string_over_many_events_costs_steps_linear_in_its_length() {
+    // An OSC 52 reply of the clipboard, in 100 reads of 4096 characters.
+    const EVENTS: usize = 100;
+    const EVENT_LENGTH: usize = 4096;
+    let body = "QUJD".repeat(EVENT_LENGTH / 4);
+    let mut reader = KeyReader::new();
+    let mut keys = reader.feed(1.0, &format!("\x1b]52;c;{body}"));
+    let mut time = 1.0;
+    for _ in 1..EVENTS {
+        time += 0.001;
+        keys.extend(reader.feed(time, &body));
+    }
+    let end = time + 0.001;
+    keys.extend(reader.feed(end, "\x07z"));
+    keys.extend(reader.finish());
+    assert_eq!(keys, vec![(end, text("z"))]);
+    let length = EVENTS * EVENT_LENGTH;
+    assert!(
+        reader.steps <= 2 * length,
+        "{} steps for a string of {length} characters",
+        reader.steps
+    );
+}
+
+#[test]
 fn a_string_start_whose_rest_comes_after_the_timeout_is_an_alt_key() {
     assert_eq!(
         read(&[(1.0, "\x1b]ab"), (1.5, "c")]),
