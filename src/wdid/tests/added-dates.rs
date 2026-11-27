@@ -96,7 +96,7 @@ fn an_alias_name_that_the_shell_must_expand_defines_nothing() {
 /// the words of the line as the shell reads them.
 #[test]
 fn an_alias_line_with_an_open_quote_reads_the_rest_of_the_line_as_its_value() {
-    let cases: [(&str, &[&str]); 9] = [
+    let cases: [(&str, &[&str]); 10] = [
         ("alias q1='open q2=z", &["q1"]),
         ("alias -s {jpg,png}='open", &["*.jpg", "*.png"]),
         ("alias a=1 b='open", &["a", "b"]),
@@ -106,6 +106,7 @@ fn an_alias_line_with_an_open_quote_reads_the_rest_of_the_line_as_its_value() {
         ("alias {a,b}=`date`", &["a", "b"]),
         ("alias gs='git status' \\", &["gs"]),
         ("alias foo=\"cmd1 && \\", &["foo"]),
+        ("alias a=1 b=\"cmd1 && \\", &["a", "b"]),
     ];
     for (line, names) in cases {
         let expected: Vec<Defined> = names.iter().map(|name| Defined::alias(*name)).collect();
