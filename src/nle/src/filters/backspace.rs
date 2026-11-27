@@ -79,6 +79,16 @@ fn reject_options(options: &FilterOptions) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Check that the terminal of `width` by `height` cells can hold a screen.
+fn check_size(width: usize, height: usize) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err(format!(
+            "the terminal is {width} by {height} cells, and it needs at least 1 by 1"
+        ));
+    }
+    Ok(())
+}
+
 /// The kind of the backspace removal filter, as a `FilterKind`.
 #[must_use]
 pub fn kind() -> FilterKind {
@@ -103,11 +113,12 @@ fn remove_backspacing(
     options: &FilterOptions,
 ) -> Result<Span, String> {
     reject_options(options)?;
-    let mut screen = TerminalState::new(
+    let (width, height) = (
         usize::from(context.size.width),
         usize::from(context.size.height),
-        probe_theme(),
     );
+    check_size(width, height)?;
+    let mut screen = TerminalState::new(width, height, probe_theme());
     for event in context
         .before
         .iter()
