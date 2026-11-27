@@ -244,3 +244,276 @@ fn a_gray_index_mirrors_inside_the_ramp() {
     assert_eq!(invert_gray(243), 244);
     assert_eq!(invert_gray(244), 243);
 }
+
+// Tests of the SGR rewrite.
+
+/// A converter for Solarized Light with the rules that a test states.
+fn converter(cube: CubeRule, grayscale: GrayscaleRule, truecolor: TruecolorRule) -> Converter {
+    Converter::new(&ColorScheme {
+        cube,
+        grayscale,
+        truecolor,
+        ..ColorScheme::new(PreviewTheme::SolarizedLight)
+    })
+}
+
+/// The rewrite of `params` with each rule at `Keep`.
+fn rewrite(params: &str) -> Option<String> {
+    converter(CubeRule::Keep, GrayscaleRule::Keep, TruecolorRule::Keep).rewrite(params)
+}
+
+/// The parameters that the texts of the items of `params` give.
+fn joined(params: &str) -> String {
+    sgr_items(params)
+        .iter()
+        .map(SgrItem::text)
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// The text of a 24-bit color of the code `code`.
+fn rgb_text(code: u8, (red, green, blue): Rgb) -> String {
+    format!("{code};2;{red};{green};{blue}")
+}
+
+#[test]
+fn a_base_color_becomes_the_color_of_the_theme() {
+    assert_eq!(
+        rewrite("1;31;44").as_deref(),
+        Some("1;38;2;220;50;47;48;2;38;139;210")
+    );
+}
+
+#[test]
+fn a_bright_color_uses_the_bright_half_of_the_palette() {
+    let palette = solarized_light_palette();
+
+    assert_eq!(rewrite("91"), Some(rgb_text(38, palette[9])));
+    assert_eq!(rewrite("104"), Some(rgb_text(48, palette[12])));
+    assert_eq!(rewrite("97"), Some(rgb_text(38, palette[15])));
+    assert_eq!(rewrite("100"), Some(rgb_text(48, palette[8])));
+}
+
+#[test]
+fn an_indexed_base_color_becomes_a_24_bit_color() {
+    let palette = solarized_light_palette();
+
+    assert_eq!(rewrite("38;5;1"), Some(rgb_text(38, palette[1])));
+    assert_eq!(rewrite("48:5:4"), Some(rgb_text(48, palette[4])));
+    assert_eq!(rewrite("58;5;1"), Some(rgb_text(58, palette[1])));
+}
+
+#[test]
+fn a_list_with_no_color_to_change_gives_none() {
+    for params in [
+        "",
+        "0",
+        "1;4",
+        "39;49;59",
+        "38;5;196",
+        "38;5;240",
+        "38;2;1;2;3",
+        "4:3",
+    ] {
+        assert_eq!(rewrite(params), None, "{params:?}");
+    }
+}
+
+#[test]
+fn a_cube_operand_is_not_read_as_a_color_code() {
+    assert_eq!(rewrite("38;5;31"), None);
+    assert_eq!(
+        rewrite("1;38;5;31;32").as_deref(),
+        Some(format!("1;38;5;31;{}", rgb_text(38, solarized_light_palette()[2])).as_str())
+    );
+    assert_eq!(
+        rewrite("38;5;0;31")
+            .as_deref()
+            .map(|text| text.starts_with("38;2;")),
+        Some(true)
+    );
+}
+
+#[test]
+fn an_incomplete_color_stays_as_written() {
+    assert_eq!(rewrite("38;5"), None);
+    assert_eq!(rewrite("38;2;1;2"), None);
+    assert_eq!(rewrite("1;48;2;1"), None);
+    assert_eq!(
+        sgr_items("38;2;1;2"),
+        vec![SgrItem::Other("38;2;1;2".to_string())]
+    );
+}
+
+#[test]
+fn a_color_with_a_bad_operand_stays_as_written() {
+    assert_eq!(rewrite("38;2;300;0;0"), None);
+    assert_eq!(rewrite("38;5;256"), None);
+    assert_eq!(rewrite("38;5;1:2"), None);
+    assert_eq!(
+        sgr_items("38;2;300;0;0;1"),
+        vec![
+            SgrItem::Other("38;2;300;0;0".to_string()),
+            SgrItem::Other("1".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn a_bad_group_still_takes_its_operands() {
+    // The 0 is an operand of the group, not a reset.
+    assert_eq!(
+        sgr_items("38;5;999;0"),
+        vec![
+            SgrItem::Other("38;5;999".to_string()),
+            SgrItem::Reset("0".to_string()),
+        ]
+    );
+    assert_eq!(
+        sgr_items("38;5;256"),
+        vec![SgrItem::Other("38;5;256".to_string())]
+    );
+}
+
+#[test]
+fn an_extended_code_with_no_mode_is_one_other_item() {
+    assert_eq!(
+        sgr_items("38;7;1"),
+        vec![
+            SgrItem::Other("38".to_string()),
+            SgrItem::Other("7".to_string()),
+            SgrItem::Other("1".to_string()),
+        ]
+    );
+    assert_eq!(sgr_items("38"), vec![SgrItem::Other("38".to_string())]);
+}
+
+#[test]
+fn the_colon_form_with_an_empty_color_space_is_read() {
+    let converter = converter(
+        CubeRule::Keep,
+        GrayscaleRule::Keep,
+        TruecolorRule::InvertLightness,
+    );
+
+    assert_eq!(
+        sgr_items("38:2::10:20:30"),
+        vec![SgrItem::Color {
+            slot: Slot::Foreground,
+            text: "38:2::10:20:30".to_string(),
+            color: SgrColor::Rgb((10, 20, 30)),
+        }]
+    );
+    assert_eq!(
+        converter.rewrite("38:2::10:20:30").as_deref(),
+        Some("38;2;225;235;245")
+    );
+    assert_eq!(
+        converter.rewrite("48:2:0:10:20:30").as_deref(),
+        Some("48;2;225;235;245")
+    );
+    assert_eq!(
+        converter.rewrite("38:2:10:20:30").as_deref(),
+        Some("38;2;225;235;245")
+    );
+}
+
+#[test]
+fn a_colon_form_that_is_not_a_color_stays_as_written() {
+    assert_eq!(rewrite("38:5"), None);
+    assert_eq!(rewrite("38:2:1:2"), None);
+    assert_eq!(rewrite("38:3:1:2:3"), None);
+    assert_eq!(rewrite("4:3;5"), None);
+}
+
+#[test]
+fn the_cube_rule_nearest_gives_the_nearest_color_of_the_theme() {
+    let converter = converter(CubeRule::Nearest, GrayscaleRule::Keep, TruecolorRule::Keep);
+
+    assert_eq!(
+        converter.rewrite("38;5;196").as_deref(),
+        Some("38;2;220;50;47")
+    );
+    assert_eq!(converter.rewrite("38;5;240"), None);
+}
+
+#[test]
+fn the_grayscale_rule_invert_mirrors_the_ramp() {
+    let converter = converter(CubeRule::Keep, GrayscaleRule::Invert, TruecolorRule::Keep);
+
+    assert_eq!(converter.rewrite("38;5;232").as_deref(), Some("38;5;255"));
+    assert_eq!(converter.rewrite("48;5;243").as_deref(), Some("48;5;244"));
+    assert_eq!(converter.rewrite("38;5;196"), None);
+}
+
+#[test]
+fn the_truecolor_rule_leaves_a_color_that_does_not_change() {
+    let converter = converter(
+        CubeRule::Keep,
+        GrayscaleRule::Keep,
+        TruecolorRule::InvertLightness,
+    );
+
+    assert_eq!(converter.rewrite("38;2;255;0;0"), None);
+    assert_eq!(
+        converter.rewrite("38;2;255;255;255").as_deref(),
+        Some("38;2;0;0;0")
+    );
+}
+
+#[test]
+fn a_reset_and_a_default_keep_their_text() {
+    assert_eq!(sgr_items("0"), vec![SgrItem::Reset("0".to_string())]);
+    assert_eq!(sgr_items(""), vec![SgrItem::Reset(String::new())]);
+    assert_eq!(
+        sgr_items("39;49;59"),
+        vec![
+            SgrItem::Default(Slot::Foreground, "39".to_string()),
+            SgrItem::Default(Slot::Background, "49".to_string()),
+            SgrItem::Default(Slot::Underline, "59".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn a_number_that_does_not_fit_stays_as_written() {
+    assert_eq!(
+        sgr_items("99999999999;1"),
+        vec![
+            SgrItem::Other("99999999999".to_string()),
+            SgrItem::Other("1".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn the_texts_of_the_items_give_back_the_parameters() {
+    for params in [
+        "",
+        "0",
+        ";",
+        "1;31;44",
+        "91;104",
+        "38;5;1",
+        "48:5:4",
+        "58;5;1",
+        "38;5;196",
+        "38;2;1;2;3",
+        "38;2;1;2",
+        "38;5",
+        "38",
+        "38;2;300;0;0;1",
+        "38;5;999;0",
+        "38;7;1",
+        "38:2::10:20:30",
+        "38:2:1:2",
+        "4:3;5",
+        "39;49;59",
+        "99999999999",
+        "1;;3",
+        "00;038;5;1",
+        "x;y",
+    ] {
+        assert_eq!(joined(params), params, "{params:?}");
+    }
+}
