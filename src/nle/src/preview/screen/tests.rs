@@ -93,3 +93,22 @@ fn a_hidden_cursor_changes_no_cell() {
     let screen = Screen::of(&terminal(4, 1, "\x1b[?25lab"));
     assert_eq!(texts(&screen.rows[0]), ["ab  "]);
 }
+
+#[test]
+fn a_wide_character_is_a_run_of_its_own() {
+    let screen = Screen::of(&terminal(6, 1, "\x1b[?25l日本ab"));
+    let row = &screen.rows[0];
+    assert_eq!(texts(row), ["日", "本", "ab  "]);
+    assert_eq!(
+        row.runs.iter().map(|run| run.single_cell).collect::<Vec<_>>(),
+        [true, true, false]
+    );
+}
+
+#[test]
+fn a_control_character_shows_as_a_space() {
+    let mut state = terminal(3, 1, "\x1b[?25lab");
+    state.grid[0][0].ch = '\0';
+    let screen = Screen::of(&state);
+    assert_eq!(screen.row_texts(), [" b "]);
+}
