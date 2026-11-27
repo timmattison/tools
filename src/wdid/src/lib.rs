@@ -10,7 +10,8 @@
 //! - [`catalog`] reads the tools of the workspace: names, crate directories,
 //!   added dates, and install state.
 //! - [`command_words`] gives the command words of one command line.
-//! - [`defs`] counts the uses of each alias and each function of the shell.
+//! - [`defs`] counts the uses of each alias and each function of the shell,
+//!   and finds the duplicates and the shadows among them.
 //! - [`history`] gets the full atuin history as a list of rows.
 //! - [`origin`] holds the file that defined each alias and each function, and
 //!   says which definitions are mine.

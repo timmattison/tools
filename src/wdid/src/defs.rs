@@ -5,8 +5,9 @@
 //! one [`Usage`] for each alias and for each function. It counts a typed use
 //! and a use through another definition. It finds each definition that the
 //! shell runs without a typed name, with its [`Reason`]. It classifies each
-//! other definition by the date of its last use. The function is pure: it
-//! starts no process and reads no file.
+//! other definition by the date of its last use. It also gives each
+//! [`Finding`]: the duplicates and the shadows among the definitions. The
+//! function is pure: it starts no process and reads no file.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
