@@ -102,3 +102,20 @@ fn the_rendered_recording_is_shorter_by_the_removed_time() {
 fn ctrl_h_erases_like_the_backspace_key() {
     assert_eq!(run(typo_then_backspace("\x08")), without_the_typo());
 }
+
+#[test]
+fn output_backspaces_of_a_program_with_no_input_stay() {
+    let events = vec![out(1.0, "Loading... 50%"), out(1.5, "\x08\x08\x0875%")];
+    assert_eq!(run(events.clone()), events);
+}
+
+#[test]
+fn a_typed_key_and_output_backspaces_with_no_erase_key_stay() {
+    let events = vec![
+        out(0.0, "$ "),
+        input(1.0, "a"),
+        out(1.0, "a"),
+        out(1.5, "\x08\x08"),
+    ];
+    assert_eq!(run(events.clone()), events);
+}
