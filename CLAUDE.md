@@ -1296,8 +1296,9 @@ Linux runner is small.
 ## Checks in an issue-fleet Step
 
 A step of issue-fleet runs the checks of the crates that its change touches,
-and not the full list. CI runs the full list on the pull request. This section
-applies when `ISSUE_FLEET_RUN` is set. issue-fleet sets that variable in each
+and not the full list. CI runs the full list on the pull request. CI does not
+run the checks of the msgs frontend, thus a step that changes that frontend
+runs them itself. This section applies when `ISSUE_FLEET_RUN` is set. issue-fleet sets that variable in each
 step, also in each step of the `review-loop` that it starts. Each other session
 keeps the full list at the end of a TDD run, as
 [Continuous Integration](#continuous-integration) says.
@@ -1325,7 +1326,7 @@ does the work of CI a second time, and it slows each other step on the machine.
    `-p`.
 2. For each crate that the change touches, run `cargo test -p <crate>` and
    `cargo clippy -p <crate> --all-targets -- -D warnings`. Also run these
-   tests:
+   checks:
    - When the change touches a crate that other crates of the workspace use,
      run the tests of each crate that depends on it. Do this also when that is
      most of the workspace. `childenv` has 74 dependents, and `buildinfo` has
@@ -1337,6 +1338,15 @@ does the work of CI a second time, and it slows each other step on the machine.
      the hook starts, `test.sh`, and each file in a `specs` or `plans`
      directory. Thus a change to Rust code also needs the tests of
      `repo-guards`.
+   - When the change touches a file under `src/msgs/frontend/` or
+     `src/msgs/scripts/`, run the checks of the msgs frontend: `tsc --noEmit`
+     on both directories, and `vitest run`. Only the msgs block of
+     `.husky/pre-commit` runs them, and part 3 skips that hook:
+
+     ```bash
+     pnpm --dir src/msgs/frontend install --frozen-lockfile --prefer-offline
+     pnpm --dir src/msgs/frontend run check
+     ```
 3. Commit with `--no-verify`. The pre-commit hook runs the full list for each
    commit that stages a Rust file, a `Cargo.toml`, `Cargo.lock`, or
    `scripts/rust-checks.sh`.
