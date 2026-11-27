@@ -406,9 +406,7 @@ impl Walk {
 /// palette. The color cube of that palette uses only the channel values 0, 95,
 /// 135, 175, 215 and 255, and its gray ramp has equal channels. No color
 /// `(n, 1, 2)` is in it. Thus two cells are equal only when a terminal in
-/// each theme draws them the same. With `TerminalTheme::auto()`, black is the
-/// background, so a space on `CSI 40 m` would equal a blank cell, and the
-/// filter would remove a black cell that a viewer sees in another theme.
+/// each theme draws them the same.
 fn probe_theme() -> TerminalTheme {
     let color = |n: u8| (n, 1, 2);
     TerminalTheme {

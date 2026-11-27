@@ -535,9 +535,6 @@ fn a_range_that_ends_after_the_echo_of_a_backspace_removes_the_typo() {
 
 #[test]
 fn a_black_cell_is_not_a_blank_cell() {
-    // With `TerminalTheme::auto()`, black is the background, so the space on
-    // `CSI 40 m` equals a blank cell. In another theme the viewer sees a black
-    // cell, so the pair must stay.
     let events = vec![
         out(0.0, "$ "),
         input(1.0, "x"),
