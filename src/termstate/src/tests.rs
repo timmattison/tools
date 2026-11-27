@@ -368,8 +368,20 @@ fn a_sequence_that_can_or_sub_ends_leaves_the_parser_settled() {
 
 #[test]
 fn a_csi_sequence_that_vte_ignores_leaves_the_parser_settled_at_its_final_byte() {
-    for sequence in ["\x1b[1;?h", "\x1b[1;?\r\nh", "\x1b[ 1m", "\x1b[1;?h\r\n"] {
-        assert!(feed_new(&format!("ab{sequence}")).is_settled(), "{sequence:?}");
+    let sequences = [
+        "\x1b[1;?h",
+        "\x1b[1;?\r\nh",
+        "\x1b[ 1m",
+        "\x1b[1;?h\r\n",
+        "\x1b\r[1;?h",
+        "\x1b\x7f[1;?h",
+        "\x1bé[1;?h",
+    ];
+    for sequence in sequences {
+        assert!(
+            feed_new(&format!("ab{sequence}")).is_settled(),
+            "{sequence:?}"
+        );
     }
     assert!(!feed_new("ab\x1b[1;?").is_settled());
 }
@@ -401,8 +413,8 @@ fn vte_is_in_ground(text: &str) -> bool {
 /// in a different way. `ESC` and `[` are in the list twice, so that more
 /// sequences start.
 const WALK: [char; 22] = [
-    '\x1b', '\x1b', '[', '[', ']', 'P', '_', '?', '1', ';', ' ', 'h', 'q', '\\', '\x18',
-    '\x1a', '\x07', '\r', '\x7f', 'é', '\u{9c}', 'x',
+    '\x1b', '\x1b', '[', '[', ']', 'P', '_', '?', '1', ';', ' ', 'h', 'q', '\\', '\x18', '\x1a',
+    '\x07', '\r', '\x7f', 'é', '\u{9c}', 'x',
 ];
 
 #[test]
