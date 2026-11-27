@@ -224,3 +224,26 @@ fn a_preview_draws_blank_cells_with_the_background_of_its_theme() {
     let state = preview.seek(secs(0.0));
     assert_eq!(state.get_grid()[0][0].bg_color, (40, 42, 54));
 }
+
+#[test]
+fn the_snapshots_stay_in_the_cell_budget() {
+    // 30,000 dense events fill the event axis. 100 sparse events fill the
+    // time axis. Together they reach the worst case of `2 * budget + 1`.
+    let mut events: Vec<Event> = (0..30_000)
+        .map(|i| event(f64::from(i) / 30_000.0, EventType::Output, "x"))
+        .collect();
+    events.extend((0..100).map(|i| event(1.0 + f64::from(i), EventType::Output, "x")));
+    let mut preview = Preview::new(recording(500, 500, events), PreviewTheme::Auto);
+    preview.seek(secs(1000.0));
+
+    let cells = 500 * 500;
+    let count = preview.snapshot_count();
+    assert!(
+        count * cells <= SNAPSHOT_CELL_BUDGET,
+        "{count} snapshots of {cells} cells go past the budget"
+    );
+    assert!(
+        count * cells > SNAPSHOT_CELL_BUDGET / 2,
+        "{count} snapshots do not fill the budget"
+    );
+}

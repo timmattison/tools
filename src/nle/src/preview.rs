@@ -266,8 +266,8 @@ impl Preview {
         if self.applied <= last.applied {
             return;
         }
-        let due = time - last.time >= self.interval
-            || self.applied - last.applied >= self.event_interval;
+        let due =
+            time - last.time >= self.interval || self.applied - last.applied >= self.event_interval;
         if due {
             self.snapshots.push(Snapshot {
                 applied: self.applied,
