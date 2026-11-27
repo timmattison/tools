@@ -1207,6 +1207,28 @@ impl TerminalState {
                 let count = count_param(params, 0);
                 self.cursor_y = (self.cursor_y + count).min(self.height - 1);
             }
+            'G' | '`' => {
+                // CHA and HPA: cursor to a column
+                let col = count_param(params, 0);
+                self.cursor_x = col.saturating_sub(1).min(self.width - 1);
+            }
+            'd' => {
+                // VPA: cursor to a row
+                let row = count_param(params, 0);
+                self.cursor_y = row.saturating_sub(1).min(self.height - 1);
+            }
+            'E' => {
+                // CNL: cursor down, to the first column
+                let count = count_param(params, 0);
+                self.cursor_y = (self.cursor_y + count).min(self.height - 1);
+                self.cursor_x = 0;
+            }
+            'F' => {
+                // CPL: cursor up, to the first column
+                let count = count_param(params, 0);
+                self.cursor_y = self.cursor_y.saturating_sub(count);
+                self.cursor_x = 0;
+            }
             'C' => {
                 // Cursor right
                 let count = count_param(params, 0);

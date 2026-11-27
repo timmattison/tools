@@ -6517,8 +6517,8 @@ column is visible, the filter changes nothing.
 
 The output shows the screen as `termstate` models it, which is the model of the
 video export of `beta`. A sequence that `termstate` does not model, for example
-CHA, VPA, the insert mode, or a second screen buffer for mode 1049, thus has no
-effect in the output. The filter keeps the OSC sequences (the title, the
+the insert mode or a second screen buffer for mode 1049, thus has no effect in
+the output. The filter keeps the OSC sequences (the title, the
 palette, the default colors, and the cursor color), DECSCUSR, mode 12, and BEL.
 The design is in `specs/2026-11-27-nle-viewport-filter-design.md`. A zoom into a
 region over time cannot go into escape sequences, thus it waits for the export

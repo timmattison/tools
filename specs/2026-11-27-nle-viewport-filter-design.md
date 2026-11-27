@@ -17,8 +17,8 @@ sequences. Thus each player and each exporter (`beta play`, `beta export web`,
 changes.
 
 The output shows the screen that `termstate` models. A sequence that
-`termstate` does not model (for example CHA, VPA, the insert mode, the origin
-mode, a second screen buffer for mode 1049) has no effect in the output.
+`termstate` does not model (for example the insert mode, the origin mode, a
+second screen buffer for mode 1049) has no effect in the output.
 
 ## Part 1: the source of each color in `termstate`
 

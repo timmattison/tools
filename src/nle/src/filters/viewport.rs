@@ -6,9 +6,8 @@
 //! sequences. Thus each player and each exporter shows the crop.
 //!
 //! The output shows the screen that `termstate` models. A sequence that
-//! `termstate` does not model (for example CHA, VPA, the insert mode, the
-//! origin mode, or a second screen buffer for mode 1049) has no effect in the
-//! output.
+//! `termstate` does not model (for example the insert mode, the origin mode,
+//! or a second screen buffer for mode 1049) has no effect in the output.
 //!
 //! The options, with their keys in the project file:
 //!
