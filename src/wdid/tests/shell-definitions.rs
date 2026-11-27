@@ -1265,6 +1265,11 @@ fn a_real_bash_gives_the_program_that_a_name_hides() {
 
 /// A name with a glob character stays one name in the bash script, also when
 /// a file in the directory of the shell matches it.
+///
+/// The test looks only for the two names that it is about, `a*c` and `abc`.
+/// An interactive bash also reads a startup file of the system, and that file
+/// can define more functions. The `/etc/bash.bashrc` of Ubuntu defines
+/// `command_not_found_handle`.
 #[test]
 fn a_real_bash_keeps_a_name_with_a_glob_character() {
     let Some(bash) = find_shell("bash") else {
@@ -1279,7 +1284,14 @@ fn a_real_bash_keeps_a_name_with_a_glob_character() {
     let shell = real_shell(&bash, home.path());
     let definitions = read(shell, ShellKind::Bash, Duration::from_secs(60)).unwrap();
     let names: Vec<&String> = definitions.function_bodies.keys().collect();
-    assert_eq!(names, ["a*c"]);
+    assert!(
+        definitions.function_bodies.contains_key("a*c"),
+        "the function a*c is missing from {names:?}"
+    );
+    assert!(
+        !definitions.function_bodies.contains_key("abc"),
+        "the name a*c expanded to the file abc in {names:?}"
+    );
     let program = home.path().join("bin").join("a*c");
     assert_eq!(definitions.programs.get("a*c"), Some(&program));
 }
