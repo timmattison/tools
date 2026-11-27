@@ -55,6 +55,8 @@ fn an_alias_command_defines_each_of_its_names() {
         ("alias x{p,{q,r}}=z", vec!["xp", "xq", "xr"]),
         ("alias {a,\"b c\"}=w", vec!["a", "b c"]),
         ("alias x={a,b}", vec!["x"]),
+        ("alias x=a{1..3}", vec!["x"]),
+        ("alias {a,b}=x{1..3}", vec!["a", "b"]),
     ];
     for (line, names) in braces {
         let expected: Vec<Defined> = names.into_iter().map(Defined::alias).collect();
@@ -62,10 +64,18 @@ fn an_alias_command_defines_each_of_its_names() {
     }
 }
 
+/// The cap of 1024 words bounds the work for one line of a dotfile. A word
+/// past the cap gives the name of its text as written, thus a long value
+/// keeps the name.
+#[test]
+fn an_alias_word_past_the_brace_cap_keeps_a_plain_name() {
+    let line = format!("alias x={}", "{a,b}".repeat(11));
+    assert_eq!(defined_names(&line), vec![Defined::alias("x")]);
+}
+
 /// Only the shell knows the name of a word that holds an expansion, a glob,
-/// or a brace sequence, thus such a word defines nothing. A brace list that
-/// grows past the cap of 1024 words defines nothing too, which bounds the
-/// work for one line of a dotfile.
+/// or a brace sequence, thus such a word defines nothing. A name with a brace
+/// list that grows past the cap of 1024 words defines nothing too.
 #[test]
 fn an_alias_name_that_the_shell_must_expand_defines_nothing() {
     let too_long = format!("alias {}=x", "{a,b}".repeat(11));
