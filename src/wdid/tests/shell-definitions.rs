@@ -1263,6 +1263,27 @@ fn a_real_bash_gives_the_program_that_a_name_hides() {
     assert_programs(home.path(), &definitions);
 }
 
+/// A name with a glob character stays one name in the bash script, also when
+/// a file in the directory of the shell matches it.
+#[test]
+fn a_real_bash_keeps_a_name_with_a_glob_character() {
+    let Some(bash) = find_shell("bash") else {
+        eprintln!("skipped: bash is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    make_programs(home.path(), &["a*c"]);
+    write_file(home.path(), "abc", "");
+    let rc = "PATH=$HOME/bin:$PATH\nfunction a*c { true; }\ncd \"$HOME\"\n";
+    write_file(home.path(), ".bashrc", rc);
+    let shell = real_shell(&bash, home.path());
+    let definitions = read(shell, ShellKind::Bash, Duration::from_secs(60)).unwrap();
+    let names: Vec<&String> = definitions.function_bodies.keys().collect();
+    assert_eq!(names, ["a*c"]);
+    let program = home.path().join("bin").join("a*c");
+    assert_eq!(definitions.programs.get("a*c"), Some(&program));
+}
+
 #[test]
 fn an_alias_without_a_known_origin_has_no_origin() {
     let definitions = parsed(&records(&[
