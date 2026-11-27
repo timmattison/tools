@@ -1324,9 +1324,19 @@ does the work of CI a second time, and it slows each other step on the machine.
 1. Do not run `scripts/rust-checks.sh`, `test.sh`, `cargo test --workspace`,
    `cargo clippy --workspace`, or a `cargo test` or a `cargo clippy` with no
    `-p`.
-2. For each crate that the change touches, run `cargo test -p <crate>` and
-   `cargo clippy -p <crate> --all-targets -- -D warnings`. Also run these
-   checks:
+2. For each crate that the change touches, run the four checks of
+   `scripts/rust-checks.sh` for that crate, with the same flags and the same
+   environment. Each member lives at `src/<crate>`:
+
+   ```bash
+   cargo fmt -p <crate> -- --check
+   cargo machete src/<crate>
+   cargo clippy --locked -p <crate> --all-targets -- -D warnings
+   CLICOLOR_FORCE=1 COLORTERM=truecolor cargo test --locked --no-fail-fast -p <crate>
+   ```
+
+   `cargo fmt` and `cargo machete` compile nothing, and part 3 skips the hook
+   that runs them. Also run these checks:
    - When the change touches a crate that other crates of the workspace use,
      run the tests of each crate that depends on it. Do this also when that is
      most of the workspace. `childenv` has 99 dependents, and `buildinfo` has
@@ -1373,7 +1383,8 @@ cargo metadata --format-version 1 --no-deps \
       [$crate]
       | until(users([null, "build"]) == .; users([null, "build"]))
       | users([null, "build", "dev"]) - [$crate] | .[] | ("-p", .)' \
-  | xargs cargo test -p "$crate"
+  | CLICOLOR_FORCE=1 COLORTERM=truecolor \
+    xargs cargo test --locked --no-fail-fast -p "$crate"
 ```
 
 Keep `-p "$crate"` in the command. GNU `xargs` runs its command one time when
