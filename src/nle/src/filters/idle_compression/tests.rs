@@ -516,3 +516,8 @@ fn an_earlier_mark_moves_with_the_time_that_it_is_in() {
     // at 12 s comes after it, so it moves back by 9 s.
     assert_eq!(mark_times(&rendered.marks), vec![0.0, 0.4, 3.0]);
 }
+
+#[test]
+fn the_shipped_registry_holds_idle_compression() {
+    assert!(filters::registry().contains(&kind()));
+}

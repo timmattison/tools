@@ -21,9 +21,14 @@
 //! The options hold the size of the screen, because the emulator needs it.
 //! The idle panel of the window takes the size from the open recording.
 
+use std::iter;
+
+use termstate::{Cell, TerminalState, TerminalTheme};
+
 use crate::error::NleError;
-use crate::pipeline::{FilterRegistry, Span};
-use crate::types::{AppliedFilter, FilterKind, FilterOptions, FilterRegion};
+use crate::format::format_duration;
+use crate::pipeline::{FilterRegistry, Mark, Span};
+use crate::types::{AppliedFilter, Event, EventType, FilterKind, FilterOptions, FilterRegion};
 
 /// The kind of the idle compression filter.
 pub const KIND: &str = "idle-compression";
@@ -238,10 +243,194 @@ pub fn register(registry: &mut FilterRegistry) {
     registry.register_span(kind(), compress);
 }
 
-/// Compress the idle periods of a span by the settings in `options`.
+/// Compress the idle periods of a span by the settings in `options`: the
+/// steps in the documentation of this module.
 fn compress(span: Span, options: &FilterOptions) -> Result<Span, String> {
-    let _ = options;
-    Ok(span)
+    let settings = settings_from(options)?;
+    let activity = activity_times(&span.events, settings)?;
+    let last_event = span.events.iter().map(|e| e.time).fold(0.0, f64::max);
+    let end = span.length.max(last_event);
+    let map = TimeMap::new(idle_periods(&activity, end, settings), settings.compress_to);
+
+    let events: Vec<Event> = span
+        .events
+        .into_iter()
+        .map(|event| Event {
+            time: map.apply(event.time),
+            ..event
+        })
+        .collect();
+    let mut marks: Vec<Mark> = span
+        .marks
+        .into_iter()
+        .map(|mark| Mark {
+            time: map.apply(mark.time),
+            ..mark
+        })
+        .collect();
+    marks.extend(map.marks());
+    // The map never decreases, so the end stays the largest time. The max
+    // keeps it so when the rounding of two times differs.
+    let length = events
+        .iter()
+        .map(|e| e.time)
+        .chain(marks.iter().map(|mark| mark.time))
+        .fold(map.apply(end), f64::max);
+    Ok(Span {
+        events,
+        length,
+        marks,
+    })
+}
+
+/// The times of the activity of `events`, in time order: each input event,
+/// and each output event that changes a cell of a watched row. The output
+/// replays in time order through an emulator with a blank screen, and events
+/// at one time keep their order.
+fn activity_times(events: &[Event], settings: IdleCompression) -> Result<Vec<f64>, String> {
+    let mut ordered: Vec<&Event> = events.iter().collect();
+    ordered.sort_by(|a, b| a.time.total_cmp(&b.time));
+
+    let height = usize::from(settings.height);
+    let watched = usize::from(settings.ignore_top_rows)
+        ..height.saturating_sub(usize::from(settings.ignore_bottom_rows));
+    let mut terminal =
+        TerminalState::new(usize::from(settings.width), height, TerminalTheme::auto());
+    // The watched rows as the last activity left them.
+    let mut shown: Vec<Vec<Cell>> = watched_rows(&terminal, watched.clone()).to_vec();
+
+    let mut times = Vec::new();
+    for event in ordered {
+        let active = match event.event_type {
+            EventType::Input => true,
+            EventType::Output => {
+                terminal
+                    .process_output(&event.data)
+                    .map_err(|error| error.to_string())?;
+                update(&mut shown, watched_rows(&terminal, watched.clone()))
+            }
+        };
+        if active {
+            times.push(event.time);
+        }
+    }
+    Ok(times)
+}
+
+/// The rows of the screen of `terminal` in `rows`, or no row when the range
+/// is not on the screen.
+fn watched_rows(terminal: &TerminalState, rows: std::ops::Range<usize>) -> &[Vec<Cell>] {
+    terminal.get_grid().get(rows).unwrap_or_default()
+}
+
+/// Copy each row of `rows` that differs into `shown`. Returns whether a row
+/// differed.
+fn update(shown: &mut [Vec<Cell>], rows: &[Vec<Cell>]) -> bool {
+    let mut changed = false;
+    for (kept, row) in shown.iter_mut().zip(rows) {
+        if kept != row {
+            kept.clone_from(row);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// An idle period: the time from one activity to the next, before the
+/// filter.
+#[derive(Debug, Clone, Copy)]
+struct Period {
+    start: f64,
+    end: f64,
+}
+
+impl Period {
+    fn length(self) -> f64 {
+        self.end - self.start
+    }
+}
+
+/// The idle periods to compress: the gaps between two activities, or
+/// between an activity and the start at 0 or `end`, that are at least the
+/// threshold and longer than the compressed length.
+fn idle_periods(activity: &[f64], end: f64, settings: IdleCompression) -> Vec<Period> {
+    let mut periods = Vec::new();
+    let mut previous = 0.0_f64;
+    for time in activity.iter().copied().chain(iter::once(end)) {
+        let period = Period {
+            start: previous,
+            end: time,
+        };
+        if period.length() >= settings.threshold && period.length() > settings.compress_to {
+            periods.push(period);
+        }
+        previous = previous.max(time);
+    }
+    periods
+}
+
+/// The map from a time of the region before the filter to the time after it.
+struct TimeMap {
+    periods: Vec<Period>,
+    compress_to: f64,
+    /// The time that the periods before each period lose, and at the end the
+    /// time that all of them lose.
+    lost_before: Vec<f64>,
+}
+
+impl TimeMap {
+    fn new(periods: Vec<Period>, compress_to: f64) -> Self {
+        let mut lost_before = Vec::with_capacity(periods.len() + 1);
+        let mut lost = 0.0;
+        lost_before.push(lost);
+        for period in &periods {
+            lost += period.length() - compress_to;
+            lost_before.push(lost);
+        }
+        Self {
+            periods,
+            compress_to,
+            lost_before,
+        }
+    }
+
+    /// The time after the filter of `time`. A time inside a period shrinks in
+    /// proportion. A later time moves back by the time that the periods
+    /// before it lose.
+    fn apply(&self, time: f64) -> f64 {
+        // The first period that ends after `time`.
+        let index = self.periods.partition_point(|period| period.end <= time);
+        let lost = self.lost_before.get(index).copied().unwrap_or_default();
+        let moved = match self.periods.get(index) {
+            Some(period) if time > period.start => {
+                period.start - lost + (time - period.start) * self.compress_to / period.length()
+            }
+            _ => time - lost,
+        };
+        moved.max(0.0)
+    }
+
+    /// A mark at the start of each period, after the filter.
+    fn marks(&self) -> impl Iterator<Item = Mark> + '_ {
+        self.periods.iter().map(|period| Mark {
+            time: self.apply(period.start),
+            label: label(period.length(), self.compress_to),
+        })
+    }
+}
+
+/// The text of the mark of a period of `length` seconds that became
+/// `compress_to` seconds.
+fn label(length: f64, compress_to: f64) -> String {
+    if compress_to > 0.0 {
+        format!(
+            "Idle time: {} compressed to {}",
+            format_duration(length),
+            format_duration(compress_to)
+        )
+    } else {
+        format!("Idle time: {} removed", format_duration(length))
+    }
 }
 
 #[cfg(test)]
