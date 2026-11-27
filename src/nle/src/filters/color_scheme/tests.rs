@@ -384,8 +384,13 @@ fn an_incomplete_color_stays_as_written() {
 
 #[test]
 fn a_color_with_a_bad_operand_stays_as_written() {
-    assert_eq!(rewrite("38;2;300;0;0"), None);
-    assert_eq!(rewrite("38;5;256"), None);
+    for params in ["38;2;300;0;0", "38;5;256"] {
+        assert_eq!(
+            sgr_items(params),
+            vec![SgrItem::Other(params.to_string())],
+            "{params:?}"
+        );
+    }
     assert_eq!(rewrite("38;5;1:2"), None);
     assert_eq!(
         sgr_items("38;2;300;0;0;1"),
