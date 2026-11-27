@@ -41,8 +41,10 @@
 //!   comes back as its theme color.
 
 mod keys;
-
 mod options;
+mod paint;
+mod timeline;
+
 pub use options::{
     HudOptions, Position, Rgb, ACCENT_OPTION, BACKGROUND_OPTION, BORDER_OPTION, DURATION_OPTION,
     FADE_OPTION, POSITION_OPTION, TEXT_OPTION, THEME_OPTION,
@@ -71,10 +73,6 @@ pub fn applied(region: FilterRegion, options: &HudOptions) -> AppliedFilter {
         options: options.to_options(),
     }
 }
-
-mod timeline;
-
-mod paint;
 
 /// The most cells of a screen that the HUD replays. A larger size fails the
 /// render, so that a header with a bad size does not take all the memory.

@@ -6397,14 +6397,70 @@ The editing engine of the crate has four parts:
   `Fn(&[Event], &FilterOptions) -> Vec<Event>`, gets the events of its region,
   and the later events move by the change in the time of its last event. A
   span filter (`register_span`) also gets the length of its region and answers
-  a new length, and the later events move by the change in the length.
+  a new length, and the later events move by the change in the length. A
+  screen filter (`register_screen`) also gets the size of the terminal and the
+  events before its region, so that it can replay the screen. It keeps the
+  time: no event moves. `FilterRegistry::run_on` and the render give it the
+  size. `FilterRegistry::run` has no size, and it refuses a screen filter.
   `filters::registry()` holds the filters that ship: time dilation
-  (`time-dilation`, issue #153) is a span filter. Issues #152 to #168 add the
+  (`time-dilation`, issue #153) is a span filter, and the keystroke HUD
+  (`keystroke-hud`, issue #161) is a screen filter. Issues #152 to #168 add the
   others.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
   undo and redo history.
+
+The keystroke HUD filter (`keystroke-hud`) shows the keys of the presenter
+in a box with rounded corners, as a screencast tool does. It reads the input
+events of its region. Typed text shows as text, for example `ls -la`. A special
+key shows as a label in the accent color, for example `Enter`, `Tab`, `Ctrl+R`,
+`Alt+.`, or `↑`. Fast typing goes into one box, and `Enter` closes the box. A
+held key shows once with a count, for example `↓ ×12`. The box fades in and
+out in steps of 24-bit color.
+
+The filter draws with output events: each one saves the cursor, draws the box,
+and restores the cursor. It replays the events through the emulator of
+`termstate`, so it knows the cells under the box. It puts them back when the
+box goes away, and it keeps the box in place when the output scrolls. Thus
+`beta play`, `beta export web`, and `beta export video` show the HUD with no
+change. The window has no panel for the filter yet. A project holds it in its
+list of filters:
+
+```json
+{
+  "kind": "keystroke-hud",
+  "region": "All",
+  "options": { "position": "bottom-right", "duration": 2.0, "theme": "dracula" }
+}
+```
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `position` | `top-right` | `top-left`, `top-center`, `top-right`, `bottom-left`, `bottom-center`, or `bottom-right` |
+| `duration` | `1.5` | The seconds that a box stays after its last key |
+| `fade` | `0.2` | The seconds of each fade. `0` turns the fade off |
+| `theme` | `auto` | The theme of the export (`beta export --theme`). The fade starts from its background |
+| `text` | `#ffffff` | The color of typed text |
+| `accent` | `#ffc83c` | The color of the labels of special keys |
+| `background` | `#303030` | The color of the inside of the box |
+| `border` | `#808080` | The color of the border |
+
+A redaction of input events (issue #156) must come before the HUD in the list
+of filters of the project. Then the HUD does not show the hidden keys, for
+example a password. A redaction after the HUD does not change the boxes that
+the HUD drew.
+
+The limits of the HUD:
+
+- A modifier key alone (Ctrl, Alt, Shift) shows nothing, because a terminal
+  sends no byte for it. A terminal with the kitty keyboard protocol sends a
+  code, and the HUD skips it.
+- The HUD never makes a region longer. A box that is still on the screen at the
+  end of its region goes away there.
+- `termstate` gives each character one cell. A wide character (for example
+  `日`) in a label moves the right border by one cell in a terminal or in
+  xterm.js.
 
 The crate also has functions that save the rendered recording
 (`Editor::save_recording`), list the recordings in a directory, and export a
