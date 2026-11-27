@@ -75,6 +75,25 @@ const MIN_SNAPSHOT_INTERVAL: f64 = 1.0;
 /// The fewest events between two snapshots.
 const MIN_EVENTS_PER_SNAPSHOT: usize = 1000;
 
+/// The most columns that a preview draws.
+const MAX_COLUMNS: usize = 500;
+
+/// The most rows that a preview draws.
+const MAX_ROWS: usize = 500;
+
+/// The grid size of the preview for `recording`, as `(columns, rows)`.
+///
+/// Each side is at least 1, because `TerminalState::new` computes `height - 1`
+/// and a height of 0 panics. Each side is at most 500, because a corrupt file
+/// can state 65535 by 65535, which asks for billions of cells. A value from
+/// outside the program must not cause a panic or a huge allocation.
+fn grid_size(recording: &Recording) -> (usize, usize) {
+    (
+        usize::from(recording.width).clamp(1, MAX_COLUMNS),
+        usize::from(recording.height).clamp(1, MAX_ROWS),
+    )
+}
+
 /// The terminal at one point of the replay.
 struct Snapshot {
     /// The count of events that the state has applied.
@@ -117,9 +136,8 @@ impl Preview {
     /// A preview of `recording` drawn with `theme`. It replays nothing yet.
     #[must_use]
     pub fn new(recording: Arc<Recording>, theme: PreviewTheme) -> Self {
-        let blank = TerminalState::new(80, 24, theme.palette());
-        let rows = blank.get_grid().len();
-        let columns = blank.get_grid().first().map_or(0, Vec::len);
+        let (columns, rows) = grid_size(&recording);
+        let blank = TerminalState::new(columns, rows, theme.palette());
         let cells = columns.saturating_mul(rows).max(1);
         let budget = (SNAPSHOT_CELL_BUDGET / cells).clamp(MIN_SNAPSHOTS, MAX_SNAPSHOTS);
         let duration = if recording.duration.is_finite() && recording.duration > 0.0 {
