@@ -324,8 +324,6 @@ fn the_render_error_names_the_filter() {
     }
 }
 
-// Tests of the region.
-
 // Tests of the size.
 
 #[test]
