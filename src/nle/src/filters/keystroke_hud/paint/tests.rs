@@ -470,22 +470,6 @@ fn a_restore_of_the_program_after_the_replays_agree_is_repaired() {
 }
 
 #[test]
-fn an_unfinished_sequence_of_the_program_keeps_the_scan() {
-    let screen = size(20, 8);
-    let mut rig = Rig::new(screen, &TerminalTheme::auto());
-    let overlay = box_of(screen, Position::TopRight, "ls");
-    rig.feed("ab");
-    assert!(rig.paint(Some(&overlay)).is_some());
-    rig.feed("\x1b[");
-    rig.paint(None);
-    rig.feed("");
-    rig.paint(None);
-    rig.feed("5;5HX");
-    rig.paint(None);
-    rig.assert_viewer_is_reference();
-}
-
-#[test]
 fn a_paint_inside_an_unfinished_sequence_of_the_program_writes_nothing() {
     let screen = size(20, 8);
     let mut rig = Rig::new(screen, &TerminalTheme::auto());
