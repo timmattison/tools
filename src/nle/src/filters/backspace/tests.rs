@@ -487,3 +487,31 @@ fn a_line_of_more_typed_keys_than_the_depth_keeps_its_oldest_key() {
     let rendered = render(300, 3, events).unwrap();
     assert_eq!(rendered.events, expected);
 }
+
+#[test]
+fn the_budget_lowers_the_depth_on_a_large_terminal() {
+    // Mutant that was run: the depth is always `MAX_DEPTH`. Then all five
+    // typed keys and backspaces go and the test fails.
+    // A terminal of 2048 by 512 cells has 1 << 20 cells, so the depth is 4.
+    let mut events = vec![out(0.0, "$ ")];
+    events.extend(typed(&[
+        ("a", 1.0),
+        ("b", 1.25),
+        ("c", 1.5),
+        ("d", 1.75),
+        ("e", 2.0),
+    ]));
+    for time in [2.25, 2.5, 2.75, 3.0, 3.25] {
+        events.push(input(time, "\x7f"));
+        events.push(out(time, "\x08 \x08"));
+    }
+    let expected = vec![
+        out(0.0, "$ "),
+        input(1.0, "a"),
+        out(1.0, "a"),
+        input(1.25, "\x7f"),
+        out(1.25, "\x08 \x08"),
+    ];
+    let rendered = render(2048, 512, events).unwrap();
+    assert_eq!(rendered.events, expected);
+}
