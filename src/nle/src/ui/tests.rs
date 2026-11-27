@@ -512,6 +512,17 @@ impl Window {
         self.stop.expect("a window with an open recording")
     }
 
+    /// The Zoom in button of the timeline. `open_recording` noted it.
+    fn zoom_in_button(&self) -> ElementId {
+        self.zoom_in.expect("a window with an open recording")
+    }
+
+    /// The style of the first clip block of the timeline: its place and its
+    /// width, which show the zoom and the scroll.
+    fn clip_style(&self) -> String {
+        text_between(&self.html(), "class=\"timeline-clip\" style=\"", "\"")
+    }
+
     /// The label of the Play and Pause button, read from the page.
     fn play_label(&self) -> String {
         text_between(&self.html(), TRANSPORT_START, "</button>")
@@ -1385,6 +1396,26 @@ async fn a_new_recording_starts_at_time_zero() {
     assert!(page.contains(&x_run(1)), "{page}");
     assert!(!page.contains(&x_run(2)), "{page}");
     assert!(page.contains("value=\"0\""), "{page}");
+}
+
+#[tokio::test]
+async fn a_new_recording_opens_with_the_whole_timeline() {
+    let fakes = Fakes::new()
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())))
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())));
+    let mut window = Window::open(&fakes);
+    window.click(window.open_button());
+    window.settle().await;
+    window.note_open_buttons();
+    let whole = window.clip_style();
+    window.click(window.zoom_in_button());
+    assert_ne!(window.clip_style(), whole);
+
+    window.click(window.open_button());
+    window.settle().await;
+    assert_eq!(window.clip_style(), whole);
 }
 
 #[tokio::test]
