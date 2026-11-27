@@ -931,10 +931,11 @@ fn each_cursor_move_ends_the_pending_wrap() {
 
 #[test]
 fn an_ignored_decstbm_keeps_the_pending_wrap() {
-    // xterm ignores a DECSTBM whose top is not above its bottom, or whose
-    // bottom is below the screen. Such a DECSTBM moves no cursor, thus the
-    // next character wraps.
-    for ignored in ["\x1b[3;2r", "\x1b[2;2r", "\x1b[1;9r"] {
+    // CASE_DECSTBM in xterm's charproc.c reads a bottom that is missing, 0,
+    // or below the screen as the last row. It ignores a DECSTBM whose top is
+    // not above that bottom. Such a DECSTBM moves no cursor, thus the next
+    // character wraps.
+    for ignored in ["\x1b[3;2r", "\x1b[2;2r"] {
         let state = feed_on(5, 3, &format!("abcde{ignored}X"));
         assert_eq!(row_text(&state, 0), "abcde", "{ignored:?}");
         assert_eq!(row_text(&state, 1), "X", "{ignored:?}");
@@ -942,10 +943,14 @@ fn an_ignored_decstbm_keeps_the_pending_wrap() {
     }
 
     // A valid DECSTBM moves the cursor home, thus it ends the pending wrap.
-    let state = feed_on(5, 3, "abcde\x1b[1;2rX");
-    assert_eq!(row_text(&state, 0), "Xbcde");
-    assert_eq!(row_text(&state, 1), "");
-    assert!(!state.is_wrap_pending());
+    // A bottom below the screen gives a region to the last row.
+    for (valid, region) in [("\x1b[1;2r", (0, 1)), ("\x1b[1;9r", (0, 2))] {
+        let state = feed_on(5, 3, &format!("abcde{valid}X"));
+        assert_eq!(row_text(&state, 0), "Xbcde", "{valid:?}");
+        assert_eq!(row_text(&state, 1), "", "{valid:?}");
+        assert_eq!(state.scroll_region(), region, "{valid:?}");
+        assert!(!state.is_wrap_pending(), "{valid:?}");
+    }
 }
 
 #[test]
