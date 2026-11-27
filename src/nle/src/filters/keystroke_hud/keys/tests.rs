@@ -208,6 +208,19 @@ fn kitty_keys() {
 }
 
 #[test]
+fn xterm_modify_other_keys_gives_the_key_of_its_code() {
+    check(&[
+        ("\x1b[27;5;13~", vec![special("Ctrl+Enter")]),
+        ("\x1b[27;2;13~", vec![special("Shift+Enter")]),
+        ("\x1b[27;5;105~", vec![special("Ctrl+I")]),
+        ("\x1b[27;2;65~", vec![special("Shift+A")]),
+        ("\x1b[27;3;46~", vec![special("Alt+.")]),
+        ("a\x1b[27;5;9~b", vec![text("a"), special("Ctrl+Tab"), text("b")]),
+        ("\x1b[27~", vec![]),
+    ]);
+}
+
+#[test]
 fn reports_of_the_terminal_give_no_key() {
     check(&[
         ("\x1b[<0;10;5M", vec![]),
