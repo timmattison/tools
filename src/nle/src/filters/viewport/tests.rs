@@ -711,15 +711,7 @@ const HEIGHT: u16 = 6;
 /// Feed each output event of `rendered` that is at or before `time` to
 /// `terminal`, from the event at `next`.
 fn feed_until(rendered: &Recording, next: &mut usize, terminal: &mut TerminalState, time: f64) {
-    while let Some(event) = rendered.events.get(*next) {
-        if event.time > time {
-            break;
-        }
-        if event.event_type == EventType::Output {
-            terminal.process_output(&event.data).unwrap();
-        }
-        *next += 1;
-    }
+    feed_events_until(&rendered.events, next, terminal, time);
 }
 
 /// Check that the grid and the cursor of `output` are the crop of `input`.
