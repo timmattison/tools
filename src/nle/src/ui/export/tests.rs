@@ -28,7 +28,7 @@ fn output_path_gives_the_path_the_ending_of_the_kind() {
     ];
     for (picked, kind, expected) in cases {
         assert_eq!(
-            kind.output_path(PathBuf::from(picked)),
+            kind.output_path(PathBuf::from(picked)).expect("a path"),
             PathBuf::from(expected),
             "{kind:?} for {picked}"
         );

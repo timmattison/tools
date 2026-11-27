@@ -4,7 +4,7 @@
 //! The types here are plain values, so the tests of `ui/export/tests.rs`
 //! need no window.
 
-use std::ffi::OsString;
+use std::ffi::OsStr;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +12,9 @@ use dioxus::prelude::*;
 
 use super::{Document, Services};
 use crate::error::NleError;
-use crate::export::{ExportProgress, ExportRequest, ExportTarget, Resolution, Theme};
+use crate::export::{
+    output_path_text, ExportProgress, ExportRequest, ExportTarget, Resolution, Theme,
+};
 use crate::format::file_name;
 
 /// The stem of a file name that has no stem left after the endings go.
@@ -133,22 +135,23 @@ impl ExportKind {
     ///
     /// A file name that already ends with the ending of this kind stays as it
     /// is. Otherwise the endings of all kinds go, and the ending of this kind
-    /// comes. A name with no stem left becomes `recording`. A file name that
-    /// is not valid UTF-8 only gets the ending.
-    pub(crate) fn output_path(self, picked: PathBuf) -> PathBuf {
-        let Some(name) = picked.file_name() else {
-            return picked;
-        };
-        let Some(text) = name.to_str() else {
-            let mut name: OsString = name.to_owned();
-            name.push(self.ending());
-            return picked.with_file_name(name);
+    /// comes. A name with no stem left becomes `recording`.
+    ///
+    /// # Errors
+    /// Returns `NleError::ExportError` when `picked` is not valid UTF-8,
+    /// because the export takes the path as text.
+    pub(crate) fn output_path(self, picked: PathBuf) -> Result<PathBuf, NleError> {
+        output_path_text(&picked)?;
+        // The whole path is valid UTF-8, thus only a path with no file name
+        // takes this branch.
+        let Some(text) = picked.file_name().and_then(OsStr::to_str) else {
+            return Ok(picked);
         };
         if ends_with_ignoring_case(text, self.ending()) {
-            return picked;
+            return Ok(picked);
         }
         let stem = stem_or_default(text);
-        picked.with_file_name(format!("{stem}{}", self.ending()))
+        Ok(picked.with_file_name(format!("{stem}{}", self.ending())))
     }
 }
 
@@ -267,10 +270,11 @@ impl ExportSettings {
     /// of the kind.
     ///
     /// # Errors
-    /// Returns the errors of `ExportSettings::target`.
+    /// Returns the errors of `ExportKind::output_path` and of
+    /// `ExportSettings::target`.
     pub(crate) fn request(&self, picked: PathBuf) -> Result<ExportRequest, NleError> {
         Ok(ExportRequest {
-            output_path: self.kind.output_path(picked),
+            output_path: self.kind.output_path(picked)?,
             target: self.target()?,
         })
     }

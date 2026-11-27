@@ -174,12 +174,14 @@ pub struct ExportRequest {
 /// Write the rendered `recording` as `request` asks, and report each stage
 /// through `progress`.
 ///
-/// A path goes to `beta` as text, and a path that is not valid UTF-8 loses
-/// its invalid bytes.
+/// The output path goes to `beta` and to the writer of a recording as text.
+/// Thus an output path that is not valid UTF-8 is refused before the first
+/// stage.
 ///
 /// # Errors
-/// Returns `NleError::SaveError` when a recording file is refused or cannot
-/// be written, and `NleError::ExportError` when the output path of a web page
+/// Returns `NleError::ExportError` when the output path is not valid UTF-8,
+/// `NleError::SaveError` when a recording file is refused or cannot be
+/// written, and `NleError::ExportError` when the output path of a web page
 /// or a video is refused, when the work file cannot be written, when `beta`
 /// cannot start, or when `beta` fails. A panic in the work becomes
 /// `NleError::TaskError`.
@@ -202,14 +204,15 @@ pub(crate) async fn export_recording_with(
     mut progress: impl FnMut(ExportProgress) + Send + 'static,
     var: impl Fn(&'static str) -> Option<OsString>,
 ) -> Result<PathBuf, NleError> {
+    let output = output_path_text(&request.output_path)?.to_owned();
     let mut options = match &request.target {
         ExportTarget::Recording { compress } => {
-            let compress = *compress;
-            return write_recording_file(recording, request.output_path, compress, progress).await;
+            write_recording_file(recording, output, *compress, progress).await?;
+            return Ok(request.output_path);
         }
         ExportTarget::Web { theme, compress } => ExportOptions {
             compress: Some(*compress),
-            ..beta_options(&request.output_path, ExportFormat::Web, *theme)
+            ..beta_options(output, ExportFormat::Web, *theme)
         },
         ExportTarget::Video {
             theme,
@@ -220,7 +223,7 @@ pub(crate) async fn export_recording_with(
             fps: fps.map(NonZeroU32::get),
             resolution: resolution.map(|size| size.to_string()),
             optimize_web: Some(*optimize_web),
-            ..beta_options(&request.output_path, ExportFormat::Video, *theme)
+            ..beta_options(output, ExportFormat::Video, *theme)
         },
     };
     let work_dir = run_blocking(|| {
@@ -253,22 +256,35 @@ pub(crate) async fn export_recording_with(
 /// `Writing` stage. `compress: None` follows the `.gz` ending.
 async fn write_recording_file(
     recording: Recording,
-    output_path: PathBuf,
+    output_path: String,
     compress: Option<bool>,
     mut progress: impl FnMut(ExportProgress),
-) -> Result<PathBuf, NleError> {
+) -> Result<(), NleError> {
     progress(ExportProgress::Writing);
-    let path = output_path.to_string_lossy().into_owned();
-    run_blocking(move || save_recording_to(&path, &recording, compress)).await?;
-    Ok(output_path)
+    run_blocking(move || save_recording_to(&output_path, &recording, compress)).await
+}
+
+/// The text of the output path `path`. `beta` and the writer of a recording
+/// take a path as text, and a lossy conversion writes a file with a different
+/// name.
+///
+/// # Errors
+/// Returns `NleError::ExportError` when `path` is not valid UTF-8.
+pub(crate) fn output_path_text(path: &Path) -> Result<&str, NleError> {
+    path.to_str().ok_or_else(|| {
+        NleError::ExportError(format!(
+            "the output path {} is not valid UTF-8",
+            path.display()
+        ))
+    })
 }
 
 /// The options of a `beta export` run of `format` to `output_path` with
 /// `theme`. The input path is empty, and the caller sets the other options.
-fn beta_options(output_path: &Path, format: ExportFormat, theme: Theme) -> ExportOptions {
+fn beta_options(output_path: String, format: ExportFormat, theme: Theme) -> ExportOptions {
     ExportOptions {
         input_path: String::new(),
-        output_path: output_path.to_string_lossy().into_owned(),
+        output_path,
         format,
         theme: Some(theme.as_str().to_string()),
         compress: None,
