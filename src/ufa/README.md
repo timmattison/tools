@@ -471,8 +471,8 @@ ufa cloud --site-manager-api-key YOUR_KEY hosts
 
 The listing shows each host ID whole, so you can copy an ID from a row into `ufa cloud host <id>`.
 An ID has about 70 characters, so the table is wide. `--output json` answers with the hosts as the
-API reported them, every field intact, rather than only the columns the table shows. One key
-changes: a firmware version that a host sent as `firmware_version` is written as `firmwareVersion`.
+API reported them, every field intact and under the key the API sent, rather than only the columns
+the table shows.
 
 The Firmware column reads `firmwareVersion` or `firmware_version`. When a host sets neither, the
 column shows the `version` that the host reported.

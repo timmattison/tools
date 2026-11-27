@@ -32,6 +32,10 @@ pub struct Host {
     pub other_fields: serde_json::Map<String, serde_json::Value>,
 }
 
+/// The snake_case key of the firmware version, as the `network-server`
+/// example of the spec spells it.
+const SNAKE_FIRMWARE_KEY: &str = "firmware_version";
+
 /// The key of the software version that a host reports beside a null
 /// `firmware_version`, in the `network-server` example of the spec.
 const VERSION_KEY: &str = "version";
@@ -46,10 +50,9 @@ pub struct ReportedState {
     /// The controllers of the host, as raw JSON. The spec gives no shape for
     /// them, and nothing in this crate reads one.
     pub controllers: Option<Vec<serde_json::Value>>,
-    /// The firmware version, read from `firmwareVersion` or from
-    /// `firmware_version`. The `network-server` example of the spec spells
-    /// the key in snake case. It is written back as `firmwareVersion`.
-    #[serde(alias = "firmware_version")]
+    /// The firmware version under the key `firmwareVersion`. A host that
+    /// spells the key `firmware_version` keeps it in `other_fields`, and
+    /// [`ReportedState::firmware`] reads both.
     pub firmware_version: Option<String>,
     pub hostname: Option<String>,
     pub model: Option<String>,
@@ -64,14 +67,17 @@ impl ReportedState {
     ///
     /// # Returns
     ///
-    /// The firmware version when the host set one. The text of `version`
-    /// when the firmware version is absent or null. `None` when the host
-    /// set neither.
+    /// The text of `firmwareVersion` when the host set it, else the text of
+    /// `firmware_version`. The text of `version` when the host set neither
+    /// firmware key, or set each one to null. `None` when the host set none
+    /// of the three.
     pub fn firmware(&self) -> Option<&str> {
         self.firmware_version.as_deref().or_else(|| {
-            self.other_fields
-                .get(VERSION_KEY)
-                .and_then(serde_json::Value::as_str)
+            [SNAKE_FIRMWARE_KEY, VERSION_KEY].into_iter().find_map(|key| {
+                self.other_fields
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+            })
         })
     }
 }

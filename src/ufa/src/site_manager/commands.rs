@@ -98,8 +98,7 @@ fn last_seen(changed: Option<&str>) -> String {
 ///
 /// `--output json` answers with the hosts as the API reported them, rather
 /// than the columns the table happens to show, so a script reading the output
-/// keeps every field. One key changes: a firmware version that a host sent as
-/// `firmware_version` is written as `firmwareVersion`.
+/// keeps every field under the key that the host sent.
 ///
 /// # Arguments
 ///
