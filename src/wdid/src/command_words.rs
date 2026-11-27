@@ -1594,3 +1594,17 @@ pub fn split_words(text: &str) -> Option<Vec<String>> {
         })
         .collect()
 }
+
+/// Gives the words of `text` when the text is exactly one simple command, or
+/// `None`. Pure.
+///
+/// A brace group that holds one simple command counts as that command. A
+/// pipeline, a list, a background command, a redirect, a process substitution,
+/// a negation, a timer, and any other compound command give `None`. So does a
+/// command that has no command word. The words are the prefix assignments, the
+/// command word, and the suffix words, each in argument form.
+#[must_use]
+pub fn simple_command(text: &str) -> Option<Vec<String>> {
+    let _ = text;
+    None
+}

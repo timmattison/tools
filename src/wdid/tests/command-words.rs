@@ -1,8 +1,8 @@
 //! Tests of the command words of one command line.
 
 use wdid::command_words::{
-    command_words, parse_line, split_words, AliasDefinition, AliasKind, AliasUse, Aliases,
-    CommandWord, Parsed,
+    command_words, parse_line, simple_command, split_words, AliasDefinition, AliasKind, AliasUse,
+    Aliases, CommandWord, Parsed,
 };
 
 /// Runs every row of a table. Each row is a line and the value that
@@ -1298,4 +1298,45 @@ fn split_words_refuses_an_unterminated_quote() {
 #[test]
 fn split_words_gives_a_newline_as_the_operator_that_the_tokenizer_gives() {
     assert_eq!(split_words("a\nb"), split(["a", "\n", "b"]));
+}
+
+#[test]
+fn simple_command_gives_the_words_of_one_simple_command() {
+    let rows = [
+        ("\tgit status \"$@\"", split(["git", "status", "\"$@\""])),
+        (
+            "{ \n    git status \"$@\"\n}",
+            split(["git", "status", "\"$@\""]),
+        ),
+        ("FOO=1 git status", split(["FOO=1", "git", "status"])),
+        ("'git' status", split(["git", "status"])),
+        ("{ { git status; }; }", split(["git", "status"])),
+    ];
+    for (text, expected) in rows {
+        assert_eq!(simple_command(text), expected, "text: {text:?}");
+    }
+}
+
+#[test]
+fn simple_command_refuses_anything_that_is_not_one_simple_command() {
+    let rows = [
+        "git status | cat",
+        "a; b",
+        "a && b",
+        "git status > x",
+        "if true; then ls; fi",
+        "ls &",
+        "( ls )",
+        "! ls",
+        "time ls",
+        "cat <(ls)",
+        "{ a; b; }",
+        "{ ls; } > x",
+        "FOO=1",
+        "f() { ls; }",
+        "",
+    ];
+    for text in rows {
+        assert_eq!(simple_command(text), None, "text: {text:?}");
+    }
 }
