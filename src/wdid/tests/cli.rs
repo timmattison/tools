@@ -1261,8 +1261,9 @@ alias wdhidden='echo hi'\n\
 alias wdwrapped='wdwrapped --flag'\n\
 wdcmd() { command wdcmd --flag \"$@\" }\n";
 
-/// The plugin of [`FINDINGS_ZSHRC`]: two aliases of mine are not in it, and
-/// two others share `git checkout`.
+/// The plugin of [`FINDINGS_ZSHRC`]. `wdgst` has the same expansion as my
+/// `wdgs`. `wdgco` and `wdgcheck` share `git checkout`, and no alias of that
+/// finding is mine, so only `--all` shows it.
 const FINDINGS_PLUGIN: &str = "alias wdgst='git status'\n\
 alias wdgco='git checkout'\n\
 alias wdgcheck='git checkout'\n";
