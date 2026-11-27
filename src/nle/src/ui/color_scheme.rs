@@ -6,10 +6,7 @@
 
 use dioxus::prelude::*;
 
-use super::{
-    edit_document, range_from, region_text, report, Document, END_LABEL, REMOVE_LABEL, START_LABEL,
-};
-use crate::editor::Edit;
+use super::{add_filter, filter_rows, range_from, region_text, Document, END_LABEL, START_LABEL};
 use crate::filters::color_scheme::{self, ColorScheme, CubeRule, GrayscaleRule, TruecolorRule};
 use crate::preview::PreviewTheme;
 use crate::types::FilterRegion;
@@ -262,29 +259,13 @@ pub(super) fn ColorSchemePanel(
             }
             button {
                 onclick: move |_| {
-                    let outcome = region_from_fields(&start.read(), &end.read()).and_then(|region| {
-                        let filter = color_scheme::applied(region, &scheme.read());
-                        edit_document(loaded, |project| Edit::AddFilter {
-                            index: project.filters.len(),
-                            filter,
-                        })
-                    });
-                    report(on_result, COLOR_SCHEME_FAILED_PREFIX, outcome);
+                    let change = region_from_fields(&start.read(), &end.read())
+                        .map(|region| color_scheme::applied(region, &scheme.read()));
+                    add_filter(loaded, on_result, COLOR_SCHEME_FAILED_PREFIX, change);
                 },
                 {APPLY_COLOR_SCHEME_LABEL}
             }
-            for (index, text) in rows {
-                div { class: "color-scheme-row", key: "{index}",
-                    span { "{text}" }
-                    button {
-                        onclick: move |_| {
-                            let outcome = edit_document(loaded, |_| Edit::RemoveFilter { index });
-                            report(on_result, COLOR_SCHEME_FAILED_PREFIX, outcome);
-                        },
-                        {REMOVE_LABEL}
-                    }
-                }
-            }
+            {filter_rows(loaded, on_result, "color-scheme-row", COLOR_SCHEME_FAILED_PREFIX, rows)}
         }
     }
 }
