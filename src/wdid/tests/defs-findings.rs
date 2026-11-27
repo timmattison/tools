@@ -667,3 +667,32 @@ fn a_function_that_ends_with_the_quoted_text_of_all_arguments_is_not_a_finding()
     function(&mut defs, "glog", "\tgit log '\"$@\"'", ZSHRC);
     assert_eq!(kinds(&findings(&[], &defs)), Vec::new());
 }
+
+/// A word that holds a blank shows in quotes, so the words `echo`, `x y` do
+/// not read as the words `echo`, `x`, `y`.
+#[test]
+fn a_word_that_holds_a_blank_shows_in_quotes() {
+    let mut defs = empty();
+    alias(&mut defs, "a", "echo \"x y\"", ZSHRC, 1);
+    alias(&mut defs, "b", "echo 'x y'", ZSHRC, 2);
+    alias(&mut defs, "c", "echo x y", ZSHRC, 3);
+    let found = findings(&[], &defs);
+    let shared = only(&found, FindingKind::SameExpansion).expect("a same-expansion finding");
+    let names: Vec<&str> = shared
+        .definitions
+        .iter()
+        .map(|member| member.name.as_str())
+        .collect();
+    assert_eq!(names, ["a", "b"]);
+    assert_eq!(shared.words, ["echo", "'x y'"]);
+    let report = wdid::defs::render::text(
+        &tally(&[], &defs, &window(false)),
+        &window(false),
+        "/bin/zsh",
+        None,
+    );
+    assert!(
+        report.contains("Same expansion (echo 'x y'): a (alias"),
+        "{report}"
+    );
+}

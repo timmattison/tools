@@ -1099,3 +1099,16 @@ fn the_json_findings_are_an_empty_list_when_there_is_none() {
         serde_json::from_str(&json(&tally(Vec::new()), &window(), "/bin/zsh")).unwrap();
     assert_eq!(document["findings"], serde_json::json!([]), "{document}");
 }
+
+#[test]
+fn a_control_character_in_a_word_keeps_the_entry_on_one_line() {
+    let found = Finding {
+        words: vec!["printf".to_string(), "'a\nb'".to_string()],
+        ..same_expansion()
+    };
+    let report = text(&with_findings(vec![found]), &window(), "/bin/zsh", None);
+    assert!(
+        findings_block(&report).contains("\n  Same expansion (printf 'a\\nb'): gs (alias"),
+        "{report}"
+    );
+}
