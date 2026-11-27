@@ -17,8 +17,8 @@
 )]
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 
+use gitscratch::testing::executable::write_executable;
 use gitscratch::testing::{DecoyRepository, TestRepo};
 
 /// The line that starts each recorded call in the recording file.
@@ -61,8 +61,7 @@ WN_FAKE_GH_BODY
         recording = recording.display(),
     );
     let gh = bin.path().join("gh");
-    fs::write(&gh, script).unwrap();
-    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&gh, script).unwrap();
 
     let stand_in = tempfile::tempdir().unwrap();
     let mut command = childenv::fixture_command(env!("CARGO_BIN_EXE_wn"));

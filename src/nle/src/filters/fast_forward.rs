@@ -13,7 +13,7 @@
 
 use crate::error::NleError;
 use crate::filters::time_dilation::{self, Speed};
-use crate::pipeline::{FilterRegistry, Span};
+use crate::pipeline::{FilterRegistry, Span, SpanContext};
 use crate::types::{AppliedFilter, Event, EventType, FilterKind, FilterOptions, FilterRegion};
 
 /// The kind of the fast-forward filter.
@@ -160,7 +160,11 @@ pub fn register(registry: &mut FilterRegistry) {
 }
 
 /// Compress a span in the mode of its options.
-fn fast_forward(span: Span, options: &FilterOptions) -> Result<Span, String> {
+fn fast_forward(
+    span: Span,
+    _context: SpanContext<'_>,
+    options: &FilterOptions,
+) -> Result<Span, String> {
     Ok(match mode_from(options)? {
         Mode::SkipToEnd => skip_to_end(span),
         Mode::Accelerate(acceleration) => time_dilation::scale(span, acceleration.speed()),

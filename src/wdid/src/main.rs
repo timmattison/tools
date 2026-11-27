@@ -106,7 +106,10 @@ enum Command {
     /// Report on each alias and each function of the interactive shell: the
     /// file that defined it, the uses, the definitions that gave the other
     /// uses, and the definitions never used, idle, or run without a typed
-    /// name. Needs no cargo workspace.
+    /// name. Last come the duplicates and shadows: aliases with the same
+    /// expansion, an alias and a function that do the same thing, an alias
+    /// defined more than one time, an alias that hides a function, and a
+    /// definition that hides a program. Needs no cargo workspace.
     Defs(DefsArgs),
 }
 
@@ -131,7 +134,10 @@ struct DefsArgs {
     /// when its file is under `ZSH_CUSTOM`. It is also mine when its file is
     /// under HOME and not under `ZSH`, the oh-my-zsh directory. With this
     /// flag, the text report also shows the others, grouped by the file that
-    /// defined them, and the functions whose name starts with `_`.
+    /// defined them, and the functions whose name starts with `_`. Without
+    /// this flag, the duplicates and shadows show only a finding that holds
+    /// one or more of my definitions or one of my places. With it, they show
+    /// each finding.
     #[arg(long)]
     all: bool,
 }
