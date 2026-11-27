@@ -1647,6 +1647,121 @@ fn rule_body(selector: &str) -> String {
     text_between(STYLE, &format!("{selector} {{"), "}")
 }
 
+/// The selectors of the rules of the style sheet, in source order.
+fn style_selectors() -> Vec<&'static str> {
+    STYLE
+        .split('}')
+        .filter_map(|rule| rule.split_once('{'))
+        .map(|(selector, _)| selector.trim())
+        .collect()
+}
+
+/// The specificity of a CSS selector (Selectors Level 4, section 17). The
+/// fields are in the order of the comparison: a field counts only when each
+/// field before it is equal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct Specificity {
+    /// The id selectors.
+    ids: u32,
+    /// The class selectors and the pseudo-classes.
+    classes: u32,
+    /// The type selectors.
+    types: u32,
+}
+
+impl Specificity {
+    /// The specificity of `selector`. `:where()` adds nothing, and `:not()`
+    /// and `:is()` add the specificity of their argument. A form that this
+    /// function does not know fails the test, so that no count is wrong in
+    /// silence.
+    fn of(selector: &str) -> Self {
+        /// The name at the start of `text`, and the text after it.
+        fn split_name(text: &str) -> (&str, &str) {
+            let end = text
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+                .unwrap_or(text.len());
+            text.split_at(end)
+        }
+
+        let mut counts = Self::default();
+        let mut rest = selector.trim();
+        while let Some(next) = rest.chars().next() {
+            rest = if let Some(after) = rest.strip_prefix('#') {
+                counts.ids += 1;
+                split_name(after).1
+            } else if let Some(after) = rest.strip_prefix('.') {
+                counts.classes += 1;
+                split_name(after).1
+            } else if let Some(after) = rest.strip_prefix(':') {
+                let (name, after) = split_name(after);
+                match after.strip_prefix('(') {
+                    None => {
+                        counts.classes += 1;
+                        after
+                    }
+                    Some(inner) => {
+                        let (argument, after) = inner
+                            .split_once(')')
+                            .unwrap_or_else(|| panic!("no ) after :{name}( in {selector}"));
+                        assert!(
+                            !argument.contains([',', '(']),
+                            "no rule for the argument of :{name}() in {selector}"
+                        );
+                        let added = match name {
+                            "where" => Self::default(),
+                            "not" | "is" => Self::of(argument),
+                            _ => panic!("no rule for :{name}() in {selector}"),
+                        };
+                        counts.ids += added.ids;
+                        counts.classes += added.classes;
+                        counts.types += added.types;
+                        after
+                    }
+                }
+            } else if let Some(after) = rest.strip_prefix([' ', '>', '+', '~', '*']) {
+                after
+            } else if next.is_ascii_alphabetic() {
+                counts.types += 1;
+                split_name(rest).1
+            } else {
+                panic!("no rule for {rest:?} in {selector:?}")
+            };
+        }
+        counts
+    }
+}
+
+/// The hover rule of every button must lose to the hover rule of the Dismiss
+/// button of the error banner. Else the dark text of that button stands on the
+/// dark hover color of the other buttons, on a pink banner.
+#[test]
+fn the_dismiss_button_keeps_its_own_hover_color() {
+    let selectors = style_selectors();
+    // The cascade takes the rule of the higher specificity, and of two equal
+    // specificities, the rule that comes later.
+    let rank = |selector: &str| {
+        let position = selectors
+            .iter()
+            .position(|candidate| *candidate == selector)
+            .unwrap_or_else(|| panic!("no rule {selector} in {STYLE}"));
+        (Specificity::of(selector), position)
+    };
+    let dismiss = rank(".error-dismiss:hover");
+    let every_button: Vec<&str> = selectors
+        .iter()
+        .copied()
+        .filter(|selector| selector.starts_with("button:hover"))
+        .collect();
+    assert!(!every_button.is_empty(), "no button:hover rule in {STYLE}");
+    for selector in every_button {
+        assert!(
+            dismiss > rank(selector),
+            "{selector} {:?} beats .error-dismiss:hover {dismiss:?}",
+            rank(selector)
+        );
+    }
+}
+
 #[test]
 fn the_style_sheet_fits_the_grid_to_the_pane() {
     let pane = rule_body(".preview-screen");
