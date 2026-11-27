@@ -399,6 +399,9 @@ impl Starts {
         let Some((command, _)) = double_quoted(rest) else {
             return;
         };
-        self.add_code(Trigger::KeyCommand(key.to_owned()), &decode_key_command(command));
+        self.add_code(
+            Trigger::KeyCommand(key.to_owned()),
+            &decode_key_command(command),
+        );
     }
 }
