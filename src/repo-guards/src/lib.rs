@@ -19,9 +19,11 @@
 pub mod alternate_screen;
 pub mod arboard_wall;
 mod cargo;
+pub mod clippy_superset;
 pub mod doc_links;
 pub mod doc_placement;
 pub mod git_env_sweep;
+pub mod op_wall;
 pub mod target_lints;
 pub mod tool_index;
 pub mod trippy_wall;
