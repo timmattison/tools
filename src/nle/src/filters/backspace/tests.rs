@@ -130,6 +130,54 @@ fn ctrl_h_erases_like_the_backspace_key() {
 }
 
 #[test]
+fn a_typed_multi_byte_character_goes_with_its_backspace() {
+    // `é` (U+00E9) is one character of two bytes.
+    let mut events = vec![out(0.0, "$ ")];
+    events.extend(typed(&[("h", 1.0), ("\u{e9}", 1.5)]));
+    events.push(input(2.0, "\x7f"));
+    events.push(out(2.0, "\x08 \x08"));
+    events.extend(typed(&[("e", 2.5)]));
+    assert_eq!(run(events), without_the_typo());
+}
+
+#[test]
+fn a_combining_sequence_in_one_input_event_stays_and_ends_the_stack() {
+    // A terminal draws `e` and U+0301 in one cell, and the emulator draws
+    // them in two. The echo of the Ctrl+U erases `a` and the sequence in a
+    // terminal, but leaves `a` on the screen of the emulator. If the sequence
+    // were a typed key, the filter would remove it and the Ctrl+U, and keep
+    // the `a` that the terminal erased.
+    let events = vec![
+        out(0.0, "$ "),
+        input(1.0, "a"),
+        out(1.0, "a"),
+        input(1.5, "e\u{301}"),
+        out(1.5, "e\u{301}"),
+        input(2.0, "\x15"),
+        out(2.0, "\x08\x08  \x08\x08"),
+    ];
+    assert_eq!(run(events.clone()), events);
+}
+
+#[test]
+fn a_wide_character_and_its_shell_erase_stay_with_the_key_before_it() {
+    // A terminal draws `日` (U+65E5) in two cells, and the emulator draws it
+    // in one. The shell erases it with two backspaces, which in the emulator
+    // also erase `a`. The screen then equals the screen before `a`, but the
+    // terminal still shows `a`.
+    let events = vec![
+        out(0.0, "$ "),
+        input(1.0, "a"),
+        out(1.0, "a"),
+        input(1.5, "\u{65e5}"),
+        out(1.5, "\u{65e5}"),
+        input(2.0, "\x7f"),
+        out(2.0, "\x08\x08  \x08\x08"),
+    ];
+    assert_eq!(run(events.clone()), events);
+}
+
+#[test]
 fn output_backspaces_of_a_program_with_no_input_stay() {
     let events = vec![out(1.0, "Loading... 50%"), out(1.5, "\x08\x08\x0875%")];
     assert_eq!(run(events.clone()), events);
