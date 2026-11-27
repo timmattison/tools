@@ -11,6 +11,10 @@
 //! continuation cell after it (`WIDE_CONTINUATION`). A character of no width,
 //! such as a combining mark, takes no cell.
 //!
+//! Two terminals are equal when each later byte has the same effect on both. The
+//! backspace removal filter of `nle` uses this equality: it compares the screen
+//! before a typed key with the screen after the key that erased it.
+//!
 //! It does not draw pixels. `beta` keeps the drawing, the fonts, the tmux
 //! layout, and the ffmpeg pipe.
 
@@ -108,7 +112,7 @@ fn read_semicolon_color(groups: &[&[u16]], at: usize) -> (Option<ExtendedColor>,
 
 /// The colors of one terminal theme: the default background and foreground,
 /// and the 16 base ANSI colors.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalTheme {
     /// The default background color.
     pub background: (u8, u8, u8),
@@ -546,6 +550,97 @@ impl Cell {
         self.ch == WIDE_CONTINUATION
     }
 }
+
+/// Two terminals are equal when each later byte has the same effect on both.
+///
+/// Thus they hold the same screen, cursor, pen, saved cursor, scroll region,
+/// character set, autowrap mode, pending wrap, cursor visibility, palette,
+/// selection and override colors, theme, and size, and the same unfinished
+/// escape sequence. The pen is the colors, the source of each color, and each
+/// attribute that the next printed character gets.
+///
+/// The parser is not compared. By the argument on `Clone`, a parser is in the
+/// state that `Parser::new()` reaches after it reads `pending`, so two equal
+/// `pending` buffers give two parsers in the same state.
+///
+/// The marks of `take_changed_rows` are not compared. They record which rows
+/// changed, and no later byte reads them.
+impl PartialEq for TerminalState {
+    fn eq(&self, other: &Self) -> bool {
+        // A destructure, so that a new field fails to compile until this
+        // comparison names it.
+        let Self {
+            grid,
+            changed_rows: _,
+            cursor_x,
+            cursor_y,
+            width,
+            height,
+            theme,
+            current_fg,
+            current_bg,
+            current_fg_source,
+            current_bg_source,
+            bold,
+            italic,
+            underline,
+            dim,
+            blink,
+            reverse,
+            hidden,
+            strikethrough,
+            parser: _,
+            pending,
+            saved_cursor_x,
+            saved_cursor_y,
+            scroll_top,
+            scroll_bottom,
+            use_acs,
+            autowrap,
+            wrap_pending,
+            cursor_visible,
+            dynamic_palette,
+            selection_fg,
+            selection_bg,
+            override_fg,
+            override_bg,
+        } = self;
+        *cursor_x == other.cursor_x
+            && *cursor_y == other.cursor_y
+            && *width == other.width
+            && *height == other.height
+            && *current_fg == other.current_fg
+            && *current_bg == other.current_bg
+            && *current_fg_source == other.current_fg_source
+            && *current_bg_source == other.current_bg_source
+            && *bold == other.bold
+            && *italic == other.italic
+            && *underline == other.underline
+            && *dim == other.dim
+            && *blink == other.blink
+            && *reverse == other.reverse
+            && *hidden == other.hidden
+            && *strikethrough == other.strikethrough
+            && *pending == other.pending
+            && *saved_cursor_x == other.saved_cursor_x
+            && *saved_cursor_y == other.saved_cursor_y
+            && *scroll_top == other.scroll_top
+            && *scroll_bottom == other.scroll_bottom
+            && *use_acs == other.use_acs
+            && *autowrap == other.autowrap
+            && *wrap_pending == other.wrap_pending
+            && *cursor_visible == other.cursor_visible
+            && *selection_fg == other.selection_fg
+            && *selection_bg == other.selection_bg
+            && *override_fg == other.override_fg
+            && *override_bg == other.override_bg
+            && *theme == other.theme
+            && *dynamic_palette == other.dynamic_palette
+            && *grid == other.grid
+    }
+}
+
+impl Eq for TerminalState {}
 
 impl Default for Cell {
     fn default() -> Self {

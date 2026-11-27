@@ -8,9 +8,10 @@
 //! Take this module with the feature `testing`, as a dev-dependency only. A
 //! build without the feature holds none of it.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use gitscratch::testing::executable::write_executable;
 
 /// The file that the fake commands keep the text in. It sits beside them.
 const CLIPBOARD_FILE: &str = "clipboard";
@@ -22,9 +23,6 @@ const SOCKET_NAME: &str = "mosh-open.sock";
 /// The system directories that stay on `PATH` behind the fakes. The scripts
 /// need `sh` and `cat`.
 const SYSTEM_PATH: &str = "/usr/bin:/bin";
-
-/// The mode of a fake command.
-const EXECUTABLE_MODE: u32 = 0o755;
 
 /// The fake `pbcopy`. It finds its own directory through `${0%/*}`, so no path
 /// goes into the script.
@@ -132,10 +130,12 @@ impl FakeShims {
     }
 
     /// Writes the executable `name` with the text `script`.
+    ///
+    /// The command is written with `write_executable`, because a test runs it.
+    /// On Linux, a script that the test process held open for writing gives
+    /// `ETXTBSY` at its run.
     fn write_command(&self, name: &str, script: &str) {
         let path = self.dir.join(name);
-        std::fs::write(&path, script).expect("the fake command is written");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(EXECUTABLE_MODE))
-            .expect("the fake command is made executable");
+        write_executable(&path, script).expect("the fake command is written");
     }
 }

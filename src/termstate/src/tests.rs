@@ -1329,3 +1329,82 @@ fn take_changed_rows_clears_the_marks() {
     assert_eq!(state.take_changed_rows(), vec![0, 1]);
     assert_eq!(state.take_changed_rows(), Vec::<usize>::new());
 }
+
+#[test]
+fn two_terminals_that_read_the_same_bytes_are_equal() {
+    assert!(feed_text("ab\x1b[31mc\r\n") == feed_text("ab\x1b[31mc\r\n"));
+}
+
+#[test]
+fn an_echo_and_its_erase_leave_a_terminal_equal_to_one_that_read_neither() {
+    assert!(feed_text("$ h") == feed_text("$ hr\x08 \x08"));
+}
+
+#[test]
+fn the_pen_counts_although_the_screen_is_the_same() {
+    assert!(feed_text("ab") != feed_text("ab\x1b[31m"));
+}
+
+#[test]
+fn the_saved_cursor_counts_although_the_cursor_is_the_same() {
+    assert!(feed_text("") != feed_text("\x1b[5C\x1b7\x1b[5D"));
+}
+
+#[test]
+fn an_unfinished_sequence_counts_until_it_ends() {
+    let mut unfinished = feed_text("x\x1b[");
+    assert!(unfinished != feed_text("x"));
+
+    unfinished.process_output("m").unwrap();
+    assert!(unfinished == feed_text("x"));
+}
+
+#[test]
+fn the_theme_counts_although_only_a_palette_color_differs() {
+    // The two themes have the same default colors, so the screens are the
+    // same. A later `CSI 31 m` paints in different reds.
+    let mut other = TerminalTheme::auto();
+    other.red = (1, 2, 3);
+    assert!(TerminalState::new(10, 3, TerminalTheme::auto()) != TerminalState::new(10, 3, other));
+}
+
+#[test]
+fn an_attribute_of_the_pen_counts_although_the_screen_is_the_same() {
+    assert!(feed_text("ab") != feed_text("ab\x1b[7m"));
+}
+
+#[test]
+fn the_source_of_a_pen_color_counts_although_its_rgb_is_the_same() {
+    // A base color and a 24-bit color of the same RGB value paint the same
+    // cell, but a later change of the theme changes only the base color.
+    let (r, g, b) = TerminalTheme::auto().red;
+    let base = feed_text("ab\x1b[31m");
+    let rgb = feed_text(&format!("ab\x1b[38;2;{r};{g};{b}m"));
+    assert_eq!(base.current_fg, rgb.current_fg);
+    assert!(base != rgb);
+}
+
+#[test]
+fn the_autowrap_mode_counts_although_the_screen_is_the_same() {
+    assert!(feed_text("ab") != feed_text("ab\x1b[?7l"));
+}
+
+#[test]
+fn a_pending_wrap_counts_although_the_cursor_is_the_same() {
+    // A move away and back clears the pending wrap, and the cursor ends in
+    // the last column again.
+    let pending = feed_text("0123456789");
+    let cleared = feed_text("0123456789\x1b[D\x1b[C");
+    assert_eq!(
+        (pending.cursor_x, pending.cursor_y),
+        (cleared.cursor_x, cleared.cursor_y)
+    );
+    assert!(pending != cleared);
+}
+
+#[test]
+fn the_marks_of_the_changed_rows_do_not_count() {
+    let mut taken = feed_text("ab");
+    assert_eq!(taken.take_changed_rows(), vec![0]);
+    assert!(taken == feed_text("ab"));
+}

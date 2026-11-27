@@ -90,7 +90,7 @@ use termstate::{Cell, TerminalState, TerminalTheme};
 
 use self::writer::{Glyph, Look, Writer, HIDE_CURSOR, SHOW_CURSOR};
 use crate::ansi::{Scanner, Sequence, Step};
-use crate::pipeline::{FilterRegistry, Screen, ScreenSize, ScreenView};
+use crate::pipeline::{FilterRegistry, Screen, ScreenView, TerminalSize};
 use crate::preview::{MAX_COLUMNS, MAX_ROWS};
 use crate::types::{Event, EventType, FilterKind, FilterOptions};
 
@@ -163,7 +163,7 @@ fn filter(
 ) -> Result<Screen, String> {
     let value = serde_json::to_value(options).map_err(|error| error.to_string())?;
     let options: Options = serde_json::from_value(value).map_err(|error| error.to_string())?;
-    let ScreenSize { width, height } = view.size;
+    let TerminalSize { width, height } = view.size;
     check_screen(view.size)?;
     let (rows_axis, columns_axis) = (Axis::ROWS, Axis::COLUMNS);
     let rows_crop = rows_axis.check_crop(options.rows, height)?;
@@ -186,7 +186,7 @@ fn filter(
             size: view.size,
         });
     }
-    let size = ScreenSize {
+    let size = TerminalSize {
         width: u16::try_from(columns.len()).map_err(|error| error.to_string())?,
         height: u16::try_from(rows.len()).map_err(|error| error.to_string())?,
     };
@@ -195,8 +195,8 @@ fn filter(
 }
 
 /// Check that the screen has a cell and fits the limits of the preview.
-fn check_screen(size: ScreenSize) -> Result<(), String> {
-    let ScreenSize { width, height } = size;
+fn check_screen(size: TerminalSize) -> Result<(), String> {
+    let TerminalSize { width, height } = size;
     if width == 0 || height == 0 {
         return Err(format!("the screen of {width}x{height} has no cells"));
     }
@@ -341,7 +341,7 @@ impl Replay {
     /// A replay for the region `All` of a screen of `size`, with the visible
     /// `rows` and `columns`. The output is a blank terminal of the size of the
     /// visible cells.
-    fn moved(size: ScreenSize, rows: Vec<usize>, columns: Vec<usize>) -> Self {
+    fn moved(size: TerminalSize, rows: Vec<usize>, columns: Vec<usize>) -> Self {
         Self {
             terminal: new_terminal(size),
             reader: Reader::default(),
@@ -364,7 +364,7 @@ impl Replay {
     ///
     /// The emulator refuses the data of an event.
     fn masked(
-        size: ScreenSize,
+        size: TerminalSize,
         rows: Vec<usize>,
         columns: Vec<usize>,
         before: &[Event],
@@ -677,7 +677,7 @@ fn shown(indexes: &[usize], len: usize) -> Vec<bool> {
 }
 
 /// An emulator of a screen of `size`.
-fn new_terminal(size: ScreenSize) -> TerminalState {
+fn new_terminal(size: TerminalSize) -> TerminalState {
     TerminalState::new(
         usize::from(size.width),
         usize::from(size.height),

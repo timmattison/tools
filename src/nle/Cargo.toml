@@ -16,9 +16,11 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 flate2 = "1.0"
 buildinfo = { workspace = true }
-# The emulator of the preview. It is the same emulator that beta uses to export.
+# The emulator of the preview, and of the screens that the backspace removal
+# filter compares. It is the same emulator that beta uses to export.
 termstate = { workspace = true }
-# The width of a character in terminal cells, for the runs of the screen model.
+# The width of a character in terminal cells, for the runs of the screen model,
+# and for the width of a match that the redaction filter masks.
 unicode-width = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
@@ -26,6 +28,8 @@ tokio = { workspace = true }
 # bans std::process::Command::new.
 childenv = { workspace = true }
 chrono = { workspace = true }
+# The redaction filter finds text with a regular expression.
+regex = { workspace = true }
 # The file dialog of the Open Recording button. These are the same features that
 # dioxus-desktop uses, so the build holds one copy of rfd.
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }

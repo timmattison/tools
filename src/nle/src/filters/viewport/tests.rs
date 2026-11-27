@@ -8,7 +8,7 @@ use termstate::{ColorSource, TerminalState, TerminalTheme};
 use super::writer::{Glyph, Look, Writer};
 use super::*;
 use crate::error::NleError;
-use crate::pipeline::{RegionView, ScreenSize};
+use crate::pipeline::{RegionView, TerminalSize};
 use crate::preview::{MAX_COLUMNS, MAX_ROWS};
 use crate::types::{AppliedFilter, EditProject, EventType, FilterRegion, Recording, Seconds};
 
@@ -48,7 +48,7 @@ fn call(
             length: 100.0,
             open: true,
         },
-        size: ScreenSize { width, height },
+        size: TerminalSize { width, height },
         before: &[],
         whole_timeline: true,
     };
@@ -113,7 +113,7 @@ fn no_option_gives_the_events_and_the_size_back() {
     assert_eq!(screen.events, events);
     assert_eq!(
         screen.size,
-        ScreenSize {
+        TerminalSize {
             width: 80,
             height: 24
         }
@@ -135,7 +135,7 @@ fn a_crop_of_the_full_screen_gives_the_events_and_the_size_back() {
         assert_eq!(screen.events, events, "{value}");
         assert_eq!(
             screen.size,
-            ScreenSize {
+            TerminalSize {
                 width: 80,
                 height: 24
             },
@@ -213,7 +213,7 @@ fn a_screen_at_the_limits_of_the_preview_is_accepted() {
 
     assert_eq!(
         screen.size,
-        ScreenSize {
+        TerminalSize {
             width,
             height: height - 1
         }

@@ -51,16 +51,18 @@ pub enum ColorSource {
 A fourth form in `src/nle/src/pipeline.rs`, next to the event, in-place, and
 span forms:
 
-```rust
-pub struct ScreenSize { pub width: u16, pub height: u16 }
+The size is `TerminalSize`, which the span form also uses in its
+`SpanContext`. Issue #152 added that type on `main` while this branch was
+open, so the screen form takes it and does not define a second type.
 
+```rust
 pub struct ScreenView<'a> {
     pub region: RegionView,   // as for an in-place filter
-    pub size: ScreenSize,     // the size of the screen at this step
+    pub size: TerminalSize,   // the size of the screen at this step
     pub before: &'a [Event],  // the events before the region, times on the timeline
 }
 
-pub struct Screen { pub events: Vec<Event>, pub size: ScreenSize }
+pub struct Screen { pub events: Vec<Event>, pub size: TerminalSize }
 
 pub type ScreenFilterFn =
     dyn Fn(&[Event], ScreenView<'_>, &FilterOptions) -> Result<Screen, String> + Send + Sync;
@@ -81,6 +83,9 @@ pub type ScreenFilterFn =
 6. The final size is the `width` and the `height` of the rendered recording.
 7. `FilterRegistry::run` has no header. It refuses a screen filter with a
    render error that names the kind.
+8. A span filter gets the size of its step in its `SpanContext`. Thus a span
+   filter after a crop sees the cropped screen. In `FilterRegistry::run`, it
+   gets the size of a VT100.
 
 ## Part 3: the `viewport` filter
 

@@ -36,6 +36,11 @@ const TWO_COMMIT_DATE: &str = "2026-03-04T12:00:00Z";
 /// The width that the table gets, so that no line wraps.
 const WIDE: &str = "200";
 
+/// The start of the names of the oh-my-zsh variables, for example `ZSH` and
+/// `ZSH_CUSTOM`. `wdid defs` reads them from the shell, thus a run sheds each
+/// one that the environment of `cargo test` holds.
+const OH_MY_ZSH_PREFIX: &str = "ZSH";
+
 /// The format that atuin prints for the time of a row.
 const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
@@ -222,9 +227,17 @@ impl Setup {
     }
 
     /// The command for `wdid`, with the stub `PATH` and the width of the
-    /// table. The shell is zsh. The caller adds the flags.
+    /// table. The shell is zsh. The command has no variable whose name starts
+    /// with [`OH_MY_ZSH_PREFIX`], so the origins that `wdid defs` calls mine
+    /// do not depend on the shell that starts `cargo test`. The caller adds
+    /// the flags.
     fn command(&self) -> Command {
         let mut command = childenv::fixture_command(BIN);
+        for (name, _) in std::env::vars_os() {
+            if name.to_string_lossy().starts_with(OH_MY_ZSH_PREFIX) {
+                command.env_remove(name);
+            }
+        }
         command
             .env("PATH", self.stubs.path())
             .env("HOME", self.home.path())
@@ -863,8 +876,541 @@ fn the_help_texts_name_defs_and_the_flags_of_defs() {
     let defs = setup.command().args(["defs", "--help"]).output().unwrap();
     assert!(defs.status.success(), "{defs:?}");
     let text = stdout(&defs);
-    for flag in ["--since", "--json", "--idle-days"] {
+    for flag in ["--since", "--json", "--idle-days", "--all"] {
         assert!(text.contains(flag), "{text}");
     }
     assert!(!text.contains("--repo"), "{text}");
+    assert!(
+        text.contains("run without a typed name"),
+        "the help of defs names each group of the report: {text}"
+    );
+    assert!(
+        text.contains("duplicates and shadows"),
+        "the help of defs names the group of the findings: {text}"
+    );
+    assert!(
+        text.contains("each finding"),
+        "the help of --all says that it shows each finding: {text}"
+    );
+    let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        words.contains("one or more of my definitions or one of my places"),
+        "the help of --all gives the rule of Finding::mine: a place of mine \
+         also makes a finding mine: {text}"
+    );
+    assert!(
+        text.contains("ZSH_CUSTOM"),
+        "the help of --all names each place that Places::is_mine calls mine: {text}"
+    );
+}
+
+/// The `.zshrc` of the origin tests of `wdid defs`: an alias of mine on line
+/// 2, a stand-in of oh-my-zsh in `$HOME/omz` with one plugin, and a private
+/// function.
+const ORIGIN_ZSHRC: &str = "export ZSH=$HOME/omz\n\
+alias wt='echo wt'\n\
+source $ZSH/plugins/git/git.plugin.zsh\n\
+_private() { true }\n";
+
+/// The plugin file of [`ORIGIN_ZSHRC`], below the home directory.
+const ORIGIN_PLUGIN: &str = "omz/plugins/git/git.plugin.zsh";
+
+/// Writes [`ORIGIN_ZSHRC`] and its plugin into the home directory of
+/// `setup`.
+fn write_origin_home(setup: &Setup) {
+    std::fs::write(setup.home.path().join(".zshrc"), ORIGIN_ZSHRC).unwrap();
+    let plugin = setup.home.path().join(ORIGIN_PLUGIN);
+    std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+    std::fs::write(plugin, "alias gst='git status'\n").unwrap();
+}
+
+/// Runs `wdid defs` with `args` on the home of [`write_origin_home`], outside
+/// each work tree. The history has one use of `gst` and one of `wt`.
+fn run_origin_defs(args: &[&str]) -> (Setup, Output) {
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "gst"), row(1, "wt")]));
+    write_origin_home(&setup);
+    let cwd = gitscratch::testing::not_a_repository();
+    let output = defs_command(&setup)
+        .args(args)
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+    (setup, output)
+}
+
+/// Gives the first table row of `text` whose name cell is `name`.
+fn table_row<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    text.lines().find(|line| {
+        line.strip_prefix('\u{2502}')
+            .and_then(|line| line.split('\u{2506}').next())
+            .is_some_and(|cell| cell.trim() == name)
+    })
+}
+
+#[test]
+fn defs_shows_only_my_definitions_with_their_origins() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let (_setup, output) = run_origin_defs(&[]);
+    assert!(output.status.success(), "{output:?}");
+    let text = stdout(&output);
+    let wt = table_row(&text, "wt").unwrap_or_else(|| panic!("no row of wt in {text}"));
+    assert!(wt.contains("~/.zshrc:2"), "{wt}");
+    assert!(table_row(&text, "gst").is_none(), "{text}");
+    assert!(!text.contains("git.plugin.zsh"), "{text}");
+    assert!(!text.contains("_private"), "{text}");
+    assert!(
+        text.lines().any(|line| line.starts_with("Definitions: ")
+            && line.ends_with(" others (--all shows the others).")),
+        "{text}"
+    );
+}
+
+#[test]
+fn defs_all_groups_the_others_by_origin_and_shows_the_private_functions() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let (_setup, output) = run_origin_defs(&["--all"]);
+    assert!(output.status.success(), "{output:?}");
+    let text = stdout(&output);
+    assert!(
+        text.lines().any(|line| line.starts_with("Mine: ")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("\n~/{ORIGIN_PLUGIN}: 1 definition\n")),
+        "{text}"
+    );
+    let gst = table_row(&text, "gst").unwrap_or_else(|| panic!("no row of gst in {text}"));
+    assert!(gst.contains(&format!("~/{ORIGIN_PLUGIN}:1")), "{gst}");
+    assert!(table_row(&text, "_private").is_some(), "{text}");
+    assert!(table_row(&text, "wt").is_some(), "{text}");
+}
+
+#[test]
+fn defs_json_gives_the_origin_and_mine_of_each_definition() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let (setup, output) = run_origin_defs(&["--json"]);
+    let document = json(&output);
+    let home = setup.home.path();
+    let wt = definition(&document, "wt");
+    assert_eq!(
+        wt["origin"],
+        serde_json::json!({ "file": home.join(".zshrc"), "line": 2 }),
+        "{document}"
+    );
+    assert_eq!(wt["mine"], true, "{document}");
+    let gst = definition(&document, "gst");
+    assert_eq!(
+        gst["origin"],
+        serde_json::json!({ "file": home.join(ORIGIN_PLUGIN), "line": 1 }),
+        "{document}"
+    );
+    assert_eq!(gst["mine"], false, "{document}");
+    assert_eq!(gst["uses"], 1, "{document}");
+    assert!(!has_definition(&document, "_private"), "{document}");
+    let entries = document["definitions"].as_array().unwrap();
+    let mine = entries.iter().filter(|entry| entry["mine"] == true).count();
+    assert_eq!(document["shell"]["mine"], mine, "{document}");
+    assert_eq!(
+        document["shell"]["others"],
+        entries.len() - mine,
+        "{document}"
+    );
+}
+
+/// The temporary `ZDOTDIR` and the wrapper function `alias` change no count
+/// of the tools report. An alias in `.zshenv`, an alias and a function in
+/// `.zshrc`, and a typed tool each count as they did before them.
+#[test]
+fn the_tools_report_counts_through_the_zshenv_and_the_zshrc() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let setup = Setup::new(&Atuin::Rows(&[
+        row(1, "envone"),
+        row(1, "one x"),
+        row(1, "two"),
+        row(1, "wdid-fixture-one"),
+    ]));
+    std::fs::write(
+        setup.home.path().join(".zshenv"),
+        format!("alias envone='{TOOL_ONE}'\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        setup.home.path().join(".zshrc"),
+        format!("alias one='{TOOL_ONE} --flag'\ntwo() {{ {TOOL_TWO} \"$@\" }}\n"),
+    )
+    .unwrap();
+    let output = setup
+        .command()
+        .env("SHELL", ZSH)
+        .env("ZDOTDIR", setup.home.path())
+        .arg("--json")
+        .arg("--repo")
+        .arg(setup.workspace.path())
+        .output()
+        .unwrap();
+    let document = json(&output);
+    let one = tool(&document, TOOL_ONE);
+    assert_eq!(one["uses"], 3, "{document}");
+    assert_eq!(one["typed"], 1, "{document}");
+    assert_eq!(
+        one["through"],
+        serde_json::json!([{ "name": "envone", "uses": 1 }, { "name": "one", "uses": 1 }]),
+        "{document}"
+    );
+    let two = tool(&document, TOOL_TWO);
+    assert_eq!(two["uses"], 1, "{document}");
+    assert_eq!(
+        two["through"],
+        serde_json::json!([{ "name": "two", "uses": 1 }]),
+        "{document}"
+    );
+}
+
+/// The bash of the tests of `wdid defs` that read a `.bashrc`.
+const BASH: &str = "/bin/bash";
+
+/// The `.zshrc` of the tests of the definitions that zsh runs without a typed
+/// name. Each block defines one start, and `unused` has none.
+const STARTS_ZSHRC: &str = "precmd() { prompt_helper }\n\
+prompt_helper() { true }\n\
+mychpwd() { true }\n\
+autoload -Uz add-zsh-hook\n\
+add-zsh-hook chpwd mychpwd\n\
+TRAPINT() { return 128 }\n\
+searchfn() { true }\n\
+zle -N history-search-wdid searchfn\n\
+bindkey '^R' history-search-wdid\n\
+lonelyfn() { true }\n\
+zle -N lonely-widget lonelyfn\n\
+zle-line-init() { true }\n\
+zle -N zle-line-init\n\
+kmsel() { true }\n\
+autoload -Uz add-zle-hook-widget\n\
+add-zle-hook-widget keymap-select kmsel\n\
+unused() { true }\n";
+
+/// The `.bashrc` of the test of the definitions that bash runs without a
+/// typed name.
+const STARTS_BASHRC: &str = "pcfn() { pc_helper; }\n\
+pc_helper() { true; }\n\
+PROMPT_COMMAND='pcfn'\n\
+trapfn() { true; }\n\
+trap 'trapfn' EXIT\n\
+unused() { true; }\n";
+
+/// Gives the reasons of the definition `name` in `document`, as text.
+fn reasons_of(document: &Value, name: &str) -> Vec<String> {
+    definition(document, name)["reasons"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no reasons of {name} in {document}"))
+        .iter()
+        .map(|reason| reason.as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Says if the list `group` of `document` holds the definition `name`.
+fn listed_in(document: &Value, group: &str, name: &str) -> bool {
+    document[group]
+        .as_array()
+        .unwrap_or_else(|| panic!("no list {group} in {document}"))
+        .iter()
+        .any(|entry| entry["name"] == name)
+}
+
+/// Gives the lines of the group `heading` of the text report: the lines after
+/// the heading line that start with two spaces.
+fn group_of<'a>(text: &'a str, heading: &str) -> Vec<&'a str> {
+    text.lines()
+        .skip_while(|line| !line.starts_with(heading))
+        .skip(1)
+        .take_while(|line| line.starts_with("  "))
+        .collect()
+}
+
+#[test]
+fn defs_gives_the_functions_that_zsh_runs_without_a_typed_name_their_state() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "ls")]));
+    std::fs::write(setup.home.path().join(".zshrc"), STARTS_ZSHRC).unwrap();
+    let cwd = gitscratch::testing::not_a_repository();
+
+    let output = defs_command(&setup)
+        .arg("--json")
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+
+    let document = json(&output);
+    for (name, reason) in [
+        ("precmd", "precmd hook"),
+        ("prompt_helper", "precmd hook, through precmd"),
+        ("mychpwd", "chpwd hook"),
+        ("TRAPINT", "INT trap"),
+        ("searchfn", "widget history-search-wdid, key ^R"),
+        ("zle-line-init", "widget zle-line-init"),
+        ("kmsel", "widget zle-keymap-select"),
+    ] {
+        let entry = definition(&document, name);
+        assert_eq!(
+            entry["classification"], "runs_without_typing",
+            "{name}: {document}"
+        );
+        assert_eq!(reasons_of(&document, name), [reason], "{name}: {document}");
+        assert!(listed_in(&document, "runs_without_typing", name), "{name}");
+        assert!(!listed_in(&document, "never_used", name), "{name}");
+        assert!(!listed_in(&document, "idle", name), "{name}");
+    }
+    let lonely = definition(&document, "lonelyfn");
+    assert_eq!(lonely["classification"], "never_used", "{document}");
+    assert_eq!(reasons_of(&document, "lonelyfn"), ["widget, no key"]);
+    assert!(listed_in(&document, "never_used", "lonelyfn"), "{document}");
+    assert!(reasons_of(&document, "unused").is_empty(), "{document}");
+    assert!(listed_in(&document, "never_used", "unused"), "{document}");
+
+    let output = defs_command(&setup)
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = stdout(&output);
+    let never = group_of(&text, "Never used:");
+    assert!(
+        never.contains(&"  lonelyfn (function, widget, no key)"),
+        "{text}"
+    );
+    assert!(never.contains(&"  unused (function)"), "{text}");
+    assert!(!never.iter().any(|line| line.contains("precmd")), "{text}");
+    let starts = group_of(&text, "Runs without typing:");
+    assert!(
+        starts.contains(&"  precmd (function, precmd hook)"),
+        "{text}"
+    );
+    assert!(
+        starts.contains(&"  searchfn (function, widget history-search-wdid, key ^R)"),
+        "{text}"
+    );
+}
+
+#[test]
+fn defs_gives_the_functions_that_bash_runs_without_a_typed_name_their_state() {
+    if !Path::new(BASH).exists() {
+        eprintln!("skipped: bash is not installed");
+        return;
+    }
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "ls")]));
+    std::fs::write(setup.home.path().join(".bashrc"), STARTS_BASHRC).unwrap();
+    let cwd = gitscratch::testing::not_a_repository();
+    // The script of bash runs `tail`, which the stub directory does not hold.
+    let search_path = format!("{}:/usr/bin:/bin", setup.stubs.path().display());
+
+    let output = setup
+        .command()
+        .env("SHELL", BASH)
+        .env("PATH", search_path)
+        .args(["defs", "--json"])
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+
+    let document = json(&output);
+    for (name, reason) in [
+        ("pcfn", "PROMPT_COMMAND"),
+        ("pc_helper", "PROMPT_COMMAND, through pcfn"),
+        ("trapfn", "EXIT trap"),
+    ] {
+        let entry = definition(&document, name);
+        assert_eq!(
+            entry["classification"], "runs_without_typing",
+            "{name}: {document}"
+        );
+        assert_eq!(reasons_of(&document, name), [reason], "{name}: {document}");
+        assert!(!listed_in(&document, "never_used", name), "{name}");
+    }
+    assert!(listed_in(&document, "never_used", "unused"), "{document}");
+}
+
+/// The `.zshrc` of the tests of the duplicates and the shadows. Each name
+/// starts with `wd`, so a program of the machine seldom shares it. Line 3 is
+/// `wdgs`, line 5 is `wdgl`, and line 7 is the first `wdll`.
+const FINDINGS_ZSHRC: &str = "export ZSH=$HOME/omz\n\
+path=($HOME/bin $path)\n\
+alias wdgs='git status'\n\
+source $ZSH/plugins/git/git.plugin.zsh\n\
+alias wdgl='git log'\n\
+wdglog() { git log \"$@\" }\n\
+alias wdll='ls -l'\n\
+source $HOME/more.zsh\n\
+wdx() { true }\n\
+alias wdx='echo x'\n\
+alias wdhidden='echo hi'\n\
+alias wdwrapped='wdwrapped --flag'\n\
+wdcmd() { command wdcmd --flag \"$@\" }\n";
+
+/// The plugin of [`FINDINGS_ZSHRC`]. `wdgst` has the same expansion as my
+/// `wdgs`. `wdgco` and `wdgcheck` share `git checkout`, and no alias of that
+/// finding is mine, so only `--all` shows it.
+const FINDINGS_PLUGIN: &str = "alias wdgst='git status'\n\
+alias wdgco='git checkout'\n\
+alias wdgcheck='git checkout'\n";
+
+/// The file that defines `wdll` a second time, in the home directory.
+const FINDINGS_MORE: &str = "alias wdll='ls -la'\n";
+
+/// The programs in the `bin` directory of the home that
+/// [`FINDINGS_ZSHRC`] puts first on the path.
+const FINDINGS_PROGRAMS: [&str; 3] = ["wdhidden", "wdwrapped", "wdcmd"];
+
+/// The heading of the group of the duplicates and the shadows.
+const FINDINGS_HEADING: &str = "Duplicates and shadows:";
+
+/// Runs `wdid defs` with `args` on the home of [`FINDINGS_ZSHRC`], outside each
+/// work tree. The history uses `wdgs` twice, `wdglog` once, and `wdll` once.
+fn run_findings_defs(args: &[&str]) -> (Setup, Output) {
+    let setup = Setup::new(&Atuin::Rows(&[
+        row(1, "wdgs"),
+        row(2, "wdgs"),
+        row(1, "wdglog"),
+        row(1, "wdll"),
+    ]));
+    let home = setup.home.path();
+    std::fs::write(home.join(".zshrc"), FINDINGS_ZSHRC).unwrap();
+    std::fs::write(home.join("more.zsh"), FINDINGS_MORE).unwrap();
+    let plugin = home.join(ORIGIN_PLUGIN);
+    std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+    std::fs::write(plugin, FINDINGS_PLUGIN).unwrap();
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for program in FINDINGS_PROGRAMS {
+        write_script(&bin, program, "");
+    }
+    let cwd = gitscratch::testing::not_a_repository();
+    let output = defs_command(&setup)
+        .args(args)
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+    (setup, output)
+}
+
+/// Gives the lines of the group of the duplicates and the shadows in `text`:
+/// the indented lines after its heading.
+fn findings_lines(text: &str) -> Vec<&str> {
+    let mut lines = text.lines().skip_while(|line| *line != FINDINGS_HEADING);
+    assert!(lines.next().is_some(), "no findings group in:\n{text}");
+    lines.take_while(|line| line.starts_with("  ")).collect()
+}
+
+#[test]
+fn defs_lists_the_duplicates_and_the_shadows_of_my_definitions() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let (_setup, output) = run_findings_defs(&[]);
+    assert!(output.status.success(), "{output:?}");
+    let text = stdout(&output);
+    let lines = findings_lines(&text);
+    let has = |entry: &str| lines.iter().any(|line| *line == format!("  {entry}"));
+    let plugin = format!("~/{ORIGIN_PLUGIN}");
+    assert!(
+        has(&format!(
+            "Same expansion (git status): wdgs (alias, ~/.zshrc:3, 2 uses), wdgst (alias, {plugin}:1, 0 uses)"
+        )),
+        "{text}"
+    );
+    assert!(
+        has("Alias and function (git log): wdgl (alias, ~/.zshrc:5, 0 uses), wdglog (function, ~/.zshrc, 1 use)"),
+        "{text}"
+    );
+    assert!(
+        has("Defined 2 times: wdll (alias, 1 use) at ~/.zshrc:7, ~/more.zsh:1 (in effect)"),
+        "{text}"
+    );
+    assert!(
+        has("Alias hides function: wdx (alias, ~/.zshrc:10, 0 uses), wdx (function, ~/.zshrc, 0 uses)"),
+        "{text}"
+    );
+    assert!(
+        has("Hides a program (~/bin/wdhidden): wdhidden (alias, ~/.zshrc:11, 0 uses)"),
+        "{text}"
+    );
+    let block = lines.join("\n");
+    assert!(!block.contains("wdwrapped"), "{text}");
+    assert!(!block.contains("wdcmd"), "{text}");
+    assert!(!block.contains("wdgcheck"), "{text}");
+}
+
+#[test]
+fn defs_all_also_lists_the_findings_of_the_others() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let (_setup, output) = run_findings_defs(&["--all"]);
+    assert!(output.status.success(), "{output:?}");
+    let text = stdout(&output);
+    let lines = findings_lines(&text);
+    let plugin = format!("~/{ORIGIN_PLUGIN}");
+    let others = format!(
+        "  Same expansion (git checkout): wdgcheck (alias, {plugin}:3, 0 uses), wdgco (alias, {plugin}:2, 0 uses)"
+    );
+    assert!(lines.iter().any(|line| *line == others), "{text}");
+}
+
+#[test]
+fn defs_json_lists_each_kind_of_finding_and_marks_the_others() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let (_setup, output) = run_findings_defs(&["--json"]);
+    let document = json(&output);
+    let found = document["findings"].as_array().unwrap();
+    let names = |entry: &Value| -> Vec<String> {
+        entry["definitions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|member| member["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    for (kind, first) in [
+        ("same_expansion", "wdgs"),
+        ("alias_and_function", "wdgl"),
+        ("defined_more_than_once", "wdll"),
+        ("alias_hides_function", "wdx"),
+        ("hides_program", "wdhidden"),
+    ] {
+        let entry = found
+            .iter()
+            .find(|entry| entry["kind"] == kind && names(entry).iter().any(|name| name == first))
+            .unwrap_or_else(|| panic!("no {kind} finding of {first} in {document}"));
+        assert_eq!(entry["mine"], true, "{entry}");
+    }
+    let others = found
+        .iter()
+        .find(|entry| {
+            entry["kind"] == "same_expansion" && names(entry).iter().any(|name| name == "wdgcheck")
+        })
+        .unwrap_or_else(|| panic!("no finding of wdgcheck in {document}"));
+    assert_eq!(others["mine"], false, "{others}");
+    assert_eq!(others["words"], serde_json::json!(["git", "checkout"]));
+    let mut members = names(others);
+    members.sort();
+    assert_eq!(members, ["wdgcheck", "wdgco"]);
 }
