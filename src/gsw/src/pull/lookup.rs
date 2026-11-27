@@ -307,11 +307,11 @@ pub(crate) fn run_lookup(
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::time::{Instant, UNIX_EPOCH};
 
     use ghrest::GithubRepo;
+    use gitscratch::testing::executable::write_executable;
     use tempfile::TempDir;
 
     use super::*;
@@ -638,8 +638,7 @@ mod tests {
     /// Writes an executable `#!/bin/sh` script into `dir` and returns its path.
     fn write_stub(dir: &TempDir, name: &str, body: &str) -> PathBuf {
         let path = dir.path().join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         path
     }
 

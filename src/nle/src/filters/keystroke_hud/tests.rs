@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use super::*;
 use crate::filters;
-use crate::types::{EditProject, EventType, Recording, Seconds, TerminalSize};
+use crate::pipeline::TerminalSize;
+use crate::types::{EditProject, EventType, Recording, Seconds};
 use termstate::{TerminalState, TerminalTheme};
 
 /// The time of the last event of a test: it keeps the region long.
@@ -35,7 +36,10 @@ fn ended(mut events: Vec<Event>) -> Vec<Event> {
 }
 
 fn size(columns: u16, rows: u16) -> TerminalSize {
-    TerminalSize { columns, rows }
+    TerminalSize {
+        width: columns,
+        height: rows,
+    }
 }
 
 /// Options with no fade and a duration of one second.
@@ -65,8 +69,8 @@ fn hud(events: &[Event], options: &HudOptions, size: TerminalSize) -> Vec<Event>
 /// The screen after the output events with a time at or before `at`.
 fn replay(events: &[Event], at: f64, size: TerminalSize) -> TerminalState {
     let mut state = TerminalState::new(
-        usize::from(size.columns),
-        usize::from(size.rows),
+        usize::from(size.width),
+        usize::from(size.height),
         TerminalTheme::auto(),
     );
     for event in events {
@@ -93,8 +97,8 @@ fn assert_same_screen(shown: &TerminalState, reference: &TerminalState) {
 }
 
 const WIDE: TerminalSize = TerminalSize {
-    columns: 40,
-    rows: 10,
+    width: 40,
+    height: 10,
 };
 
 fn typing() -> Vec<Event> {
@@ -457,8 +461,8 @@ fn screens(events: &[Event], size: TerminalSize) -> Vec<(f64, Vec<String>)> {
         .iter()
         .map(|event| {
             let screen = replay(events, event.time, size);
-            let rows = (0..usize::from(size.rows))
-                .map(|row| text(&screen, row, 0, usize::from(size.columns)))
+            let rows = (0..usize::from(size.height))
+                .map(|row| text(&screen, row, 0, usize::from(size.width)))
                 .collect();
             (event.time, rows)
         })

@@ -11,7 +11,7 @@
 
 use super::options::{HudOptions, Position, Rgb};
 use super::timeline::{Piece, Shown};
-use crate::types::TerminalSize;
+use crate::pipeline::TerminalSize;
 use termstate::{Cell, TerminalState, TerminalTheme};
 
 /// The cells between the box and the edge of the screen.
@@ -101,8 +101,8 @@ fn bg_code(color: Color) -> String {
 
 /// Whether the screen of `size` has room for a box with a label of one cell.
 pub(crate) fn fits(size: TerminalSize) -> bool {
-    usize::from(size.columns) >= 2 * MARGIN + 2 * PADDING + 3
-        && usize::from(size.rows) >= 2 * MARGIN + BOX_ROWS
+    usize::from(size.width) >= 2 * MARGIN + 2 * PADDING + 3
+        && usize::from(size.height) >= 2 * MARGIN + BOX_ROWS
 }
 
 /// One cell of a box. `bg` is `None` for a border cell, which keeps the
@@ -198,8 +198,8 @@ pub(crate) fn layout(size: TerminalSize, options: &HudOptions, shown: &Shown) ->
     if !fits(size) {
         return None;
     }
-    let columns = usize::from(size.columns);
-    let rows = usize::from(size.rows);
+    let columns = usize::from(size.width);
+    let rows = usize::from(size.height);
     let mut label = label_cells(shown);
     let most = columns.saturating_sub(2 * MARGIN + 2 * PADDING + 2);
     if label.len() > most {
@@ -369,8 +369,8 @@ impl Painter {
         if !fits(size) {
             return None;
         }
-        let width = usize::from(size.columns);
-        let height = usize::from(size.rows);
+        let width = usize::from(size.width);
+        let height = usize::from(size.height);
         Some(Self {
             clean: TerminalState::new(width, height, replay_theme()),
             shown: TerminalState::new(width, height, replay_theme()),

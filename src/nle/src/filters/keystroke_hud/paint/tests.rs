@@ -5,12 +5,15 @@
 use super::{bg_code, fg_code, fits, layout, replay_theme, Color, Overlay, Painter};
 use crate::filters::keystroke_hud::options::{HudOptions, Position, Rgb};
 use crate::filters::keystroke_hud::timeline::{Piece, Shown};
-use crate::types::TerminalSize;
+use crate::pipeline::TerminalSize;
 use termstate::{TerminalState, TerminalTheme};
 
 /// The size of a screen.
 fn size(columns: u16, rows: u16) -> TerminalSize {
-    TerminalSize { columns, rows }
+    TerminalSize {
+        width: columns,
+        height: rows,
+    }
 }
 
 /// A piece of typed text.
@@ -67,8 +70,8 @@ struct Rig {
 impl Rig {
     /// A rig for a screen of `screen`, with the theme of the export `theme`.
     fn new(screen: TerminalSize, theme: &TerminalTheme) -> Self {
-        let width = usize::from(screen.columns);
-        let height = usize::from(screen.rows);
+        let width = usize::from(screen.width);
+        let height = usize::from(screen.height);
         Self {
             painter: Painter::new(screen).expect("the screen has room"),
             viewer: TerminalState::new(width, height, theme.clone()),

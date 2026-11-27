@@ -110,7 +110,7 @@ pub fn register(registry: &mut FilterRegistry) {
 fn draw(screen: &Screen<'_>, span: Span, options: &FilterOptions) -> Result<Vec<Event>, String> {
     let options = HudOptions::from_options(options)?;
     let size = screen.size;
-    let (columns, rows) = (size.columns, size.rows);
+    let (columns, rows) = (size.width, size.height);
     if usize::from(columns) * usize::from(rows) > MAX_CELLS {
         return Err(format!(
             "the terminal is {columns} x {rows} cells, which is more than the {MAX_CELLS} cells that the keystroke HUD replays"

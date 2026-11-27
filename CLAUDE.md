@@ -310,8 +310,8 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
 - `vpn-tunnel` - the `--op-path` value in the `op-cache invalidate` command that
   the all-in-use error prints
 - `wdid` - the crate directory in the `cargo install --path` command of the
-  workspace line, and the paths and the history rows that the tests put into
-  stub scripts
+  workspace line, each shared word of a duplicate that needs quotes, and the
+  paths and the history rows that the tests put into stub scripts
 
 ## GitHub REST Through `gh`
 

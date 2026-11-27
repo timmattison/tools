@@ -1,7 +1,8 @@
 //! Tests of the command words of one command line.
 
 use wdid::command_words::{
-    command_words, parse_line, AliasDefinition, AliasKind, AliasUse, Aliases, CommandWord, Parsed,
+    command_words, parse_line, simple_command, split_words, AliasDefinition, AliasKind, AliasUse,
+    Aliases, Argument, CommandWord, Parsed, WrapperRun, COMMAND,
 };
 
 /// Runs every row of a table. Each row is a line and the value that
@@ -1266,4 +1267,212 @@ fn definitions_keep_a_multibyte_name_and_value() {
             value: "echo 日本語 🎉".to_owned(),
         }]
     );
+}
+
+/// Makes a literal word.
+fn lit(text: &str) -> Argument {
+    Argument::Literal(text.to_owned())
+}
+
+/// Makes a word that holds an expansion.
+fn exp(text: &str) -> Argument {
+    Argument::Expansion(text.to_owned())
+}
+
+/// Makes an operator.
+fn op(text: &str) -> Argument {
+    Argument::Operator(text.to_owned())
+}
+
+#[test]
+fn split_words_gives_the_words_in_argument_form() {
+    let rows = [
+        ("git  status", vec![lit("git"), lit("status")]),
+        ("'git' status", vec![lit("git"), lit("status")]),
+        ("ls | less", vec![lit("ls"), op("|"), lit("less")]),
+        ("echo \"$HOME\"", vec![lit("echo"), exp("\"$HOME\"")]),
+        ("\\ls -G", vec![lit("ls"), lit("-G")]),
+        ("echo 'a b'", vec![lit("echo"), lit("a b")]),
+        ("echo '$HOME'", vec![lit("echo"), lit("$HOME")]),
+        ("echo $HOME", vec![lit("echo"), exp("$HOME")]),
+        ("ls ~", vec![lit("ls"), exp("~")]),
+        ("ls '|' less", vec![lit("ls"), lit("|"), lit("less")]),
+        ("", vec![]),
+    ];
+    for (text, expected) in rows {
+        assert_eq!(split_words(text), Some(expected), "text: {text:?}");
+    }
+}
+
+/// An unquoted glob, brace expansion, or leading `=` is an expansion, also
+/// when a quoted piece or a line join divides it, or when a brace pair that
+/// expands nothing comes first. The shell removes a line join, so it does not
+/// divide a pattern. The same text in quotes, and a bracket or a brace that
+/// expands nothing, is a literal.
+#[test]
+fn split_words_gives_an_unquoted_pattern_as_an_expansion() {
+    let rows = [
+        ("ls *.c", vec![lit("ls"), exp("*.c")]),
+        ("ls '*.c'", vec![lit("ls"), lit("*.c")]),
+        ("ls \"*\".c", vec![lit("ls"), lit("*.c")]),
+        ("ls file?.c", vec![lit("ls"), exp("file?.c")]),
+        ("ls [ab].c", vec![lit("ls"), exp("[ab].c")]),
+        ("[ -f x ]", vec![lit("["), lit("-f"), lit("x"), lit("]")]),
+        ("echo {a,b}", vec![lit("echo"), exp("{a,b}")]),
+        ("echo {1..3}", vec![lit("echo"), exp("{1..3}")]),
+        ("echo '{a,b}'", vec![lit("echo"), lit("{a,b}")]),
+        ("rm {}", vec![lit("rm"), lit("{}")]),
+        ("echo {x},y", vec![lit("echo"), lit("{x},y")]),
+        ("echo {x}{a,b}", vec![lit("echo"), exp("{x}{a,b}")]),
+        ("echo {a,\"b\"}", vec![lit("echo"), exp("{a,\"b\"}")]),
+        ("ls [ab\"c\"]", vec![lit("ls"), exp("[ab\"c\"]")]),
+        ("echo {a\",\"b}", vec![lit("echo"), lit("{a,b}")]),
+        ("echo {1.\\\n.3}", vec![lit("echo"), exp("{1..3}")]),
+        ("echo \\\n=ls", vec![lit("echo"), exp("=ls")]),
+        ("echo =ls", vec![lit("echo"), exp("=ls")]),
+        ("echo \\=ls", vec![lit("echo"), lit("=ls")]),
+        ("echo a=b", vec![lit("echo"), lit("a=b")]),
+    ];
+    for (text, expected) in rows {
+        assert_eq!(split_words(text), Some(expected), "text: {text:?}");
+    }
+}
+
+#[test]
+fn split_words_refuses_an_unterminated_quote() {
+    assert_eq!(split_words("echo 'x"), None);
+}
+
+#[test]
+fn split_words_gives_a_newline_as_the_operator_that_the_tokenizer_gives() {
+    assert_eq!(
+        split_words("a\nb"),
+        Some(vec![lit("a"), op("\n"), lit("b")])
+    );
+}
+
+#[test]
+fn simple_command_gives_the_words_of_one_simple_command() {
+    let rows = [
+        (
+            "\tgit status \"$@\"",
+            vec![lit("git"), lit("status"), exp("\"$@\"")],
+        ),
+        (
+            "{ \n    git status \"$@\"\n}",
+            vec![lit("git"), lit("status"), exp("\"$@\"")],
+        ),
+        (
+            "FOO=1 git status",
+            vec![lit("FOO=1"), lit("git"), lit("status")],
+        ),
+        ("'git' status", vec![lit("git"), lit("status")]),
+        ("{ { git status; }; }", vec![lit("git"), lit("status")]),
+        (
+            "\tgit log '\"$@\"'",
+            vec![lit("git"), lit("log"), lit("\"$@\"")],
+        ),
+    ];
+    for (text, expected) in rows {
+        assert_eq!(simple_command(text), Some(expected), "text: {text:?}");
+    }
+}
+
+/// Only the double-quoted `@` passes on each argument as one word. The check
+/// reads the parsed word, thus the braces do not matter.
+#[test]
+fn is_all_arguments_reads_the_parsed_word() {
+    let rows = [
+        (exp("\"$@\""), true),
+        (exp("\"${@}\""), true),
+        (exp("$@"), false),
+        (exp("\"$*\""), false),
+        (exp("\"${*}\""), false),
+        (exp("\"$@x\""), false),
+        (exp("\"${@:2}\""), false),
+        (exp("\"$1\""), false),
+        (lit("\"$@\""), false),
+    ];
+    for (word, expected) in rows {
+        assert_eq!(word.is_all_arguments(), expected, "word: {word:?}");
+    }
+}
+
+#[test]
+fn simple_command_refuses_anything_that_is_not_one_simple_command() {
+    let rows = [
+        "git status | cat",
+        "a; b",
+        "a && b",
+        "git status > x",
+        "if true; then ls; fi",
+        "ls &",
+        "( ls )",
+        "! ls",
+        "time ls",
+        "cat <(ls)",
+        "{ a; b; }",
+        "{ ls; } > x",
+        "FOO=1",
+        "f() { ls; }",
+        "",
+    ];
+    for text in rows {
+        assert_eq!(simple_command(text), None, "text: {text:?}");
+    }
+}
+
+/// Makes one run of a word by a wrapper.
+fn run(wrapper: &str, word: &str) -> WrapperRun {
+    WrapperRun {
+        wrapper: wrapper.to_owned(),
+        word: word.to_owned(),
+    }
+}
+
+#[test]
+fn the_line_records_each_run_of_a_word_by_a_wrapper() {
+    let rows = [
+        ("command ls -G \"$@\"", vec![run("command", "ls")]),
+        (
+            "sudo command ls",
+            vec![run("sudo", "command"), run("command", "ls")],
+        ),
+        ("command -v ls", vec![]),
+        ("echo command ls", vec![]),
+        ("ls", vec![]),
+        ("command", vec![]),
+        ("command $x", vec![]),
+        ("a | command b", vec![run("command", "b")]),
+    ];
+    for (text, expected) in rows {
+        let line = parse_line(text, &Aliases::new()).expect("the line parses");
+        assert_eq!(line.wrapped, expected, "text: {text:?}");
+    }
+}
+
+#[test]
+fn the_name_of_the_command_wrapper_is_a_constant() {
+    assert_eq!(COMMAND, "command");
+}
+
+#[test]
+fn shell_text_quotes_a_literal_only_when_it_needs_quotes() {
+    let rows = [
+        (Argument::Literal("git".to_string()), "git"),
+        (Argument::Literal("x y".to_string()), "'x y'"),
+        (Argument::Literal(String::new()), "''"),
+        (Argument::Literal("it's".to_string()), "'it'\\''s'"),
+        (Argument::Literal("=ls".to_string()), "'=ls'"),
+        (Argument::Literal("FOO=1".to_string()), "FOO=1"),
+        (Argument::Literal("日本語".to_string()), "日本語"),
+        (Argument::Literal("🎉".to_string()), "'🎉'"),
+        (Argument::Literal("$HOME".to_string()), "'$HOME'"),
+        (Argument::Expansion("$HOME".to_string()), "$HOME"),
+        (Argument::Expansion("\"$@\"".to_string()), "\"$@\""),
+        (Argument::Operator("|".to_string()), "|"),
+    ];
+    for (word, expected) in rows {
+        assert_eq!(word.shell_text(), expected, "word: {word:?}");
+    }
 }

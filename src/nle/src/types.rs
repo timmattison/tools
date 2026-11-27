@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::error::NleError;
 use crate::json_file;
+use crate::pipeline::TerminalSize;
 
 /// A terminal recording, compatible with the beta recorder format.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -245,22 +246,13 @@ pub struct EditProject {
     pub filters: Vec<AppliedFilter>,
 }
 
-/// The size of a terminal, in character cells.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TerminalSize {
-    /// The number of columns.
-    pub columns: u16,
-    /// The number of rows.
-    pub rows: u16,
-}
-
 impl Recording {
     /// The size of the terminal that made this recording.
     #[must_use]
     pub fn size(&self) -> TerminalSize {
         TerminalSize {
-            columns: self.width,
-            rows: self.height,
+            width: self.width,
+            height: self.height,
         }
     }
 
