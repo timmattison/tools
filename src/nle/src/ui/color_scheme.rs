@@ -262,10 +262,28 @@ pub(super) fn ColorSchemePanel(
             }
             button {
                 onclick: move |_| {
-                    // The button does nothing yet.
-                    let _ = (&loaded, &on_result);
+                    let outcome = region_from_fields(&start.read(), &end.read()).and_then(|region| {
+                        let filter = color_scheme::applied(region, &scheme.read());
+                        edit_document(loaded, |project| Edit::AddFilter {
+                            index: project.filters.len(),
+                            filter,
+                        })
+                    });
+                    report(on_result, COLOR_SCHEME_FAILED_PREFIX, outcome);
                 },
                 {APPLY_COLOR_SCHEME_LABEL}
+            }
+            for (index, text) in rows {
+                div { class: "color-scheme-row", key: "{index}",
+                    span { "{text}" }
+                    button {
+                        onclick: move |_| {
+                            let outcome = edit_document(loaded, |_| Edit::RemoveFilter { index });
+                            report(on_result, COLOR_SCHEME_FAILED_PREFIX, outcome);
+                        },
+                        {REMOVE_LABEL}
+                    }
+                }
             }
         }
     }
