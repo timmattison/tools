@@ -1,0 +1,92 @@
+//! Tests of the backspace removal filter.
+
+use std::sync::Arc;
+
+use super::*;
+use crate::error::NleError;
+use crate::types::{AppliedFilter, EditProject, Event, EventType, FilterRegion, Recording};
+
+/// An output event.
+fn out(time: f64, data: &str) -> Event {
+    Event {
+        time,
+        event_type: EventType::Output,
+        data: data.to_string(),
+    }
+}
+
+/// An input event.
+fn input(time: f64, data: &str) -> Event {
+    Event {
+        time,
+        event_type: EventType::Input,
+        data: data.to_string(),
+    }
+}
+
+/// The filter on the region `All` of `events`.
+fn applied_to_all() -> AppliedFilter {
+    AppliedFilter {
+        kind: kind(),
+        region: FilterRegion::All,
+        options: FilterOptions::new(),
+    }
+}
+
+/// Run the filter on the region `All` of `events`, on a terminal of 80 by 24.
+fn run(events: Vec<Event>) -> Vec<Event> {
+    let mut registry = FilterRegistry::new();
+    register(&mut registry);
+    registry.run(events, &[applied_to_all()]).unwrap()
+}
+
+/// Render a recording of `width` by `height` with `events` through the
+/// filter. The duration of the source is the largest event time.
+fn render(width: u16, height: u16, events: Vec<Event>) -> Result<Recording, NleError> {
+    let mut source = Recording::test_fixture();
+    source.width = width;
+    source.height = height;
+    source.duration = events.iter().map(|event| event.time).fold(0.0, f64::max);
+    source.events = events;
+    let mut project = EditProject::from_recording(Arc::new(source))?;
+    project.filters.push(applied_to_all());
+    let mut registry = FilterRegistry::new();
+    register(&mut registry);
+    registry.render(&project)
+}
+
+/// The events of the issue: a typo `r`, its backspace `key`, and the key `e`.
+fn typo_then_backspace(key: &str) -> Vec<Event> {
+    vec![
+        out(0.0, "$ "),
+        input(1.0, "h"),
+        out(1.0, "h"),
+        input(1.5, "r"),
+        out(1.5, "r"),
+        input(2.0, key),
+        out(2.0, "\x08 \x08"),
+        input(2.5, "e"),
+        out(2.5, "e"),
+    ]
+}
+
+/// The events of the issue without the typo and its backspace.
+fn without_the_typo() -> Vec<Event> {
+    vec![
+        out(0.0, "$ "),
+        input(1.0, "h"),
+        out(1.0, "h"),
+        input(1.5, "e"),
+        out(1.5, "e"),
+    ]
+}
+
+#[test]
+fn the_app_registry_holds_the_backspace_removal_filter() {
+    assert!(crate::filters::registry().contains(&FilterKind::new("backspace-removal")));
+}
+
+#[test]
+fn a_typo_and_its_backspace_leave_the_recording() {
+    assert_eq!(run(typo_then_backspace("\x7f")), without_the_typo());
+}
