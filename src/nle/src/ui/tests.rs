@@ -1299,7 +1299,15 @@ fn the_style_sheet_fits_the_grid_to_the_pane() {
     assert!(pane.contains("container-type: size"), "{pane}");
     let terminal = rule_body(".terminal");
     let size = text_between(&terminal, "font-size:", ";");
-    for part in ["100cqw", "100cqh", "var(--columns)", "var(--rows)"] {
-        assert!(size.contains(part), "{part} missing in {size}");
-    }
+    // A cell is 0.6 em wide and one line high, so the rows divide the height
+    // by the line height of the same rule.
+    let line_height = text_between(&terminal, "line-height:", ";");
+    let line_height = line_height.trim();
+    assert_eq!(
+        size.trim(),
+        format!(
+            "min(calc(100cqw / (var(--columns) * 0.6)), \
+             calc(100cqh / (var(--rows) * {line_height})))"
+        )
+    );
 }
