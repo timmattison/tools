@@ -1189,13 +1189,25 @@ fn a_function_from_an_eval_has_the_file_of_the_eval_and_is_mine() {
     assert!(definitions.places.is_mine(found));
 }
 
+/// The directory of the file that zsh gives a process substitution, `<(…)`.
+/// The build of zsh picks `/proc/self/fd` where it works, as on Linux, and
+/// else `/dev/fd`, as on macOS.
+const PROCESS_SUBSTITUTION_DIRECTORY: &str = if cfg!(target_os = "linux") {
+    "/proc/self/fd"
+} else {
+    "/dev/fd"
+};
+
 #[test]
-fn a_function_from_a_process_substitution_is_in_dev_fd_and_is_not_mine() {
+fn a_function_from_a_process_substitution_is_in_the_descriptor_directory_and_is_not_mine() {
     let Some((_home, definitions)) = omz_definitions() else {
         return;
     };
     let found = definitions.function_origin("procfn").expect("an origin");
-    assert!(found.file.starts_with("/dev/fd"), "{found:?}");
+    assert!(
+        found.file.starts_with(PROCESS_SUBSTITUTION_DIRECTORY),
+        "{found:?}"
+    );
     assert!(!definitions.places.is_mine(Some(found)));
 }
 
@@ -1360,12 +1372,15 @@ fn a_global_alias_a_suffix_alias_and_an_alias_after_two_dashes_get_their_lines()
 }
 
 #[test]
-fn an_alias_from_a_process_substitution_is_in_dev_fd_and_is_not_mine() {
+fn an_alias_from_a_process_substitution_is_in_the_descriptor_directory_and_is_not_mine() {
     let Some((_home, definitions)) = omz_definitions() else {
         return;
     };
     let found = alias_origin(&definitions, "procalias", AliasKind::Regular).expect("an origin");
-    assert!(found.file.starts_with("/dev/fd"), "{found:?}");
+    assert!(
+        found.file.starts_with(PROCESS_SUBSTITUTION_DIRECTORY),
+        "{found:?}"
+    );
     assert_eq!(found.line, Some(1));
     assert!(!definitions.places.is_mine(Some(&found)));
 }
