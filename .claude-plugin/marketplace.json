@@ -1,0 +1,14 @@
+{
+  "name": "timmattison-tools",
+  "description": "Claude Code plugins for the tools in timmattison/tools",
+  "owner": {
+    "name": "Tim Mattison"
+  },
+  "plugins": [
+    {
+      "name": "ic-inline",
+      "source": "./plugins/ic-inline",
+      "description": "Shows images, and the differences between two images, inline in the Claude Code transcript, decoded by ic"
+    }
+  ]
+}

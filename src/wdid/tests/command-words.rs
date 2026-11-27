@@ -1,6 +1,9 @@
 //! Tests of the command words of one command line.
 
-use wdid::command_words::{command_words, Aliases, CommandWord, Parsed};
+use wdid::command_words::{
+    command_words, parse_line, simple_command, split_words, AliasDefinition, AliasKind, AliasUse,
+    Aliases, Argument, CommandWord, Parsed, WrapperRun, COMMAND,
+};
 
 /// Runs every row of a table. Each row is a line and the value that
 /// `command_words` must give for it, with an empty alias table.
@@ -1039,4 +1042,437 @@ fn a_suffix_alias_works_with_the_other_aliases() {
             ("a.rs", words(vec![word("y.rs", ["a.rs"]).through("*.rs")])),
         ],
     );
+}
+
+/// Makes an alias use.
+fn used(name: &str, through: Option<&str>) -> AliasUse {
+    AliasUse {
+        name: name.to_owned(),
+        through: through.map(str::to_owned),
+    }
+}
+
+/// Gives the alias uses of a line, sorted, so the order of the walk does not
+/// matter. Gives `None` when the parser refuses the line.
+fn uses(line: &str, aliases: &Aliases) -> Option<Vec<AliasUse>> {
+    parse_line(line, aliases).map(|parsed| {
+        let mut list = parsed.aliases;
+        list.sort();
+        list
+    })
+}
+
+/// Sorts the expected alias uses, as `uses` sorts the real ones.
+fn sorted(mut list: Vec<AliasUse>) -> Option<Vec<AliasUse>> {
+    list.sort();
+    Some(list)
+}
+
+/// A regular alias that the person typed gives one use with no `through`.
+#[test]
+fn a_typed_regular_alias_is_one_use() {
+    let mut aliases = Aliases::new();
+    aliases.insert("wt", "cwt");
+    assert_eq!(uses("wt x", &aliases), sorted(vec![used("wt", None)]));
+}
+
+/// An alias in the value of another alias is a use through the typed alias.
+#[test]
+fn an_alias_of_an_alias_is_a_use_through_the_typed_one() {
+    let mut aliases = Aliases::new();
+    aliases.insert("wtf", "wt -f");
+    aliases.insert("wt", "cwt");
+    assert_eq!(
+        uses("wtf", &aliases),
+        sorted(vec![used("wtf", None), used("wt", Some("wtf"))])
+    );
+}
+
+/// With three levels, `through` stays the name that the person typed.
+#[test]
+fn three_levels_all_name_the_typed_alias() {
+    let mut aliases = Aliases::new();
+    aliases.insert("a", "b");
+    aliases.insert("b", "c");
+    aliases.insert("c", "d");
+    assert_eq!(
+        uses("a", &aliases),
+        sorted(vec![
+            used("a", None),
+            used("b", Some("a")),
+            used("c", Some("a")),
+        ])
+    );
+}
+
+/// A self-alias is one use, and a cycle ends after each name expanded once.
+#[test]
+fn a_self_alias_is_one_use_and_a_cycle_ends() {
+    let mut aliases = Aliases::new();
+    aliases.insert("ls", "ls -G");
+    assert_eq!(uses("ls x", &aliases), sorted(vec![used("ls", None)]));
+    let mut cycle = Aliases::new();
+    cycle.insert("a", "b");
+    cycle.insert("b", "a");
+    assert_eq!(
+        uses("a", &cycle),
+        sorted(vec![used("a", None), used("b", Some("a"))])
+    );
+}
+
+/// A global alias in an argument is one use for each occurrence.
+#[test]
+fn a_global_alias_in_an_argument_is_one_use_each_time() {
+    let mut aliases = Aliases::new();
+    aliases.insert_global("G", "| prhash");
+    assert_eq!(uses("ls G", &aliases), sorted(vec![used("G", None)]));
+    assert_eq!(
+        uses("ls G; ls G", &aliases),
+        sorted(vec![used("G", None), used("G", None)])
+    );
+}
+
+/// A global alias in the value of a regular alias is a use through it.
+#[test]
+fn a_global_alias_in_a_regular_value_is_a_use_through_it() {
+    let mut aliases = Aliases::new();
+    aliases.insert("l", "ls G");
+    aliases.insert_global("G", "| cat");
+    assert_eq!(
+        uses("l", &aliases),
+        sorted(vec![used("l", None), used("G", Some("l"))])
+    );
+}
+
+/// A global alias in the value of a global alias is a use through the outer one.
+#[test]
+fn a_global_alias_in_a_global_value_is_a_use_through_the_outer_one() {
+    let mut aliases = Aliases::new();
+    aliases.insert_global("G1", "G2 x");
+    aliases.insert_global("G2", "| prhash");
+    assert_eq!(
+        uses("ls G1", &aliases),
+        sorted(vec![used("G1", None), used("G2", Some("G1"))])
+    );
+}
+
+/// A suffix alias is a use with its marker as the name.
+#[test]
+fn a_suffix_alias_is_a_use_named_by_its_marker() {
+    let mut aliases = Aliases::new();
+    aliases.insert_suffix("md", "glow");
+    assert_eq!(
+        uses("README.md", &aliases),
+        sorted(vec![used("*.md", None)])
+    );
+}
+
+/// The trailing-blank rule expands the next word, and the person typed it.
+#[test]
+fn the_trailing_blank_rule_gives_a_use_of_the_next_word() {
+    let mut aliases = Aliases::new();
+    aliases.insert("sudo", "sudo ");
+    aliases.insert("ll", "ls -l");
+    assert_eq!(
+        uses("sudo ll", &aliases),
+        sorted(vec![used("sudo", None), used("ll", None)])
+    );
+}
+
+/// Quoted text and an escaped name give no use.
+#[test]
+fn quoted_text_gives_no_use() {
+    let mut aliases = Aliases::new();
+    aliases.insert("wt", "cwt");
+    for line in ["'wt'", "\\wt", "echo \"wt\"", "git commit -m \"wt x\""] {
+        assert_eq!(uses(line, &aliases), sorted(vec![]), "line: {line:?}");
+    }
+}
+
+/// An alias inside a substitution is a use.
+#[test]
+fn an_alias_inside_a_substitution_is_a_use() {
+    let mut aliases = Aliases::new();
+    aliases.insert("wt", "cwt");
+    assert_eq!(uses("echo $(wt)", &aliases), sorted(vec![used("wt", None)]));
+}
+
+/// A line that the parser refuses gives no result at all.
+#[test]
+fn a_refused_line_gives_none() {
+    let mut aliases = Aliases::new();
+    aliases.insert("wt", "cwt");
+    assert_eq!(parse_line("wt $(", &aliases), None);
+}
+
+/// The words of `parse_line` are the words of `command_words`.
+#[test]
+fn the_words_of_parse_line_are_the_words_of_command_words() {
+    let mut aliases = Aliases::new();
+    aliases.insert("wtf", "wt -f");
+    aliases.insert("wt", "cwt");
+    aliases.insert_global("G", "| cat");
+    for line in ["wtf a | wt b", "wtf", "ls G", "echo $(wt)", "plain x"] {
+        let parsed = parse_line(line, &aliases).map(|parsed| parsed.words);
+        let expected = match command_words(line, &aliases) {
+            Parsed::Words(list) => Some(list),
+            Parsed::Unparsed => None,
+        };
+        assert_eq!(parsed, expected, "line: {line:?}");
+    }
+}
+
+/// `definitions` gives each alias with its kind, sorted by name. The name of a
+/// suffix alias has its marker.
+#[test]
+fn definitions_give_each_alias_with_its_kind_sorted_by_name() {
+    let mut aliases = Aliases::new();
+    aliases.insert("ll", "ls -l");
+    aliases.insert_global("G", "| grep");
+    aliases.insert_suffix("md", "glow");
+    let expected = vec![
+        AliasDefinition {
+            name: "*.md".to_owned(),
+            kind: AliasKind::Suffix,
+            value: "glow".to_owned(),
+        },
+        AliasDefinition {
+            name: "G".to_owned(),
+            kind: AliasKind::Global,
+            value: "| grep".to_owned(),
+        },
+        AliasDefinition {
+            name: "ll".to_owned(),
+            kind: AliasKind::Regular,
+            value: "ls -l".to_owned(),
+        },
+    ];
+    assert_eq!(aliases.definitions(), expected);
+}
+
+#[test]
+fn definitions_of_an_empty_table_are_empty() {
+    assert_eq!(Aliases::new().definitions(), Vec::new());
+}
+
+#[test]
+fn definitions_keep_a_multibyte_name_and_value() {
+    let mut aliases = Aliases::new();
+    aliases.insert("日本", "echo 日本語 🎉");
+    assert_eq!(
+        aliases.definitions(),
+        vec![AliasDefinition {
+            name: "日本".to_owned(),
+            kind: AliasKind::Regular,
+            value: "echo 日本語 🎉".to_owned(),
+        }]
+    );
+}
+
+/// Makes a literal word.
+fn lit(text: &str) -> Argument {
+    Argument::Literal(text.to_owned())
+}
+
+/// Makes a word that holds an expansion.
+fn exp(text: &str) -> Argument {
+    Argument::Expansion(text.to_owned())
+}
+
+/// Makes an operator.
+fn op(text: &str) -> Argument {
+    Argument::Operator(text.to_owned())
+}
+
+#[test]
+fn split_words_gives_the_words_in_argument_form() {
+    let rows = [
+        ("git  status", vec![lit("git"), lit("status")]),
+        ("'git' status", vec![lit("git"), lit("status")]),
+        ("ls | less", vec![lit("ls"), op("|"), lit("less")]),
+        ("echo \"$HOME\"", vec![lit("echo"), exp("\"$HOME\"")]),
+        ("\\ls -G", vec![lit("ls"), lit("-G")]),
+        ("echo 'a b'", vec![lit("echo"), lit("a b")]),
+        ("echo '$HOME'", vec![lit("echo"), lit("$HOME")]),
+        ("echo $HOME", vec![lit("echo"), exp("$HOME")]),
+        ("ls ~", vec![lit("ls"), exp("~")]),
+        ("ls '|' less", vec![lit("ls"), lit("|"), lit("less")]),
+        ("", vec![]),
+    ];
+    for (text, expected) in rows {
+        assert_eq!(split_words(text), Some(expected), "text: {text:?}");
+    }
+}
+
+/// An unquoted glob, brace expansion, or leading `=` is an expansion, also
+/// when a quoted piece or a line join divides it, or when a brace pair that
+/// expands nothing comes first. The shell removes a line join, so it does not
+/// divide a pattern. The same text in quotes, and a bracket or a brace that
+/// expands nothing, is a literal.
+#[test]
+fn split_words_gives_an_unquoted_pattern_as_an_expansion() {
+    let rows = [
+        ("ls *.c", vec![lit("ls"), exp("*.c")]),
+        ("ls '*.c'", vec![lit("ls"), lit("*.c")]),
+        ("ls \"*\".c", vec![lit("ls"), lit("*.c")]),
+        ("ls file?.c", vec![lit("ls"), exp("file?.c")]),
+        ("ls [ab].c", vec![lit("ls"), exp("[ab].c")]),
+        ("[ -f x ]", vec![lit("["), lit("-f"), lit("x"), lit("]")]),
+        ("echo {a,b}", vec![lit("echo"), exp("{a,b}")]),
+        ("echo {1..3}", vec![lit("echo"), exp("{1..3}")]),
+        ("echo '{a,b}'", vec![lit("echo"), lit("{a,b}")]),
+        ("rm {}", vec![lit("rm"), lit("{}")]),
+        ("echo {x},y", vec![lit("echo"), lit("{x},y")]),
+        ("echo {x}{a,b}", vec![lit("echo"), exp("{x}{a,b}")]),
+        ("echo {a,\"b\"}", vec![lit("echo"), exp("{a,\"b\"}")]),
+        ("ls [ab\"c\"]", vec![lit("ls"), exp("[ab\"c\"]")]),
+        ("echo {a\",\"b}", vec![lit("echo"), lit("{a,b}")]),
+        ("echo {1.\\\n.3}", vec![lit("echo"), exp("{1..3}")]),
+        ("echo \\\n=ls", vec![lit("echo"), exp("=ls")]),
+        ("echo =ls", vec![lit("echo"), exp("=ls")]),
+        ("echo \\=ls", vec![lit("echo"), lit("=ls")]),
+        ("echo a=b", vec![lit("echo"), lit("a=b")]),
+    ];
+    for (text, expected) in rows {
+        assert_eq!(split_words(text), Some(expected), "text: {text:?}");
+    }
+}
+
+#[test]
+fn split_words_refuses_an_unterminated_quote() {
+    assert_eq!(split_words("echo 'x"), None);
+}
+
+#[test]
+fn split_words_gives_a_newline_as_the_operator_that_the_tokenizer_gives() {
+    assert_eq!(
+        split_words("a\nb"),
+        Some(vec![lit("a"), op("\n"), lit("b")])
+    );
+}
+
+#[test]
+fn simple_command_gives_the_words_of_one_simple_command() {
+    let rows = [
+        (
+            "\tgit status \"$@\"",
+            vec![lit("git"), lit("status"), exp("\"$@\"")],
+        ),
+        (
+            "{ \n    git status \"$@\"\n}",
+            vec![lit("git"), lit("status"), exp("\"$@\"")],
+        ),
+        (
+            "FOO=1 git status",
+            vec![lit("FOO=1"), lit("git"), lit("status")],
+        ),
+        ("'git' status", vec![lit("git"), lit("status")]),
+        ("{ { git status; }; }", vec![lit("git"), lit("status")]),
+        (
+            "\tgit log '\"$@\"'",
+            vec![lit("git"), lit("log"), lit("\"$@\"")],
+        ),
+    ];
+    for (text, expected) in rows {
+        assert_eq!(simple_command(text), Some(expected), "text: {text:?}");
+    }
+}
+
+/// Only the double-quoted `@` passes on each argument as one word. The check
+/// reads the parsed word, thus the braces do not matter.
+#[test]
+fn is_all_arguments_reads_the_parsed_word() {
+    let rows = [
+        (exp("\"$@\""), true),
+        (exp("\"${@}\""), true),
+        (exp("$@"), false),
+        (exp("\"$*\""), false),
+        (exp("\"${*}\""), false),
+        (exp("\"$@x\""), false),
+        (exp("\"${@:2}\""), false),
+        (exp("\"$1\""), false),
+        (lit("\"$@\""), false),
+    ];
+    for (word, expected) in rows {
+        assert_eq!(word.is_all_arguments(), expected, "word: {word:?}");
+    }
+}
+
+#[test]
+fn simple_command_refuses_anything_that_is_not_one_simple_command() {
+    let rows = [
+        "git status | cat",
+        "a; b",
+        "a && b",
+        "git status > x",
+        "if true; then ls; fi",
+        "ls &",
+        "( ls )",
+        "! ls",
+        "time ls",
+        "cat <(ls)",
+        "{ a; b; }",
+        "{ ls; } > x",
+        "FOO=1",
+        "f() { ls; }",
+        "",
+    ];
+    for text in rows {
+        assert_eq!(simple_command(text), None, "text: {text:?}");
+    }
+}
+
+/// Makes one run of a word by a wrapper.
+fn run(wrapper: &str, word: &str) -> WrapperRun {
+    WrapperRun {
+        wrapper: wrapper.to_owned(),
+        word: word.to_owned(),
+    }
+}
+
+#[test]
+fn the_line_records_each_run_of_a_word_by_a_wrapper() {
+    let rows = [
+        ("command ls -G \"$@\"", vec![run("command", "ls")]),
+        (
+            "sudo command ls",
+            vec![run("sudo", "command"), run("command", "ls")],
+        ),
+        ("command -v ls", vec![]),
+        ("echo command ls", vec![]),
+        ("ls", vec![]),
+        ("command", vec![]),
+        ("command $x", vec![]),
+        ("a | command b", vec![run("command", "b")]),
+    ];
+    for (text, expected) in rows {
+        let line = parse_line(text, &Aliases::new()).expect("the line parses");
+        assert_eq!(line.wrapped, expected, "text: {text:?}");
+    }
+}
+
+#[test]
+fn the_name_of_the_command_wrapper_is_a_constant() {
+    assert_eq!(COMMAND, "command");
+}
+
+#[test]
+fn shell_text_quotes_a_literal_only_when_it_needs_quotes() {
+    let rows = [
+        (Argument::Literal("git".to_string()), "git"),
+        (Argument::Literal("x y".to_string()), "'x y'"),
+        (Argument::Literal(String::new()), "''"),
+        (Argument::Literal("it's".to_string()), "'it'\\''s'"),
+        (Argument::Literal("=ls".to_string()), "'=ls'"),
+        (Argument::Literal("FOO=1".to_string()), "FOO=1"),
+        (Argument::Literal("日本語".to_string()), "日本語"),
+        (Argument::Literal("🎉".to_string()), "'🎉'"),
+        (Argument::Literal("$HOME".to_string()), "'$HOME'"),
+        (Argument::Expansion("$HOME".to_string()), "$HOME"),
+        (Argument::Expansion("\"$@\"".to_string()), "\"$@\""),
+        (Argument::Operator("|".to_string()), "|"),
+    ];
+    for (word, expected) in rows {
+        assert_eq!(word.shell_text(), expected, "word: {word:?}");
+    }
 }

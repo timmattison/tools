@@ -244,6 +244,14 @@ impl Accounts {
             .cloned()
             .unwrap_or_else(|| uid.to_string())
     }
+
+    /// Adds the names of `other` to this map. A name in `other` replaces the
+    /// name of the same account in this map, because `other` is the newer
+    /// read.
+    pub fn merge(&mut self, other: &Accounts) {
+        self.names
+            .extend(other.names.iter().map(|(uid, name)| (*uid, name.clone())));
+    }
 }
 
 impl FromIterator<(Uid, String)> for Accounts {
@@ -283,7 +291,7 @@ fn plural<'a>(count: usize, singular: &'a str, many: &'a str) -> &'a str {
 /// asked for. On a loaded Mac the two samples of `top` were 4 seconds apart
 /// when the interval was 2 seconds, so the decimal is the difference between a
 /// rate and a guess.
-fn seconds(span: Duration) -> String {
+pub fn seconds(span: Duration) -> String {
     format!("{:.1} s", span.as_secs_f64())
 }
 
@@ -296,15 +304,18 @@ fn seconds(span: Duration) -> String {
 pub struct Measurement<'a> {
     /// The ranking of the same sample.
     pub ranking: &'a Ranking,
+    /// The count of processes that the first header line states. It is a
+    /// field and not the length of the rows, because a compact history keeps
+    /// only the rows that made faults, and the header must state the count of
+    /// the whole sample.
+    pub processes: usize,
     /// The swap traffic over [`Measurement::swap_window`].
     pub swap: VmDelta,
     /// The swap file of this Mac, from `vm.swapusage`.
     pub usage: SwapUsage,
     /// The size of the compressor in bytes.
     pub compressor_bytes: u64,
-    /// The time between the two reads of the counters of the system. It is
-    /// longer than the window of the ranking, because `top` starts and stops
-    /// inside it.
+    /// The time between the two reads of the counters of the system.
     pub swap_window: Duration,
     /// The interval that the person asked for.
     pub interval: Span,
@@ -321,7 +332,7 @@ pub struct Measurement<'a> {
 #[must_use]
 pub fn header(measurement: &Measurement<'_>) -> Vec<String> {
     let ranking = measurement.ranking;
-    let processes = ranking.rows.len();
+    let processes = measurement.processes;
     let mut lines = vec![
         format!(
             "{} {} over a {} window (interval {}) {DASH} {} faults, {}/s",
@@ -332,15 +343,87 @@ pub fn header(measurement: &Measurement<'_>) -> Vec<String> {
             count(ranking.total_faults),
             rate(ranking.faults_per_second(ranking.total_faults)),
         ),
+        swap_line(measurement),
+        claude_line(ranking),
+    ];
+    lines.extend(skipped_line(ranking));
+    lines
+}
+
+/// Gives the line of the swap traffic, the compressor, and the swap in use.
+///
+/// [`header`] and [`span_header`] both state it, so the two cannot disagree.
+fn swap_line(measurement: &Measurement<'_>) -> String {
+    format!(
+        "swap: {} in, {} out in {}{DOT}compressor {}{DOT}swap in use {} of {}",
+        count(measurement.swap.swapins),
+        count(measurement.swap.swapouts),
+        seconds(measurement.swap_window),
+        bytes(measurement.compressor_bytes),
+        bytes(measurement.usage.used_bytes),
+        bytes(measurement.usage.total_bytes),
+    )
+}
+
+/// The singular of the word for one frame of a span.
+const FRAME: &str = "frame";
+
+/// The plural of the word for one frame of a span.
+const FRAMES: &str = "frames";
+
+/// The singular of the word for one gap of a span.
+const GAP: &str = "gap";
+
+/// The plural of the word for one gap of a span.
+const GAPS: &str = "gaps";
+
+/// Gives a count of frames and a count of gaps, for example `58 frames, 1 gap`.
+///
+/// The header of a span and the banner of the view both state these counts,
+/// so one function holds the singular and the plural.
+#[must_use]
+pub fn frames_and_gaps(frames: usize, gaps: usize) -> String {
+    format!(
+        "{} {}, {} {}",
+        count_of(frames),
+        plural(frames, FRAME, FRAMES),
+        count_of(gaps),
+        plural(gaps, GAP, GAPS),
+    )
+}
+
+/// What a view states about the span of history that it shows.
+#[derive(Debug, Clone, Copy)]
+pub struct SpanTotals<'a> {
+    /// The span that the person asked for, for example `5 m`.
+    pub label: &'a str,
+    /// The count of frames that the span holds.
+    pub frames: usize,
+    /// The count of gaps in the span: times that the view tried to measure and
+    /// did not.
+    pub gaps: usize,
+}
+
+/// Gives the lines above the table of a view of a span of frames.
+///
+/// The first line states the measured time, the frames, and the gaps. The
+/// other lines are the lines of [`header`].
+#[must_use]
+pub fn span_header(measurement: &Measurement<'_>, span: &SpanTotals<'_>) -> Vec<String> {
+    let ranking = measurement.ranking;
+    let processes = measurement.processes;
+    let mut lines = vec![
         format!(
-            "swap: {} in, {} out in {}{DOT}compressor {}{DOT}swap in use {} of {}",
-            count(measurement.swap.swapins),
-            count(measurement.swap.swapouts),
-            seconds(measurement.swap_window),
-            bytes(measurement.compressor_bytes),
-            bytes(measurement.usage.used_bytes),
-            bytes(measurement.usage.total_bytes),
+            "{} {} with faults over {} measured of {} ({}) {DASH} {} faults, {}/s",
+            count_of(processes),
+            plural(processes, PROCESS, PROCESSES),
+            seconds(ranking.window),
+            span.label,
+            frames_and_gaps(span.frames, span.gaps),
+            count(ranking.total_faults),
+            rate(ranking.faults_per_second(ranking.total_faults)),
         ),
+        swap_line(measurement),
         claude_line(ranking),
     ];
     lines.extend(skipped_line(ranking));
@@ -354,6 +437,11 @@ pub fn header(measurement: &Measurement<'_>) -> Vec<String> {
 /// a process without a word reports a clean Mac that is not clean, so each
 /// count is here. A count of zero adds no part, and a Mac that hides nothing
 /// says nothing, the same as `occ`.
+///
+/// In a span, the count of the processes that exited is a sum over the
+/// frames. The zombies and the unsampled processes come from the newest frame
+/// of the span, so the span states the same two counts as the one-frame view
+/// of that frame.
 fn skipped_line(ranking: &Ranking) -> Option<String> {
     let skipped = ranking.skipped;
     let mut parts: Vec<String> = Vec::new();
@@ -419,7 +507,7 @@ fn claude_line(ranking: &Ranking) -> String {
 
 /// The name of each column of the table, in the order that the issue lists
 /// them.
-const COLUMNS: [&str; 10] = [
+pub const COLUMNS: [&str; 10] = [
     "PID",
     "OWNER",
     "FAULTS/S",
@@ -521,25 +609,43 @@ pub fn rows(
         table.set_width(width);
     }
     for row in shown {
-        let (session, state, directory) = claude_cells(&row.claude);
-        table.add_row([
-            row.pid.to_string(),
-            accounts.name_of(row.uid),
-            rate(ranking.faults_per_second(row.faults)),
-            share(ranking.share(row.faults)),
-            row.rss_kib.map_or_else(|| ABSENT.to_owned(), kibibytes),
-            age(row.started_at_epoch_secs, now),
-            command(&row.command),
-            session,
-            state,
-            directory,
-        ]);
+        table.add_row(row_cells(ranking, row, accounts, now));
     }
     let drawn = table.to_string();
-    match more_line(ranking, &rows[shown.len()..]) {
+    let hidden = &rows[shown.len()..];
+    let faults = hidden
+        .iter()
+        .fold(0_u64, |total, row| total.saturating_add(row.faults));
+    match more_line(ranking, hidden.len(), faults) {
         Some(line) => format!("{drawn}\n{line}"),
         None => drawn,
     }
+}
+
+/// Gives the ten cells of `row`, in the order of [`COLUMNS`].
+///
+/// The table of `rows` and a full-screen view both call this function, so no
+/// caller formats a cell twice.
+#[must_use]
+pub fn row_cells(
+    ranking: &Ranking,
+    row: &RankedRow,
+    accounts: &Accounts,
+    now: SystemTime,
+) -> [String; 10] {
+    let (session, state, directory) = claude_cells(&row.claude);
+    [
+        row.pid.to_string(),
+        accounts.name_of(row.uid),
+        rate(ranking.faults_per_second(row.faults)),
+        share(ranking.share(row.faults)),
+        row.rss_kib.map_or_else(|| ABSENT.to_owned(), kibibytes),
+        age(row.started_at_epoch_secs, now),
+        command(&row.command),
+        session,
+        state,
+        directory,
+    ]
 }
 
 /// The mark of a text that gives a part of something, and not the whole of it.
@@ -549,23 +655,23 @@ pub fn rows(
 /// that the limit hid. One mark for both, so a reader learns it once.
 pub const MORE: char = '…';
 
-/// Gives the line that counts the rows which the limit hid, or nothing when it
-/// hid no row.
+/// Gives the line that counts `hidden` rows which made `faults` together, or
+/// nothing when `hidden` is 0.
 ///
 /// The limit hides the small rates, and on 2026-09-18 the sum of the small
 /// rates was the load. A reader must see what the limit took away, so the line
-/// gives the share of all faults that those rows made.
-fn more_line(ranking: &Ranking, hidden: &[RankedRow]) -> Option<String> {
-    if hidden.is_empty() {
+/// gives the share of all faults that those rows made. A view that keeps the
+/// rows in its own store calls this function with the count and the sum, and
+/// not with the rows.
+#[must_use]
+pub fn more_line(ranking: &Ranking, hidden: usize, faults: u64) -> Option<String> {
+    if hidden == 0 {
         return None;
     }
-    let faults = hidden
-        .iter()
-        .fold(0_u64, |total, row| total.saturating_add(row.faults));
     Some(format!(
         "{MORE} {} more {} made {} of all faults",
-        count_of(hidden.len()),
-        plural(hidden.len(), PROCESS, PROCESSES),
+        count_of(hidden),
+        plural(hidden, PROCESS, PROCESSES),
         share(ranking.share(faults)),
     ))
 }
@@ -576,7 +682,7 @@ fn more_line(ranking: &Ranking, hidden: &[RankedRow]) -> Option<String> {
 /// session with no registry record gives three empty cells too: the issue
 /// demands that such a row shows no session, because a guess names the wrong
 /// session and nothing in the text says that it is a guess.
-fn claude_cells(claude: &ClaudeView) -> (String, String, String) {
+pub fn claude_cells(claude: &ClaudeView) -> (String, String, String) {
     match claude {
         ClaudeView::NotClaude | ClaudeView::NoRecord => {
             (String::new(), String::new(), String::new())
@@ -1079,6 +1185,7 @@ mod tests {
     fn measurement(ranking: &Ranking) -> Measurement<'_> {
         Measurement {
             ranking,
+            processes: ranking.rows.len(),
             swap: VmDelta {
                 swapins: 46_564,
                 swapouts: 40_156,
@@ -1112,6 +1219,163 @@ mod tests {
             header(&measurement(&one)).first().map(String::as_str),
             Some("1 process over a 4.0 s window (interval 5s) — 3 faults, 0.8/s")
         );
+    }
+
+    /// The first line states the count in `Measurement::processes`, and not
+    /// the length of the rows. A compact history keeps only the rows with
+    /// faults, and the count of the whole sample must stay.
+    #[test]
+    fn the_first_line_states_the_processes_field_and_not_the_rows() {
+        let ranking = ranking(vec![row(10, 3), row(20, 2)], 5);
+        let stated = Measurement {
+            processes: 812,
+            ..measurement(&ranking)
+        };
+        let one = Measurement {
+            processes: 1,
+            ..measurement(&ranking)
+        };
+
+        assert_eq!(
+            header(&stated).first().map(String::as_str),
+            Some("812 processes over a 4.0 s window (interval 5s) — 5 faults, 1.2/s")
+        );
+        assert_eq!(
+            header(&one).first().map(String::as_str),
+            Some("1 process over a 4.0 s window (interval 5s) — 5 faults, 1.2/s")
+        );
+    }
+
+    /// `more_line` counts what its arguments state, and `rows` keeps its text.
+    #[test]
+    fn more_line_counts_the_count_and_the_sum_that_it_is_given() {
+        let ranking = ranking(vec![row(10, 60), row(20, 30), row(30, 10)], 100);
+
+        assert_eq!(more_line(&ranking, 0, 0), None);
+        assert_eq!(
+            more_line(&ranking, 1, 10).as_deref(),
+            Some("… 1 more process made 10.0% of all faults")
+        );
+        assert_eq!(
+            more_line(&ranking, 2, 40).as_deref(),
+            Some("… 2 more processes made 40.0% of all faults")
+        );
+    }
+
+    /// `row_cells` gives the ten cells of a row in the order of `COLUMNS`.
+    #[test]
+    fn row_cells_gives_the_ten_cells_in_the_order_of_the_columns() {
+        let ranking = ranking(vec![row(10, 400), row(20, 600)], 1_000);
+        let accounts = Accounts::new().with(Uid::new(VIEWER_UID), "tim");
+        let plain = row(10, 400);
+        let other = RankedRow {
+            claude: ClaudeView::OtherAccount,
+            rss_kib: None,
+            ..row(20, 600)
+        };
+
+        assert_eq!(
+            row_cells(&ranking, &plain, &accounts, now()),
+            [
+                "10".to_owned(),
+                "tim".to_owned(),
+                rate(ranking.faults_per_second(400)),
+                share(ranking.share(400)),
+                kibibytes(831_488),
+                age(Some(STARTED), now()),
+                command("/usr/bin/process-10 --flag"),
+                String::new(),
+                String::new(),
+                String::new(),
+            ]
+        );
+        let cells = row_cells(&ranking, &other, &accounts, now());
+        assert_eq!(cells[0], "20");
+        assert_eq!(cells[4], ABSENT);
+        assert_eq!(cells[7], OTHER_ACCOUNT);
+        assert_eq!(cells[8], "");
+    }
+
+    /// `span_header` states the span, then the swap line, the Claude line, and
+    /// the skipped line.
+    #[test]
+    fn span_header_gives_the_span_line_and_the_lines_of_the_header() {
+        let mut long = ranking(vec![row(10, 3)], 1_234_567);
+        long.window = Duration::from_millis(297_400);
+        long.claude = ClaudeTotal {
+            processes: 3,
+            faults: 508_000,
+            other_account: 0,
+        };
+        let stated = Measurement {
+            processes: 812,
+            ..measurement(&long)
+        };
+        let span = SpanTotals {
+            label: "the last 5 m",
+            frames: 58,
+            gaps: 1,
+        };
+        let lines = span_header(&stated, &span);
+
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some(
+                format!(
+                    "812 processes with faults over 297.4 s measured of the last 5 m (58 frames, 1 gap) \u{2014} 1,234,567 faults, {}/s",
+                    rate(long.faults_per_second(1_234_567))
+                )
+                .as_str()
+            )
+        );
+        assert_eq!(lines.get(1), header(&stated).get(1));
+        assert_eq!(lines.get(2), header(&stated).get(2));
+        assert_eq!(lines.len(), 3);
+
+        let one = SpanTotals {
+            label: "the last 1 m",
+            frames: 1,
+            gaps: 0,
+        };
+        let skipped = with_skipped(
+            long.clone(),
+            Skipped {
+                exited: 0,
+                exited_faults: 0,
+                zombies: 72,
+                unsampled: 0,
+            },
+        );
+        let single = Measurement {
+            processes: 1,
+            ..measurement(&skipped)
+        };
+        let lines = span_header(&single, &one);
+        assert!(lines[0].starts_with(
+            "1 process with faults over 297.4 s measured of the last 1 m (1 frame, 0 gaps)"
+        ));
+        assert_eq!(
+            lines.get(3).map(String::as_str),
+            Some("skipped: 72 zombies")
+        );
+    }
+
+    /// `merge` keeps the names of both maps, and the name of `other` wins.
+    #[test]
+    fn merge_keeps_both_maps_and_lets_the_other_name_win() {
+        let mut mine = Accounts::new()
+            .with(Uid::new(1), "old")
+            .with(Uid::new(2), "kept");
+        let other = Accounts::new()
+            .with(Uid::new(1), "new")
+            .with(Uid::new(3), "added");
+
+        mine.merge(&other);
+
+        assert_eq!(mine.name_of(Uid::new(1)), "new");
+        assert_eq!(mine.name_of(Uid::new(2)), "kept");
+        assert_eq!(mine.name_of(Uid::new(3)), "added");
+        assert_eq!(mine.name_of(Uid::new(4)), "4");
     }
 
     /// The second line gives the swap traffic over the time that the tool

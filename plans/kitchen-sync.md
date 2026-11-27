@@ -1,6 +1,6 @@
 # Plan: kitchen-sync
 
-> Source PRD: `docs/superpowers/specs/2026-04-13-kitchen-sync-design.md`
+> Source PRD: `specs/2026-04-13-kitchen-sync-design.md`
 
 ## Architectural decisions
 

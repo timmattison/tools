@@ -798,8 +798,6 @@ const NO_SSH_COMMAND: &str = "unset";
 /// made executable.
 #[cfg(unix)]
 fn install_fake_package_manager(bin_dir: &Path, record: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
     let record = shellquote::shell_quote(record.to_str().expect("utf-8 record path"));
     let script = format!(
         "#!/bin/sh\n\
@@ -807,9 +805,8 @@ fn install_fake_package_manager(bin_dir: &Path, record: &Path) {
          exec git config {BOOTSTRAP_PROBE_KEY} {BOOTSTRAP_PROBE_VALUE}\n"
     );
     let fake = bin_dir.join(FAKE_PACKAGE_MANAGER);
-    fs::write(&fake, script).unwrap_or_else(|e| panic!("write {}: {e}", fake.display()));
-    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755))
-        .unwrap_or_else(|e| panic!("make {} executable: {e}", fake.display()));
+    gitscratch::testing::executable::write_executable(&fake, script)
+        .unwrap_or_else(|e| panic!("write {}: {e}", fake.display()));
 }
 
 /// The hook bootstrap install acts on the repository `nwt` stands in, and gets

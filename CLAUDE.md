@@ -219,6 +219,19 @@ caller. It says so at the call site with
 The exemption stays visible in the file it applies to, rather than in a central
 allowlist.
 
+### 24-bit colors read `COLORTERM`
+
+`colored` reads `COLORTERM` each time it formats a 24-bit color. If the value
+is not `truecolor` or `24bit`, it writes the nearest of the 16 basic colors.
+`colored` gives no API to override this read, and `with_forced_ansi` does not
+change it. Thus a test that asserts on a 24-bit color passes only where
+`COLORTERM` says `truecolor`.
+
+`scripts/rust-checks.sh` pins `COLORTERM=truecolor` for the test run, thus the
+hook and CI give the same result in each terminal. To run such a test by hand
+in a terminal that does not set `COLORTERM`, set it on the command:
+`COLORTERM=truecolor cargo test -p gsw`.
+
 ### Crates Currently Using testcolor
 
 - `cdva` - the long-help test of `--strict`
@@ -278,6 +291,10 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
   prints for a person to paste
 - `crap` - the paths that the tests of the shell function put into the fake
   scripts
+- `drun` - the fixture directory that the tests write into the fake docker
+  script
+- `faulte` - the text and the PID file path that the stream tests put into
+  the stub scripts
 - `gitscratch` - the log path, the path of the real git, and the subcommand
   names that the `git` shim of `testing::git_shim` puts into its script
 - `glance` - the remote binary in the command that `ssh` sends to the second
@@ -290,7 +307,11 @@ full path, `shellquote::shell_quote(...)`, where the call site sits behind a
 - `sidecar` - the fixture root that the tests put into the fake `gh`
 - `swt` - the path of a `.swt-check` override, and the command lines it prints
   for a person to paste
-- `wdid` - the paths and the history rows that the tests put into stub scripts
+- `vpn-tunnel` - the `--op-path` value in the `op-cache invalidate` command that
+  the all-in-use error prints
+- `wdid` - the crate directory in the `cargo install --path` command of the
+  workspace line, each shared word of a duplicate that needs quotes, and the
+  paths and the history rows that the tests put into stub scripts
 
 ## GitHub REST Through `gh`
 
@@ -475,10 +496,20 @@ visible in the file it applies to.
 ### The Runners
 
 The ban covers the Rust code of this workspace. It does not cover code that
-other crates own, for example the build script of a dependency. So
-`.husky/pre-commit` and `test.sh` start each cargo command through
-`without_git_environment` in `scripts/without-git-environment.sh`, which removes
-the whole prefix. The hook is started by `sh`, so that function does not use
+other crates own, for example the build script of a dependency. So each runner
+starts each cargo command through `without_git_environment` in
+`scripts/without-git-environment.sh`, which removes the whole prefix:
+
+- `scripts/rust-checks.sh` runs the four gates. The pre-commit hook and CI both
+  start it, so a cargo command that you add to it gets the sweep.
+- `scripts/plugin-checks.sh` runs the checks of the claude CLI on the plugins
+  under `plugins/`. The pre-commit hook and CI both start it, and it starts
+  each `claude` command through the same function.
+- `.husky/pre-commit` itself starts only the cargo commands of the tool-index
+  guard and of the `ic-inline` block.
+- `test.sh` runs the workspace tests.
+
+The hook is started by `sh`, so `without_git_environment` does not use
 `compgen`, which a shell other than bash does not have.
 
 ### The Trap: A Lint Cannot Say This
@@ -534,9 +565,10 @@ constructor or states an exemption at its site. It does not prove three things:
 
 - `clippy.toml` `disallowed-methods` — a raw `Command::new`,
   `tokio::process::Command::new` or `CommandBuilder::new` fails the build
-- `src/repo-guards/tests/pre_commit_hook.rs` — no cargo command of the hook or
-  of `test.sh` sees a `GIT_` variable, under a fake `cargo` that writes its
-  environment to a file
+- `src/repo-guards/tests/pre_commit_hook.rs` — no cargo command of the hook, of
+  the `scripts/rust-checks.sh` that the hook starts, or of `test.sh`, and no
+  `claude` command of the `scripts/plugin-checks.sh` that the hook starts, sees
+  a `GIT_` variable, under a fake program that writes its environment to a file
 - `repo_guards::git_env_sweep` (`src/repo-guards/src/git_env_sweep.rs`) — no
   file cargo compiles removes a `GIT_`-prefixed variable by name. Its companion
   test asks `cargo metadata` whether the read set holds every target root cargo
@@ -690,6 +722,7 @@ nothing is reported, so a stale entry fails too. The list holds three entries:
 - `cctop` - the full-screen view, through the ratatui session
 - `chf` - the picker, through the ratatui session
 - `diskhog` - the full-screen view, through the ratatui session
+- `faulte` - the view of `faulte tui`, through the ratatui session
 - `gitrdun` - the progress view, through the ratatui session
 - `gsw` - the watch view
 - `ha` - the full-screen view, through the ratatui session
@@ -884,7 +917,7 @@ Every crate in this workspace **must** inherit the repo-wide lint set, and a cra
 
 ### Why
 
-The root `Cargo.toml` declares `[workspace.lints.rust]` and `[workspace.lints.clippy]`, but cargo hands those lints only to members that opt in. A member that omits the stanza is silently exempt: nothing warns and nothing fails, because the exemption is spelled as an *absence*. That is also why it spreads — a new crate that never types the stanza is born exempt. All 73 members opt in today, and `repo_guards::workspace_lints` keeps it that way: a new crate that omits the stanza fails `cargo test`.
+The root `Cargo.toml` declares `[workspace.lints.rust]` and `[workspace.lints.clippy]`, but cargo hands those lints only to members that opt in. A member that omits the stanza is silently exempt: nothing warns and nothing fails, because the exemption is spelled as an *absence*. That is also why it spreads — a new crate that never types the stanza is born exempt. Each member opts in today, and `repo_guards::workspace_lints` keeps it that way: a new crate that omits the stanza fails `cargo test`.
 
 ### Usage
 
@@ -1000,6 +1033,27 @@ tool's own entry would otherwise document a tool named `To`.
   test asks `cargo metadata` whether the guard's set of binaries is the set
   cargo actually builds, so a binary the guard never learned to discover shows
   up as a set difference instead of a clean report
+
+## Specs and Plans
+
+A spec **must** live in `specs/` and a plan **must** live in `plans/`, both at
+the repository root. A file in any other directory named `specs` or `plans` is
+in the wrong place.
+
+### Why
+
+The superpowers skills write specs and plans to `docs/superpowers/` by default.
+This repository took that default three times: #198 (`portplz`), #200
+(`kitchen-sync`), and #191 (`vpn-tunnel`). Nothing failed, so the files stayed
+there until a review of #191 found them.
+
+### Guards Enforcing This
+
+- `repo_guards::doc_placement` (`src/repo-guards/src/doc_placement.rs`) — every
+  file in a `specs` or `plans` directory below the repository root fails
+  `cargo test`. The walk does not enter a directory that holds a `.git` entry,
+  because that directory is another checkout, for example an agent worktree
+  in `.claude/worktrees/`
 
 ## UTF-8 String Safety
 
@@ -1162,3 +1216,179 @@ shellcheck scripts/update-deps.sh
 5. **Handle arguments properly**: Use `while` loops with `shift` for multi-argument parsing
 6. **Provide help text**: Include `-h`/`--help` options
 7. **Avoid emojis**: Use text indicators like `[PASS]`/`[FAIL]` instead of `✓`/`✗`
+
+## Continuous Integration
+
+Every check that CI runs **must** live in `scripts/rust-checks.sh` or in
+`scripts/plugin-checks.sh`.
+
+### Why
+
+The pre-commit hook and CI must run the same checks. When each caller holds
+its own list, the two lists drift apart, and a check that one list lost
+reports nothing. Thus one script holds each list. `scripts/rust-checks.sh`
+holds the checks of the Rust workspace, and `scripts/plugin-checks.sh` holds the
+checks of the Claude Code plugins under `plugins/`. `.husky/pre-commit` and
+`.github/workflows/ci.yml` each start both scripts. The hook starts a script
+only when a staged path is one that the script reads.
+
+To run the full list by hand, run `./scripts/rust-checks.sh`, then
+`./scripts/plugin-checks.sh`, from the repository root. Do this at the end of a
+TDD run. A `git commit --allow-empty` stages no file, thus the hook runs no
+check in this repository. A step of issue-fleet does not run the full list. It
+obeys [Checks in an issue-fleet Step](#checks-in-an-issue-fleet-step).
+
+### What CI does
+
+`.github/workflows/ci.yml` runs for each pull request, for each push to `main`,
+and when a person starts it by hand (`workflow_dispatch`). It runs the Rust
+checks in one job on `ubuntu-latest` and in one job on `macos-latest`. Some
+crates hold code that compiles only on macOS, and a Linux job does not compile,
+lint, or test that code. It runs the plugin checks in one job on
+`ubuntu-latest`. GitHub does not charge for standard runners in a public
+repository.
+
+Each job of the Rust checks does these steps:
+
+1. On Linux only, install the system packages with `apt-get`: the libraries
+   that some crates link against, and the tools that some tests run. `msgs` is
+   a Tauri app and `nle` is a Dioxus app. On Linux both link against WebKitGTK
+   4.1 and libxdo.
+2. Install Node.js, at the version that `NODE_VERSION` in the workflow names.
+   The tests of `nle` run TypeScript under the real `node`, which needs
+   Node.js 22.18 or later.
+3. Install the toolchain and the components that `rust-toolchain.toml` names.
+4. Install `cargo-machete`.
+5. Restore the Cargo cache. Only a run on `main` saves a cache, and a pull
+   request reads that cache.
+6. Run `scripts/rust-checks.sh`.
+
+The job of the plugin checks does these steps:
+
+1. Install Node.js, at the same `NODE_VERSION`. The package of the claude CLI
+   needs Node.js 22 or later.
+2. Install the claude CLI with `npm`, at the version that
+   `CLAUDE_CODE_VERSION` in the workflow names.
+3. Run `scripts/plugin-checks.sh`.
+
+The plugin checks need no login. `claude plugin test` runs the tests in the
+sandbox of the engine, which has no file system, network or process, thus one
+platform is sufficient.
+
+The workflow sets `CARGO_PROFILE_DEV_DEBUG=0` for each job, because debug
+information is most of the size of the target directory, and the disk of a
+Linux runner is small.
+
+### To add a check
+
+- Add a check of the Rust workspace to `scripts/rust-checks.sh`, and a check of
+  a plugin to `scripts/plugin-checks.sh`. Do not add it to the hook or to the
+  workflow.
+- If the check needs a tool that the runner does not have, add an install step
+  to the workflow.
+- If a crate or a test needs a system library or a tool on Linux, add its
+  package to the `apt-get install` step. The tests of `crap` need `zsh`, for
+  example.
+- Pin each third-party action to a full commit SHA, and write its release tag
+  in a comment. A tag can move, but a commit SHA cannot.
+- Run `actionlint .github/workflows/ci.yml` after each change to the workflow.
+
+## Checks in an issue-fleet Step
+
+A step of issue-fleet runs the checks of the crates that its change touches,
+and not the full list. CI runs the full list on the pull request. CI does not
+run the checks of the msgs frontend, thus a step that changes that frontend
+runs them itself. This section applies when `ISSUE_FLEET_RUN` is set.
+issue-fleet sets that variable in each step, also in each step of the
+`review-loop` that it starts. Each other session keeps the full list at the end
+of a TDD run, as [Continuous Integration](#continuous-integration) says.
+
+### Why
+
+On 2026-11-26, three runs of issue-fleet on one Mac of 14 cores held new work at
+the load gate for 5.7 of 10.5 hours. The steps of this repository made most of
+that load. A sample of 90 s counted 681 new processes each second, and 91% came
+from one `/address-issues` step that ran the full list by hand. The test
+binaries of `gsw`, `cwt` and `gitscratch` start `git` and the tool under test
+for each test. Each new process costs kernel time and a check by `syspolicyd`.
+In the steps of that day, `cargo test` ran 1,191 times, for 6.4 hours of wall
+time.
+
+CI runs `scripts/rust-checks.sh` on each pull request, as
+[What CI does](#what-ci-does) says. issue-fleet opens a pull request for each
+issue, and it merges only after the CI run is green. Thus a full run in a step
+does the work of CI a second time, and it slows each other step on the machine.
+
+### The Rule
+
+1. Do not run `scripts/rust-checks.sh`, `test.sh`, `cargo test --workspace`,
+   `cargo clippy --workspace`, or a `cargo test` or a `cargo clippy` with no
+   `-p`.
+2. For each crate that the change touches, run the four checks of
+   `scripts/rust-checks.sh` for that crate, with the same flags and the same
+   environment. Each member lives at `src/<crate>`:
+
+   ```bash
+   cargo fmt -p <crate> -- --check
+   cargo machete src/<crate>
+   cargo clippy --locked -p <crate> --all-targets -- -D warnings
+   CLICOLOR_FORCE=1 COLORTERM=truecolor cargo test --locked --no-fail-fast -p <crate>
+   ```
+
+   `cargo fmt` and `cargo machete` compile nothing, and part 3 skips the hook
+   that runs them. Also run these checks:
+   - When the change touches a crate that other crates of the workspace use,
+     run the tests of each crate that depends on it. Do this also when that is
+     most of the workspace. `childenv` has 99 dependents, and `buildinfo` has
+     88, of 115 members.
+   - When the change touches a file that a guard of `repo-guards` reads, run
+     `cargo test -p repo-guards`. The guards read each Rust file that cargo
+     compiles, each `Cargo.toml`, `README.md`, `TLDR.md`, `clippy.toml`,
+     `.gitignore`, `rust-toolchain.toml`, `.husky/pre-commit`, the scripts that
+     the hook starts, `test.sh`, and each file in a `specs` or `plans`
+     directory. Thus a change to Rust code also needs the tests of
+     `repo-guards`.
+   - When the change touches a file under `src/msgs/frontend/` or
+     `src/msgs/scripts/`, run the checks of the msgs frontend: `tsc --noEmit`
+     on both directories, and `vitest run`. Only the msgs block of
+     `.husky/pre-commit` runs them, and part 3 skips that hook:
+
+     ```bash
+     pnpm --dir src/msgs/frontend install --frozen-lockfile --prefer-offline
+     pnpm --dir src/msgs/frontend run check
+     ```
+3. Commit with `--no-verify`. The pre-commit hook runs the full list for each
+   commit that stages a Rust file, a `Cargo.toml`, a `Cargo.lock`,
+   `scripts/rust-checks.sh`, or the `rustfmt.toml` or the `rust-toolchain.toml`
+   at the root.
+4. Do not end a TDD run with the full list. Make no closing
+   `git commit --allow-empty`, and do not run the list by hand in its place.
+   The CI run of the pull request ends the TDD run.
+
+This command tests a crate together with each workspace crate that depends on
+it. A crate depends on it when it names the crate in a dependency table, or
+when it gets the crate through a normal or a build dependency on another
+member. `sysclip` has 5 crates of the first kind, and 5 more through
+`clipboardmon`. A dev-dependency does not pass the crate on, because the tests
+of a member do not build the dev-dependencies of its dependencies. In the
+filter, the kind `null` is a normal dependency.
+
+```bash
+crate=childenv
+cargo metadata --format-version 1 --no-deps \
+  | jq -r --arg crate "$crate" '
+      [.packages[] | {name, deps: [.dependencies[] | select(.path != null)]}] as $members
+      | def users($kinds): . as $set | [$members[]
+          | select(any(.deps[]; (.kind | IN($kinds[])) and (.name | IN($set[]))))
+          | .name] + $set | unique;
+      [$crate]
+      | until(users([null, "build"]) == .; users([null, "build"]))
+      | users([null, "build", "dev"]) - [$crate] | .[] | ("-p", .)' \
+  | CLICOLOR_FORCE=1 COLORTERM=truecolor \
+    xargs cargo test --locked --no-fail-fast -p "$crate"
+```
+
+Keep `-p "$crate"` in the command. GNU `xargs` runs its command one time when
+the list is empty, and a `cargo test` with no `-p` tests the whole workspace.
+BSD `xargs` on macOS runs nothing when the list is empty, thus the
+`cargo test -p <crate>` of part 2 stays necessary.

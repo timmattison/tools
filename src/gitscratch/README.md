@@ -1747,7 +1747,10 @@ window, and not the window of whoever typed `cargo test`.
 the terminal, and gives back a `std::process::Output`.
 `Pty::run_with_output_on_terminal` puts standard error on the terminal too, so a
 test sees the display that a person sees. So a test of `grind` or
-`grime` sees the color that a person at a terminal sees. Output processing is
+`grime` sees the color that a person at a terminal sees. A child whose command
+states no `TERM` gets `TERM=xterm-256color` (`Pty::TERM`), because a display
+draws nothing for no `TERM`, and a GitHub runner sets none. A `TERM` that the
+command sets or removes wins. Output processing is
 off, so the bytes come back as the child wrote them. The master end is read on
 a thread of its own, so output of any size comes back whole. The helper lives
 here because both tools need it, and two copies of the same `unsafe` code part
@@ -1765,6 +1768,17 @@ that waits for its delay has time to show. The terminal tests of `grind` and
 `grime` use that pause. It exists because gitscratch sheds
 every `GIT_*` variable from its children, so `GIT_TRACE` logs nothing. Only a
 `git` on `PATH` sees which git processes a replay starts.
+
+It also holds `gitscratch::testing::executable::write_executable`, the writer of
+a stub that a test runs. It takes the arguments of `std::fs::write` and makes
+the file executable, so it replaces `fs::write` followed by a change of the mode
+to `0o755`. Linux refuses to run a file that a process holds open for writing
+(`ETXTBSY`, "Text file busy"). A thread that forks while the test process
+writes a stub gives the child a copy of the write descriptor, and a run of the
+stub in that window fails. Thus a `/bin/sh` child writes the file, and the test
+process holds no write descriptor for it at any time. macOS does not refuse
+such a run, so the race shows only on Linux. The module is Unix only. Write
+each new stub that a test runs with it.
 
 | Fixture | Shape |
 | --- | --- |

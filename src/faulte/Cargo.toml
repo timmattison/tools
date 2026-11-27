@@ -20,14 +20,20 @@ childenv.workspace = true
 chrono.workspace = true
 clap.workspace = true
 comfy-table.workspace = true
+crossterm.workspace = true
 occ.workspace = true
+ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
 termsize.workspace = true
+textfit.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+altscreen = { workspace = true, features = ["ratatui"] }
 libc.workspace = true
+signal-hook.workspace = true
 
 [dev-dependencies]
+shellquote.workspace = true
 testcolor.workspace = true
 
 [lints]

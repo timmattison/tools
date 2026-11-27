@@ -1,0 +1,46 @@
+[package]
+name = "nle"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Non-linear editor for terminal recordings"
+
+[lib]
+name = "nle_lib"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["desktop"] }
+serde = { workspace = true, features = ["rc"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+flate2 = "1.0"
+buildinfo = { workspace = true }
+# The emulator of the preview, and of the screens that the backspace removal
+# filter compares. It is the same emulator that beta uses to export.
+termstate = { workspace = true }
+# The width of a character in terminal cells, for the runs of the screen model,
+# and for the width of a match that the redaction filter masks.
+unicode-width = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+# Every child process starts through childenv::command, because clippy.toml
+# bans std::process::Command::new.
+childenv = { workspace = true }
+chrono = { workspace = true }
+# The redaction filter finds text with a regular expression.
+regex = { workspace = true }
+# The file dialog of the Open Recording button. These are the same features that
+# dioxus-desktop uses, so the build holds one copy of rfd.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+
+[dev-dependencies]
+dioxus-ssr = "0.7"
+toml = { workspace = true }
+# The tests of dev-script.rs and of src/commands/tests.rs write their shims
+# through testing::executable::write_executable. Linux refuses to run a shim
+# that a fork on another test thread holds open for writing (ETXTBSY).
+gitscratch = { workspace = true, features = ["testing"] }
+
+[lints]
+workspace = true

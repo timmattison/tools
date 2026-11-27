@@ -1,0 +1,4 @@
+allowBuilds:
+  # esbuild runs through its platform package (@esbuild/<os>-<cpu>). Its
+  # install script only checks that package, thus it does not need to run.
+  esbuild: false

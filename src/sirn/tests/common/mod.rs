@@ -19,49 +19,60 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::thread::JoinHandle;
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
+
+/// Bounds each wait for a consuming `sirn::Pool` method. A pool that does not
+/// release all of its workers is a defect, and the test must fail on it, not
+/// hang the suite.
+pub const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Runs `run` on its own thread, and returns its result if it ends within
+/// [`JOIN_TIMEOUT`].
+///
+/// # Panics
+///
+/// Panics when `run` does not end within [`JOIN_TIMEOUT`]. The thread of
+/// `run` stays blocked, but the test fails at once.
+pub fn within_timeout<T, F>(run: F) -> T
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(run());
+    });
+
+    receiver
+        .recv_timeout(JOIN_TIMEOUT)
+        .unwrap_or_else(|_| panic!("did not finish within {JOIN_TIMEOUT:?}"))
+}
 
 /// Starts a server bound to an ephemeral loopback port serving `routes`.
 ///
-/// Returns the bound address, the server handle (so the caller can `unblock()`
-/// it for shutdown), and the worker-thread join handles.
-pub fn start(
-    routes: BTreeMap<String, PathBuf>,
-) -> (SocketAddr, Arc<tiny_http::Server>, Vec<JoinHandle<()>>) {
+/// Returns the bound address and the worker [`sirn::Pool`], which a test ends
+/// with [`stop`].
+pub fn start(routes: BTreeMap<String, PathBuf>) -> (SocketAddr, sirn::Pool) {
     let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port"));
     let addr = server.server_addr().to_ip().expect("ip addr");
-    let handles = sirn::serve(
-        Arc::clone(&server),
-        sirn::ServeMode::Files(Arc::new(routes)),
-        2,
-    );
-    (addr, server, handles)
+    let pool = sirn::serve(server, sirn::ServeMode::Files(Arc::new(routes)), 2);
+    (addr, pool)
 }
 
 /// Starts a directory-mode server rooted at `root` (caller canonicalizes it).
-pub fn start_dir(root: PathBuf) -> (SocketAddr, Arc<tiny_http::Server>, Vec<JoinHandle<()>>) {
+pub fn start_dir(root: PathBuf) -> (SocketAddr, sirn::Pool) {
     let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port"));
     let addr = server.server_addr().to_ip().expect("ip addr");
-    let handles = sirn::serve(
-        Arc::clone(&server),
-        sirn::ServeMode::Directory(Arc::new(root)),
-        2,
-    );
-    (addr, server, handles)
+    let pool = sirn::serve(server, sirn::ServeMode::Directory(Arc::new(root)), 2);
+    (addr, pool)
 }
 
-/// Unblocks `server` and joins every worker so threads don't linger after a test.
-///
-/// `tiny_http::Server::unblock` releases exactly one `recv()`-blocked thread per
-/// call, so it must be invoked once per worker for the whole pool to exit.
-pub fn stop(server: &Arc<tiny_http::Server>, handles: Vec<JoinHandle<()>>) {
-    for _ in &handles {
-        server.unblock();
-    }
-    for handle in handles {
-        handle.join().expect("worker thread joins cleanly");
-    }
+/// Shuts `pool` down on purpose and joins every worker within
+/// [`JOIN_TIMEOUT`], so threads do not linger after a test. `Pool::shutdown`
+/// releases each worker itself.
+pub fn stop(pool: sirn::Pool) {
+    within_timeout(move || pool.shutdown()).expect("worker pool shuts down cleanly");
 }
 
 /// Issues `GET <path> HTTP/1.0` with `Connection: close`, reads to EOF, and

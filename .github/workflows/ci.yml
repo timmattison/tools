@@ -1,0 +1,143 @@
+# Continuous integration for the Rust workspace and the Claude Code plugins.
+#
+# The Rust jobs run scripts/rust-checks.sh, and the plugin job runs
+# scripts/plugin-checks.sh. The pre-commit hook runs the same scripts, thus CI
+# and the hook run the same lists of checks. Add a new check to a script, not
+# to this file.
+#
+# The Rust jobs run on Linux and on macOS. Some crates hold code that compiles
+# only on macOS (`#[cfg(target_os = "macos")]`). A Linux job does not compile,
+# lint, or test that code. GitHub does not charge for standard runners in a
+# public repository.
+#
+# Each third-party action is pinned to a full commit SHA, with its release tag
+# in a comment. A tag can move, but a commit SHA cannot.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A new push to a pull request stops the run of the old push. Each other run
+  # (a push to main, a manual start) has a group of its own. GitHub keeps only
+  # one pending run in a group and cancels it when a newer run queues, also
+  # with cancel-in-progress false.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Debug information is most of the size of the target directory, and the
+  # disk of a Linux runner is small. CI reads no debug symbols.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  # The version of Node.js that each job installs. The tests of nle need 22.18
+  # or later, and the package of the claude CLI needs 22 or later.
+  NODE_VERSION: "24"
+
+jobs:
+  rust-checks:
+    name: Rust checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      # A failure on one platform must not hide the result of the other.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the system packages (Linux)
+        if: runner.os == 'Linux'
+        # alsa-sys (audio) and openssl-sys link against these libraries. The
+        # tests of crap run its shell function in zsh. msgs is a Tauri app and
+        # nle is a Dioxus app. On Linux both draw through wry, which links
+        # against WebKitGTK 4.1 and the libraries under it: GTK 3, libsoup 3,
+        # and JavaScriptCore 4.1. Their menus come from muda, which links
+        # against libxdo.
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libasound2-dev \
+            libgtk-3-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            pkg-config \
+            zsh
+
+      - name: Install Node.js
+        # The tests of nle run its dev script and the unit tests of that
+        # script under the real node, which must strip the TypeScript types
+        # itself. That needs Node.js 22.18 or later, and the version of the
+        # runner image can be older.
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install the pinned Rust toolchain
+        # With no argument, rustup installs the toolchain and the components
+        # that rust-toolchain.toml names.
+        run: |
+          rustup --version
+          rustup toolchain install
+          rustc --version
+
+      - name: Install cargo-machete
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-machete@0.9.2
+
+      - name: Restore the Cargo cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # Only main saves a cache. A pull request reads the cache of main,
+          # thus the caches of pull requests do not fill the 10 GB limit.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Run the Rust checks
+        run: ./scripts/rust-checks.sh
+
+  plugin-checks:
+    name: Plugin checks
+    # The plugin tests run in the sandbox of the engine, which has no file
+    # system, network or process. Thus the platform does not change them, and
+    # one Linux job is sufficient.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # The version of the claude CLI that runs the checks: the version of the
+      # `stable` tag of @anthropic-ai/claude-code on 2026-11-25.
+      CLAUDE_CODE_VERSION: "2.1.326"
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Node.js
+        # The package of the claude CLI needs Node.js 22 or later.
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install the claude CLI
+        # npm comes with Node.js. It runs the postinstall script of the
+        # package, which puts the native binary for the runner in place. The
+        # checks need no login.
+        run: |
+          npm install --global --no-fund --no-audit "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+          claude --version
+
+      - name: Run the plugin checks
+        run: ./scripts/plugin-checks.sh

@@ -1,0 +1,30 @@
+{
+  "name": "ic-inline",
+  "version": "0.2.1",
+  "description": "Shows images, and the differences between two images, inline in the Claude Code transcript, decoded by ic: /ic <file> and /ic diff for you, show_image and show_diff for Claude",
+  "author": { "name": "Tim Mattison" },
+  "repository": "https://github.com/timmattison/tools",
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "renderer": {
+      "type": "string",
+      "title": "Renderer",
+      "description": "auto draws real pixels where the terminal can (kitty, Ghostty) and colored half blocks elsewhere. blocks always draws half blocks. image always draws pixels.",
+      "default": "auto",
+      "options": ["auto", "blocks", "image"]
+    },
+    "maxRows": {
+      "type": "number",
+      "title": "Rows at most",
+      "description": "The tallest that a picture can be in the transcript, in terminal rows.",
+      "default": 24
+    },
+    "icPath": {
+      "type": "string",
+      "title": "ic command",
+      "description": "The ic executable to run: a name on PATH or an absolute path. It must know --emit-rgba.",
+      "default": "ic"
+    }
+  }
+}

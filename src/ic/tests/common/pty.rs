@@ -48,10 +48,43 @@
 //! window of the wrong size ever exists. The caller states that size, because a
 //! window of one size proves one thing to one target.
 
+use std::io::Read;
 use std::os::unix::process::CommandExt;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::ptr;
+use std::thread;
 use std::time::{Duration, Instant};
+
+/// The request of the primary device attributes.
+///
+/// Every terminal answers it, so its answer is what ends a read of the
+/// terminal, and it stands last in the query that `ic` writes. A read that
+/// waits for it therefore waits for the whole of a query.
+const ATTRIBUTES_REQUEST: &[u8] = b"\x1b[c";
+
+/// How long one turn of [`run_with_terminal`] waits for a byte of the terminal.
+///
+/// The runner reads the terminal and asks after the child in turn, and this is
+/// the length of one turn. A run that asks writes its query inside the first
+/// one, and [`Pty::read_until`] gives that query back the moment the request of
+/// the attributes ends it.
+///
+/// **It is the floor of a turn as well as the ceiling.** [`Pty::read_until`]
+/// gives the rest of the slice back the moment the needle arrives, and it gives
+/// the whole of it back when the read of the terminal fails. The runner sleeps
+/// out what such a read left, so a wait for the child costs no core of the
+/// machine.
+const READ_SLICE: Duration = Duration::from_millis(100);
+
+/// How long [`run_with_terminal`] waits for `ic` to exit.
+///
+/// Ten seconds, which is generous because a loaded machine starts a process
+/// late. **The wall clock is the bound, and a count of turns is not**: a count
+/// is a deadline only while each turn costs what the count assumes, and a turn
+/// that ends early then shortens the whole wait without saying so. A change
+/// that stopped `ic` from exiting must fail a test instead of holding it, and
+/// it must take the stated ten seconds to say so.
+const EXIT_BUDGET: Duration = Duration::from_secs(10);
 
 /// Take the controlling terminal away from the child of `command`.
 ///
@@ -149,13 +182,19 @@ impl Pty {
         // and to ask for no name of the slave device. The last pointer is the
         // size of the window, and it points at a live local variable that
         // outlives the call.
+        //
+        // The size goes in as a raw `*mut` pointer, not as `&mut size`. The
+        // `libc` crate declares that parameter `*mut winsize` on macOS and
+        // `*const winsize` on Linux. A `*mut` pointer converts to both, but a
+        // `&mut` reference to a `*const` parameter makes clippy report
+        // `unnecessary_mut_passed` on Linux.
         let result = unsafe {
             libc::openpty(
                 &mut master,
                 &mut slave,
                 ptr::null_mut(),
                 ptr::null_mut(),
-                &mut size,
+                ptr::from_mut(&mut size),
             )
         };
         assert_eq!(
@@ -303,6 +342,115 @@ impl Drop for Pty {
     }
 }
 
+/// What one run of [`run_with_terminal`] did.
+pub struct TerminalRun {
+    /// The exit status of the run, as a number.
+    pub code: Option<i32>,
+    /// Every byte that the run wrote to standard output.
+    pub stdout: String,
+    /// Every byte that the run wrote to standard error.
+    pub stderr: String,
+    /// Every byte that the run wrote to its terminal.
+    pub wrote: Vec<u8>,
+}
+
+/// Run `command` with a pseudo-terminal of `window` as its controlling
+/// terminal.
+///
+/// [`Pty::hand_to`] puts the child in a session of its own, which drops the
+/// terminal the child inherited from the test runner and claims this one
+/// instead. So the run asks this terminal, which answers nothing, and it
+/// reaches no terminal of a person.
+///
+/// **The read of the terminal runs beside the wait for the child, and not
+/// behind it.** A process that closes its controlling terminal waits for the
+/// output queue of that terminal to drain, and the master end is where it
+/// drains to. So a run that wrote a query the runner had not read yet would
+/// hang on the way out, and a wait in front of the read would hold the two of
+/// them there for good.
+///
+/// # Arguments
+/// * `command` - The command to run. The caller states the environment and the
+///   arguments, and this call states the terminal and the three standard
+///   streams.
+/// * `window` - The size that the pseudo-terminal reports.
+///
+/// # Returns
+/// The exit status, the two captured streams, and every byte that the run wrote
+/// to the terminal.
+///
+/// # Panics
+/// Panics when `ic` does not start, and when it does not exit inside the
+/// deadline that [`EXIT_BUDGET`] states.
+pub fn run_with_terminal(command: &mut Command, window: Window) -> TerminalRun {
+    let pty = Pty::open(window);
+
+    // `spawn` inherits the streams of the test runner, where `output` gives a
+    // pipe for each of them. So this states all three.
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    pty.hand_to(command);
+
+    let mut child = command.spawn().expect("ic must run");
+
+    let deadline = Instant::now() + EXIT_BUDGET;
+    let mut wrote = Vec::new();
+    let mut exited = None;
+    while Instant::now() < deadline {
+        let slice = deadline
+            .saturating_duration_since(Instant::now())
+            .min(READ_SLICE);
+        let turn = Instant::now();
+        wrote.extend(pty.read_until(ATTRIBUTES_REQUEST, slice));
+        if let Some(status) = child.try_wait().expect("failed to ask after ic") {
+            exited = Some(status);
+            break;
+        }
+        let spent = turn.elapsed();
+        if spent < slice {
+            thread::sleep(slice - spent);
+        }
+    }
+    let Some(status) = exited else {
+        // The child outlived the deadline, which is the failure this wait is
+        // here to report. It ends first: a child that nobody kills and nobody
+        // waits for holds a slot of the process table of the machine for as
+        // long as the test runner lives.
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("ic must exit inside the deadline of this file");
+    };
+    // The child has exited, so every byte it ever wrote to the terminal is
+    // waiting there already. One last turn takes the bytes it wrote on its way
+    // out.
+    wrote.extend(pty.read_until(ATTRIBUTES_REQUEST, READ_SLICE));
+
+    TerminalRun {
+        code: status.code(),
+        stdout: drain(child.stdout.take(), "stdout"),
+        stderr: drain(child.stderr.take(), "stderr"),
+        wrote,
+    }
+}
+
+/// Take every byte that one pipe of the child holds.
+///
+/// The child has exited by the time this runs, so the whole of what it wrote is
+/// waiting in the pipe and the read ends at once.
+///
+/// # Arguments
+/// * `pipe` - The end of the pipe that the child wrote to.
+/// * `name` - The name of that stream, for the message of a failure.
+fn drain(pipe: Option<impl Read>, name: &str) -> String {
+    let mut bytes = Vec::new();
+    pipe.unwrap_or_else(|| panic!("the run must hold a pipe for {name}"))
+        .read_to_end(&mut bytes)
+        .unwrap_or_else(|error| panic!("failed to read the {name} of ic: {error}"));
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 /// Whether `haystack` holds `needle`.
 fn holds(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
@@ -331,9 +479,13 @@ fn waits_for_a_byte(fd: libc::c_int, left: Duration) -> bool {
         libc::FD_ZERO(&mut watched);
         libc::FD_SET(fd, &mut watched);
     }
+    // The microseconds go through `u64`. `suseconds_t` is `i32` on macOS and
+    // `i64` on Linux, thus a conversion from `u32` can fail on macOS only, and
+    // clippy on Linux reports it as a fallible conversion that cannot fail. A
+    // conversion from `u64` can fail on both platforms.
     let mut budget = libc::timeval {
         tv_sec: libc::time_t::try_from(left.as_secs()).unwrap_or(libc::time_t::MAX),
-        tv_usec: libc::suseconds_t::try_from(left.subsec_micros()).unwrap_or(0),
+        tv_usec: libc::suseconds_t::try_from(u64::from(left.subsec_micros())).unwrap_or(0),
     };
     // SAFETY: the set and the budget are owned here, and the two pointers that
     // name no set are null, which select(2) reads as "ask nothing of them".

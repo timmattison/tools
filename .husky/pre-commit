@@ -2,83 +2,80 @@
 # Reject commits that fail formatting, linting, or the test suite. The gates
 # only run when a staged change touches a Rust file (see the trigger regex
 # below), so a commit that touches no Rust never pays for the Rust toolchain.
-# The tool-index block below is the one deliberate exception: a commit that
-# stages README.md or TLDR.md and no Rust file runs one Rust test target,
-# because the guard that protects the two Markdown indexes lives in the Rust
-# suite.
+# Two blocks below are the deliberate exceptions. A commit that stages
+# README.md or TLDR.md, or a file of plugins/ic-inline, and no Rust file runs
+# one Rust test target. The guard that protects the two Markdown indexes, and
+# the test that holds the plugin to the output of ic, live in the Rust suite.
 #
-# The four Rust gates run cheapest-first so a commit fails fast on the
-# quickest check:
-#
-#   1. cargo fmt --check  - formatting drift; no compile, so it is fastest.
-#   2. cargo machete      - unused-dependency detector. Like fmt it compiles
-#                           nothing (it parses Cargo manifests and sources), so
-#                           it runs before clippy. Plain mode is used (not
-#                           --with-metadata) so it never touches Cargo.lock; the
-#                           crates with known false positives carry
-#                           [package.metadata.cargo-machete] ignored entries.
-#                           A non-zero exit means an unused dependency slipped
-#                           into a manifest, which fails the commit.
-#   3. cargo clippy       - lints as hard errors. --all-targets covers tests/
-#                           and benches/, where lints like
-#                           unseparated_literal_suffix would otherwise slip
-#                           through, and -D warnings turns every workspace lint
-#                           into a hard error.
-#   4. cargo test         - the workspace test suite. Slowest, so it runs last;
-#                           clippy's --all-targets has already compiled the test
-#                           targets, so this pass is mostly incremental + run.
+# The four Rust gates live in scripts/rust-checks.sh, and the checks of the
+# Claude Code plugins live in scripts/plugin-checks.sh. CI runs both scripts.
+# Each script is the one list of its checks: add a new check there, not here.
+# The header of each script gives its checks and the reason for each one.
+# CLAUDE.md, "Checks in an issue-fleet Step", says why a step skips this hook.
 #
 # The trigger regex also matches rustfmt.toml and rust-toolchain.toml at the
 # repo root: a commit that bumps the toolchain or style config is the scenario
 # most likely to introduce drift, so the gate must run on those changes too.
+# It also matches scripts/rust-checks.sh, because a change to the list of
+# checks must run the changed list.
 #
 # All four checks read the WORKING TREE, not the staged index, so a partially
 # staged file (or one staged then edited) is checked in its on-disk state, not
 # the version being committed. This is a deliberate trade-off: index-only
 # checking (stash --keep-index dances) is fragile, and the workspace-wide cargo
 # commands cannot operate on a virtual index anyway.
-set -euo pipefail
+#
+# Husky starts this file with `sh -e`, and the sh of Debian and Ubuntu is
+# dash. Dash refuses `set -o pipefail`, so the hook does not set it.
+set -eu
 
 # shellcheck source=scripts/without-git-environment.sh
 . "$(dirname "$0")/../scripts/without-git-environment.sh"
 
-if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$|(^|/)Cargo\.(toml|lock)$|^(rustfmt|rust-toolchain)\.toml$'; then
-    echo "pre-commit: running cargo fmt --all -- --check"
-    without_git_environment cargo fmt --all -- --check
-    echo "pre-commit: running cargo machete (unused dependency check)"
-    if ! command -v cargo-machete >/dev/null 2>&1; then
-        echo "pre-commit: cargo-machete not found; installing it once (cargo install cargo-machete --locked)…"
-        without_git_environment cargo install cargo-machete --locked
-    fi
-    without_git_environment cargo machete
-    echo "pre-commit: running cargo clippy --all-targets --workspace -- -D warnings"
-    without_git_environment cargo clippy --all-targets --workspace -- -D warnings
-    echo "pre-commit: running cargo test --workspace (CLICOLOR_FORCE=1)"
-    # Git exports GIT_ variables into the hook, and every program that the hook
-    # starts inherits them. A test that runs `git init` in a temp repo then aims
-    # at THIS repo and can rewrite its index and branch. Every cargo command
-    # here runs through `without_git_environment`. It removes the whole GIT_
-    # prefix and never a list of names. Rust spawns of this workspace shed the
-    # same variables through the crate `childenv`, and clippy makes its
-    # constructors mandatory. The runner is the only layer for code that other
-    # crates own, such as the build script of a dependency.
-    #
-    # CLICOLOR_FORCE=1 makes the `colored` crate paint whatever the run writes
-    # to. Without it, `colored` paints only when file descriptor 1 is a
-    # terminal, so a test that compares painted output against plain text
-    # passes in a redirected run and fails under a hand-typed commit, where the
-    # hook passes its terminal straight through. That is a deterministic result
-    # on a condition the test does not control, and it stays hidden until
-    # somebody commits from a terminal. Forcing the codes on makes the gate
-    # strictly stricter: such a test now fails on every commit. A test that
-    # asserts on rendered text must compare visible glyphs, through the
-    # `testcolor` crate — see "Colored Output in Tests" in CLAUDE.md.
-    #
-    # This does not defeat a tool that decides its own color output. A manual
-    # `colored::control::set_override` beats CLICOLOR_FORCE, so `gsw --no-color`
-    # and `seescc` under NO_COLOR still print plain text, and
-    # `testcolor::with_forced_ansi` still forces the codes on.
-    without_git_environment env CLICOLOR_FORCE=1 cargo test --workspace
+# Each path that the commit adds, deletes, changes, or gives a new type (a file
+# that becomes a symbolic link), one on each line. The list takes no
+# --diff-filter, because a status that a filter leaves out hides its path from
+# each block that reads the list. git diff finds renames by default, and
+# --name-only then prints only the new path of a move. --no-renames shows a
+# move as a deletion of the old path and an addition of the new path, so a
+# block that matches the old path sees a move out of it. The Rust block, the
+# index block, the msgs block, the plugin block and the ic-inline block below
+# read this list, each through staged_path_matches.
+staged_paths_with_deletions() {
+    git diff --cached --name-only --no-renames
+}
+
+# The list, read one time. Under `set -e`, a failed git diff stops the hook
+# here, so no block reads a list that git did not finish.
+staged_paths="$(staged_paths_with_deletions)"
+
+# Succeed when a line of the list matches the extended regular expression $1.
+#
+# grep -q stops at its first match, so in a large list the writer of a pipe
+# into it still has paths to write, and it gets SIGPIPE. Under
+# `set -o pipefail`, the pipeline is then false, and the block runs no gate
+# and says nothing: a commit that staged some thousand paths and Cargo.lock
+# ran no Rust gate in this way. Dash has no pipefail, but bash has it, so a
+# block must not send the list through a pipe into grep.
+#
+# A here-document is not a pipeline. The status of the command is the status
+# of grep, and a writer that the shell starts for a long document is not part
+# of that status. Do not write `| grep -E ... >/dev/null` instead of -q:
+# GNU grep also stops at its first match when its output is /dev/null. Husky
+# starts this file with `sh`, so the bash here-string `<<<` is not available.
+staged_path_matches() {
+    grep -qE -- "$1" <<EOF
+$staged_paths
+EOF
+}
+
+# The Rust block reads staged_paths_with_deletions: a deletion of a Rust file,
+# a move of it to a path that is not Rust, or a link in its place leaves each
+# `mod` item that names the file without its file, and the build of the tree
+# then fails.
+if staged_path_matches '\.rs$|(^|/)Cargo\.(toml|lock)$|^(rustfmt|rust-toolchain)\.toml$|^scripts/rust-checks\.sh$'; then
+    echo "pre-commit: running scripts/rust-checks.sh"
+    ./scripts/rust-checks.sh
     rust_gate_ran=yes
 fi
 
@@ -98,11 +95,61 @@ fi
 # fraction of the Rust block. The rust_gate_ran guard keeps a commit that
 # touches Rust and an index from running the same test twice.
 #
-# --diff-filter carries D on top of ACMR: deleting an index outright is the
-# fault this catches, not only editing one. The same git-env scrub as the gate
-# above keeps the two symmetric.
+# The block reads staged_paths_with_deletions: deleting or moving an index is
+# the fault this catches, not only editing one. The same
+# `without_git_environment` as each cargo command of scripts/rust-checks.sh
+# keeps the two symmetric.
 if [ "${rust_gate_ran:-}" != yes ] &&
-    git diff --cached --name-only --diff-filter=ACMRD | grep -qE '^(README|TLDR)\.md$'; then
+    staged_path_matches '^(README|TLDR)\.md$'; then
     echo "pre-commit: running cargo test -p repo-guards --test tool_index_coverage"
     without_git_environment cargo test -p repo-guards --test tool_index_coverage
+fi
+
+# The msgs frontend is a TypeScript package, and no Rust gate reads it. A
+# commit that stages a file under it, or under the scripts of msgs, runs its
+# type check and its tests. The install is frozen,
+# so the gate never changes the lockfile, and offline-first, so a warm store
+# needs no network.
+#
+# The block reads staged_paths_with_deletions, as the index gate above does: a
+# move of a file out of the frontend, a deletion, or a link in its place breaks
+# each import of that file as surely as an edit can.
+if staged_path_matches '^src/msgs/(frontend|scripts)/'; then
+    msgs_frontend="$(dirname "$0")/../src/msgs/frontend"
+    echo "pre-commit: running the msgs frontend checks (tsc --noEmit, vitest run)"
+    without_git_environment pnpm --dir "$msgs_frontend" install --frozen-lockfile --prefer-offline
+    without_git_environment pnpm --dir "$msgs_frontend" run check
+fi
+
+# The Claude Code plugins under plugins/ are TypeScript, and the Rust gate above
+# reads none of them. A commit that stages a file of a plugin, the marketplace
+# file that lists them, or scripts/plugin-checks.sh, therefore runs
+# scripts/plugin-checks.sh. CI runs the same script. Its header gives each
+# check and the reason for it.
+#
+# The block reads staged_paths_with_deletions, as the index gate above does:
+# deleting a file of a plugin, or moving it out, can break the plugin as surely
+# as an edit can.
+if staged_path_matches '^(plugins/|\.claude-plugin/)|^scripts/plugin-checks\.sh$'; then
+    echo "pre-commit: running scripts/plugin-checks.sh"
+    ./scripts/plugin-checks.sh
+fi
+
+# The test emit_rgba_prints_the_json_that_the_plugin_tests_hold of ic reads
+# plugins/ic-inline/tests/fixture.png and the FIXTURE_JSON of the plugin tests,
+# and holds that copy to the real output of `ic --emit-rgba`. The sandbox of
+# `claude plugin test` runs no process, so the plugin block above cannot see a
+# stale copy. Without this block, such a commit passes, and the next commit
+# that stages a Rust file fails in a change that did not cause it.
+#
+# It runs the whole test target, not the one test by name: a filter that
+# matches no test passes, so a rename of the test would leave the block a
+# no-op. The rust_gate_ran guard keeps a commit that touches Rust from running
+# the target twice, because the workspace tests hold it. The block reads
+# staged_paths_with_deletions, because the test names the old paths, so a
+# deletion or a move of a file of the plugin breaks it as an edit can.
+if [ "${rust_gate_ran:-}" != yes ] &&
+    staged_path_matches '^plugins/ic-inline/'; then
+    echo "pre-commit: running cargo test -p ic --test emit-rgba"
+    without_git_environment cargo test -p ic --test emit-rgba
 fi

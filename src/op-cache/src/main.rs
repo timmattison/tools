@@ -30,10 +30,19 @@ enum Commands {
         /// Where to write the binary file
         output_path: String,
     },
-    /// Remove a credential from the cache (next read re-fetches from 1Password)
+    /// Remove a credential and its cached field lists from the cache (the next
+    /// read or list-fields re-fetches from 1Password)
     Invalidate {
         /// 1Password path to invalidate
         op_path: String,
+    },
+    /// List fields matching a prefix from a 1Password item
+    ListFields {
+        /// 1Password item path (e.g., "op://Private/ProtonVPN WireGuard key")
+        op_path: String,
+        /// Field name prefix to filter by (e.g., "credential")
+        #[arg(long, default_value = "credential")]
+        prefix: String,
     },
     /// Remove the entire cache file
     Clear,
@@ -66,6 +75,15 @@ fn run(cli: Cli) -> op_cache::Result<()> {
             let path = OpPath::new(&op_path)?;
             let resolved = cache.read_binary(&path, output_path.as_ref())?;
             print!("{}", resolved.display());
+        }
+        Commands::ListFields { op_path, prefix } => {
+            let cache = OpCache::new()?;
+            let path = OpPath::new(&op_path)?;
+            let fields = cache.read_item_fields(&path, &prefix)?;
+            eprintln!("Fields matching \"{}\" ({}):", prefix, fields.len());
+            for field in &fields {
+                println!("  {}", field.label);
+            }
         }
         Commands::Invalidate { op_path } => {
             let path = OpPath::new(&op_path)?;

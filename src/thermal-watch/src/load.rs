@@ -8,6 +8,7 @@
 //! calls [`Load::stop`]. The workers are threads rather than processes, so they
 //! also end when the process ends. Neither guarantee depends on the other.
 
+#[cfg(target_os = "macos")]
 use std::ffi::CString;
 use std::hint::black_box;
 use std::num::NonZeroUsize;
@@ -117,6 +118,7 @@ pub fn performance_core_count() -> usize {
 ///
 /// A name the kernel does not publish gives `None`, which is how a machine with
 /// no performance core level reports itself.
+#[cfg(target_os = "macos")]
 fn sysctl_usize(name: &str) -> Option<usize> {
     let key = CString::new(name).ok()?;
     let mut value: u32 = 0;
@@ -141,4 +143,14 @@ fn sysctl_usize(name: &str) -> Option<usize> {
         return None;
     }
     Some(value as usize)
+}
+
+/// Read one integer sysctl by name, on a platform that has no read by name.
+///
+/// Linux and the other platforms give no `sysctlbyname`, thus each read gives
+/// `None`, and [`performance_core_count`] falls back to the count of cores that
+/// the standard library reports.
+#[cfg(not(target_os = "macos"))]
+fn sysctl_usize(_name: &str) -> Option<usize> {
+    None
 }

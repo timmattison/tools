@@ -1,5 +1,7 @@
 # Fun tools written by Tim Mattison
 
+[![CI](https://github.com/timmattison/tools/actions/workflows/ci.yml/badge.svg)](https://github.com/timmattison/tools/actions/workflows/ci.yml)
+
 I started this repo forever ago (2014!) to hold some tools I needed at the time. I converted the tools from ~~Golang~~
 to Rust for fun, and that conversion is now complete: no Go is left in this repository.
 
@@ -99,7 +101,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
 ### runlimit
 A shared Rust library that runs a child program with a time limit. It drains stdout and stderr on reader threads,
 so a chatty child cannot fill a pipe. It kills and reaps a child that does not finish in time, so a hung child
-cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
+cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
 
 ## The tools
 
@@ -174,18 +176,6 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
       moving lots of files is shitty. Much simpler than `find ... -exec mv`, especially for common tasks like moving
       all files of a certain type. Collision-safe by default and handles moves across volumes (where `rename` fails).
     - To install: `cargo install --git https://github.com/timmattison/tools bm`
-- localnext
-    - Runs statically compiled NextJS applications locally. You'll need to build your code and get the magic `out`
-      directory by adding `output: 'export'` to your `next.config.mjs` file. This was written to work with [the
-      templates I was testing at the time](https://github.com/timmattison/material-ui-react-templates). Run it from
-      the project directory or from inside `out`; either way it serves the same directory. Extensionless routes
-      resolve to their `.html` file, and anything it cannot find falls back to `index.html`. The listening port is
-      derived automatically (the same algorithm as `portplz`): inside a git repository from the repository name, the
-      branch, and the current user — the project directory plays no part there — or, outside one, from the directory
-      basename and the current user; either way it stays stable across runs. Two exports from the same repository on
-      the same branch derive the same port, so the second one needs `-p/--port`. Binds `127.0.0.1`. Answers HTTP
-      byte-range requests, so an exported `<video>`/`<audio>` element seeks instead of re-downloading the whole file.
-    - To install: `cargo install --git https://github.com/timmattison/tools localnext`
 - unescapeboard
     - Waits for text with `\\"` in it to be put on the clipboard and then unescapes one level of it.
     - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
@@ -237,6 +227,10 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
       so a given project always serves on a stable port and two users on one machine don't collide; override it with
       `-p/--port`. Binds `127.0.0.1` by default — use `--bind 0.0.0.0` to expose it on the LAN. Answers HTTP
       byte-range requests, so a served `<video>`/`<audio>` file seeks instead of re-downloading from the start.
+    - `sirn` does not try `<path>.html` when `<path>` does not exist, thus a static Next.js export (the `out`
+      directory of `output: 'export'`) needs a server that does, for example
+      `pnpm dlx serve out --listen tcp://127.0.0.1:3000`. Without `--listen`, `serve` binds every interface and puts
+      the export on the LAN.
     - To install: `cargo install --git https://github.com/timmattison/tools sirn`
 - uuidplz
     - Generates UUIDs. With no input it prints a random v4 UUID. Given a string or a file it seeds a name-based
@@ -307,6 +301,13 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     - A fast terminal image and video display utility, designed as a high-performance alternative to `imgcat`. Supports
       multiple image and video formats, resizing with aspect ratio preservation, and reading from files or stdin. Video support requires ffmpeg.
     - To install: `cargo install --git https://github.com/timmattison/tools ic`
+    - `ic --emit-rgba 640x480 photo.jpg` prints the decoded pixels as JSON for a program that draws the picture itself.
+      The [`ic-inline`](plugins/ic-inline/README.md) Claude Code plugin uses it to show pictures inline in the transcript:
+      `/plugin install ic-inline --marketplace timmattison/tools`
+    - `ic --diff before.png after.png` compares two images pixel by pixel and shows one picture of the differences.
+      `--diff-mode` selects red boxes around each region, a red highlight on the first image (the default), or a mask.
+      The `ic-inline` plugin shows the same picture in the transcript: `/ic diff before.png after.png` for you,
+      and the tool `show_diff` for Claude.
 - inscribe
     - Automatically generates clear and consistent git commit messages using Claude AI. Analyzes staged changes and creates
       conventional commit messages. Supports credential storage in system credential managers (Keychain on macOS, Credential
@@ -402,6 +403,17 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
 - wl
     - Shows which process is listening on a given port. Useful for identifying what program is using a specific port
       on your system. Supports verbose output to show detailed socket information.
+    - Without root, `wl` sees only the processes that you own. Run it under `sudo` for a complete answer. When a run
+      without root names no process, `wl` writes a note about this limit to standard error, unless the port is
+      free.
+    - `wl` gives one of these answers:
+        - `PID: … Process: … Socket: …`, one line for each process that it sees on the port.
+        - `Port <port> is in use, but no owning process is visible to the current user.` The kernel's list of
+          listening sockets holds the port, and a process that `wl` cannot see owns it.
+        - `No processes listening on port <port>`. A complete read of that list found no listener on the port.
+        - `Cannot tell whether port <port> is in use`. `wl` reads that list on macOS and Linux only, so this is the
+          answer on each other platform, and also when the read does not complete.
+        - `Error getting listeners`, with exit status 1, when `wl` cannot list the processes at all.
     - To install: `cargo install --git https://github.com/timmattison/tools wl`
 - wolly
     - Wake-on-LAN tool to remotely wake computers by sending magic packets. Features automatic subnet broadcast
@@ -1043,14 +1055,21 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
   - To install: `cargo install --git https://github.com/timmattison/tools beta`
 - vpn-tunnel
   - Generates Docker-based VPN tunnels using gluetun + ProtonVPN + WireGuard. Produces a ready-to-run
-    `docker-compose.yml` plus helper scripts; pulls the WireGuard credential from 1Password via
-    op-cache. Supports per-city pinning or US-wide IP diversity and configurable container prefixes.
+    `docker-compose.yml` plus helper scripts. Reads the `credential*` fields of a 1Password item
+    through op-cache and picks the first WireGuard credential that no running tunnel holds. A
+    regenerated directory keeps the credential that its `.env` names, unless a tunnel of another
+    container name holds it. A directory whose `.env` names no credential, for example one generated
+    before that line existed, keeps the credential whose key its own running tunnel holds.
+    `generate` stops when docker cannot report the running tunnels.
+    Supports per-city pinning or US-wide IP diversity and configurable container prefixes.
   - To install: `cargo install --git https://github.com/timmattison/tools vpn-tunnel`
 - op-cache
   - 1Password credential cache with retry logic, atomic writes, and worktree support. Wraps `op read`
     so repeated calls don't re-hit 1Password (or trigger Touch ID) for every secret. Supports text and
     binary secrets, env-var overrides, cache invalidation, and includes worktree hooks for automatic
-    setup. Required by other tools in this repo (e.g. `vpn-tunnel`).
+    setup. Its `list-fields` subcommand lists the fields of a 1Password item whose label matches a
+    prefix, which is how `vpn-tunnel` finds the several WireGuard credentials that live on one item.
+    Required by other tools in this repo (e.g. `vpn-tunnel`).
   - The 1Password prompt names only the application above the caller. In a zellij pane, it names
     "zellij", whichever of the sessions asked. Thus, before each run of `op`, op-cache names the
     caller itself. A cache hit and an `--env-var` override run no `op`, thus they do neither step.
@@ -1072,13 +1091,14 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
   - op-cache writes an audit trail to `$XDG_STATE_HOME/op-cache/audit.jsonl`. When
     `XDG_STATE_HOME` is unset, empty, or relative, the file is `~/.local/state/op-cache/audit.jsonl`.
     The audit trail has no switch. Each line is one JSON record, of one of two kinds:
-    - `op_start`, before `op` runs: the time, the `request_id`, the attempt, the operation (`read` or
-      `read-binary`), the reference, the working directory, the cache file, the zellij session and
-      pane, `TERM_PROGRAM`, the Claude Code session, and the chain of ancestor processes (at most 32,
-      each command line cut to 1024 bytes). The Claude Code session is the nearest ancestor that has
-      a file `sessions/<pid>.json` in `$CLAUDE_CONFIG_DIR`, else in `~/.claude`. A file whose
-      `startedAt` is earlier than the start of that ancestor is skipped, because that PID now belongs
-      to a different process. The lookup then continues to the next ancestor.
+    - `op_start`, before `op` runs: the time, the `request_id`, the attempt, the operation (`read`,
+      `read-binary`, or `item-get` for `list-fields`), the reference, the working directory, the
+      cache file, the zellij session and pane, `TERM_PROGRAM`, the Claude Code session, and the chain
+      of ancestor processes (at most 32, each command line cut to 1024 bytes). The Claude Code
+      session is the nearest ancestor that has a file `sessions/<pid>.json` in `$CLAUDE_CONFIG_DIR`,
+      else in `~/.claude`. A file whose `startedAt` is earlier than the start of that ancestor is
+      skipped, because that PID now belongs to a different process. The lookup then continues to the
+      next ancestor.
     - `op_end`, after `op` returns, with the same `request_id`: the `outcome` (`ok`, `empty`,
       `failed`, or `spawn_error`), the `exit_code`, and the `duration_ms`. An `empty` outcome means
       `op` exited 0 but gave no value, and op-cache tries again as after a failure. An `empty` or a
@@ -2237,8 +2257,10 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
 - faulte (fault rate)
   - Ranks the processes of a Mac by page faults per second over an interval, and gives a total
     line for the Claude Code sessions. The header adds the swap traffic, the size of the
-    compressor, and the swap in use over the same sample. `faulte kill` stops the old idle Claude
-    Code sessions after a question. It supports macOS only. See below for the full entry.
+    compressor, and the swap in use over the same sample. `faulte check` says in seconds if the
+    system time is high, and if memory churn or process churn occurs at the same time.
+    `faulte kill` stops the old idle Claude Code sessions after a question. `faulte tui` is a live
+    full-screen view with a history. It supports macOS only. See below for the full entry.
   - To install: `cargo install --git https://github.com/timmattison/tools faulte`
 
 - ha (hot actions)
@@ -2844,6 +2866,95 @@ cannot hang the caller. Used by `cwt`, `gsw`, and `ha`.
     processes, such as 176 Claude Code sessions, then count as one cause. It uses no language
     model. It supports macOS only. See below for the full entry.
   - To install: `cargo install --git https://github.com/timmattison/tools whyslow`
+- portcul (portcullis)
+  - Shows each process that listens on a port in a table in the terminal. Move with the arrow keys or `j`/`k`.
+    Press `d` or Enter to send SIGTERM to the selected process after a confirmation, and press `r` to read the
+    table again. The table refreshes each 2 s, and `--refresh <seconds>` changes the interval (0.1 s or more).
+  - `portcul list [port]` prints one line for each process and address. `portcul kill <port>` sends SIGTERM to
+    each process on the port after a confirmation, and `--yes` skips the confirmation. After the confirmation,
+    `kill` reads the list again, and it sends nothing to a process that no longer listens on the port. `list`
+    and `kill` exit with status 1 when no process listens on the port, and `kill` also exits with status 1 when a
+    kill fails or a process no longer listens.
+  - To install: `cargo install --git https://github.com/timmattison/tools portcul`
+- workit
+  - Builds a Cargo workspace manifest out of a directory tree. It walks the tree, finds every
+    `Cargo.toml` that declares a package and no workspace of its own, and writes those directories
+    into the `[workspace]` members list — rewriting the members of a manifest that is already there
+    and leaving the rest of it alone, and naming on stderr every member the walk did not find
+    before that rewrite drops it. The manifest lands beside the tree that was scanned, so
+    `workit --path ~/code/other` writes `~/code/other/Cargo.toml` and never touches the directory
+    the run was started from; `--output` names a file of its own instead. A member is written
+    relative to the directory that holds the manifest, because that is the directory cargo resolves
+    a member against, so `--output` decides what the members read. A package in that directory
+    itself is written as `.`, which is what cargo calls it. Cargo holds a member only where
+    that manifest sits above the member on the file system, and it refuses an absolute path and a
+    `../` path alike, so `--output` has to name a file at or above the tree that was scanned. A run
+    that meets a package the manifest directory does not hold refuses, names every such package,
+    and writes nothing — it used to write those packages as absolute paths, and no checkout could
+    load the manifest that came out, not even the one that wrote it. The one file left out of the members
+    list is the manifest the run writes, because no workspace holds itself: a package at the
+    search path is a member of a manifest that lands elsewhere. Two packages that share a name are
+    refused rather than written, with the paths that hold each one, because a workspace cannot
+    carry the same package name twice — the report is ordered by package name and by path, so two
+    runs over one tree read the same. A directory named `target` or `node_modules` stays out of
+    the walk, and so does a package inside a git worktree that lies *below* the search path, which
+    is a second checkout of packages the repository already holds — where the search path itself
+    sits is never matched, so a run from inside a worktree still finds every package under it, and
+    a run that found packages and then filtered every one of them out says so and names
+    `--include-worktrees`. A package under a nested repository of its own is not a second checkout
+    and stays in, also when its git directory lies elsewhere, as after
+    `git init --separate-git-dir`, and also when its `.git` file names no git directory, at
+    which git itself stops. A package in a submodule goes with the checkout that holds the submodule: it
+    stays in under the main checkout, and it is left out under a worktree below the search path. An exclusion names a whole directory below the search path, so
+    `targets` and `node_modules_backup` stay in, and the search path itself is never matched
+    against the list — `workit --path ~/code/target/myproj` searches that tree like any other. An
+    entry it cannot use — a directory whose mode keeps it out, a `Cargo.toml` nobody can parse, a
+    package that states no name — is named on stderr and skipped rather than ending the walk, and
+    the number skipped is stated once at the end; the packages it did find are still the answer. A
+    package with no name never reaches the members list, because cargo refuses a whole workspace
+    that lists one — it used to be written in like any other, and the run reported a workspace cargo
+    loads no part of. A run that skipped something and has no package left to list never answered
+    the question it was asked, so that one fails instead of reporting an empty tree.
+  - Usage: `workit`, `workit --path ~/code/tools` (writes `~/code/tools/Cargo.toml`),
+    `workit --path packages --output Cargo.toml` (scans `packages/` and writes the manifest above
+    it, so every member reads `packages/<name>`),
+    `workit --dry-run` (prints the manifest it would write and touches nothing),
+    `workit --exclude vendor`, `workit --include-worktrees`,
+    `workit --no-default-excludes`.
+  - To install: `cargo install --git https://github.com/timmattison/tools workit`
+
+- drun (Docker run on the least busy host)
+  - Runs a Docker container on the least busy of your Docker hosts, and finds the container again
+    later. Use it when this computer is short of memory and other computers on the network can
+    run the containers. A host is a Docker context, usually a computer that `docker` connects to
+    through SSH.
+  - `drun run` takes the arguments of `docker run`. It starts a small `busybox` container on each
+    host at the same time, reads the free memory and the load average, and runs the container on
+    the host whose fullest resource is the least full. Without `-d`, the terminal goes to the
+    container, and `drun` exits with the exit status of the container. With `-d`, `drun` prints
+    `<host> <name>`.
+  - `drun` keeps no record of its own. `drun ps`, `drun status`, `drun logs`, `drun wait`,
+    `drun exec`, `drun cp`, and `drun rm` ask every host for its containers and use the one host
+    that has the named container. Each container gets a name that no host uses, and the label
+    `drun.managed=true`.
+  - `drun hosts` shows how busy each host is. `drun pick` prints the host that `drun` chooses,
+    for `docker --context "$(drun pick)" compose up -d`.
+  - `drun buildx create` puts a new buildx builder on the least busy host, so each build on the
+    builder runs there and not on this computer. `drun builder create` does the same.
+  - A command that `drun` does not know, as `drun buildx build` or `drun login`, goes to the
+    docker of this computer without a change, so a script can run `drun` in place of `docker`.
+  - Name the hosts in `DRUN_CONTEXTS=box-a,box-b` or in `~/.config/drun/config.toml`.
+    [src/drun/README.md](src/drun/README.md) gives the setup of the hosts, the reuse of SSH
+    connections, what changes when a container runs on another computer, and how to build
+    images on a host.
+  - Usage: `drun run -d -p 8080:80 nginx`, `drun run --rm alpine uname -a`, `drun ps`,
+    `drun status quirky-otter-4821`, `drun logs -f quirky-otter-4821`,
+    `drun wait quirky-otter-4821`, `drun cp quirky-otter-4821:/out/result.json .`,
+    `drun rm quirky-otter-4821`, `drun hosts`,
+    `drun buildx create --name multiarch --driver docker-container --use`
+  - `drun check-flags` compares the flag tables of `drun` with the help of the docker CLI on this
+    computer. Run it after each update of Docker.
+  - To install: `cargo install --git https://github.com/timmattison/tools drun`
 
 ## dirhash
 
@@ -4667,7 +4778,7 @@ A session started under a different account is found automatically: when the id 
 crap 57570685-2d64-4431-8ab6-c021a12fa1af --user alice
 ```
 
-The name resolves as a sibling of your home (`<home>/../<name>` — `/Users/alice` on macOS, `/home/alice` on Linux). Because a transcript that belongs to another user can never be found by a `claude --resume` you run yourself, `crap` copies it into your own tree and resumes it as a `--fork-session` (a fresh id) at its original recorded directory — the foreign transcript is only ever read, and every write lands under your home. The transient copy is removed once Claude writes the forked transcript, the same way `--here` cleans up its import (a symlink for a same-user source, a copy for a cross-user one). Because the fork only reads the original, `--user` is safe even while that session is still live in the other user's account. A `--user` naming your own account is a same-user hit and simply resumes in place.
+The name resolves as a sibling of your home (`<home>/../<name>` — `/Users/alice` on macOS, `/home/alice` on Linux). Because a transcript that belongs to another user can never be found by a `claude --resume` you run yourself, `crap` copies it into your own tree and resumes it as a `--fork-session` (a fresh id) at its original recorded directory — the foreign transcript is only ever read, and every write lands under your home. The transient copy is removed once Claude writes the forked transcript, the same way `--here` cleans up its import (a symlink for a same-user source, a copy for a cross-user one). Because the fork only reads the original, `--user` is safe even while that session is still live in the other user's account. A `--user` naming your own account is a same-user hit and simply resumes in place. That includes another name for your own home: a different case on a case-insensitive filesystem (`--user Tim` for `/Users/tim` on the macOS default, or for `/home/tim` on an ext4 casefold, CIFS or ntfs3 home on Linux), or a symlinked alias. `crap` compares the trees themselves (the device and the inode of each), not the names or the resolved paths.
 
 Most of the time you don't need the flag at all. With no `--user`, `crap <id>` searches **your own** tree first — byte-for-byte the same fast path as always — and only if the id isn't there does it automatically fall back to scanning every sibling home that has run Claude, resuming the first readable match exactly as `--user` would (copy into your own tree, fork at the original directory). The fallback is **self-first**, so an id that happens to exist in two accounts always resolves to *your* copy, never the foreign one. Reach for `--user <name>` only when you want to force a specific account — it skips your own tree entirely, which is also how you disambiguate on purpose.
 
@@ -4880,7 +4991,7 @@ If you installed the shell function before `--forks` existed, run `crap --shell-
 - `-f, --force`: Resume even if the session appears to be running in another process
 - `--here`: Resume the session in the current directory (as a forked, new-id session) instead of its original one; also accepts a cross-user source (combined with `--user`), which is copied into your own tree rather than symlinked
 - `--expand`: Resume a fork of the session with each compaction undone, so `/rewind` in the fork lists the prompts from before each compaction. With `--here`, the fork runs in the current directory. Without it, the fork runs in the original directory. It works with `--user`, it ignores `--force`, and it prints the size of the history on stderr. See [Resume with the full history](#resume-with-the-full-history---expand)
-- `--user <name>`: Resume another user's session from a specific account — **not required** for a cross-user resume, since the no-flag path already falls back on its own; reach for it when you want to force one account in particular. `<name>` is resolved as a sibling of your home (`<home>/../<name>` — `/Users/<name>` on macOS, `/home/<name>` on Linux), and only that user's `~/.claude/projects` tree is searched (your own is skipped, so `--user` also disambiguates an id on purpose). The foreign transcript is copied into your own tree and resumed as a fork (fresh id) at its original directory — or in the current directory instead when combined with `--here` — the original is only ever read. Naming your own account is a same-user hit and resumes in place
+- `--user <name>`: Resume another user's session from a specific account — **not required** for a cross-user resume, since the no-flag path already falls back on its own; reach for it when you want to force one account in particular. `<name>` is resolved as a sibling of your home (`<home>/../<name>` — `/Users/<name>` on macOS, `/home/<name>` on Linux), and only that user's `~/.claude/projects` tree is searched (your own is skipped, so `--user` also disambiguates an id on purpose). The foreign transcript is copied into your own tree and resumed as a fork (fresh id) at its original directory — or in the current directory instead when combined with `--here` — the original is only ever read. Naming your own account is a same-user hit and resumes in place, also by another name for the same home (a different case on a case-insensitive filesystem, or a symlinked alias)
 - `--status`: Print the session's conversational state (`waiting-for-user`, `busy`, `awaiting-assistant`, or `empty`; or `<status> (live, pid <pid>)` when open elsewhere) and exit, without resuming. With no id, lists every session for the current directory with its state and start/last times
 - `--json`: With `--status`, emit JSON instead of text (one object for an id, an array for the directory listing)
 - `--forks`: Show what the fork log knows about the session — each fork of it, with `saved` or `not saved`, and the chain of sessions it was forked from — and exit, without resuming
@@ -5231,19 +5342,38 @@ On 2026-09-17 and 2026-09-18, this Mac spent 78% of its time in the kernel. 34 M
 
 213 Claude Code processes made 90% of all page faults in that sample. No single one of them was the cause: the median session made 23,000 faults in the 20 seconds, and the `node` and `vitest` processes of a running pre-commit hook made 0.4% together. The answer was the sum of 213 small rates, and no row of a table says a sum. That is why `faulte` prints one total line for the Claude Code sessions, above the table. 86 of the 213 sessions were older than 7 days, and that is why `faulte kill` exists.
 
+### Is this the problem now?
+
+`faulte check` gives one verdict in 5 seconds. It reads the CPU counters and the compressor counters of the kernel, and it starts one short process to learn the newest process number. It runs no `top` and no `ps`, thus it works when one `ps` takes 13 seconds.
+
+| Verdict | Meaning | Exit code |
+| --- | --- | --- |
+| `OK` | System time is below 30% of all CPU time. | 0 |
+| `MEMORY CHURN` | System time is at least 30%, and the compressor compresses and decompresses at least 50,000 pages each second. | 1 |
+| `PROCESS CHURN` | System time is at least 30%, the compressor does not reach its limit in both directions, and at least 150 processes start each second. | 1 |
+| `OTHER SYSTEM TIME` | System time is at least 30%, the compressor does not reach its limit in both directions, and fewer than 150 processes start each second. | 1 |
+
+An error gives the exit code 2. `faulte check --watch` prints one line for each interval until you stop it.
+
+On 2026-11-08, at 0% idle, this Mac showed two states. With 32 GB in the compressor, system time was 52% to 66%, and it followed the rate of compressions (correlation 0.88, over 12 samples of 5 seconds). It did not follow the load average (0.32). Each second, 193 to 444 new processes started. With 16 GB in the compressor and at most 51,323 compressions each second, system time was still 42% to 56%, with 257 to 490 new processes each second. The limits come from the bad samples of that day. No sample of a quiet period set them.
+
 ### Basic Usage
 
 ```bash
 faulte
 faulte --interval 20s --limit 40
+faulte check
+faulte check --watch --interval 10s
 faulte kill
 faulte kill --older-than 3d --idle-for 1h --max 5
+faulte tui
+faulte tui --interval 2s
 ```
 
 ### Options
 
-- `--interval <DURATION>`: The time to sample the page faults of each process, for example `5s`, `10m`, `2h`, or `7d`. A bare number is a number of seconds. Defaults to `5s`. Zero is refused, because a sample of no time measures nothing.
-- `--limit <N>`: The number of rows that the table shows. Defaults to 25. One line under the table counts the rows that the limit hid, and gives their share of all faults, because the limit hides the small rates and the small rates were the load. The flag belongs to the ranking alone: `faulte kill` shows every candidate of its plan, and refuses `--limit` rather than take it and ignore it.
+- `--interval <DURATION>`: The length of the sample, for example `5s`, `10m`, `2h`, or `7d`. A bare number is a number of seconds. The ranking, `faulte kill`, and each sample of `faulte tui` count the page faults of each process over this time. `faulte check` reads the kernel counters at the start and at the end of this time. Defaults to `5s`. Zero is refused, because a sample of no time measures nothing.
+- `--limit <N>`: The number of rows that the table shows. Defaults to 25. One line under the table counts the rows that the limit hid, and gives their share of all faults, because the limit hides the small rates and the small rates were the load. The flag belongs to the ranking alone: `faulte kill` shows every candidate of its plan, and refuses `--limit` after its name. Before the name, as in `faulte --limit 3 kill`, the flag is a flag of `faulte` itself, and `faulte kill` takes it and ignores it. That spelling keeps the exit code that it had before `faulte tui`.
 - `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
 - `-h`, `--help`: Print the usage.
 
@@ -5326,6 +5456,62 @@ Both parsers fail closed. A header row that is not the one `faulte` asked for, a
 
 The registry of Claude Code is the one fact that stays out of reach. The `~/.claude/sessions` directory of the other account has the mode `0700`. A Claude Code process of another account therefore gives its fault rate, its memory and its age, and `other account — run with sudo` in place of the session, the state and the directory. Under `sudo`, `faulte` reads the registry in the home directory of each owner, and `faulte kill` can stop the sessions of every account. `faulte` never runs `sudo` itself, the same as `crap`.
 
+### `faulte tui`
+
+`faulte tui` opens a full-screen view that keeps a history. `faulte` takes one sample and exits. The view takes a new sample all the time, and each new ranking replaces the old one. The view keeps every ranking, so a person can go back in time.
+
+```text
+faulte tui
+faulte tui --interval 2s
+```
+
+The table has the same columns as `faulte`, and the header has the same lines. It shows every process that made at least one fault. The `--limit` flag does not apply, because a limit hides the small rates, and the small rates were the load. `faulte tui` refuses `--limit`. Above the table, a timeline shows the fault rate over the whole history. Each cell of the timeline shows the highest rate of its slice, so a spike stays visible on a narrow terminal. A second row shows the swap traffic. The two rows are separate, because faults and swap are two separate questions.
+
+In this section, a **frame** is the ranking and the memory counters of one sample. A **gap** is a time that the view tried to measure and did not measure. A failed read makes a gap with its reason. A gap has its own glyph on the timeline, and it is never the lowest bar. The view continues after a failed read.
+
+The view is one sample behind the clock. A sample is complete when the header of the next sample arrives. A banner states the time of the frame on the screen. When the frame is not the live frame, the banner says so in words, with the clock time and the age of the frame. The age and the session state of each row are those of that frame. The sampler continues while a person reads the past, so the history has no hole.
+
+| Key | Action |
+| --- | --- |
+| `←` or `h`, `→` or `l` | Move one frame back, or one frame forward |
+| `[`, `]` | Move one minute back, or one minute forward |
+| `Home` | Move to the oldest frame |
+| `End` | Return to the live view |
+| `Esc` | Close the detail view. With no detail view open, return to the live view |
+| `↑` or `k`, `↓` or `j` | Select the row above, or the row below. In the detail view, show the command of the new process from its first line |
+| `PageUp`, `PageDown` | Move the selection by one screen. In the detail view, scroll the command line |
+| `w` | Change the span of the table: one frame, 1 m, 5 m, 15 m, the whole history |
+| `Enter` | Open the detail view of the selected process |
+| `q`, `Ctrl-C` | Quit |
+
+No key uses Shift or another modifier, because a modified arrow key depends on the terminal and on the multiplexer. The keys answer during a sample, because the sampler runs on its own thread. A slow `top` does not freeze the view.
+
+The `w` key ranks the processes over a span that ends at the selected frame, so one table answers "which processes caused the last 5 minutes". A process that exited in the span keeps its row. The rate of a span is the sum of the faults of the process over the frames of the span, divided by the sum of the windows of those frames. A gap adds to neither sum, so the rate counts measured time only. The header of a span states the measured time and the count of gaps. Its skipped line gives the sum of the processes that exited over the frames of the span, and the zombies and the unsampled processes of the newest frame. Those two counts are snapshots, so a sum counts one zombie once for each frame that saw it. The detail view shows the fault rate of one process over the whole history, and its full command line. A reused PID is a different process, so two processes never share one history.
+
+The view marks the rows of `faulte`, `top`, and `ps` that it started. Those rows stay in the totals. No key sends a signal. `faulte kill` keeps its plan and its question.
+
+#### The memory budget
+
+The history lives in memory and ends with the process. A Mac that is short of memory must not lose more memory to its own diagnostic tool. The budget is 64 MiB, and it counts the frames and the command text. The count of frames also has a limit, so the list of the frames takes at most an eighth of the budget. At one frame each 5 s, the budget holds about 8 hours. The oldest frames leave first. If the selected frame leaves, the selection moves to the oldest frame, and the banner says so. The 8 hours is an estimate from one Mac. The budget test holds the limit.
+
+A frame keeps one compact row for each process that made at least one fault. On 2026-11-08, one sample of this Mac had 1,415 rows, and 495 of them had at least one fault. The command lines took 238,203 bytes. A history of full values at one frame each 5 s needs about 340 MB of text each hour.
+
+#### One `top` child
+
+The view runs one `top -l 0 -s <interval> -c d` child for its whole life. The command `faulte` runs `top -l 2` for each window, and each run pays the full start of `top`. That start made a hole in the record. These measurements are from 2026-11-08, at a load average of 125 to 166:
+
+| Measurement | Result |
+| --- | --- |
+| One `top -l 2 -s 5` | 25.02 s of wall time for one window of 9 s |
+| One `top -l 0 -s 2` through a pipe | First sample after 9.42 s, then one more sample each 4.2 s to 6.9 s |
+| One `top -l 0 -s 2` through a pseudo-terminal | First sample after 22.17 s, then one more sample each 4.6 s to 7.0 s |
+
+A pipe is sufficient. The first sample holds the counter since each process started, so the view discards it. Each later sample is one window, and the windows touch. The window of each frame comes from what the samples state, and not from the interval that the person asked for. If the child ends, the sampler starts one new child after one interval, and a gap holds the lost time. When the view ends, the `top` child stops with it.
+
+#### The terminal
+
+`faulte tui` needs a terminal on its input and on its output. If one of them is not a terminal, `faulte tui` prints the reason and exits 1, and it starts no `top`. A quit, a panic, `SIGTERM`, and `SIGHUP` each restore the terminal. The view redraws at any size. On a platform other than macOS, it prints `faulte supports macOS only.` and exits 1.
+
 ### `faulte kill`
 
 `faulte kill` stops Claude Code sessions, and it never selects another kind of process. `pk` does that job. A session is a candidate when all four of these rules are true:
@@ -5374,17 +5560,19 @@ The transcript of a session stays on disk after the stop, so `crap` takes that s
 - **A scheduled wake-up.** A session can be idle and hold a scheduled wake-up, for example a `/loop`. The registry records no wake-up, so `faulte` cannot see one. This is why the plan shows every candidate before the question: `faulte` gives the facts that it has, and the person decides.
 - **The sessions of another account, without root.** They get a row and a fault rate, and `other account — run with sudo` in place of the session fields. In the plan, they get a block of their own with the `sudo faulte kill` command line that includes them, and `faulte kill` never signals them. A count of unreadable sessions is a better answer than silence about them.
 - **A process that the two sources disagree about.** `top` lists no zombie, and `ps` lists no PID 0. A process can also start or stop between the two reads. `faulte` gives PID 0 a row that names `kernel_task`, and it gives every other such process a count in the header. Nothing falls out of the report.
-- **A live display, and another platform.** `faulte` takes one sample and exits. Nothing refreshes. It supports macOS only, because the fault sampler and the counters of the memory system are those of macOS. On another platform it prints `faulte supports macOS only.` and exits 1.
+- **A live display, and another platform.** The ranking and `faulte kill` take one sample and exit. `faulte check --watch` adds one line for each interval, and it redraws nothing. `faulte tui` is the live view, and it keeps a history. It supports macOS only, because the fault sampler and the counters of the memory system are those of macOS. On another platform it prints `faulte supports macOS only.` and exits 1.
 
 ### Exit codes
 
-- `0`: Success. A question that the person declined is a success as well, because `faulte` did what the answer said.
-- `1`: The platform is not macOS, or `faulte kill` found candidates and its input is not a terminal.
-- `2`: A source of this Mac failed, or its output failed a parser, or a stop did not do what the plan said that it would do. `faulte` prints the reason, and it never prints an empty ranking.
+- `0`: Success. A question that the person declined is a success as well, because `faulte` did what the answer said. For `faulte check`, the verdict is `OK`, or the reader of a `--watch` left.
+- `1`: The platform is not macOS, or `faulte check` found a problem, or `faulte kill` found candidates and its input is not a terminal, or `faulte tui` has no terminal on its input or its output.
+- `2`: A source of this Mac failed, or its output failed a parser, or a stop did not do what the plan said that it would do, or `faulte check` could not write its output. `faulte` prints the reason, and it never prints an empty ranking.
 
 ## wdid (what do i do)
 
 Count which tools of this workspace you really use. `wdid` reads the whole shell history through atuin. It gives each tool a use count, the date of the first use and of the last use, and the way you ran it. It also lists the tools that you never used, and the tools that you stopped using.
+
+`wdid defs` gives a second report: one row for each alias and each function of your shell. See [wdid defs: the aliases and the functions](#wdid-defs-the-aliases-and-the-functions).
 
 `atuin stats` cannot answer this question. It ranks the first word of each command. A tool that you run through an alias (`wtm`), through a function (`wt`), after a pipe, or after `sudo` has no count under its own name. `wdid` parses each command line, finds each word in command position, and follows aliases and functions down to the tool.
 
@@ -5399,7 +5587,7 @@ atuin search --filter-mode global --include-duplicates --print0 --timezone +0 \
 
 It does not use `atuin history list`. That command obeys `filter_mode` of your atuin config, and a config with `filter_mode = "session"` gives one row. The search above always gives every row. The times are in UTC.
 
-`wdid` reads the aliases and the functions from your interactive shell (`$SHELL`, zsh or bash). It starts `$SHELL -i -c` with a script that prints them between two unique markers, so text from your startup files does no damage. The shell has 30 seconds. `--no-shell` skips this step.
+`wdid` reads the aliases and the functions from your interactive shell (`$SHELL`, zsh or bash). It starts `$SHELL -i -c` with a script that prints them between two unique markers, so text from your startup files does no damage. The shell has 30 seconds. `--no-shell` skips this step. zsh starts with a temporary `ZDOTDIR` that records the file of each alias, and your startup files run as before (see [The origin and my definitions](#the-origin-and-my-definitions)).
 
 ### What counts
 
@@ -5425,11 +5613,13 @@ wdid --json
 wdid --since 2026-01-01
 wdid --unparsed
 wdid --repo ~/code/tools --no-shell
+cd ~ && wdid   # the workspace that the installed wdid came from
+wdid defs      # the aliases and the functions, in any directory
 ```
 
 ### Options
 
-- `--repo <PATH>`: The cargo workspace to report on. Without it, `wdid` uses the git work tree that holds the current directory. The workspace must have a `Cargo.toml`.
+- `--repo <PATH>`: The cargo workspace to report on. The workspace must have a `Cargo.toml`. Without this option, `wdid` uses the git work tree of the current directory when that work tree has a `Cargo.toml`, else the workspace that the installed `wdid` came from. See [The workspace](#the-workspace).
 - `--since <YYYY-MM-DD>`: Count only the rows from this date on. A row on this date counts. The report says how many rows it left out.
 - `--json`: Print the whole report as one JSON document. It conflicts with `--unparsed`.
 - `--unparsed`: Print the commands that `wdid` could not parse, one line for each (`<rows>`, a tab, the command), the functions that it could not parse, and the alias lines that it could not parse, one line for each. Print no report. In the `--json` document, `shell.unparsed_aliases` is a list of those alias lines.
@@ -5439,7 +5629,42 @@ wdid --repo ~/code/tools --no-shell
 - `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
 - `-h`, `--help`: Print the usage.
 
+These options are for the tools report. `wdid defs` has its own options (see [wdid defs](#wdid-defs-the-aliases-and-the-functions)).
+
 The table fits `COLUMNS` when that variable is set, else the width of the terminal. An error prints `wdid: <reason>` on standard error and exits 1. A usage error exits 2.
+
+### The workspace
+
+`wdid` finds the cargo workspace to report on in this order:
+
+1. `--repo <path>`. If the path is not a cargo workspace, `wdid` stops with an error.
+2. The git work tree of the current directory, when its top has a `Cargo.toml`. In a worktree of a different cargo workspace, `wdid` reports on that workspace.
+3. The workspace that the installed `wdid` came from. Thus `wdid` runs in any directory, for example `~`.
+4. An error. It says why step 2 failed, it gives the reason that step 3 failed, and it names `--repo`.
+
+For step 3, `wdid` reads the record of its own install in `.crates2.json`. `cargo install` keeps that file in its install root: `$CARGO_INSTALL_ROOT`, else `$CARGO_HOME`, else `~/.cargo`.
+
+- A `git+` record comes from `cargo install --git`. It names the repository and the full commit: `wdid 0.1.0 (git+https://github.com/timmattison/tools#12baa4168146b6018d38dbe4f8cace7ed5b4081b)`. cargo keeps a checkout of that commit in `$CARGO_HOME/git/checkouts/<repository name>-<hash>/<short commit>`. The hash is internal to cargo, thus `wdid` looks in each directory under `checkouts` whose name starts with the repository name and `-`. It uses a checkout only when `git rev-parse HEAD` in that checkout gives the full commit of the record. The checkout holds the full history, thus the added dates of the tools are correct.
+- A `path+file` record comes from `cargo install --path`. It names the crate directory. `wdid` uses the cargo workspace that holds that directory, as `cargo locate-project --workspace` gives it.
+
+Step 3 fails when there is no record, when the record names another source (for example the registry), when no checkout of the commit exists, when the checkout is at a different commit, or when the crate directory of a `path+file` record no longer exists. `cargo cache --autoclean` removes the checkouts. To get the checkout back, install `wdid` again. Or name the workspace with `--repo`.
+
+The report names the workspace and the step that found it. The text report ends with a line such as this one:
+
+```text
+Workspace: /Users/me/.cargo/git/checkouts/tools-dda63c64534664e9/12baa41 (the source of the installed wdid, commit 12baa41)
+```
+
+The `--json` document ends with a `workspace` block. `found_by` is `repo_flag`, `work_tree`, `installed_git`, or `installed_path`. An `installed_git` block also holds `url` and `commit`. An `installed_path` block also holds `crate_dir`.
+
+```json
+"workspace": {
+  "root": "/Users/me/.cargo/git/checkouts/tools-dda63c64534664e9/12baa41",
+  "found_by": "installed_git",
+  "url": "https://github.com/timmattison/tools",
+  "commit": "12baa4168146b6018d38dbe4f8cace7ed5b4081b"
+}
+```
 
 ### The three groups
 
@@ -5483,7 +5708,6 @@ Never used, old (added 90 or more days ago):
   sirn
 Never used, new (added less than 90 days ago):
   faulte (added 2026-09-18)
-  localnext (added 2026-09-04)
   occ (added 2026-08-14)
 Idle (no use in the last 180 days):
   update-aws-credentials (218 uses, last use 2025-11-13)
@@ -5493,7 +5717,292 @@ History: 347,212 rows. 4,385 not counted (exit 127). 13 did not parse (wdid --un
 Shell: 276 aliases, 1,267 functions (24 did not parse).
 ```
 
-The excerpt leaves out rows of the table and entries of the groups. `si` is a shell function that runs `nwt -b <branch>`, so each `si` is a use of `nwt`.
+The excerpt leaves out rows of the table and entries of the groups. The run was before `wdid` named its workspace, thus it has no `Workspace:` line. `si` is a shell function that runs `nwt -b <branch>`, so each `si` is a use of `nwt`.
+
+### wdid defs: the aliases and the functions
+
+`wdid defs` reports on each alias and each function of your interactive shell. Use it to find the definitions that you use, the definitions that you can remove, and the definitions that you forgot. The tools report shows an alias or a function only through a tool of the workspace that it runs. `wdid defs` shows each of your definitions, also an alias that runs `git` and a definition with zero uses.
+
+A definition that the shell runs without a typed name, for example a `precmd` hook or the function of a widget that a key starts, gets the state "runs without typing" with its reason. It does not show in "Never used". See [What runs without typing](#what-runs-without-typing).
+
+The report ends with the duplicates and the shadows: aliases with the same value, an alias and a function that do the same thing, an alias that your startup files define more than one time, an alias that hides a function, and a definition that hides a program. Each finding gives the use count of each name, so that you can choose which name to keep. See [Duplicates and shadows](#duplicates-and-shadows).
+
+Each definition gets its origin: the file that defined it. By default, the text report shows only your own definitions. A shell with oh-my-zsh has hundreds of aliases and functions from its plugins and its `lib` files, and those are not yours. `--all` shows each definition, and groups the others by the file that defined them.
+
+`wdid defs` reads the history and the shell definitions as the tools report does. It needs no cargo workspace, and it starts no `cargo` process and no `git` process. Thus it runs in any directory.
+
+```bash
+wdid defs
+wdid defs --all
+wdid defs --json
+wdid defs --since 2026-01-01 --idle-days 90
+```
+
+#### What counts
+
+- A typed alias or a typed function. A zsh global alias counts in each word position where zsh expands it. A zsh suffix alias counts with its marker as its name (`*.md`).
+- An alias at the start of the value of an alias. With `alias wtf='wt -f'` and `alias wt=cwt`, a typed `wtf` is a typed use of `wtf` and a use of `wt` through `wtf`.
+- A function that a function calls, to any depth. With `myf() { helper "$@" }`, a typed `myf` is a typed use of `myf` and a use of `helper` through `myf`. The walk visits each function one time, thus a cycle stops.
+- A function that an alias calls. With `alias g='myf --x'`, a typed `g` is a use of `myf` through `g`.
+
+A use through other definitions names the definition that you typed. With `a` that calls `b` and `b` that calls `c`, a typed `a` gives `c` a use through `a`.
+
+#### What does not count
+
+- An alias in the body of a function. zsh and bash expand each alias in a function body when they read the definition. Thus the body that `wdid` gets holds the value of the alias, not its name, and the alias gets no use from the function.
+- A name in quoted text, a row with exit code 127, and a line that does not parse, as in the tools report.
+- A function whose name starts with `_`. The completion system makes these functions by the hundred, and nobody types them. Only `--all` shows them. A call through such a function still counts: with `f() { _helper }` and `_helper() { g }`, a typed `f` is a use of `g` through `f`.
+
+#### What runs without typing
+
+zsh and bash run some definitions when nobody types their names. The history has no row for these runs. Thus `wdid` asks the shell for each such start. Each definition that a start reaches gets the state "runs without typing" and its reasons. Such a definition does not show in "Never used" or in "Idle", whatever its uses. Its typed uses still count in the table.
+
+The starts of zsh:
+
+- **A hook function.** The functions `precmd`, `preexec`, `chpwd`, `periodic`, `zshaddhistory`, and `zshexit`, and each name in the arrays `precmd_functions` thru `zshexit_functions`. `add-zsh-hook` fills these arrays. The reason is the hook, for example `precmd hook`.
+- **A trap function.** `TRAPINT`, `TRAPEXIT`, and each other `TRAP` name of a signal in `$signals`. The reason is the signal, for example `INT trap`. A function such as `TRAPPED` is not a trap, because `PED` is not a signal.
+- **The handler of a command that zsh does not find**, `command_not_found_handler`. The reason is `command not found`.
+- **The function of a widget that a key starts.** `zle -lL` gives the function of each widget, and `bindkey -M <keymap> -L` gives the keys of each keymap. The reason is the widget and its keys, for example `widget atuin-search, key ^R`. A key in two keymaps is one key. The space key shows as `" "`.
+- **The function of a special widget**, which zle runs at an event of its own: `zle-line-init`, `zle-line-finish`, `zle-keymap-select`, `zle-isearch-exit`, `zle-isearch-update`, `zle-line-pre-redraw`, and `zle-history-line-set`. A widget that `add-zle-hook-widget` adds to one of them runs at the same event. The reason is the special widget, for example `widget zle-line-init`.
+
+The starts of bash:
+
+- **`PROMPT_COMMAND`**, a text or an array. The reason is `PROMPT_COMMAND`.
+- **The code of a trap**, from `trap -p`. The reason is the signal without `SIG`, for example `EXIT trap`. `wdid` lists the traps before it removes the `DEBUG` trap for its own script.
+- **The command of a `bind -x` key**, from `bind -X`. The reason is the key, for example `bind -x, key \C-x\C-r`. bash has `bind -X` from version 4.3 on. The bash of macOS is 3.2, thus it gives no key.
+
+`wdid` reads the code of a bash start as a typed line. Each function and each alias that the code names runs, also a function that such an alias calls.
+
+Each function that a start runs passes its reason to each function that it calls, to any depth. The reason then names the definition that the start runs, for example `precmd hook, through omz_termsupport_precmd`. The walk visits each function one time, thus a cycle stops. A function whose name starts with `_` passes its reason too, also when the report does not show it.
+
+A widget function that no key starts gets the reason `widget, no key`. Only a typed `zle` call or `execute-named-cmd` starts it. Thus it keeps the state that its uses give, and it can show in "Never used" with that reason.
+
+`wdid` does not find these starts:
+
+- A function in a prompt string, for example `$(git_prompt_info)` in `PROMPT` with `prompt_subst`.
+- A zsh trap that `trap 'code' SIGNAL` sets. Only a `TRAP` function counts in zsh.
+- The bash function `command_not_found_handle`.
+
+The groups of a run with a `precmd` hook, its callee, a widget with a key, and a widget with no key:
+
+```text
+Never used:
+  lonelyfn (function, widget, no key)
+Idle (no use in the last 180 days): none
+Runs without typing:
+  precmd (function, precmd hook)
+  prompt_helper (function, precmd hook, through precmd)
+  searchfn (function, widget history-search, key ^R)
+```
+
+#### The origin and my definitions
+
+The origin of an alias is `file:line`. The origin of a function is its file.
+
+- **A zsh function.** zsh keeps the file of each function in `$functions_source`. A function from an `eval` gets the file that holds the `eval`. A function from `source <(…)` gets `/dev/fd/N` on macOS and `/proc/self/fd/N` on Linux. `wdid` loads each autoloaded function first, and a loaded function gets its file too. For a function whose name starts with `_`, `autoload -Ur` finds the file and loads no body.
+- **A zsh alias.** zsh keeps no origin for an alias. Thus `wdid` starts zsh with `ZDOTDIR` set to a new temporary directory. The `.zshenv` of that directory defines a shell function named `alias`. For each definition, the function records the file and the line of the call (`$funcfiletrace`), and then it runs `builtin alias "$@"`. Then the file sets `ZDOTDIR` back to its value in your environment, or removes it when your environment has none, and it sources your real `.zshenv`. zsh then reads your other startup files from your real `ZDOTDIR`, also when your `.zshenv` changes `ZDOTDIR`. Before `wdid` lists the aliases, it removes the function. The temporary directory has a unique name, and `wdid` removes it after the run, also after an error or a timeout.
+- **An alias from `builtin alias`.** This command goes around the function, thus its origin is unknown.
+- **bash.** `shopt -s extdebug` and `declare -F` give the file of each function. bash keeps no origin for an alias, thus the origin of each bash alias is unknown.
+
+An origin that is not an absolute path is unknown, for example `(eval)`, or `environment` for a bash function from the environment.
+
+A definition is mine when its origin is unknown, when its file is under `$ZSH_CUSTOM`, or when its file is under `$HOME` and not under the oh-my-zsh directory (`$ZSH`). `wdid` reads `HOME`, `ZSH`, and `ZSH_CUSTOM` from the shell, after your startup files ran. Thus:
+
+- A definition in `~/.zshrc`, in a file under `$HOME` that `~/.zshrc` sources, or in `$ZSH_CUSTOM` is mine.
+- A definition that an `eval` in `~/.zshrc` makes is mine, for example a function from `eval "$(tsm shell-init)"`. Your file chose to run it.
+- A definition with an unknown origin is mine, so that the default report never hides it. zsh itself defines the aliases `run-help` and `which-command`, which have no file.
+- A definition from `$ZSH`, from `/usr/share/zsh`, from `/dev/fd` or `/proc/self/fd`, or from a different file outside `$HOME` is not mine. A definition from `source <(tsm shell-init)` is in `/dev/fd` on macOS and in `/proc/self/fd` on Linux, thus it is not mine.
+
+#### The report
+
+Three header lines start the report. The first line gives the history rows, the rows with exit code 127, and the rows that did not parse. The second line gives the shell, the number of aliases, and the number of functions. The third line gives the number of my definitions and the number of the others.
+
+The table has one row for each of my definitions, the most used first:
+
+- `Name`: the name. A suffix alias has its marker (`*.md`).
+- `Kind`: `alias`, `global alias`, `suffix alias`, or `function`.
+- `Uses`: the typed uses plus the uses through other definitions.
+- `Typed`: the uses where you typed the name.
+- `Through`: the definitions that gave the other uses, each with its count. When `COLUMNS` or the terminal gives a width, a cell longer than 30 columns wraps. With no width, the cell is one line.
+- `First use` and `Last use`: the dates of the first and the last counted use.
+- `Origin`: the origin, with `~` for your home directory: `file:line` for an alias, the file for a function, or `-` when the origin is unknown.
+- `Definition`: the value of an alias, or the first line of a function body. The cell is one line. When `COLUMNS` or the terminal gives a width, `wdid` cuts the cell to fit that width and ends it with `…`.
+
+An alias and a function can have the same name. They are two rows.
+
+With `--all`, the table of my definitions gets the heading `Mine` and a count. After it, the report has one table for each file that defined the others, in path order. The heading of each table is the file and its count of definitions, for example `~/.oh-my-zsh/plugins/git/git.plugin.zsh: 208 definitions`. The tables also hold the functions whose names start with `_`. Each completion function has a file of its own, thus a shell with the completion system gives one table for each completion function.
+
+Three groups follow the tables:
+
+- **Never used.** The definitions with zero uses, each with its kind, but not a definition that runs without typing.
+- **Idle.** The definitions whose last use is older than `--idle-days` days, each with its kind, its uses, and the date of its last use, but not a definition that runs without typing.
+- **Runs without typing.** The definitions that the shell runs without a typed name, each with its kind and its reasons. `; ` divides two reasons. See [What runs without typing](#what-runs-without-typing).
+
+A widget function that no key starts ends its entry in "Never used" or in "Idle" with its reason, `widget, no key`.
+
+Without `--all`, the three groups hold only my definitions. With `--all`, they hold each definition.
+
+The group `Duplicates and shadows` ends the report. See [Duplicates and shadows](#duplicates-and-shadows).
+
+#### Duplicates and shadows
+
+Over time, a shell gets definitions that do the same thing as other definitions, and names that hide other names. Each entry of the group `Duplicates and shadows` is one finding. It gives each name of the finding with its kind, its origin, and its uses. `wdid` finds five kinds:
+
+1. **Same expansion.** Two or more aliases have the same value, after `wdid` splits each value into words as the shell does. Thus `git  status` and `'git' status` are the same value as `git status`. A quoted word is not the expansion with the same text. For example, `echo '$HOME'` is not the same value as `echo $HOME`, and `ls '*.c'` is not the same value as `ls *.c`. A regular alias and a global alias are never in one finding. A suffix alias is never in a finding of this kind, because each suffix names different files.
+
+   ```text
+   Same expansion (git status): gs (alias, ~/.zshrc:3, 3 uses), gst (alias, ~/.oh-my-zsh/plugins/git/git.plugin.zsh:1, 2 uses)
+   ```
+
+2. **An alias and a function that do the same thing.** The body of the function is one simple command whose last argument is `"$@"` or `"${@}"`. The other words of that command are the words of the value of the alias. A brace group around the command is the same command. A pipe, a list, or a redirect makes a different command.
+
+   ```text
+   Alias and function (git log): gl (alias, ~/.zshrc:7, 0 uses), glog (function, ~/.zshrc, 1 use)
+   ```
+
+   An entry of the first two kinds gives the shared words as the shell reads them. A word that needs quotes shows in single quotes, for example `echo 'x y'`. Thus the words `echo` and `x y` do not look like the words `echo`, `x`, and `y`. A control character shows as an escape such as `\n`, so that the entry stays on one line.
+
+3. **Defined more than one time.** Your startup files define an alias name two or more times. The finding gives each `file:line` in order, and the last one is in effect. The wrapper function `alias` records each definition (see [The origin and my definitions](#the-origin-and-my-definitions)). Two definitions at the same `file:line` count one time, for example from a file that your startup files source two times. Each definition at an unknown place counts, because `wdid` cannot tell if two unknown places are one place. zsh keeps only the last definition of a function, and bash keeps no origin for an alias. Thus this kind covers zsh aliases only.
+
+   ```text
+   Defined 2 times: ll (alias, 4 uses) at ~/.oh-my-zsh/lib/directories.zsh:30, ~/.zshrc:12 (in effect)
+   ```
+
+4. **An alias hides a function.** An alias and a function have the same name. zsh expands the alias first in command position, thus a typed name never starts the function. An alias whose value starts with its own name is not a finding, because zsh does not expand that alias again: `alias y='y --color'` runs the function `y`.
+
+   ```text
+   Alias hides function: x (alias, ~/.zshrc:9, 0 uses), x (function, ~/.zshrc, 5 uses)
+   ```
+
+5. **A definition hides a program.** The name of an alias or a function is also the name of a program on the `PATH` of the shell. The shell finds the program after your startup files ran: zsh through `$commands`, bash through `type -P`. A name that is also a builtin of the shell is not a finding, because the builtin hides the program already. For example, macOS has `/usr/bin/cd`, and the builtin `cd` runs first. A wrapper is not a finding either:
+   - an alias whose value starts with its own name, for example `ls='ls -G'`
+   - an alias whose value runs its own name through `command`, for example `ls='command ls --color'`
+   - a function whose body runs the program through `command <name>`, for example `grep() { command grep --color=auto "$@" }`
+
+   ```text
+   Hides a program (/bin/cat): cat (function, ~/.zshrc, 12 uses)
+   ```
+
+By default, the group shows only a finding that holds one or more of your definitions. For example, two aliases with the same value in an oh-my-zsh plugin show only with `--all`. A finding of the kind "Defined more than one time" is also yours when one of its places is in your files. An example is an alias of your `~/.zshrc` that a plugin defines again later. A function whose name starts with `_` takes part only with `--all`, as in the table. The `--json` document holds each finding in `findings`, also with no `--all`.
+
+#### Options of wdid defs
+
+- `--since <YYYY-MM-DD>`: Count only the rows from this date on. A row on this date counts.
+- `--all`: Show each definition. The text report also shows the others, grouped by the file that defined them, and the functions whose names start with `_`. The group `Duplicates and shadows` shows each finding, also a finding that holds none of your definitions.
+- `--json`: Print the report as one JSON document. `definitions` holds each definition, also the ones with zero uses and the ones that are not mine, and its `definition` is never cut. Each entry has `origin` and `mine`. `origin` holds `file` and `line`, or it is `null` when the origin is unknown. A function has no line, thus its `line` is `null`. `shell.mine` and `shell.others` give the two counts. Each entry has `reasons`, the text of each of its reasons as the text report writes it. The list is empty for most entries. `never_used`, `idle`, and `runs_without_typing` hold the name and the kind of each entry of the three groups, also the entries that are not mine. `findings` holds each finding of [Duplicates and shadows](#duplicates-and-shadows), also a finding that holds none of your definitions. Each finding has `kind` (`same_expansion`, `alias_and_function`, `defined_more_than_once`, `alias_hides_function`, or `hides_program`), `mine`, and `definitions`, with the `name`, `kind`, `origin`, `uses`, and `mine` of each definition. The `mine` of a finding is true when one of its definitions or one of its places is yours, thus it can be true while the `mine` of its definition is false. `words` holds the shared words of the first two kinds. Each word is as the shell reads it, in single quotes when it needs them. `places` holds each place of `defined_more_than_once` (an origin, or `null` when it is unknown), and `program` holds the path of `hides_program`. A field that a kind does not use is an empty list or `null`. With `--all`, the document also holds the functions whose names start with `_`.
+- `--idle-days <DAYS>`: A definition is idle when its last use is older than this. Defaults to 180.
+
+The options of the tools report (`--repo`, `--no-shell`, `--unparsed`, `--new-days`) do not apply. An option of the tools report before `defs` is a usage error.
+
+#### Example of wdid defs
+
+A run on a small history, with a stand-in of oh-my-zsh in `~/.oh-my-zsh`. Its git plugin defines `gst` and `gco`. zsh itself defines `run-help` and `which-command`.
+
+```text
+History: 14 rows. 1 not counted (exit 127). 0 did not parse.
+Shell: /bin/zsh, 9 aliases, 3 functions (0 did not parse).
+Definitions: 10 mine, 2 others (--all shows the others).
+
+┌───────────────┬──────────────┬──────┬───────┬─────────┬────────────┬────────────┬────────────┬─────────────────────────┐
+│ Name          ┆ Kind         ┆ Uses ┆ Typed ┆ Through ┆ First use  ┆ Last use   ┆ Origin     ┆ Definition              │
+╞═══════════════╪══════════════╪══════╪═══════╪═════════╪════════════╪════════════╪════════════╪═════════════════════════╡
+│ wt            ┆ alias        ┆    4 ┆     1 ┆ wtf 3   ┆ 2026-11-23 ┆ 2026-11-25 ┆ ~/.zshrc:2 ┆ cwt                     │
+│ gs            ┆ alias        ┆    3 ┆     3 ┆         ┆ 2026-11-20 ┆ 2026-11-22 ┆ ~/.zshrc:3 ┆ git status              │
+│ wtf           ┆ alias        ┆    3 ┆     3 ┆         ┆ 2026-11-23 ┆ 2026-11-25 ┆ ~/.zshrc:4 ┆ wt -f                   │
+│ *.md          ┆ suffix alias ┆    1 ┆     1 ┆         ┆ 2026-11-24 ┆ 2026-11-24 ┆ ~/.zshrc:5 ┆ glow                    │
+│ G             ┆ global alias ┆    1 ┆     1 ┆         ┆ 2026-11-23 ┆ 2026-11-23 ┆ ~/.zshrc:6 ┆ | grep                  │
+│ helper        ┆ function     ┆    1 ┆     0 ┆ myf 1   ┆ 2026-11-25 ┆ 2026-11-25 ┆ ~/.zshrc   ┆ echo "helping $1"       │
+│ myf           ┆ function     ┆    1 ┆     1 ┆         ┆ 2026-11-25 ┆ 2026-11-25 ┆ ~/.zshrc   ┆ helper "$@"             │
+│ oldfn         ┆ function     ┆    1 ┆     1 ┆         ┆ 2026-03-21 ┆ 2026-03-21 ┆ ~/.zshrc   ┆ tar czf backup.tgz "$@" │
+│ run-help      ┆ alias        ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ -          ┆ man                     │
+│ which-command ┆ alias        ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ -          ┆ whence                  │
+└───────────────┴──────────────┴──────┴───────┴─────────┴────────────┴────────────┴────────────┴─────────────────────────┘
+
+Never used:
+  run-help (alias)
+  which-command (alias)
+Idle (no use in the last 180 days):
+  oldfn (function, 1 use, last use 2026-03-21)
+Runs without typing: none
+
+Duplicates and shadows:
+  Same expansion (git status): gs (alias, ~/.zshrc:3, 3 uses), gst (alias, ~/.oh-my-zsh/plugins/git/git.plugin.zsh:1, 2 uses)
+```
+
+The same run with `--all` adds a table for the git plugin after the table of my definitions. This excerpt leaves out rows of the first table:
+
+```text
+Definitions: 10 mine, 2 others.
+
+Mine: 10 definitions
+┌───────────────┬──────────────┬──────┬───────┬─────────┬────────────┬────────────┬────────────┬─────────────────────────┐
+│ Name          ┆ Kind         ┆ Uses ┆ Typed ┆ Through ┆ First use  ┆ Last use   ┆ Origin     ┆ Definition              │
+╞═══════════════╪══════════════╪══════╪═══════╪═════════╪════════════╪════════════╪════════════╪═════════════════════════╡
+│ wt            ┆ alias        ┆    4 ┆     1 ┆ wtf 3   ┆ 2026-11-23 ┆ 2026-11-25 ┆ ~/.zshrc:2 ┆ cwt                     │
+└───────────────┴──────────────┴──────┴───────┴─────────┴────────────┴────────────┴────────────┴─────────────────────────┘
+
+~/.oh-my-zsh/plugins/git/git.plugin.zsh: 2 definitions
+┌──────┬───────┬──────┬───────┬─────────┬────────────┬────────────┬───────────────────────────────────────────┬──────────────┐
+│ Name ┆ Kind  ┆ Uses ┆ Typed ┆ Through ┆ First use  ┆ Last use   ┆ Origin                                    ┆ Definition   │
+╞══════╪═══════╪══════╪═══════╪═════════╪════════════╪════════════╪═══════════════════════════════════════════╪══════════════╡
+│ gst  ┆ alias ┆    2 ┆     2 ┆         ┆ 2026-11-26 ┆ 2026-11-26 ┆ ~/.oh-my-zsh/plugins/git/git.plugin.zsh:1 ┆ git status   │
+│ gco  ┆ alias ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ ~/.oh-my-zsh/plugins/git/git.plugin.zsh:2 ┆ git checkout │
+└──────┴───────┴──────┴───────┴─────────┴────────────┴────────────┴───────────────────────────────────────────┴──────────────┘
+
+Never used:
+  gco (alias)
+  run-help (alias)
+  which-command (alias)
+Idle (no use in the last 180 days):
+  oldfn (function, 1 use, last use 2026-03-21)
+Runs without typing: none
+
+Duplicates and shadows:
+  Same expansion (git status): gs (alias, ~/.zshrc:3, 3 uses), gst (alias, ~/.oh-my-zsh/plugins/git/git.plugin.zsh:1, 2 uses)
+```
+
+One entry of the `--json` document:
+
+```json
+{
+  "name": "wt",
+  "kind": "alias",
+  "definition": "cwt",
+  "uses": 4,
+  "typed": 1,
+  "through": [{ "name": "wtf", "uses": 3 }],
+  "first_use": "2026-11-23",
+  "last_use": "2026-11-25",
+  "classification": "used",
+  "origin": { "file": "/Users/me/.zshrc", "line": 2 },
+  "mine": true,
+  "reasons": []
+}
+```
+
+`kind` is `alias`, `global_alias`, `suffix_alias`, or `function`. `classification` is `used`, `idle`, `never_used`, or `runs_without_typing`.
+
+The one entry of `findings` in the same document:
+
+```json
+{
+  "kind": "same_expansion",
+  "mine": true,
+  "definitions": [
+    { "name": "gs", "kind": "alias", "origin": { "file": "/Users/me/.zshrc", "line": 3 }, "uses": 3, "mine": true },
+    {
+      "name": "gst",
+      "kind": "alias",
+      "origin": { "file": "/Users/me/.oh-my-zsh/plugins/git/git.plugin.zsh", "line": 1 },
+      "uses": 2,
+      "mine": false
+    }
+  ],
+  "words": ["git", "status"],
+  "places": [],
+  "program": null
+}
+```
 
 ### Install
 
@@ -6014,3 +6523,427 @@ After Enter, `chf` replaces itself with the shell that runs `crap`. The exit sta
 ```bash
 cargo install --git https://github.com/timmattison/tools chf
 ```
+
+## msgs (iMessage browser)
+
+Browse, search, and export your iMessage conversations. `msgs` is a desktop app for macOS, made with Tauri v2. It reads `~/Library/Messages/chat.db` read-only, and it never writes to it.
+
+- **Conversations.** The left panel lists the conversations, newest first. The arrow keys move the selection, and Enter opens the conversation.
+- **Messages.** The right panel shows the messages of the conversation as chat bubbles. Older messages load when you scroll up. An attachment shows as a line with its name and size.
+- **Search.** The search box finds the text of all messages. At each start, `msgs` makes a full-text index of the message text in memory, in the background, and the search box shows the progress. A search that you type during the build waits for it, and runs when the index is ready. Click a result to open its conversation at that message and highlight it.
+- **Export.** Click **Export Selection**, click the first and the last message of a range, then click **Export JSON**. `msgs` writes `messages.json` and an `attachments/` folder to the location that you choose. Each attachment file gets the name `<attachment id>-<file name>`, and `messages.json` gives that path in `exported_file`.
+
+The search index lives in memory only. `msgs` writes no copy of the message text to disk. Thus each start makes the index again, and search waits for that build. An older `msgs` kept the index in `~/Library/Application Support/msgs/text-cache.db`, outside the protection that macOS gives to `~/Library/Messages`. At each start, `msgs` deletes that file.
+
+`msgs --version` prints the version and does not start the app.
+
+### Requirements
+
+- macOS, with Messages set up.
+- Full Disk Access for the app, or for the terminal that starts it: System Settings > Privacy & Security > Full Disk Access. If the access is missing, `msgs` shows these steps.
+- Node.js, pnpm, and the Tauri CLI (`cargo install tauri-cli`).
+
+### Run it in development
+
+```bash
+src/msgs/scripts/dev.ts
+```
+
+The script installs the frontend dependencies, gets a free port from `portplz`, and starts the app on that port. Tauri starts Vite on the same port through `beforeDevCommand`, and the script does not change `tauri.conf.json`. A plain `cargo tauri dev` from the root of the repository starts Vite on port 1420. It does not install the frontend dependencies, thus run `pnpm --dir src/msgs/frontend install` before it.
+
+### Build it
+
+Run these commands from the root of the repository. The build does not install the frontend dependencies, thus the first command installs them:
+
+```bash
+pnpm --dir src/msgs/frontend install
+cargo tauri build --no-bundle   # the binary is target/release/msgs
+```
+
+## nle (non-linear editor)
+
+A desktop application for the terminal recordings that `beta` writes. It opens
+a `.json` or `.json.gz` recording, makes an edit project of it, shows its
+metadata, and plays the edited recording in its preview pane. The timeline
+(issue #150) is a placeholder with a playhead control.
+
+The preview pane draws the terminal of the edited recording at the playhead.
+Drag the playhead control under **Timeline** to go to a time. **Play** plays
+the recording from the playhead, and the same button then says **Pause**.
+**Stop** stops playback and goes back to the start. Playback stops at the end,
+and **Play** at the end starts again from the beginning. The readout shows the
+time of the playhead and the duration of the edited recording. The **Theme**
+menu selects one of the palettes of `beta export --theme`: Auto, Dracula,
+Monokai, Solarized Dark, or Solarized Light. The terminal grows or shrinks to
+fit the pane, and each edit shows in the preview at once. A new recording opens
+stopped, at time zero.
+
+The speed panel under the metadata changes the speed of a region. Type the
+start and the end of the region in seconds and a speed, then click
+**Apply Speed**. A speed of 2 plays the region twice as fast, and 0.5 plays it
+at half speed. Each later event moves by the change in the length of the
+region, also when the region holds no event, for example a silent build step.
+Each region gets a row with a **Remove** button, and different regions can have
+different speeds. The times of a new region are on the timeline after the
+speed changes above it. The panel shows the duration of the edited recording.
+The panel refuses a change after which the recording does not render, and it
+shows the reason in the banner.
+
+The redaction panel under the speed panel finds text on the whole timeline and
+replaces it, for example to remove API keys, tokens, hostnames, or user names
+from a recording. **Find** takes an exact text, a regular expression, or a
+preset: email addresses, IP addresses, AWS keys, tokens, or hostnames.
+**Replace with** takes asterisks or blocks (`█`), one for each terminal column
+of the match, or a text. **Events** selects the output events, or the output
+and the input events. Then click **Apply Redaction**. Each redaction gets a row
+with a **Remove** button.
+
+A redaction does not change the time of an event, and it knows escape
+sequences:
+
+- A match can cross events and escape sequences, because the terminal can
+  split a word across writes, or color part of it.
+- An escape sequence never changes, and a search never matches inside one. A
+  search for `31` does not change the color code `ESC [ 31 m`.
+- The text of an OSC sequence, for example a window title, is searched, but a
+  match never crosses from the visible text into an OSC sequence. The text
+  starts after the number of the sequence and its `;`, thus a search for `0`
+  does not change the title sequence `ESC ] 0 ;`. Image data (DCS and APC
+  strings) is not searched. The clipboard data of OSC 52 is not searched
+  either, because it is base64, and a text search cannot read it.
+- The iTerm2 sequence OSC 1337 holds a command `Key=value`. The value is
+  searched, thus a redaction of a user name also changes the host and the
+  directory that the shell integration writes as `RemoteHost=user@host` and
+  `CurrentDir=/Users/user`. The key is not searched. The base64 value of a
+  key such as `File` (an image) or `SetUserVar` is not searched.
+- A mask keeps the control characters of a match, for example a line feed, so
+  the layout of the screen stays the same.
+- In a regular expression, a capture group named `redact` replaces only its
+  own text. The AWS key preset uses it to keep the name of a key visible, and
+  the token preset uses it to keep the word `Bearer`.
+
+The timeline (issue #150) does not show where the redactions are yet.
+
+The application is one Rust crate on Dioxus 0.7, with the desktop (webview)
+renderer. Its components call the Rust code directly, and the open project is
+Dioxus state, thus no IPC layer and no frontend package exist.
+
+The editing engine of the crate has five parts:
+
+- **Edit project** (`EditProject`): clips of source recordings, placed on the
+  tracks of the timeline, and the filters that apply to the result. An edit
+  never changes a source recording. A project saves to JSON, plain or gzip, and
+  loads back. A save writes each source recording once, also when several clips
+  cut it.
+- **Filter pipeline** (`FilterRegistry`): a filter is a pure function,
+  registered by kind. The filters of a project run in order, each on the whole
+  timeline or on a range of it. An event filter,
+  `Fn(&[Event], &FilterOptions) -> Vec<Event>`, gets the events of its region,
+  and the later events move by the change in the time of its last event. An
+  in-place filter (`register_in_place`) also gets the length of its region and
+  whether anything comes after it. It rewrites its region and moves nothing. A
+  span filter (`register_span`) also gets the length of its region and answers
+  a new length, and the later events move by the change in the length. A span
+  filter also gets the events before and after its region and the size of the
+  terminal: the size of the clip that starts first, or 80 by 24 in
+  `FilterRegistry::run`.
+  `filters::registry()` holds the filters that ship. The cursor filter is an
+  in-place filter, and each other one is a span filter:
+  - `cursor` (`visibility`, `shape`, `blink`, `color`, issue #168): sets how
+    the cursor looks. [The cursor filter](#the-cursor-filter) below gives its
+    options.
+  - `time-dilation` (`speed`, issue #153): plays its region faster or slower.
+  - `redaction` (`find`, `replace`, `input`, issue #156): replaces text in the
+    data of the events and keeps each time. The paragraphs on the redaction
+    panel above give its rules.
+  - `typing-speed` (`chars_per_second`, `pause`, `jitter`, issue #155): plays
+    each burst of typing at one rate. The paragraph on this filter below gives
+    its rules.
+  - `pause-removal` (`threshold`, `max_pause`, issue #154): each gap between two
+    events that is longer than `threshold` becomes `max_pause` long.
+  - `pause-insertion` (`at`, `duration`, issue #154): each event at or after
+    `at` moves later by `duration`, and so do the events after a range and the
+    end of the timeline. An `at` past the end of the region by more than a
+    microsecond is an error.
+  - `auto-trim` (`leading`, `trailing`, both on when not set, issue #154):
+    removes the time before the first input event and the time after the last
+    output event.
+  - `backspace-removal` (no options, issue #152): removes each typo, the erase
+    key after it, their output, and their time.
+    [The backspace removal filter](#the-backspace-removal-filter) below gives
+    its rules.
+
+  The filters of issue #154 parse their options as a Rust type, so the render
+  refuses a missing option, a value of the wrong type, and a key that the
+  filter does not know. The window cannot add them yet (issue #150). Issues
+  #157 to #167 add more filters.
+- **Render**: the registry flattens a project into one `beta` recording.
+- **Edits and history** (`Editor`): each change of a project is an `Edit`. The
+  editor refuses an edit that breaks a rule of the project, and it keeps an
+  undo and redo history.
+- **Preview** (`preview::Preview`): replays the events of the rendered
+  recording through the terminal emulator of `termstate`, which the video
+  export of `beta` also uses. On the way it keeps snapshots of the terminal,
+  about one for each second of the recording, so a seek replays only from the
+  nearest snapshot and not from time zero. The number of snapshots has a
+  limit that depends on the size of the grid.
+
+The typing speed filter plays each burst of typing at one rate. Its option
+`chars_per_second` sets the rate, and each input event counts as one
+character. A gap between two keys that is longer than `pause` (2 s when the
+option is missing) keeps its length, and so does the gap after a key that
+holds a line end. Thus each hesitation inside a command goes away, and each
+pause between two commands stays. An output keeps its delay after the key
+before it, so the echo of a key follows the key. When the gap to the next key
+becomes shorter, the delay becomes shorter by the same ratio. The option
+`jitter` (0 when missing, and below 1) changes each interval by up to that
+fraction, so the typing does not look mechanical. Each render gives the same
+times. The window cannot add the filter to a project yet.
+
+The crate also has functions that save the rendered recording
+(`Editor::save_recording`), list the recordings in a directory, and export a
+recording through the `beta` CLI as a video or a web player. The window does
+not call them yet.
+
+### The cursor filter
+
+The `cursor` filter sets how the cursor looks in the rendered recording. It
+rewrites the escape sequences that set the cursor in the output events. Thus
+`beta play` and the web export of `beta` show the result as a terminal shows
+it. The video export of `beta` draws only a block cursor, shown or hidden, thus
+it shows the visibility but not the shape, the blink, or the color.
+
+The window has no control for filters yet. A project file names the filter in
+its `filters` list:
+
+```json
+{
+  "kind": "cursor",
+  "region": "All",
+  "options": { "visibility": "smart", "shape": "bar", "blink": false, "color": "#ffcc00" }
+}
+```
+
+| Option | Values | What it does |
+|---|---|---|
+| `visibility` | `honor` (the default), `always-visible`, `always-hidden`, `smart` | `honor` obeys the DECTCEM sequences (`CSI ? 25 h` and `CSI ? 25 l`) of the recording. `always-visible` and `always-hidden` drop them and set the cursor. `smart` obeys the recording, but hides the cursor during a burst of output. |
+| `burst_gap` | seconds, above zero, 0.1 by default | For `smart` only. A burst is two or more output events, each less than `burst_gap` after the one before it, with no input event between them. Thus the echo of typed keys is not a burst. |
+| `shape` | `block`, `underline`, `bar` | Sets the shape through DECSCUSR (`CSI Ps SP q`). The blink of the recording stays, unless `blink` is set. |
+| `blink` | `true`, `false` | Sets the blink through DECSCUSR, and drops mode 12 of the recording. The shape of the recording stays, unless `shape` is set. |
+| `color` | `#rrggbb` | Sets the color through OSC 12, and drops each cursor color of the recording: OSC 12, OSC 112, and the cursor slot of an OSC 10 or 11 list. |
+
+An option that the options do not name obeys the recording. An unknown key or
+value fails the render, and the message names it.
+
+On a range, the filter sets the cursor at the start of the range, and it sets
+the state of the recording back at the end. The filter sees only its range,
+thus it takes the state before the range to be the default of a terminal: a
+visible cursor, DECSCUSR 0, and the default color. After a reset of the
+terminal (RIS or DECSTR) in the recording, the filter sets the cursor again.
+
+### The backspace removal filter
+
+The `backspace-removal` filter removes the typing errors of a recording. It
+removes a typed key, the key that erased it, and the output of both, so the
+recording shows the text that the typist meant. It also removes their time, so
+no pause shows where the error was. For example, `h`, `r`, Backspace, `e`
+becomes `h`, `e`, and the `e` comes at the time of the `r`.
+
+The filter removes keys only when the screen proves that the removal changes
+nothing that a viewer sees after it. The filter keeps a model of the screen,
+the emulator of the `termstate` crate. It compares the screen after the erase
+with the screen before the typed key. It compares each cell, the cursor, and the
+other state of the emulator, for example the pen and the visibility of the
+cursor. Thus output that writes backspaces with no erase key before it stays,
+for example a progress bar. A full-screen program in which Backspace does a
+different thing also stays, because its screen does not come back.
+
+| Key | Data | What goes |
+|---|---|---|
+| Backspace | DEL (`\x7f`) or BS (`\x08`) | The newest typed key, the Backspace, and their output. |
+| Ctrl+W | `\x17` | The typed keys that the erase removed from the screen, the Ctrl+W, and their output. |
+| Ctrl+U | `\x15` | The same as for Ctrl+W. |
+
+An erase key that has output and changes nothing on the screen goes with that
+output, for example a Backspace at the start of a line that rings the bell. An
+erase key that no typed key explains and that has no output before the next key
+stays, because over a slow link its echo can come after the next key. A key
+that is not a typed character or an erase key ends the line that the filter
+follows: for example Enter, Tab, an arrow, or a paste. An erase after such a
+key does not remove a typed key before it.
+
+The filter takes no option. A project file names it in its `filters` list:
+
+```json
+{ "kind": "backspace-removal", "region": "All", "options": {} }
+```
+
+On a range, the filter replays the output before the range into its screen, so
+it compares the screens that the viewer sees. The events after the range move
+earlier by the removed time. When the first event after the range is output,
+the end of the range cuts the output of the last key of the range. That key
+stays, because the filter cannot see all of its output.
+
+The limits:
+
+- The comparison is as exact as the emulator. The emulator does not wrap at the
+  right margin, it gives each character one cell, and it reads `CSI C` or
+  `CSI D` with no number as a move of zero columns. Thus a typo near such
+  output usually stays.
+- At a prompt that echoes nothing, more than one typed key leaves the screen as
+  a Ctrl+W or a Ctrl+U leaves it. The filter cannot tell how many keys the
+  erase removed, so it keeps them all.
+- Type-ahead over a slow link can put the echo of a key after the next key.
+  The filter then removes a key and keeps its echo. The screen at the end is
+  correct, but the viewer sees one moment that the typist did not type. Two
+  cases are known:
+  - At a prompt that echoes nothing, a typed key and a Backspace with no output
+    go together. Double type-ahead gives the same order of events, and then
+    their echoes stay: the typo shows with no key.
+  - Under single type-ahead, the output after a Backspace can be unrelated
+    output that changes nothing on the screen, for example a bell. The
+    Backspace then goes with that output, and its late echo stays. Thus an
+    earlier typed character goes with no Backspace.
+- The filter keeps a copy of the screen for each typed key of a line: at most
+  256 copies, and at most 4,194,304 cells for all copies. A line of more typed
+  keys keeps its oldest keys. A terminal of more than 1,048,576 cells fails the
+  render.
+
+The export functions run `beta` with the PATH of the app, then
+`$CARGO_HOME/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.
+A macOS app that starts from Finder or the Dock gets only the system PATH.
+`beta` runs `ffmpeg` through the same PATH.
+
+To run it from a checkout, install the Dioxus CLI (`cargo install dioxus-cli`)
+and `portplz`, then run:
+
+```bash
+./src/nle/scripts/dev.ts
+```
+
+The script asks `portplz` for a free port. Then it starts
+`dx serve --desktop --port <port>` in `src/nle`.
+
+To build the desktop application, run `dx bundle --desktop` from `src/nle`.
+On macOS, the app (`Nle.app`) and a disk image go to
+`target/dx/nle/bundle/macos/macos/`.
+
+## ff (find files)
+
+`ff` finds files by name across a whole machine. It answers the question that
+`find / -iname` answers, and it does not lose the scan.
+
+BSD `find` ends the complete walk when a system call under `fts_read` returns
+`EINTR`:
+
+```
+find / -iname "120.mp4" | tee other-locations.txt
+find: fts_read: Interrupted system call
+```
+
+Each path that `find` did not print yet is lost, and the interruption arrives
+at a time that nobody can predict. `ff` reads each directory with its own
+calls. When a call returns `EINTR`, `ff` does the same call again at the same
+position, and the walk continues.
+
+### Usage
+
+```bash
+ff 120.mp4                 # each mounted volume that holds user files
+ff '*.mp4' ~/Movies /Volumes/External
+ff -e '^IMG_\d{4}\.HEIC$' ~/Pictures
+ff -0 '*.log' /var/log | xargs -0 ls -l
+```
+
+- `<pattern>` is a glob that must match the whole file name. It ignores case.
+  A glob that holds a `/` is refused, because a file name holds no `/`.
+- `[paths...]` are the directories to search. With no path, `ff` searches the
+  whole machine (macOS only). On a different platform, name each path.
+- `-s`, `--case-sensitive` matches the case of each letter.
+- `-e`, `--regex` takes a regular expression in place of a glob. It matches
+  anywhere in the name. Use `^` and `$` to match the whole name.
+- `-x`, `--one-file-system` stops at each mount point.
+- `--include-cloud` also searches the File Provider directories.
+- `--show-skipped` names each subtree that `ff` could not read, and each
+  directory and volume that it skipped.
+- `-0`, `--print0` ends each match with a NUL, for `xargs -0`.
+
+`ff` prints each match when it finds it. It does not hold the results to the
+end. It does not follow a symbolic link below a path, but it follows a path
+that you name. It matches the name of each path that you name too, as `find`
+does.
+
+### The summary and the exit status
+
+At the end, `ff` writes a summary to standard error:
+
+```
+ff: matches: 2
+ff: entries read: 7561234 in 81.4 s
+ff: volumes searched: 5, skipped: 13
+ff: incomplete subtrees: 0
+ff: denied directories: 412 (System Integrity Protection and the privacy settings refuse some directories)
+ff: cloud directories skipped: 4 (--include-cloud searches them)
+ff: --show-skipped names each one
+```
+
+A search that returns fewer results than the truth, and says nothing, is worse
+than a search that fails. Thus `ff` counts each subtree that it could not read
+completely, and the summary always gives that count.
+
+- **Exit status 0**: `ff` read each subtree to its end.
+- **Exit status 1**: `ff` could not read one or more subtrees. `--show-skipped`
+  names each one, with its error.
+- **Exit status 2**: `ff` could not start, for example because of a bad
+  pattern, or it could not write a match.
+
+A directory below a path that the system refuses (`EACCES` or `EPERM`) is not
+incomplete. System Integrity Protection and the privacy settings of macOS
+refuse some directories on each Mac, thus `ff` counts them and does not change
+the exit status. But a path that you name and that the system refuses is
+incomplete, because `ff` read nothing there. A directory that goes away during
+the walk is not a failure either.
+
+A reader that stops early, for example `head`, stops the walk. `ff` then exits
+0 and writes no summary.
+
+### A search of the whole machine (macOS)
+
+With no path, `ff` gets the volumes from the mount table, and it walks each
+volume that holds user files one time. Each walk stays on the device of its
+volume, and it does not enter another mount point.
+
+- **The data volume, one time.** `/System/Volumes/Data` has the same device id
+  as `/`, thus a device check does not stop a walk of `/` there. A plain walk
+  of `/` reads the home directories two times: through `/Users`, and through
+  `/System/Volumes/Data/Users`. `ff` reads `/usr/share/firmlinks` at each run.
+  It walks each firmlinked directory through its firmlink (`/Users`), and the
+  rest of the data volume directly. The directories of the data volume that
+  have no firmlink, for example `/System/Volumes/Data/mnt`, stay in the walk.
+- **Skipped volumes.** `devfs`, each `autofs` map (for example
+  `/System/Volumes/Data/home`), the read-only simulator images under
+  `/Library/Developer/CoreSimulator`, the system volumes
+  `/System/Volumes/{VM,Preboot,Update,xarts,iSCPreboot,Hardware}`, and each
+  volume inside one of these. `--show-skipped` names each one with its reason.
+- **The File Provider directories.** Each directory in
+  `~/Library/CloudStorage` (Google Drive, Proton Drive, Dropbox, and others)
+  and `~/Library/Mobile Documents` (iCloud Drive) answers `readdir` over the
+  network. `ff` skips them unless you give `--include-cloud`, and the summary
+  gives their count. A path that you name is searched also when it is such a
+  directory. This rule applies to a search of named paths too. `ff` decides
+  this rule on the real path, thus `ff x .` in `~/Library` skips them too.
+
+`ff` does not use Spotlight. `mdfind` returns nothing when indexing is off on
+a volume, and it says nothing about that.
+
+### How the retry works
+
+`std::fs::read_dir` cannot do this job: after a read error, its stream ends,
+thus a caller cannot read the same position again. `walkdir` and `ignore` read
+through it. `ff` reads with `open`, `fdopendir`, `readdir`, `fstat`, and
+`fstatat` through `libc`. An interrupted call did nothing, thus the same call
+reads the same position again. The walk counts each retry, and the summary
+gives the count. One call that is interrupted 1000 times in a row makes its
+subtree incomplete, thus a stream of signals cannot make `ff` hang.
+
+To install: `cargo install --git https://github.com/timmattison/tools ff`

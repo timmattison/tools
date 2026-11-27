@@ -10,6 +10,7 @@ A fast Rust-based terminal image display utility
 - Image resizing with aspect ratio preservation
 - Support for reading from files or stdin
 - Video playback support (experimental)
+- A pixel-by-pixel diff of two images
 - Kitty terminal support (experimental)
 
 ## Installation
@@ -109,9 +110,69 @@ Error: Image display is not supported in this terminal.
 ...
 ```
 
-The flag asks the same question the display path asks — the terminal, the multiplexer, and the remote transport — so a session that passes cannot be refused by the next `ic image.png`. The flag does not ask whether stdout is a terminal, thus a redirected stdout does not change the answer.
+The flag asks the same question the display path asks — the terminal, the multiplexer, and the remote transport — so a session that passes cannot be refused by the next `ic image.png`. A protocol that `--protocol` or `IC_PROTOCOL` forces passes that question, as it does on the display path. The flag does not ask whether stdout is a terminal, thus a redirected stdout does not change the answer.
 
 `--will-display` is an input mode of its own. Do not combine it with a file, `--stdin`, or `--monitor`.
+
+### Give the pixels to a program that draws the picture itself:
+
+```bash
+ic --emit-rgba 640x480 photo.jpg
+cat photo.jpg | ic --emit-rgba 640x480 --stdin
+```
+
+Some programs own every cell of the screen, and they draw each cell again when something changes. Claude Code is one. An image that `ic` writes into such a program lands at a position that the next frame paints over. `--emit-rgba` gives the program the pixels instead, and the program draws the picture with its own elements. The [`ic-inline` Claude Code plugin](../../plugins/ic-inline/README.md) uses it.
+
+The flag decodes the picture, fits it inside the box of `WIDTHxHEIGHT` pixels, and prints one line of JSON:
+
+```json
+{"width":640,"height":427,"source_width":4032,"source_height":2688,"rgba":"..."}
+```
+
+- `width` and `height` are the size of the printed picture. It keeps the shape of the source.
+- `source_width` and `source_height` are the size of the picture in the file.
+- `rgba` holds 4 bytes for each pixel (red, green, blue, alpha), row by row from the top left, in standard base64.
+
+Each side of the box takes 1 to 4096 pixels. A picture that fits the box keeps its size, because a larger copy holds no detail that the file did not hold.
+
+`--emit-rgba` reads no terminal and writes nothing to the terminal, thus a terminal that draws no image, tmux, and mosh do not change the result. Do not combine it with a display option (`--width`, `--height`, `--scale`, `--no-newline`, `--protocol`, or a video option), with `--monitor`, or with `--will-display`. The flag ignores `IC_PROTOCOL`, because it draws no picture. It takes one file or `--stdin`, or the two files of [`--diff`](#show-the-differences-between-two-images). A video gives an error, because the flag prints one picture.
+
+### Show the differences between two images:
+
+```bash
+ic --diff before.png after.png                          # a red highlight (the default)
+ic --diff --diff-mode boxes before.png after.png
+ic --diff --diff-mode mask before.png after.png
+```
+
+`--diff` compares two images pixel by pixel and shows one picture of the differences. `ic` decodes both images to RGBA with 8 bits for each channel. A pixel differs when one or more of its four channels differ. The compare has no tolerance.
+
+In Claude Code, the [`ic-inline` plugin](../../plugins/ic-inline/README.md#show-the-differences-between-two-images) shows the same picture in the transcript: `/ic diff before.png after.png` for you, and the tool `show_diff` for Claude.
+
+Above the picture, `ic` prints two lines:
+
+```text
+before.png vs after.png
+3 regions differ (1204 pixels)
+```
+
+When no pixel differs, the second line is `the images are the same`, and `ic` still shows the picture. The auto-fit counts the rows of the two lines, thus the picture and the prompt fit below them.
+
+`--diff-mode` selects how the picture shows the differences. Red is RGBA `(255, 0, 0, 255)`.
+
+| `--diff-mode`         | A pixel that is the same | A pixel that differs                                    |
+| --------------------- | ------------------------ | ------------------------------------------------------- |
+| `boxes`               | the second image         | the second image, with a red outline around each region |
+| `highlight` (default) | the first image          | opaque red                                              |
+| `mask`                | opaque black             | opaque red                                              |
+
+In `boxes`, two pixels that differ are in one region when they touch, also at a corner. The line of each outline is `max(2, ceil(L / 400))` pixels thick, where `L` is the longer side of the picture. Thus a terminal that shrinks a large screenshot still shows the line. The box of each region has a margin of the line thickness plus 2 pixels, thus the line covers no pixel that differs, except at the edge of the picture. When two boxes overlap or touch, `ic` draws one box around both. The header counts these boxes as the regions, in each mode.
+
+`ic` does not scale an image of a different size. The two images share the upper-left corner, and the picture has the larger width and the larger height of the two. A pixel outside an image is blank: RGBA `(0, 0, 0, 0)`. Thus a strip that only one image covers is a difference, unless that image is fully transparent there. A pixel outside both images stays blank in each mode. The picture holds at most 134,217,728 pixels (512 MiB of RGBA), and a larger picture gives an error.
+
+`--width`, `--height`, `--scale`, `--preserve-aspect`, `--no-newline`, and `--protocol` apply to the picture as they apply to a still image. With `--emit-rgba WIDTHxHEIGHT`, `ic` prints the picture as the JSON of [`--emit-rgba`](#give-the-pixels-to-a-program-that-draws-the-picture-itself), and it prints no header.
+
+`--diff` takes exactly two image files. A video, a text file, `--stdin`, `--monitor`, `--will-display`, or a video option gives an error that names the cause. A file is text when its extension names no image format and its first bytes start no image, thus a screenshot with no extension works. When the first bytes are text, the header of the format that they name must also read, so a note that starts with `BM` or `P1` is still a text file. `--diff-mode` without `--diff` gives an error.
 
 ## Command Line Options
 
@@ -123,8 +184,16 @@ The flag asks the same question the display path asks — the terminal, the mult
 - `--monitor <DIR>` - Watch a directory and show each new image and text file (see [Show new images and text files in a directory](#show-new-images-and-text-files-in-a-directory)). Give it more than one time to watch more than one directory
 - `-n, --no-newline` - Leave the cursor to the caller and write only the image (see [Where the Cursor Ends](#where-the-cursor-ends))
 - `--will-display` - Report whether this session can display an image, then exit (0 = yes, 1 = no with the reason on stderr)
+- `--emit-rgba <WIDTHxHEIGHT>` - Print the picture, fitted inside the box, as one line of JSON with base64 RGBA pixels, then exit. It writes nothing to the terminal (see [Give the pixels to a program that draws the picture itself](#give-the-pixels-to-a-program-that-draws-the-picture-itself))
+- `--diff` - Compare two image files pixel by pixel, and show one picture of the differences (see [Show the differences between two images](#show-the-differences-between-two-images))
+- `--diff-mode <boxes|highlight|mask>` - How the picture of `--diff` shows the differences (default: `highlight`). It needs `--diff`
+- `--protocol <auto|sixel|kitty|iterm2>` - Force an image protocol in place of the one that `ic` selects for the terminal (default: the value of `IC_PROTOCOL`, else `auto`). A forced protocol also skips the checks that refuse a session. See [Forcing a Protocol](#forcing-a-protocol). The `IC_PROTOCOL` environment variable does the same.
 - `-h, --help` - Print help information
 - `-V, --version` - Print version information
+
+## Environment Variables
+
+- `IC_PROTOCOL` - The same values as `--protocol` (`auto`, `sixel`, `kitty`, `iterm2`). The `--protocol` flag wins when both are set. Use it to force the protocol for a whole shell session, for example `export IC_PROTOCOL=sixel` in a web terminal. See [Forcing a Protocol](#forcing-a-protocol).
 
 ## Compatibility
 
@@ -133,6 +202,34 @@ This utility uses iTerm2's inline image protocol or the Kitty image protocol. It
 Kitty support is experimental.
 
 Inside Zellij, `ic` uses Sixel instead, since the Kitty protocol does not pass through Zellij's renderer.
+
+### Forcing a Protocol
+
+By default, `ic` selects the protocol from the environment and from the answer of the terminal to a query. See [muxiavelli Panels](#muxiavelli-panels) and [Multiplexers and mosh](#multiplexers-and-mosh). If that selection is wrong, force the protocol with `--protocol`, or with `IC_PROTOCOL` for a whole shell session:
+
+```bash
+ic --protocol sixel image.png
+# or, for the whole session:
+export IC_PROTOCOL=sixel    # or: iterm2, kitty
+ic image.png
+```
+
+The values are `auto`, `sixel`, `kitty`, and `iterm2`, in uppercase or lowercase. `auto` forces nothing. The flag wins over the variable. `ic` ignores a value of `IC_PROTOCOL` that it does not know, and selects the protocol as it does for `auto`.
+
+A forced protocol wins over each name of a terminal, each answer of a terminal, and each protocol that a mosh session states that it carries. The picture of a file, of stdin, of a video, and of monitor mode draws in that protocol.
+
+**A forced protocol also skips each check that refuses a session.** With a forced protocol, `ic` does not refuse a terminal that draws no image by its name, a tmux session, or a Mosh session. You vouch for the terminal. The Mosh check reads the process tree, and under a multiplexer such as Zellij that tree can name the Mosh session of a different client. That gives a false "Mosh detected" error, and a forced protocol is the way past it. `--will-display` gives the same answer: with a forced protocol, it exits with code 0.
+
+### xterm.js Front Ends (ttyd, wetty, code-server, …)
+
+Web terminals that use [xterm.js](https://xtermjs.org/), ttyd for example, draw images only when the page loads the [`@xterm/addon-image`](https://www.npmjs.com/package/@xterm/addon-image) addon. That addon draws **Sixel and the iTerm2 inline-image protocol, but not the Kitty graphics protocol**. The default builds, also the default ttyd, do not load the addon, and then no protocol draws.
+
+A [muxiavelli panel](#muxiavelli-panels) states its protocols, and `ic` reads them, so it needs no forced protocol. A different front end inherits the environment of the terminal that started it. For example, an inherited `TERM_PROGRAM=WezTerm` makes `ic` select the Kitty protocol, and the addon cannot draw it. If your front end loads the addon, force a protocol that the addon draws:
+
+```bash
+export IC_PROTOCOL=sixel    # or: iterm2
+ic image.png
+```
 
 ### Where the Cursor Ends
 
@@ -161,8 +258,9 @@ image. Video playback uses that mode, because it puts the cursor where it wants
 it before every frame.
 
 The auto-fit size also pays for the rows that `ic` prints above the image. The
-file name rows, the image, and the row that the shell prompt returns to together
-fit inside the height of the terminal. A long file name is wider than the
+header rows (the file name, or the two lines of `--diff`), the image, and the
+row that the shell prompt returns to together fit inside the height of the
+terminal. A long file name is wider than the
 terminal, and the terminal then wraps it onto more than one row. `ic` measures
 the display width of each header line and counts the rows that the line takes,
 so a wrapped name pays for every row that it occupies.

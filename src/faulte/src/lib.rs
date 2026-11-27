@@ -24,6 +24,8 @@
 //!
 //! # The modules
 //!
+//! - [`check`] — the fast verdict of `faulte check`, from the CPU counters and
+//!   the compressor counters of the kernel, and the rate of new processes.
 //! - [`duration`] — a length of time on a command line, such as `5s` or `7d`.
 //! - [`pid`] — the numbers that name a process and an account.
 //! - [`top`] — the command line of the fault sampler, and the parser of its
@@ -39,19 +41,32 @@
 //!   and the count of each session that the rules refused.
 //! - [`stop`] — the question, the check immediately before each signal, and the
 //!   sequence of `SIGTERM` and `SIGKILL`.
+//! - [`stream`] — the parser of an endless run of `top`. It turns bytes into
+//!   events, one finished sample at a time. It holds no clock and no process.
+//! - [`history`] — the compact history of the samples, with a fixed memory
+//!   budget, and the readings of it.
 //! - [`render`] — the text that a person reads. Nothing here prints.
+//! - [`sampler`] — the thread that reads a stream of samples, joins the other
+//!   sources to each sample, and sends the result over a channel.
+//! - [`tui`] — the full-screen view. Its state is one pure value that takes a
+//!   key or an update, with no terminal and no clock.
 //! - [`machine`] — every fact of this Mac, behind one trait. The module
 //!   `machine::macos` is the one part of `faulte` that runs a command or calls
 //!   the kernel.
 
+pub mod check;
 pub mod duration;
+pub mod history;
 pub mod machine;
 pub mod pid;
 pub mod plan;
 pub mod ranking;
 pub mod render;
+pub mod sampler;
 pub mod state;
 pub mod stop;
+pub mod stream;
 pub mod table;
 pub mod top;
+pub mod tui;
 pub mod vm;

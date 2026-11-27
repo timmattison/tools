@@ -14,13 +14,18 @@ use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 use termgfx::{
-    terminal_cells, Budget, Capabilities, Cursor, MoshImages, Picture, ProtocolBudgets, Request,
-    TerminalType,
+    terminal_cells, Budget, Capabilities, Cursor, ForcedProtocol, MoshImages, Picture,
+    ProtocolBudgets, Request, TerminalType,
 };
 use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
 use unicode_width::UnicodeWidthStr;
+
+mod diff;
+mod emit;
+
+use emit::PixelBox;
 
 /// The row that the shell prompt returns to below an image.
 const PROMPT_ROWS: u32 = 1;
@@ -197,6 +202,62 @@ struct Args {
     /// means yes. Exit code 1 means no, and the reason goes to stderr
     #[clap(long)]
     will_display: bool,
+
+    /// Print the picture as one line of JSON for a program that draws it
+    /// itself, then exit. The picture fits inside WIDTHxHEIGHT pixels (1 to
+    /// 4096 on each side) and never grows. The JSON holds width, height,
+    /// source_width, source_height and rgba: 4 bytes for each pixel, row by
+    /// row, in standard base64. Nothing goes to the terminal, thus a program
+    /// that owns the screen (such as Claude Code) can run it
+    //
+    // `allow_hyphen_values` hands a box such as `-5x5` to the parser of the box,
+    // which refuses it with the shape the flag takes. Without it, clap reads the
+    // box as a short flag and refuses an argument that the user never meant.
+    #[clap(
+        long,
+        value_name = "WIDTHxHEIGHT",
+        allow_hyphen_values = true,
+        conflicts_with_all = [
+            "width",
+            "height",
+            "scale",
+            "no_newline",
+            "monitor",
+            "will_display",
+            "loop_video",
+            "fps",
+            "do_not_drop_frames",
+            "memory_cleanup_frequency",
+            "max_fps",
+            "adaptive_fps",
+            "protocol",
+        ]
+    )]
+    emit_rgba: Option<PixelBox>,
+
+    /// Force an image protocol in place of the one that ic selects for the terminal.
+    ///
+    /// Use this when ic selects a protocol that your terminal cannot draw. For
+    /// example, an xterm.js front end such as ttyd draws Sixel and the iTerm2
+    /// protocol (through @xterm/addon-image), but not the Kitty protocol. A
+    /// forced protocol also skips the checks that refuse a session (a terminal
+    /// that draws no image by its name, tmux, and Mosh), and --will-display then
+    /// answers yes. Under a multiplexer such as Zellij, the Mosh check can name
+    /// the Mosh session of a different client, and this flag is the way past
+    /// that error. The IC_PROTOCOL environment variable does the same, and this
+    /// flag wins over it.
+    #[clap(long, value_enum)]
+    protocol: Option<ProtocolArg>,
+
+    /// Compare two still images pixel by pixel, and show one picture of the
+    /// differences. Give exactly two image files, FIRST and SECOND. Neither
+    /// image is scaled, and the two share the upper-left corner
+    #[clap(long, conflicts_with_all = ["stdin", "monitor", "will_display", "loop_video", "fps", "do_not_drop_frames", "memory_cleanup_frequency", "max_fps", "adaptive_fps"])]
+    diff: bool,
+
+    /// How the picture of --diff shows the differences (default: highlight)
+    #[clap(long, value_enum, value_name = "MODE", requires = "diff")]
+    diff_mode: Option<diff::Mode>,
 }
 
 fn main() -> Result<()> {
@@ -204,8 +265,12 @@ fn main() -> Result<()> {
 
     validate_arguments(&args)?;
 
-    if args.will_display {
-        report_display_readiness()?;
+    if args.diff {
+        show_diff(&args)?;
+    } else if let Some(pixel_box) = args.emit_rgba {
+        emit_picture(&args, pixel_box)?;
+    } else if args.will_display {
+        report_display_readiness(&args)?;
     } else if args.stdin {
         display_image_from_stdin(&args)?;
     } else if !args.files.is_empty() {
@@ -231,7 +296,9 @@ fn main() -> Result<()> {
 }
 
 fn validate_arguments(args: &Args) -> Result<()> {
+    validate_diff(args)?;
     validate_input_modes(args)?;
+    validate_emit(args)?;
     validate_dimensions(args)?;
     validate_scale(args)?;
     validate_frame_options(args)?;
@@ -259,6 +326,99 @@ fn validate_input_modes(args: &Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Refuse a run of `--diff` over any count of files but two.
+///
+/// Clap refuses the flag beside the other input modes and beside the options
+/// of a video. This check holds the one rule that clap cannot state: the count
+/// of files. It runs first, so `ic --diff` with no file gets this message and
+/// not the message about a missing input.
+///
+/// # Errors
+/// An error that says the flag takes exactly two files, when the count is
+/// another number.
+fn validate_diff(args: &Args) -> Result<()> {
+    if args.diff && args.files.len() != 2 {
+        return Err(diff_file_count_error(args.files.len()));
+    }
+
+    Ok(())
+}
+
+/// The error of a run of `--diff` over `count` files, when `count` is not two.
+///
+/// [`validate_diff`] gives it, and [`show_diff`] gives the same text when its
+/// slice pattern finds another count, so the two refusals cannot drift apart.
+///
+/// # Arguments
+/// * `count` - The number of files on the command line.
+///
+/// # Returns
+/// An error that says the flag takes exactly two files, and names `count`.
+fn diff_file_count_error(count: usize) -> anyhow::Error {
+    anyhow::anyhow!(
+        "--diff compares two images, thus it takes exactly two files, and it got {count}"
+    )
+}
+
+/// Refuse a run of `--emit-rgba` over more than one picture.
+///
+/// The flag prints one JSON document, and a reader of it parses one picture.
+/// Clap refuses the flag beside every option of a display, and this check
+/// holds the one rule that clap cannot state: the count of files. With
+/// `--diff` the two files make one picture, so that run can name two files.
+///
+/// # Errors
+/// An error that says the flag takes one picture, when it has more than one
+/// file and no `--diff`.
+fn validate_emit(args: &Args) -> Result<()> {
+    if args.emit_rgba.is_some() && !args.diff && args.files.len() > 1 {
+        anyhow::bail!(
+            "--emit-rgba prints one picture, thus it takes one picture: give one file, --stdin, or --diff with two files"
+        );
+    }
+
+    Ok(())
+}
+
+/// Print the picture of the one file or of standard input as the JSON of
+/// `--emit-rgba`.
+///
+/// **This path detects no terminal.** It reads no environment variable of a
+/// terminal, it opens no `/dev/tty`, and it validates no graphics protocol,
+/// because the program that runs it owns the terminal and puts the picture
+/// there itself. The `emit` module states the document.
+///
+/// # Arguments
+/// * `args` - The command line arguments. [`validate_arguments`] already
+///   holds them to one file or to `--stdin`.
+/// * `pixel_box` - The box that the printed picture fits inside.
+///
+/// # Errors
+/// An error when the file is absent or is a video, when the bytes hold no
+/// picture, or when the write to standard output fails.
+fn emit_picture(args: &Args, pixel_box: PixelBox) -> Result<()> {
+    let picture = if args.stdin {
+        let stdin = io::stdin();
+        let (_bytes, picture) = read_stdin_picture(BufReader::new(stdin.lock()))?;
+        picture
+    } else {
+        let file_path = args
+            .files
+            .first()
+            .context("--emit-rgba needs one file or --stdin")?;
+        ensure_file_exists(file_path)?;
+        if is_video_file(file_path) {
+            anyhow::bail!(
+                "--emit-rgba prints one picture, and {} is a video",
+                file_path.display()
+            );
+        }
+        with_image_file(file_path, |source| decode_picture(&source, file_path))?
+    };
+
+    emit::write_rgba_json(&picture, pixel_box, &mut io::stdout().lock())
 }
 
 fn validate_dimensions(args: &Args) -> Result<()> {
@@ -833,6 +993,12 @@ fn in_tmux() -> bool {
     std::env::var("TMUX").is_ok()
 }
 
+/// The way past a wrong refusal of Mosh or tmux, which each such refusal
+/// names. Each rule of the gate reads a guess, and a forced protocol passes
+/// every rule.
+const FORCED_PROTOCOL_REPAIR: &str =
+    "If this check is wrong and this terminal draws images, force a protocol with --protocol or IC_PROTOCOL.";
+
 /// Refuse the run when this session cannot draw an image.
 ///
 /// The gate reads four things: what the environment of a mosh session states
@@ -844,6 +1010,10 @@ fn in_tmux() -> bool {
 /// user to read. `feature` names what the user asked for, "Image" or "Video",
 /// and the messages say that word.
 ///
+/// A terminal whose protocol the user forced with `--protocol` or
+/// `IC_PROTOCOL` passes every rule. `termgfx` names such a terminal
+/// [`TerminalType::Forced`].
+///
 /// `in_tmux` arrives as an argument, the session arrives on `terminal_caps`,
 /// and the gate reads no environment variable that decides a verdict. It reads
 /// `TERM` for one message alone. A test that set `TMUX` would change the
@@ -854,6 +1024,17 @@ fn validate_terminal_for_graphics(
     in_tmux: bool,
     feature: &str,
 ) -> Result<()> {
+    // A person who forced a protocol vouches for the terminal, and each rule
+    // below is a guess about it. The rule about mosh reads a process tree, and
+    // under a multiplexer such as Zellij that tree can name the mosh of
+    // another client. An xterm.js front end such as ttyd inherits the
+    // environment of the terminal that started it, so the name is a guess as
+    // well. A forced protocol is the way past a wrong refusal, thus it passes
+    // every rule.
+    if matches!(terminal_caps.terminal_type(), TerminalType::Forced(_)) {
+        return Ok(());
+    }
+
     // The session stands on the capabilities, so the gate and the writer that
     // draws the picture read one session. `Capabilities::detect` reads it from
     // the environment for a run, and `Capabilities::in_session` states it for
@@ -953,15 +1134,17 @@ fn validate_terminal_for_graphics(
             Upstream Mosh strips the escape sequences that carry an image (Sixel, Kitty, iTerm2).\n\
             A Mosh that draws them answers that query, so {} display cannot work here.\n\
             \n\
-            To display images, reconnect with ssh user@host instead of mosh user@host.",
-            feature
+            To display images, reconnect with ssh user@host instead of mosh user@host.\n\
+            {}",
+            feature,
+            FORCED_PROTOCOL_REPAIR
         );
     }
 
     // Check for tmux, since a tmux that draws no image strips the sequences.
     // A tmux that draws one answers the query above.
     if in_tmux {
-        anyhow::bail!("tmux detected, and this session answered no query about images. {} display does not work here. Please run it directly in your terminal.", feature);
+        anyhow::bail!("tmux detected, and this session answered no query about images. {} display does not work here. Please run it directly in your terminal.\n{}", feature, FORCED_PROTOCOL_REPAIR);
     }
 
     if !terminal_caps.draws_images() {
@@ -1027,15 +1210,26 @@ fn validate_terminal_for_graphics(
 /// spend a round trip on the size of a character cell that no verdict of this
 /// function reads, and would swallow whatever the user typed while it held the
 /// terminal in raw mode.
-fn report_display_readiness() -> Result<()> {
-    let terminal_caps = Capabilities::detect_by_asking_the_protocol();
+///
+/// A protocol that the user forced with `--protocol` or `IC_PROTOCOL` passes
+/// the gate here as it passes the gate on the image path, so the two answers
+/// stay one answer. The gate passes a forced terminal on its type alone, so
+/// such a run reads the environment and asks the terminal nothing.
+///
+/// # Arguments
+/// * `args` - The command line arguments, which hold `--protocol`.
+fn report_display_readiness(args: &Args) -> Result<()> {
+    let terminal_caps = match forced_protocol_for(args) {
+        Some(protocol) => Capabilities::detect().with_forced_protocol(protocol),
+        None => Capabilities::detect_by_asking_the_protocol(),
+    };
     let transport = detect_remote_transport();
 
     validate_terminal_for_graphics(&terminal_caps, &transport, in_tmux(), "Image")
 }
 
 fn display_video_from_file(file_path: &Path, args: &Args) -> Result<()> {
-    let terminal_caps = Capabilities::detect_by_asking();
+    let terminal_caps = drawing_capabilities(args);
     let transport = detect_remote_transport();
 
     validate_terminal_for_graphics(&terminal_caps, &transport, in_tmux(), "Video")?;
@@ -1322,7 +1516,7 @@ fn play_video_simple(
     duration: f64,
     fps: f64,
 ) -> Result<()> {
-    let terminal_caps = Capabilities::detect_by_asking();
+    let terminal_caps = drawing_capabilities(args);
     let (_raw_mode, input_rx, _input_handle) = setup_video_controls(&terminal_caps)?;
 
     // Termion owns raw mode, so the session leaves it alone.
@@ -1983,6 +2177,30 @@ fn read_image_file(
     file_path: &Path,
     capabilities: &Capabilities,
 ) -> Result<(DynamicImage, Option<Vec<u8>>)> {
+    with_image_file(file_path, |source| {
+        decode_image(source, file_path, capabilities)
+    })
+}
+
+/// Read the bytes of the image file at `file_path`, and give them to `decode`.
+///
+/// Both reads of a file argument go through here: the display, which keeps the
+/// bytes that the terminal sends as they stand, and `--emit-rgba`, which keeps
+/// the picture alone. Each failure names the path in its context, because the
+/// error of `ic file.png` is the whole output of the run, and nothing else
+/// names the path to the user.
+///
+/// # Arguments
+/// * `file_path` - The path of the image file.
+/// * `decode` - Makes the result out of the bytes of the file.
+///
+/// # Returns
+/// What `decode` gave.
+///
+/// # Errors
+/// An error when the file does not open, or when `decode` fails. The outermost
+/// context of each error is `Failed to open image file: <path>`.
+fn with_image_file<T>(file_path: &Path, decode: impl FnOnce(Vec<u8>) -> Result<T>) -> Result<T> {
     // One closure gives the context of both failures, so the two texts cannot
     // drift apart. The closure holds only a reference, so it is `Copy`, and
     // each `with_context` takes its own copy.
@@ -1990,7 +2208,137 @@ fn read_image_file(
 
     let source = fs::read(file_path).with_context(failure)?;
 
-    decode_image(source, file_path, capabilities).with_context(failure)
+    decode(source).with_context(failure)
+}
+
+/// Make a picture out of the bytes of an image file.
+///
+/// The decoder reads the format out of the first bytes of the file, and it
+/// takes the extension of the name where those bytes name nothing. That is
+/// what `image::open` does with a path, and this reads the same file the same
+/// way out of the memory that already holds it.
+///
+/// # Arguments
+/// * `source` - The bytes of the image file.
+/// * `name` - The path of the image file. This function does not open it.
+///
+/// # Errors
+/// An error when the bytes hold no image. The chain of the error starts at the
+/// error of the decoder, and no link names the path.
+fn decode_picture(source: &[u8], name: &Path) -> Result<DynamicImage> {
+    let mut reader = image::ImageReader::new(io::Cursor::new(source));
+    if let Ok(format) = image::ImageFormat::from_path(name) {
+        reader.set_format(format);
+    }
+
+    Ok(reader.with_guessed_format()?.decode()?)
+}
+
+/// Compare two still images, and show one picture of the differences.
+///
+/// The run checks both paths before it decodes either one, so a bad second
+/// path does not wait for a slow decode of the first. A video or a text file
+/// is no still image, and the error names it. A file is text when its extension
+/// names no image format and its first bytes start no image. The picture comes
+/// from [`diff::compare`] in the mode of `--diff-mode`, or `highlight` when none
+/// is given.
+///
+/// With `--emit-rgba`, the run prints the picture as JSON and prints no
+/// header. Otherwise it prints a header of two lines, the two paths and the
+/// summary of the differences, and then it shows the picture as it shows a
+/// still image.
+///
+/// # Arguments
+/// * `args` - The command line arguments. `validate_diff` has checked that
+///   `files` holds two paths.
+///
+/// # Returns
+/// Nothing when the picture is out.
+///
+/// # Errors
+/// An error when a file is missing, a video, a text file, or not an image,
+/// when the two images make a canvas over the limit, or when the output
+/// fails. Each decode error names its path.
+fn show_diff(args: &Args) -> Result<()> {
+    let [first_path, second_path] = args.files.as_slice() else {
+        return Err(diff_file_count_error(args.files.len()));
+    };
+    for path in [first_path, second_path] {
+        ensure_file_exists(path)?;
+        if is_video_file(path) {
+            anyhow::bail!(
+                "--diff compares two still images, and {} is a video",
+                path.display()
+            );
+        }
+        if is_text_file(path) && starts_no_image(path) {
+            anyhow::bail!(
+                "--diff compares two still images, and {} is a text file",
+                path.display()
+            );
+        }
+    }
+
+    let first = load_still_image(first_path)?;
+    let second = load_still_image(second_path)?;
+    let diff = diff::compare(first, second, args.diff_mode.unwrap_or_default())?;
+    let summary = diff.summary();
+    let picture = DynamicImage::ImageRgba8(diff.picture);
+
+    if let Some(pixel_box) = args.emit_rgba {
+        return emit::write_rgba_json(&picture, pixel_box, &mut io::stdout().lock());
+    }
+
+    let header = [
+        format!("{} vs {}", first_path.display(), second_path.display()),
+        summary,
+    ];
+    display_image_with_header(args, &header, |_capabilities| Ok((picture, None)))
+}
+
+/// Read and decode one image file of `--diff`.
+///
+/// # Arguments
+/// * `path` - The path of the image file.
+///
+/// # Errors
+/// An error that names the path, when the file does not open or holds no
+/// image.
+fn load_still_image(path: &Path) -> Result<DynamicImage> {
+    with_image_file(path, |source| decode_picture(&source, path))
+}
+
+/// Whether the file at `path` opens, and its first bytes start no image.
+///
+/// [`is_text_file`] reads only the extension. A screenshot with no extension,
+/// or a format that the decoder reads and `ic` does not list, is still a
+/// picture, and [`decode_picture`] reads it. The first block of the file
+/// starts an image when it names an image format. When the block is also
+/// plain text, the header of that format must read too, because the
+/// signatures `BM` and `P1` to `P7` start many lines of text. A binary image
+/// thus costs one read of its first block, and `--diff` still checks both
+/// paths before it decodes either one.
+///
+/// # Arguments
+/// * `path` - The path of the file.
+///
+/// # Returns
+/// `false` also when the file does not open, because that file is not text.
+/// The decode then reports the failure with its cause.
+fn starts_no_image(path: &Path) -> bool {
+    let mut block = Vec::new();
+    let read =
+        fs::File::open(path).and_then(|file| file.take(FIRST_BLOCK_BYTES).read_to_end(&mut block));
+    if read.is_err() {
+        return false;
+    }
+    if image::guess_format(&block).is_err() {
+        return true;
+    }
+    first_block_can_be_text(&block)
+        && image::ImageReader::open(path)
+            .and_then(image::ImageReader::with_guessed_format)
+            .is_ok_and(|reader| reader.into_dimensions().is_err())
 }
 
 /// Make a picture out of the bytes of an image file, and keep the bytes when
@@ -2046,16 +2394,7 @@ fn decode_image(
     name: &Path,
     capabilities: &Capabilities,
 ) -> Result<(DynamicImage, Option<Vec<u8>>)> {
-    // The decoder reads the format out of the first bytes of the file, and it
-    // takes the extension of the name where those bytes name nothing. That is
-    // what `image::open` does with a path, and this reads the same file the
-    // same way out of the memory that already holds it.
-    let mut reader = image::ImageReader::new(io::Cursor::new(&source));
-    if let Ok(format) = image::ImageFormat::from_path(name) {
-        reader.set_format(format);
-    }
-
-    let img = reader.with_guessed_format()?.decode()?;
+    let img = decode_picture(&source, name)?;
 
     // A file that the writer cannot send drops here, at the end of the decode,
     // and the caller holds the picture alone.
@@ -2124,7 +2463,7 @@ fn display_image_with_header(
     // The read of the terminal happens one time for the whole run, and
     // `display_image` below takes that same answer out of the memory of
     // `termgfx`. So this call costs no round trip of its own.
-    let capabilities = Capabilities::detect_by_asking();
+    let capabilities = drawing_capabilities(args);
     let (img, source) = load(&capabilities)?;
 
     let (term_width, _) = terminal_cells();
@@ -2170,7 +2509,8 @@ fn read_new_text_file(path: &Path) -> io::Result<Option<String>> {
 }
 
 /// The number of bytes at the start of a file that the text rule of monitor
-/// mode reads before it reads the rest.
+/// mode reads before it reads the rest. The text check of `--diff`
+/// ([`starts_no_image`]) reads the same block.
 ///
 /// [`read_text_to_show`] decides on this first block, and it reads the rest of
 /// the file only when the block is text. The start of a binary file, such as
@@ -2405,15 +2745,10 @@ fn display_text_file(file_path: &Path) -> Result<()> {
 /// # Errors
 /// An error when the stream does not read, or when it holds no image.
 fn picture_from_stdin(
-    mut reader: impl Read,
+    reader: impl Read,
     capabilities: &Capabilities,
 ) -> Result<(DynamicImage, Option<Vec<u8>>)> {
-    let mut buffer = Vec::new();
-    reader
-        .read_to_end(&mut buffer)
-        .context("Failed to read image data from stdin")?;
-
-    let img = image::load_from_memory(&buffer).context("Failed to decode image from stdin")?;
+    let (buffer, img) = read_stdin_picture(reader)?;
 
     // A file that this terminal never sends drops here, at the end of the read,
     // and the caller holds the picture alone.
@@ -2422,11 +2757,126 @@ fn picture_from_stdin(
     Ok((img, source))
 }
 
+/// Read every byte of `reader`, and make a picture out of them.
+///
+/// Both readers of `--stdin` go through here: the display, which keeps the
+/// bytes that the terminal sends as they stand, and `--emit-rgba`, which reads
+/// no terminal and keeps the picture alone.
+///
+/// # Arguments
+/// * `reader` - The stream that carries the bytes of one image file.
+///
+/// # Returns
+/// The bytes that the stream carried, and the picture out of them.
+///
+/// # Errors
+/// An error when the stream does not read, or when it holds no image.
+fn read_stdin_picture(mut reader: impl Read) -> Result<(Vec<u8>, DynamicImage)> {
+    let mut buffer = Vec::new();
+    reader
+        .read_to_end(&mut buffer)
+        .context("Failed to read image data from stdin")?;
+
+    let img = image::load_from_memory(&buffer).context("Failed to decode image from stdin")?;
+
+    Ok((buffer, img))
+}
+
+/// A value of the `--protocol` flag and of the `IC_PROTOCOL` environment
+/// variable.
+///
+/// `Auto` forces nothing, and `termgfx` selects the protocol for the
+/// terminal. Each other value forces its protocol. [`forced_protocol`] turns a
+/// value into the choice that `termgfx` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum ProtocolArg {
+    Auto,
+    Sixel,
+    Kitty,
+    Iterm2,
+}
+
+/// The protocol that the user forced, from the flag and from the variable.
+///
+/// The flag wins over the variable. The variable goes through the same parser
+/// of clap as the flag, with no difference between uppercase and lowercase,
+/// so the two take the same values.
+///
+/// # Arguments
+/// * `flag` - The value of `--protocol`, when the command line gives one.
+/// * `env` - The value of `IC_PROTOCOL`, when the environment holds one.
+///
+/// # Returns
+/// The forced protocol. `None` when neither setting forces a protocol: no
+/// value, the value `auto`, or a value of `IC_PROTOCOL` that `ic` does not
+/// know. `termgfx` then selects the protocol for the terminal.
+fn forced_protocol(flag: Option<ProtocolArg>, env: Option<&str>) -> Option<ForcedProtocol> {
+    let arg = match flag {
+        Some(arg) => arg,
+        None => <ProtocolArg as clap::ValueEnum>::from_str(env?, true).ok()?,
+    };
+    match arg {
+        ProtocolArg::Auto => None,
+        ProtocolArg::Sixel => Some(ForcedProtocol::Sixel),
+        ProtocolArg::Kitty => Some(ForcedProtocol::Kitty),
+        ProtocolArg::Iterm2 => Some(ForcedProtocol::Iterm2),
+    }
+}
+
+/// The protocol that the user forced for this run.
+///
+/// This is [`forced_protocol`] with the value of `IC_PROTOCOL` from the
+/// environment. The variable holds the choice for a whole shell session, for
+/// example in an xterm.js front end such as ttyd, and the flag wins over it.
+///
+/// # Arguments
+/// * `args` - The command line arguments, which hold `--protocol`.
+///
+/// # Returns
+/// The forced protocol, or `None` when the user forced no protocol.
+fn forced_protocol_for(args: &Args) -> Option<ForcedProtocol> {
+    let env = std::env::var("IC_PROTOCOL").ok();
+    forced_protocol(args.protocol, env.as_deref())
+}
+
+/// Put the protocol that the user forced, if there is one, on `capabilities`.
+///
+/// Each path that draws a picture comes through here, through
+/// [`drawing_capabilities`], and [`report_display_readiness`] reads the same
+/// [`forced_protocol_for`]. So the gate, the writer, and the rule that decides
+/// if the bytes of a file travel as they stand all read one choice.
+///
+/// # Arguments
+/// * `capabilities` - What `termgfx` read about the terminal.
+/// * `args` - The command line arguments, which hold `--protocol`.
+///
+/// # Returns
+/// `capabilities` in the forced protocol, or `capabilities` as they are when
+/// the user forced no protocol.
+fn with_the_forced_protocol(capabilities: Capabilities, args: &Args) -> Capabilities {
+    match forced_protocol_for(args) {
+        Some(protocol) => capabilities.with_forced_protocol(protocol),
+        None => capabilities,
+    }
+}
+
+/// The capabilities of the terminal for a path that draws a picture.
+///
+/// This is [`Capabilities::detect_by_asking`] with the protocol that the user
+/// forced. `termgfx` asks the terminal one time for the whole run, so a second
+/// call of this function costs no round trip.
+///
+/// # Arguments
+/// * `args` - The command line arguments, which hold `--protocol`.
+fn drawing_capabilities(args: &Args) -> Capabilities {
+    with_the_forced_protocol(Capabilities::detect_by_asking(), args)
+}
+
 fn display_image_from_stdin(args: &Args) -> Result<()> {
     // The read of the terminal happens one time for the whole run, and
     // `display_image` below takes that same answer out of the memory of
     // `termgfx`. So this call costs no round trip of its own.
-    let capabilities = Capabilities::detect_by_asking();
+    let capabilities = drawing_capabilities(args);
     let stdin = io::stdin();
     let (img, source) = picture_from_stdin(BufReader::new(stdin.lock()), &capabilities)?;
 
@@ -2506,7 +2956,7 @@ fn display_image(
     picture: Picture,
     header: HeaderRows,
 ) -> Result<()> {
-    let terminal_caps = Capabilities::detect_by_asking();
+    let terminal_caps = drawing_capabilities(args);
     let transport = detect_remote_transport();
 
     validate_terminal_for_graphics(&terminal_caps, &transport, in_tmux(), "Image")?;
@@ -2559,8 +3009,9 @@ fn display_image(
         (target_width, target_height)
     };
 
-    // `termgfx` picks the protocol from the terminal that `Capabilities::detect`
-    // already named, so this call costs no second read of the environment.
+    // `termgfx` picks the protocol from the terminal that `drawing_capabilities`
+    // already named, or it takes the protocol that the user forced there. So
+    // this call costs no second read of the environment.
     //
     // No protocol needs a special path for a remote proxy. Every writer holds
     // the renderer still and then states the position of the cursor itself, so
@@ -2818,6 +3269,79 @@ mod tests {
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use termgfx::{AnsweredProtocol, PayloadBudget};
+
+    // =========================================================================
+    // Tests for forced_protocol
+    // =========================================================================
+
+    #[test]
+    fn forced_flag_sixel_maps_to_sixel() {
+        assert_eq!(
+            forced_protocol(Some(ProtocolArg::Sixel), None),
+            Some(ForcedProtocol::Sixel)
+        );
+    }
+
+    #[test]
+    fn forced_flag_kitty_maps_to_kitty() {
+        assert_eq!(
+            forced_protocol(Some(ProtocolArg::Kitty), None),
+            Some(ForcedProtocol::Kitty)
+        );
+    }
+
+    #[test]
+    fn forced_flag_iterm2_maps_to_iterm2() {
+        assert_eq!(
+            forced_protocol(Some(ProtocolArg::Iterm2), None),
+            Some(ForcedProtocol::Iterm2)
+        );
+    }
+
+    #[test]
+    fn forced_flag_auto_is_no_override() {
+        assert_eq!(forced_protocol(Some(ProtocolArg::Auto), None), None);
+    }
+
+    #[test]
+    fn forced_env_sixel_maps_to_sixel() {
+        assert_eq!(
+            forced_protocol(None, Some("sixel")),
+            Some(ForcedProtocol::Sixel)
+        );
+    }
+
+    #[test]
+    fn forced_env_is_case_insensitive() {
+        assert_eq!(
+            forced_protocol(None, Some("ITERM2")),
+            Some(ForcedProtocol::Iterm2)
+        );
+    }
+
+    #[test]
+    fn forced_env_auto_is_no_override() {
+        assert_eq!(forced_protocol(None, Some("auto")), None);
+    }
+
+    #[test]
+    fn forced_env_unrecognised_is_no_override() {
+        assert_eq!(forced_protocol(None, Some("nonsense")), None);
+    }
+
+    #[test]
+    fn forced_none_is_no_override() {
+        assert_eq!(forced_protocol(None, None), None);
+    }
+
+    #[test]
+    fn forced_flag_beats_env() {
+        // An explicit flag wins even when IC_PROTOCOL says something else.
+        assert_eq!(
+            forced_protocol(Some(ProtocolArg::Iterm2), Some("sixel")),
+            Some(ForcedProtocol::Iterm2)
+        );
+    }
 
     /// Dimensions whose frame does not fit in `usize` give the error that
     /// names them, not an overflow. The size check of `rgb_data_to_image`
@@ -3238,9 +3762,70 @@ mod tests {
         );
     }
 
+    /// A forced protocol passes the gate where every rule of it refuses.
+    ///
+    /// The person who forces a protocol vouches for the terminal. The rule
+    /// about Mosh reads a process tree, and under a multiplexer that tree can
+    /// name the Mosh of another client. So the choice is the way past a wrong
+    /// refusal, and it passes every rule: Mosh, tmux, a terminal that draws
+    /// nothing by its name, and a session that shares no protocol with the
+    /// terminal.
+    #[test]
+    fn a_forced_protocol_passes_the_gate_where_every_rule_refuses() {
+        let draws_nothing = Capabilities::new(TerminalType::Alacritty, false, true)
+            .with_forced_protocol(ForcedProtocol::Sixel);
+        for (transport, in_tmux) in [
+            (RemoteTransport::Mosh, false),
+            (RemoteTransport::None, true),
+            (RemoteTransport::Mosh, true),
+            (RemoteTransport::None, false),
+        ] {
+            assert!(
+                validate_terminal_for_graphics(&draws_nothing, &transport, in_tmux, "Image")
+                    .is_ok(),
+                "a forced protocol passes the gate under {transport:?} with tmux {in_tmux}"
+            );
+        }
+
+        let shares_nothing = Capabilities::new(TerminalType::Ghostty, true, true)
+            .in_session(MoshImages::from_env(Some("sixel"), None, None))
+            .with_forced_protocol(ForcedProtocol::Kitty);
+        assert!(
+            validate_terminal_for_graphics(&shares_nothing, &RemoteTransport::Mosh, false, "Image")
+                .is_ok(),
+            "a forced protocol passes a session that the gate reads as one that shares no protocol"
+        );
+    }
+
     #[test]
     fn the_mosh_message_still_offers_ssh() {
         assert!(mosh_refusal_message().contains("ssh user@host"));
+    }
+
+    /// Assert that a refusal names the two ways to force a protocol.
+    ///
+    /// A forced protocol is the way past a wrong refusal: under Zellij, the
+    /// process tree can name the Mosh of a different client. A refusal that
+    /// does not name the way leaves the user with a repair that does not
+    /// apply.
+    fn assert_names_the_forced_protocol(message: &str) {
+        assert!(
+            message.contains("--protocol") && message.contains("IC_PROTOCOL"),
+            "the refusal must name --protocol and IC_PROTOCOL: {message}"
+        );
+    }
+
+    #[test]
+    fn the_mosh_message_names_the_forced_protocol() {
+        assert_names_the_forced_protocol(&mosh_refusal_message());
+    }
+
+    #[test]
+    fn the_tmux_message_names_the_forced_protocol() {
+        let caps = Capabilities::new(TerminalType::ITerm2, true, true);
+        let error = validate_terminal_for_graphics(&caps, &RemoteTransport::None, true, "Image")
+            .expect_err("a tmux that answered no query must be refused");
+        assert_names_the_forced_protocol(&error.to_string());
     }
 
     // =========================================================================
@@ -4907,5 +5492,32 @@ mod tests {
         // row for each column of the line.
         let lines = header_lines(&["abc"]);
         assert_eq!(header_rows(&lines, 0).0, 3);
+    }
+
+    // =========================================================================
+    // Tests for the help of --diff-mode
+    // =========================================================================
+
+    #[test]
+    fn diff_mode_help_names_the_default_mode() {
+        // The help states the default by hand, thus it must name the mode
+        // that `#[default]` puts on `diff::Mode`.
+        use clap::{CommandFactory, ValueEnum};
+
+        let default_mode = diff::Mode::default()
+            .to_possible_value()
+            .expect("each diff mode has a name on the command line");
+        let expected = format!("(default: {})", default_mode.get_name());
+        let command = Args::command();
+        let help = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "diff_mode")
+            .and_then(clap::Arg::get_help)
+            .expect("--diff-mode has a help text")
+            .to_string();
+        assert!(
+            help.contains(&expected),
+            "the help of --diff-mode is {help:?}, and it must hold {expected:?}"
+        );
     }
 }

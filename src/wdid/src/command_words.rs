@@ -72,6 +72,11 @@
 //! the substitution. The walk keeps the origin of each part of the new text as
 //! a range of character indexes, because the parser counts characters.
 //!
+//! [`parse_line`] also gives each alias expansion of the walk, with the name
+//! of the alias and the alias that the person typed. A person types `wtf` with
+//! `wtf='wt -f'` and `wt=cwt`. That is a use of `wtf`, and a use of `wt`
+//! through `wtf`.
+//!
 //! This module owns the parser. No type of the parser is part of a public
 //! signature, and no other module sees one.
 
@@ -80,7 +85,9 @@ use std::io::BufReader;
 use std::ops::Range;
 
 use brush_parser::ast;
-use brush_parser::word::{self, TildeExpr, WordPiece, WordPieceWithSource};
+use brush_parser::word::{
+    self, Parameter, ParameterExpr, SpecialParameter, TildeExpr, WordPiece, WordPieceWithSource,
+};
 use brush_parser::{tokenize_str_with_options, Parser, ParserOptions, Token};
 
 /// The alias table: the name of each alias and its value, after quote removal.
@@ -103,6 +110,40 @@ struct Alias {
     value: String,
     /// True for a global alias, false for a regular alias.
     global: bool,
+}
+
+/// The kind of an alias.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AliasKind {
+    /// An alias that expands at command position only.
+    Regular,
+    /// A zsh alias that expands in every word position (`alias -g`).
+    Global,
+    /// A zsh alias that expands a command word with its suffix (`alias -s`).
+    Suffix,
+}
+
+/// One alias of the table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasDefinition {
+    /// The name. A suffix alias has its marker, `*.` and the suffix (`*.md`).
+    pub name: String,
+    /// The kind.
+    pub kind: AliasKind,
+    /// The value, after quote removal.
+    pub value: String,
+}
+
+impl AliasDefinition {
+    /// Gives the suffix of a suffix alias, without its marker: `md` for
+    /// `*.md`. Gives `None` for a regular and a global alias.
+    #[must_use]
+    pub fn suffix(&self) -> Option<&str> {
+        match self.kind {
+            AliasKind::Suffix => self.name.strip_prefix(SUFFIX_MARKER),
+            AliasKind::Regular | AliasKind::Global => None,
+        }
+    }
 }
 
 /// The character that comes before the suffix of a word.
@@ -197,6 +238,28 @@ impl Aliases {
             .any(|(name, alias)| alias.global && text.contains(name.as_str()))
     }
 
+    /// Gives each alias of the table, sorted by name, then by kind.
+    #[must_use]
+    pub fn definitions(&self) -> Vec<AliasDefinition> {
+        let regular_and_global = self.values.iter().map(|(name, alias)| AliasDefinition {
+            name: name.clone(),
+            kind: if alias.global {
+                AliasKind::Global
+            } else {
+                AliasKind::Regular
+            },
+            value: alias.value.clone(),
+        });
+        let suffix = self.suffixes.iter().map(|(suffix, value)| AliasDefinition {
+            name: format!("{SUFFIX_MARKER}{suffix}"),
+            kind: AliasKind::Suffix,
+            value: value.clone(),
+        });
+        let mut all: Vec<AliasDefinition> = regular_and_global.chain(suffix).collect();
+        all.sort_by(|a, b| a.name.cmp(&b.name).then(a.kind.cmp(&b.kind)));
+        all
+    }
+
     /// Gives the number of aliases of all three kinds.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -269,6 +332,41 @@ pub enum Parsed {
     Words(Vec<CommandWord>),
     /// The parser refused the line, or a part of it. No word is known.
     Unparsed,
+}
+
+/// One expansion of an alias in a command line.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AliasUse {
+    /// The name of the alias. A suffix alias has its marker, `*.` and the
+    /// suffix (`*.md`).
+    pub name: String,
+    /// The alias that the person typed, when this expansion came from the
+    /// value of another alias. `None` when the person typed the name.
+    pub through: Option<String>,
+}
+
+/// One run of a word by a wrapper. In `sudo command ls`, `sudo` runs `command`
+/// and `command` runs `ls`, thus the line has two runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrapperRun {
+    /// The name of the wrapper.
+    pub wrapper: String,
+    /// The literal text of the word that the wrapper runs.
+    pub word: String,
+}
+
+/// The command words of one line, the aliases that expanded in it, and each
+/// run of a word by a wrapper.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Line {
+    /// The command words, in source order. These are the words that
+    /// [`command_words`] gives.
+    pub words: Vec<CommandWord>,
+    /// Each alias expansion of the walk, in walk order.
+    pub aliases: Vec<AliasUse>,
+    /// Each run of a word by a wrapper, in walk order. A wrapper that looks a
+    /// name up (`command -v ls`) runs nothing and adds no run.
+    pub wrapped: Vec<WrapperRun>,
 }
 
 /// The most levels of nesting that the walk reads. A substitution inside a
@@ -651,6 +749,9 @@ const PLAIN: Wrapper = Wrapper {
     lookup_options: false,
 };
 
+/// The name of the wrapper `command`.
+pub const COMMAND: &str = "command";
+
 /// Every wrapper that the walk knows, with its option tables.
 const WRAPPERS: &[Wrapper] = &[
     Wrapper {
@@ -701,7 +802,7 @@ const WRAPPERS: &[Wrapper] = &[
         ..PLAIN
     },
     Wrapper {
-        name: "command",
+        name: COMMAND,
         lookup_options: true,
         ..PLAIN
     },
@@ -867,8 +968,10 @@ fn is_assignment(text: &str) -> bool {
 /// candidate. A wrapper hands the candidate to the word after its options, and
 /// the loop repeats for a wrapper inside a wrapper. Gives `None` when nothing
 /// runs: no word is left, the candidate holds an expansion, or the wrapper
-/// looks a name up.
-fn unwrap_command(words: &[&ReadWord]) -> Option<usize> {
+/// looks a name up. For each wrapper hop, `runs` gets the name of the wrapper
+/// and the literal text of the word that the wrapper runs, when that word
+/// exists and has a literal.
+fn unwrap_command(words: &[&ReadWord], runs: &mut Vec<WrapperRun>) -> Option<usize> {
     let mut index = 0;
     loop {
         let literal = words.get(index)?.literal()?;
@@ -876,6 +979,12 @@ fn unwrap_command(words: &[&ReadWord]) -> Option<usize> {
             return Some(index);
         };
         index = wrapper.skip(words, index + 1)?;
+        if let Some(word) = words.get(index).and_then(|word| word.literal()) {
+            runs.push(WrapperRun {
+                wrapper: literal,
+                word,
+            });
+        }
     }
 }
 
@@ -892,6 +1001,10 @@ struct Walker<'a> {
     options: ParserOptions,
     /// The command words found so far, in source order.
     words: Vec<CommandWord>,
+    /// The alias expansions found so far, in walk order.
+    uses: Vec<AliasUse>,
+    /// The runs of a word by a wrapper found so far, in walk order.
+    wrapped: Vec<WrapperRun>,
 }
 
 impl<'a> Walker<'a> {
@@ -901,7 +1014,18 @@ impl<'a> Walker<'a> {
             aliases,
             options: ParserOptions::default(),
             words: Vec::new(),
+            uses: Vec::new(),
+            wrapped: Vec::new(),
         }
+    }
+
+    /// Records one expansion of the alias `name`. `through` is the alias that
+    /// the person typed, when the expansion came from the value of an alias.
+    fn record(&mut self, name: &str, through: Option<String>) {
+        self.uses.push(AliasUse {
+            name: name.to_owned(),
+            through,
+        });
     }
 
     /// Parses the text of `context` as a program and walks it. The global
@@ -921,16 +1045,21 @@ impl<'a> Walker<'a> {
     /// of its word, as the lexer of zsh does. A global alias in the chain is
     /// not expanded. The text of a value has the origin of the word that it
     /// replaced. Gives `None` when no word of the text is a global alias.
-    fn expand_globals(&self, context: &TextContext<'_>) -> Result<Option<ExpandedText>, Refused> {
+    fn expand_globals(
+        &mut self,
+        context: &TextContext<'_>,
+    ) -> Result<Option<ExpandedText>, Refused> {
         let found = self.global_words(context.text, |name| !context.in_chain(name));
         if found.is_empty() {
             return Ok(None);
         }
         let mut replacements = Vec::with_capacity(found.len());
         for GlobalWord { range, name, value } in found {
+            let origin = context.replaced_origin(name, Some(range.start));
+            self.record(name, context.origin_at(Some(range.start)));
             replacements.push(Replacement {
-                text: self.global_value(value, &mut vec![name], context)?,
-                origin: context.replaced_origin(name, Some(range.start)),
+                text: self.global_value(value, &mut vec![name], context, &origin)?,
+                origin,
                 range,
             });
         }
@@ -941,12 +1070,15 @@ impl<'a> Walker<'a> {
     /// it expanded. `path` holds the names of the global aliases that hold the
     /// value. They are not expanded again, thus a cycle ends. Each name on the
     /// path counts as one level of nesting.
+    /// Each global alias in the value is a use through `through`, the origin
+    /// of the outermost word that the expansion replaced.
     /// Gives `Refused` when the nesting is too deep.
     fn global_value(
-        &self,
+        &mut self,
         value: &'a str,
         path: &mut Vec<&'a str>,
         context: &TextContext<'_>,
+        through: &Option<String>,
     ) -> Result<String, Refused> {
         if context.depth + path.len() > MAX_DEPTH {
             return Err(Refused);
@@ -959,8 +1091,9 @@ impl<'a> Walker<'a> {
         }
         let mut replacements = Vec::with_capacity(found.len());
         for GlobalWord { range, name, value } in found {
+            self.record(name, through.clone());
             path.push(name);
-            let text = self.global_value(value, path, context);
+            let text = self.global_value(value, path, context, through);
             path.pop();
             replacements.push(Replacement {
                 range,
@@ -1163,10 +1296,12 @@ impl<'a> Walker<'a> {
         }
         if let Some(command) = &command {
             if let Some(value) = self.alias_value(&command.raw, context, &[]) {
+                self.record(&command.raw, context.origin_at(command.start));
                 let leading = [(value, context.replaced_origin(&command.raw, command.start))];
                 return self.walk_alias(&leading, vec![command.raw.clone()], &suffix, context);
             }
             if let Some((marker, value)) = self.suffix_alias(command, context) {
+                self.record(&marker, context.origin_at(command.start));
                 let leading = [
                     (value, context.replaced_origin(&marker, command.start)),
                     (command.raw.as_str(), context.origin_at(command.start)),
@@ -1176,7 +1311,7 @@ impl<'a> Walker<'a> {
             let sequence: Vec<&ReadWord> = std::iter::once(command)
                 .chain(suffix.iter().filter_map(|(_, read)| read.as_ref()))
                 .collect();
-            if let Some(index) = unwrap_command(&sequence) {
+            if let Some(index) = unwrap_command(&sequence, &mut self.wrapped) {
                 if let (Some(runs), Some(rest)) = (sequence.get(index), sequence.get(index + 1..)) {
                     if let Some(literal) = runs.literal() {
                         let args = rest.iter().map(|word| word.argument());
@@ -1257,6 +1392,7 @@ impl<'a> Walker<'a> {
             let Some(next_value) = self.alias_value(&next.raw, context, &names) else {
                 break;
             };
+            self.record(&next.raw, context.origin_at(next.start));
             expanded.push(next_value, context.replaced_origin(&next.raw, next.start));
             names.push(next.raw.clone());
             last = next_value;
@@ -1448,9 +1584,297 @@ impl<'a> Walker<'a> {
 /// the rules of the expansion and of the origin of each word.
 #[must_use]
 pub fn command_words(line: &str, aliases: &Aliases) -> Parsed {
+    parse_line(line, aliases).map_or(Parsed::Unparsed, |line| Parsed::Words(line.words))
+}
+
+/// Gives the command words and the alias expansions of one line, or `None`
+/// when the parser refuses the line. Pure.
+///
+/// The words are the words that [`command_words`] gives.
+#[must_use]
+pub fn parse_line(line: &str, aliases: &Aliases) -> Option<Line> {
     let mut walker = Walker::new(aliases);
     match walker.walk_text(&TextContext::line(line)) {
-        Ok(()) => Parsed::Words(walker.words),
-        Err(Refused) => Parsed::Unparsed,
+        Ok(()) => Some(Line {
+            words: walker.words,
+            aliases: walker.uses,
+            wrapped: walker.wrapped,
+        }),
+        Err(Refused) => None,
+    }
+}
+
+/// One word of a text in argument form, as [`split_words`] and
+/// [`simple_command`] give it.
+///
+/// The kind keeps apart two words with the same text. `'$HOME'` is the
+/// literal `$HOME`, but `$HOME` is an expansion. `'|'` is the literal `|`,
+/// but `|` is an operator.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Argument {
+    /// A word with no expansion: its text after quote removal.
+    Literal(String),
+    /// A word that holds an expansion, a tilde or an unquoted pattern
+    /// included: its raw text, quotes included.
+    Expansion(String),
+    /// An operator of the tokenizer, for example `|` or a newline.
+    Operator(String),
+}
+
+/// The characters, besides letters and digits, that a literal word holds
+/// without quotes. `=` is not safe as the first character, because zsh
+/// expands `=ls` to the path of `ls`.
+const SAFE_WORD_CHARACTERS: &str = "_-./,:@%+=";
+
+/// The first character of a word that zsh expands to the path of a program,
+/// for example `=ls`.
+const EQUALS_EXPANSION: char = '=';
+
+impl Argument {
+    /// Gives the word as the shell reads it. A literal that holds only safe
+    /// characters stays bare, and each other literal gets single quotes. An
+    /// expansion and an operator keep their text.
+    #[must_use]
+    pub fn shell_text(&self) -> String {
+        match self {
+            Self::Literal(text) => {
+                let bare = !text.is_empty()
+                    && !text.starts_with(EQUALS_EXPANSION)
+                    && text
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || SAFE_WORD_CHARACTERS.contains(c));
+                if bare {
+                    text.clone()
+                } else {
+                    shellquote::shell_quote(text)
+                }
+            }
+            Self::Expansion(text) | Self::Operator(text) => text.clone(),
+        }
+    }
+
+    /// Gives the text of the word, whatever its kind.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Literal(text) | Self::Expansion(text) | Self::Operator(text) => text,
+        }
+    }
+
+    /// Says if the word is `"$@"` or `"${@}"`: a double-quoted expansion of
+    /// all the arguments, which passes on each argument as one word.
+    #[must_use]
+    pub fn is_all_arguments(&self) -> bool {
+        let Self::Expansion(raw) = self else {
+            return false;
+        };
+        let Ok(pieces) = word::parse(raw, &ParserOptions::default()) else {
+            return false;
+        };
+        matches!(
+            pieces.as_slice(),
+            [WordPieceWithSource { piece: WordPiece::DoubleQuotedSequence(inner), .. }]
+                if matches!(
+                    inner.as_slice(),
+                    [WordPieceWithSource {
+                        piece: WordPiece::ParameterExpansion(ParameterExpr::Parameter {
+                            parameter: Parameter::Special(
+                                SpecialParameter::AllPositionalParameters { concatenate: false }
+                            ),
+                            indirect: false,
+                        }),
+                        ..
+                    }]
+                )
+        )
+    }
+}
+
+/// The character that stands for each piece of a word other than unquoted
+/// text and a line join in the probe of [`argument_from`]. It has no meaning
+/// in a glob or in a brace expansion, so a quoted `,` or `}` stays out of the
+/// probe, as the shell keeps it out. A line join gives nothing, as in
+/// [`literal_of`], because the shell removes it.
+const PIECE_STAND_IN: char = 'x';
+
+/// Says if the probe text `probe` of a word holds a pattern that the shell
+/// expands: `*`, `?`, or `[` before `]` (a glob), a `{` and the first `}`
+/// after it with `,` or `..` between them (a brace expansion), or a first `=`
+/// (zsh gives the path of the program). Each `{` counts, so `{x}{a,b}` is a
+/// pattern.
+fn is_pattern(probe: &str) -> bool {
+    let bracket = probe
+        .split_once('[')
+        .is_some_and(|(_, rest)| rest.contains(']'));
+    let brace = probe
+        .match_indices('{')
+        .filter_map(|(index, open)| probe.get(index + open.len()..))
+        .any(|rest| {
+            rest.split_once('}')
+                .is_some_and(|(inside, _)| inside.contains(',') || inside.contains(".."))
+        });
+    probe.contains(['*', '?']) || bracket || brace || probe.starts_with(EQUALS_EXPANSION)
+}
+
+/// Gives the [`Argument`] of a word with the raw text `raw` and the top-level
+/// `pieces`. A tilde expansion or an unquoted pattern makes an
+/// [`Argument::Expansion`], so `~` is not the literal `'~'`, and `*.c` is not
+/// the literal `'*.c'`. This is the one place of that rule.
+///
+/// The pattern rule reads one probe of the whole word: the text of each
+/// unquoted piece, nothing for a line join, and [`PIECE_STAND_IN`] for each
+/// other piece. Thus a quoted piece does not divide `{a,"b"}` into two texts
+/// that hold no pattern, and a line join does not divide `{1..3}`.
+fn argument_from(raw: &str, pieces: &[WordPieceWithSource]) -> Argument {
+    let mut probe = String::new();
+    for WordPieceWithSource { piece, .. } in pieces {
+        match piece {
+            WordPiece::TildeExpansion(_) => return Argument::Expansion(raw.to_string()),
+            WordPiece::Text(text) => probe.push_str(text),
+            WordPiece::EscapeSequence(escape) if unescape(escape).is_empty() => {}
+            _ => probe.push(PIECE_STAND_IN),
+        }
+    }
+    if is_pattern(&probe) {
+        return Argument::Expansion(raw.to_string());
+    }
+    match literal_of(pieces) {
+        Some(text) => Argument::Literal(text),
+        None => Argument::Expansion(raw.to_string()),
+    }
+}
+
+/// Gives the words of `text` as the shell splits it. Pure.
+///
+/// A word is an [`Argument::Literal`] with its text after quote removal, or an
+/// [`Argument::Expansion`] with its raw text when it holds an expansion. An
+/// operator is an [`Argument::Operator`], for example `|`. Gives `None` when
+/// the tokenizer refuses the text or a word does not parse.
+#[must_use]
+pub fn split_words(text: &str) -> Option<Vec<Argument>> {
+    let tokens =
+        tokenize_str_with_options(text, &ParserOptions::default().tokenizer_options()).ok()?;
+    tokens
+        .iter()
+        .map(|token| match token {
+            Token::Operator(operator, _) => Some(Argument::Operator(operator.clone())),
+            Token::Word(raw, _) => {
+                let pieces = word::parse(raw, &ParserOptions::default()).ok()?;
+                Some(argument_from(raw, &pieces))
+            }
+        })
+        .collect()
+}
+
+/// Gives the words of `text` when the text is exactly one simple command, or
+/// `None`. Pure.
+///
+/// A brace group that holds one simple command counts as that command. A
+/// pipeline, a list, a background command, a redirect, a process substitution,
+/// a negation, a timer, and any other compound command give `None`. So does a
+/// command that has no command word. The words are the prefix assignments, the
+/// command word, and the suffix words, each an [`Argument`].
+#[must_use]
+pub fn simple_command(text: &str) -> Option<Vec<Argument>> {
+    let options = ParserOptions::default();
+    let program = Parser::new(BufReader::new(text.as_bytes()), &options)
+        .parse_program()
+        .ok()?;
+    let [list] = program.complete_commands.as_slice() else {
+        return None;
+    };
+    words_of_single_list(list, &options)
+}
+
+/// Gives the words of `list` when it holds exactly one item, that item ends
+/// with `;` or a newline, and it is one simple command. See [`simple_command`].
+fn words_of_single_list(
+    list: &ast::CompoundList,
+    options: &ParserOptions,
+) -> Option<Vec<Argument>> {
+    let [ast::CompoundListItem(and_or, ast::SeparatorOperator::Sequence)] = list.0.as_slice()
+    else {
+        return None;
+    };
+    if !and_or.additional.is_empty() {
+        return None;
+    }
+    let pipeline = &and_or.first;
+    if pipeline.timed.is_some() || pipeline.bang {
+        return None;
+    }
+    let [command] = pipeline.seq.as_slice() else {
+        return None;
+    };
+    match command {
+        ast::Command::Simple(simple) => words_of_simple(simple, options),
+        ast::Command::Compound(ast::CompoundCommand::BraceGroup(group), None) => {
+            words_of_single_list(&group.list, options)
+        }
+        _ => None,
+    }
+}
+
+/// Gives the words of a simple command in source order, each an [`Argument`].
+/// Gives `None` when it has a redirect, a process substitution, or no command
+/// word, or when a word does not parse.
+fn words_of_simple(simple: &ast::SimpleCommand, options: &ParserOptions) -> Option<Vec<Argument>> {
+    let command = simple.word_or_name.as_ref()?;
+    let mut words = Vec::new();
+    for item in simple.prefix.iter().flat_map(|prefix| &prefix.0) {
+        words.push(item_argument(item, options)?);
+    }
+    words.push(argument_of(command, options)?);
+    for item in simple.suffix.iter().flat_map(|suffix| &suffix.0) {
+        words.push(item_argument(item, options)?);
+    }
+    Some(words)
+}
+
+/// Gives the [`Argument`] of one prefix or suffix item. Gives `None` for a
+/// redirect or a process substitution.
+fn item_argument(
+    item: &ast::CommandPrefixOrSuffixItem,
+    options: &ParserOptions,
+) -> Option<Argument> {
+    match item {
+        ast::CommandPrefixOrSuffixItem::Word(word)
+        | ast::CommandPrefixOrSuffixItem::AssignmentWord(_, word) => argument_of(word, options),
+        _ => None,
+    }
+}
+
+/// Gives the [`Argument`] of `word`: a literal, or an expansion with its raw
+/// text. Gives `None` when the word does not parse.
+fn argument_of(word: &ast::Word, options: &ParserOptions) -> Option<Argument> {
+    let pieces = word::parse(&word.value, options).ok()?;
+    Some(argument_from(&word.value, &pieces))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Gives the [`Argument`] of the raw text `raw` as one word, through
+    /// [`argument_from`] and not through the tokenizer.
+    fn argument(raw: &str) -> Option<Argument> {
+        let pieces = word::parse(raw, &ParserOptions::default()).ok()?;
+        Some(argument_from(raw, &pieces))
+    }
+
+    /// The shell removes a line join, so a line join does not divide a
+    /// pattern, and it is not a piece of the probe. The tokenizer removes an
+    /// unquoted line join before a word parses, but [`argument_from`] reads
+    /// the pieces of each raw text that it gets.
+    #[test]
+    fn a_line_join_does_not_divide_a_pattern() {
+        let rows = [
+            ("{1.\\\n.3}", Argument::Expansion("{1.\\\n.3}".to_owned())),
+            ("\\\n=ls", Argument::Expansion("\\\n=ls".to_owned())),
+            ("a\\\nb", Argument::Literal("ab".to_owned())),
+        ];
+        for (raw, expected) in rows {
+            assert_eq!(argument(raw), Some(expected), "raw: {raw:?}");
+        }
     }
 }

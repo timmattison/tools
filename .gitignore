@@ -5,8 +5,19 @@ target
 .env.bak
 .env.local
 .claude/
+.superpowers/
 .op-cache.json
 node_modules
 .wrangler/
 # swt's green-check escape hatch: per-developer, never committed.
 .swt-check
+!src/msgs/icons/
+!pnpm-lock.yaml
+src/msgs/gen/
+# A cdva test plants build output here for one run. A killed run leaves it behind.
+src/cdva/tests/planted-*/
+
+# Claude Code lays the types of its plugin API into each plugin it loads from a
+# folder. They are generated for the build that loaded the plugin, so they stay
+# out of git.
+plugins/*/.claude-plugin/types/

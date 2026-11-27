@@ -405,13 +405,38 @@ fn repository_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// The directories of the repository root that hold no source anybody wrote.
+/// The directories that hold no source anybody wrote.
 ///
-/// Both are build output that the repository's own `.gitignore` names, and
+/// Each one is build output that the repository's own `.gitignore` names, and
 /// `target` alone runs to several gigabytes. They are named here rather than
 /// left to the ignore files because this walk turns the ignore files off; see
 /// [`HOW`].
-const BUILD_DIRECTORIES: &[&str] = &["target", "node_modules"];
+///
+/// `dist` is the bundle a frontend build writes. A bundler writes one minified
+/// row of JavaScript there, and the JavaScript row of the table reads that row
+/// as ending inside a template string. Until issue #761 moved `nle` to Dioxus,
+/// `pnpm build` wrote such a bundle to `src/nle/frontend/dist`.
+const BUILD_DIRECTORIES: &[&str] = &["target", "node_modules", "dist"];
+
+/// Whether a path the walk found lies inside build output.
+///
+/// [`roots`] drops a build directory that sits at the top of the repository,
+/// and a build directory below a root reaches the walk. A frontend bundle such
+/// as `src/<tool>/frontend/dist` is such a directory, below the `src` root, so
+/// the name alone cannot be the rule. Every component of the path answers
+/// instead.
+///
+/// The path read here is the one relative to the root that found it, not the
+/// absolute one. A checkout that lives under a directory named `target` is
+/// source, and reading the absolute path would call all of it build output.
+fn is_build_output(relative: &Path) -> bool {
+    relative.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|name| BUILD_DIRECTORIES.contains(&name))
+    })
+}
 
 /// How the walk reads the tree.
 ///
@@ -483,6 +508,50 @@ fn defective_fixtures() -> PathBuf {
         .join("fixtures")
 }
 
+/// A build directory below a root, planted for the length of one run.
+///
+/// The guard below walks the repository itself, so the condition it must answer
+/// has to stand in the repository while the run lasts. A frontend bundle below
+/// a root is the case, and a checkout that nobody built holds no such
+/// directory, so a guard that waits for one reports clean on most machines and
+/// fails on the machine that built the app. This plants one every run instead.
+///
+/// The name carries the process and the clock, because two runs of this suite
+/// share one tree. A fixed name lets one run delete the file the other run is
+/// in the middle of reading.
+struct PlantedBuildOutput {
+    directory: PathBuf,
+}
+
+impl PlantedBuildOutput {
+    fn new() -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock stands after the epoch")
+            .as_nanos();
+        let directory = repository_root()
+            .join("src")
+            .join("cdva")
+            .join("tests")
+            .join(format!("planted-{}-{nanos}", std::process::id()));
+        let assets = directory.join("dist").join("assets");
+        std::fs::create_dir_all(&assets).expect("the planted build directory is created");
+        // The shape a bundler writes: one long row that opens a template string
+        // and never closes it, which is what the Vite bundle of `nle` did.
+        std::fs::write(assets.join("index.js"), "const a=`unclosed\n")
+            .expect("the planted bundle is written");
+        Self { directory }
+    }
+}
+
+impl Drop for PlantedBuildOutput {
+    fn drop(&mut self) {
+        // The run takes the directory back out even when the guard panics,
+        // because a left-behind bundle fails every later run of this suite.
+        drop(std::fs::remove_dir_all(&self.directory));
+    }
+}
+
 #[test]
 fn no_source_of_this_repository_ends_unterminated() {
     // This is the guard the character literal of Rust needed, and it asks its
@@ -499,14 +568,18 @@ fn no_source_of_this_repository_ends_unterminated() {
     // phantom string of `'"'` did, and no reading of `*.rs` alone ever sees it.
     let root = repository_root();
     let fixtures = defective_fixtures();
+    // Build output below a root is not source, and the walk must not read it.
+    // The planted bundle holds that rule in place: take the rule away and this
+    // guard fails again, on every checkout rather than only on a built one.
+    let _planted = PlantedBuildOutput::new();
 
     let found = walk(&roots(), HOW).expect("the repository this crate is built from can be walked");
 
     let mut languages: BTreeSet<&'static str> = BTreeSet::new();
     let mut read = 0_usize;
     let mut unterminated: Vec<String> = Vec::new();
-    for (path, _) in &found {
-        if path.starts_with(&fixtures) {
+    for (path, relative) in &found {
+        if path.starts_with(&fixtures) || is_build_output(relative) {
             continue;
         }
         let Some(language) = Language::from_path(path) else {

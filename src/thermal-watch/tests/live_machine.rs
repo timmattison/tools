@@ -7,14 +7,31 @@
 
 use thermal_watch::dvfs::DvfsTable;
 
+/// The sysctl that reads 1 inside a virtual machine on macOS.
+const VIRTUAL_MACHINE_SYSCTL: &str = "kern.hv_vmm_present";
+
+/// Whether this Mac is a virtual machine.
+///
+/// A virtual Mac shows its guest no DVFS table, because the host controls the
+/// clock. A GitHub Actions runner on macOS is such a machine.
+fn is_a_virtual_machine() -> bool {
+    childenv::fixture_command("/usr/sbin/sysctl")
+        .args(["-n", VIRTUAL_MACHINE_SYSCTL])
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "1"
+        })
+}
+
 #[test]
 fn reads_a_credible_dvfs_table_from_this_machine() {
     let read = DvfsTable::read();
 
-    // An Intel Mac and every non-Apple platform carry no such property, so
-    // reporting the absence is the correct result there. On Apple Silicon it is
-    // a defect, and the test says so rather than passing quietly.
-    if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+    // An Intel Mac, a virtual Mac, and every non-Apple platform carry no such
+    // property, so reporting the absence is the correct result there. On a
+    // real Apple Silicon Mac it is a defect, and the test says so rather than
+    // passing quietly.
+    if !cfg!(all(target_os = "macos", target_arch = "aarch64")) || is_a_virtual_machine() {
         if let Err(error) = read {
             println!("no DVFS table on this platform, as expected: {error}");
             return;

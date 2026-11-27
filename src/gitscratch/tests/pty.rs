@@ -5,10 +5,10 @@
 //! assertions are only as good as the helper under them. So this file holds
 //! the helper to what those tests need from it.
 //!
-//! Each test opens a pseudo-terminal of its own and starts `sh`, so the tests
-//! share no path and no terminal, and they run beside each other. No test
-//! starts git, so the scrub of the inherited git environment has nothing to do
-//! here.
+//! Each test opens a pseudo-terminal of its own and starts `sh` or `printenv`,
+//! so the tests share no path and no terminal, and they run beside each other.
+//! No test starts git, so the scrub of the inherited git environment has
+//! nothing to do here.
 
 #![cfg(unix)]
 
@@ -216,4 +216,131 @@ fn a_child_whose_stdout_and_stderr_are_on_the_terminal_gives_back_both_there() {
         "no stream may go to a pipe\n{}",
         described(&output)
     );
+}
+
+/// The name of the variable that holds the type of a terminal.
+const TERM: &str = "TERM";
+
+/// The line that the probe prints when the child sees the terminal type that
+/// the helper names.
+///
+/// A tool that draws a display on a terminal reads `TERM` first, and draws
+/// nothing for `dumb` or for no `TERM` at all. A GitHub runner sets no `TERM`,
+/// so a child that inherits the environment of the run there draws nothing.
+const DEFAULT_TERM_LINE: &[u8] = b"xterm-256color\n";
+
+/// A command that prints the `TERM` of its environment and a newline, and
+/// prints nothing and exits 1 when its environment holds no `TERM`.
+///
+/// The probe is `printenv` and not a shell script, because it must read the
+/// environment that the child got. `sh` on macOS sets a shell variable
+/// `TERM=dumb` when its environment holds no `TERM`, so `$TERM` in a script
+/// shows a value that the helper did not give.
+fn print_term() -> Command {
+    let mut command = childenv::fixture_command("printenv");
+    command.arg(TERM);
+    command
+}
+
+/// [`print_term`] in an environment that holds nothing.
+///
+/// The command states no variable, so the child sees only what the helper
+/// adds. The `TERM` of whoever started the run does not reach the child, and
+/// the test gives one answer under every terminal and under none.
+fn print_term_in_an_empty_environment() -> Command {
+    let mut command = print_term();
+    command.env_clear();
+    command
+}
+
+/// Run a command from `build` once in each of the four shapes that the helper
+/// gives, and give back the name of each shape with what its child printed.
+///
+/// The `Command` of each run comes fresh from `build`, because a run takes its
+/// command. Each run opens a terminal of its own.
+fn on_each_shape(build: impl Fn() -> Command) -> Vec<(&'static str, Output)> {
+    let given = {
+        let pty = Pty::open(COLUMNS);
+        let mut command = build();
+        pty.give_as_controlling_terminal(&mut command);
+        let output = command
+            .output()
+            .unwrap_or_else(|error| panic!("the child must start: {error}"));
+        drop(pty);
+        output
+    };
+
+    vec![
+        ("give_as_controlling_terminal", given),
+        (
+            "run_with_stdout_on_terminal",
+            Pty::open(COLUMNS).run_with_stdout_on_terminal(build()),
+        ),
+        (
+            "run_with_output_on_terminal",
+            Pty::open(COLUMNS).run_with_output_on_terminal(build()),
+        ),
+        (
+            "run_with_stdin_on_terminal",
+            Pty::open(COLUMNS).run_with_stdin_on_terminal(build(), b""),
+        ),
+    ]
+}
+
+/// A child whose command states no `TERM` sees the terminal type that the
+/// helper names.
+///
+/// A terminal that a person uses always has a type, and a tool that draws a
+/// display reads it. A test that gives the tool a terminal must therefore give
+/// it a type too, or the test passes only where the run inherits one.
+#[test]
+fn a_child_whose_command_states_no_term_sees_the_default_term() {
+    for (shape, output) in on_each_shape(print_term_in_an_empty_environment) {
+        assert_eq!(
+            output.stdout,
+            DEFAULT_TERM_LINE,
+            "{shape}: the child must see the terminal type of the helper\n{}",
+            described(&output)
+        );
+    }
+}
+
+/// A `TERM` that the command sets wins over the default of the helper.
+///
+/// A test of how a tool behaves on a `dumb` terminal sets that type on its
+/// command, and the helper must not change it.
+#[test]
+fn a_term_that_the_command_sets_wins_over_the_default() {
+    for (shape, output) in on_each_shape(|| {
+        let mut command = print_term_in_an_empty_environment();
+        command.env(TERM, "dumb");
+        command
+    }) {
+        assert_eq!(
+            output.stdout,
+            b"dumb\n",
+            "{shape}: the child must see the TERM of its command\n{}",
+            described(&output)
+        );
+    }
+}
+
+/// A `TERM` that the command removes stays removed.
+///
+/// A test of how a tool behaves with no terminal type removes `TERM` from its
+/// command, and the helper must not put it back.
+#[test]
+fn a_term_that_the_command_removes_stays_removed() {
+    for (shape, output) in on_each_shape(|| {
+        let mut command = print_term();
+        command.env_remove(TERM);
+        command
+    }) {
+        assert_eq!(
+            (output.status.code(), output.stdout.as_slice()),
+            (Some(1), &b""[..]),
+            "{shape}: the child must see no TERM\n{}",
+            described(&output)
+        );
+    }
 }

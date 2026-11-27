@@ -97,9 +97,13 @@ fn processor_time() -> Duration {
         assert_eq!(libc::getrusage(libc::RUSAGE_SELF, &mut usage), 0);
         usage
     };
+    // `tv_usec` is `i32` on macOS and `i64` on Linux. A conversion to `u64`
+    // can fail from both, thus one form compiles clean on both platforms.
     let seconds = |t: libc::timeval| {
         Duration::from_secs(t.tv_sec.unsigned_abs())
-            + Duration::from_micros(t.tv_usec.unsigned_abs().into())
+            + Duration::from_micros(
+                u64::try_from(t.tv_usec).expect("the kernel reports no negative microseconds"),
+            )
     };
     seconds(usage.ru_utime) + seconds(usage.ru_stime)
 }

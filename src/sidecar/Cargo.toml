@@ -28,6 +28,9 @@ unicode-width.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+# `write_executable` writes the fake `gh` of the tests. On Linux, a script
+# that the test process held open for writing gives ETXTBSY at its run.
+gitscratch = { workspace = true, features = ["testing"] }
 shellquote.workspace = true
 
 [lints]

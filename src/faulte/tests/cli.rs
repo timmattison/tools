@@ -22,6 +22,14 @@ const PAINT: &str = "1";
 /// The exit code that clap gives for a usage error.
 const USAGE_ERROR: i32 = 2;
 
+/// The text that `faulte` writes on a platform other than macOS.
+#[cfg(not(target_os = "macos"))]
+const UNSUPPORTED_PLATFORM: &str = "faulte supports macOS only.";
+
+/// The exit code of `faulte` on a platform other than macOS.
+#[cfg(not(target_os = "macos"))]
+const EXIT_UNSUPPORTED: i32 = 1;
+
 /// Runs the binary with `args` and returns what it wrote and how it ended.
 fn run(args: &[&str]) -> Output {
     childenv::fixture_command(BIN)
@@ -55,7 +63,8 @@ fn one_line(text: &[u8]) -> String {
         .join(" ")
 }
 
-/// `--limit` belongs to the ranking, and `faulte kill` refuses it.
+/// `--limit` belongs to the ranking, and `faulte kill` refuses it after its
+/// name. Before the name, the flag is a flag of `faulte`, and the run succeeds.
 ///
 /// The issue gives `--limit` to the ranking and `--max` to `faulte kill`. A
 /// flag that a command takes and then ignores is worse than a flag that it
@@ -76,21 +85,118 @@ fn kill_refuses_the_limit_of_the_ranking() {
         "the message names the flag that faulte kill does not take: {stderr:?}"
     );
 
-    // The ranking takes it, before the name of a command as well.
+    // The ranking takes it, before the name of a command as well. The parser
+    // decides this on each platform. Only macOS then runs the plan. Another
+    // platform stops with its refusal, which is not a usage error.
+    let before = run(&[
+        "--limit",
+        "3",
+        "kill",
+        "--interval",
+        "1s",
+        "--older-than",
+        "9999d",
+    ]);
+    #[cfg(target_os = "macos")]
     assert!(
-        run(&[
-            "--limit",
-            "3",
-            "kill",
-            "--interval",
-            "1s",
-            "--older-than",
-            "9999d"
-        ])
-        .status
-        .success(),
+        before.status.success(),
         "the ranking flag stands before the name of the command"
     );
+    #[cfg(not(target_os = "macos"))]
+    assert_eq!(
+        before.status.code(),
+        Some(EXIT_UNSUPPORTED),
+        "the parser takes the ranking flag before the name of the command, it wrote {:?}",
+        one_line(&before.stderr)
+    );
+}
+
+/// On a platform other than macOS, `faulte` parses its command line, then
+/// says that it supports macOS only, and stops.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn another_platform_is_refused_with_a_reason() {
+    let output = run(&["--interval", "1s", "--limit", "5"]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_UNSUPPORTED),
+        "faulte refuses a platform other than macOS"
+    );
+    assert_eq!(
+        glyphs(&output.stderr).trim_end(),
+        UNSUPPORTED_PLATFORM,
+        "the refusal names the one platform that faulte supports"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a refused run writes no ranking: {}",
+        glyphs(&output.stdout)
+    );
+}
+
+/// The exit code of a run that needs a terminal and has none.
+#[cfg(target_os = "macos")]
+const NOT_A_TERMINAL_EXIT: i32 = 1;
+
+/// `faulte tui` draws a full-screen view, so a run with pipes refuses.
+///
+/// The test runs the binary with a null input and a captured output.
+#[cfg(target_os = "macos")]
+#[test]
+fn tui_with_no_terminal_exits_one() {
+    let output = run(&["tui"]);
+    let stderr = one_line(&output.stderr);
+
+    assert_eq!(
+        output.status.code(),
+        Some(NOT_A_TERMINAL_EXIT),
+        "faulte tui with pipes exits 1, it wrote {stderr:?}"
+    );
+    assert!(
+        stderr.contains(
+            "faulte tui draws a full-screen view, so it needs a terminal on its input and on its output. faulte tui did not start."
+        ),
+        "the message states why: {stderr:?}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "faulte tui writes nothing to the output: {:?}",
+        glyphs(&output.stdout)
+    );
+}
+
+/// `--limit` belongs to the ranking, and `faulte tui` refuses it in both
+/// spellings. A view that took the flag and ignored it would mislead the
+/// person who wrote it.
+#[test]
+fn tui_refuses_the_limit_of_the_ranking_in_both_spellings() {
+    for args in [["tui", "--limit", "3"], ["--limit", "3", "tui"]] {
+        let output = run(&args);
+        let stderr = one_line(&output.stderr);
+
+        assert_eq!(
+            output.status.code(),
+            Some(USAGE_ERROR),
+            "faulte {args:?} is a usage error, it wrote {stderr:?}"
+        );
+        assert!(
+            stderr.contains("--limit"),
+            "the message names the flag that faulte tui does not take, for {args:?}: {stderr:?}"
+        );
+        assert!(
+            !stderr.contains("unrecognized subcommand"),
+            "the message is about the flag and not about the command, for {args:?}: {stderr:?}"
+        );
+    }
+}
+
+/// `--help` lists the `tui` command.
+#[test]
+fn help_lists_the_tui_command() {
+    let top = one_line(&run(&["--help"]).stdout);
+
+    assert!(top.contains("tui"), "faulte --help lists tui: {top}");
 }
 
 /// `--version` gives the name, the package version, the git hash, and the
@@ -156,6 +262,7 @@ fn a_bad_duration_in_any_flag_is_a_usage_error_that_names_the_text() {
 /// because every number is what this Mac did while the test ran. A number that
 /// a test states here would fail on a Mac that is quiet, and on a Mac that is
 /// busy.
+#[cfg(target_os = "macos")]
 #[test]
 fn the_ranking_states_a_header_and_a_table_of_this_mac() {
     let output = run(&["--interval", "1s", "--limit", "5"]);
@@ -190,6 +297,7 @@ fn the_ranking_states_a_header_and_a_table_of_this_mac() {
 
 /// An age that no process of any Mac reaches. The oldest process of a Mac
 /// started when the Mac started, and no Mac runs for 27 years.
+#[cfg(target_os = "macos")]
 const NO_PROCESS_IS_THIS_OLD: &str = "9999d";
 
 /// The second test that reads this Mac.
@@ -198,6 +306,7 @@ const NO_PROCESS_IS_THIS_OLD: &str = "9999d";
 /// session and `faulte` asks nothing. The test states no number, because every
 /// count under the plan is what this Mac runs while the test runs. It signals
 /// nothing: a run with no candidate reaches no signal at all.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_kill_that_selects_nothing_prints_the_plan_and_exits_zero() {
     let output = run(&[
@@ -270,6 +379,44 @@ fn help_gives_each_flag_and_its_default() {
         assert!(
             kill.contains(phrase),
             "faulte kill --help gives {phrase:?}: {kill}"
+        );
+    }
+}
+
+/// `--interval` is one global flag, thus its help is true for each command.
+/// The check samples no page faults, and its help says what the check does.
+#[test]
+fn check_help_says_what_the_interval_does_for_the_check() {
+    let help = run(&["check", "--help"]);
+    assert!(help.status.success(), "faulte check --help exits 0");
+
+    let help = one_line(&help.stdout);
+    assert!(
+        help.contains("reads the kernel counters"),
+        "faulte check --help: {help}"
+    );
+}
+
+/// The help names each exit code of the check. It does not say that the check
+/// finds the cause of the high system time, because no measurement of the
+/// check proves a cause.
+#[test]
+fn check_help_names_each_exit_code_and_claims_no_cause() {
+    let check = run(&["check", "--help"]);
+    assert!(check.status.success(), "faulte check --help exits 0");
+    let top = run(&["--help"]);
+    assert!(top.status.success(), "faulte --help exits 0");
+
+    let check = one_line(&check.stdout);
+    let top = one_line(&top.stdout);
+    assert!(
+        check.contains("0 for no problem, 1 for a problem, and 2 for an error"),
+        "faulte check --help names each exit code: {check}"
+    );
+    for (name, help) in [("faulte check --help", &check), ("faulte --help", &top)] {
+        assert!(
+            !help.contains("why the system time"),
+            "{name} claims a cause: {help}"
         );
     }
 }
@@ -555,4 +702,177 @@ mod signals {
             "the message names the call that failed: {error}"
         );
     }
+}
+
+/// `faulte check` reads this Mac, states one verdict on its first line, and
+/// gives the exit code of that verdict.
+///
+/// The verdict depends on the Mac at the time of the test, thus the test holds
+/// the rule that links the text to the exit code, and not one verdict.
+#[cfg(target_os = "macos")]
+#[test]
+fn check_states_a_verdict_and_the_exit_code_of_that_verdict() {
+    let output = run(&["check", "--interval", "1s"]);
+    let text = glyphs(&output.stdout);
+    let first = text.lines().next().unwrap_or_default();
+
+    assert!(first.starts_with("faulte check: "), "the verdict: {text}");
+    let expected = i32::from(first != "faulte check: OK");
+    assert_eq!(
+        output.status.code(),
+        Some(expected),
+        "the exit code: {text}"
+    );
+    assert!(text.contains("compressions/s"), "the rates: {text}");
+    assert!(text.contains("% system"), "the CPU split: {text}");
+    assert!(
+        text.contains("new processes/s"),
+        "the new processes: {text}"
+    );
+}
+
+/// One line of a watch reaches a reader that stops after that line, and the
+/// run then ends with no panic.
+#[cfg(target_os = "macos")]
+#[test]
+fn check_watch_prints_lines_and_ends_when_the_reader_goes_away() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    let mut child = childenv::fixture_command(BIN)
+        .args(["check", "--watch", "--interval", "1s"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the faulte binary starts");
+    let stdout = child.stdout.take().expect("the pipe of the output");
+    let mut first = String::new();
+    BufReader::new(stdout)
+        .read_line(&mut first)
+        .expect("one line of the watch");
+    // The read end of the pipe closes at the end of the statement above. The
+    // next line of the watch then finds no reader.
+    let status = child.wait().expect("the watch ends");
+
+    assert!(first.contains("% "), "a line of the watch: {first:?}");
+    assert!(first.contains("/s"), "the rates of the watch: {first:?}");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a watch with no reader ends cleanly"
+    );
+}
+
+/// A reader that leaves before the report starts does not change how the run
+/// ends. The run keeps the exit code of its verdict and does not panic.
+///
+/// The verdict depends on the Mac at the time of the test, thus the test holds
+/// the two exit codes that a verdict can give.
+#[cfg(target_os = "macos")]
+#[test]
+fn check_with_no_reader_keeps_the_exit_code_of_its_verdict() {
+    use std::process::Stdio;
+
+    let mut child = childenv::fixture_command(BIN)
+        .args(["check", "--interval", "1s"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the faulte binary starts");
+    // The read end of the pipe closes here, one second before the report.
+    drop(child.stdout.take());
+    let output = child.wait_with_output().expect("the check ends");
+
+    let stderr = glyphs(&output.stderr);
+    assert!(
+        matches!(output.status.code(), Some(0 | 1)),
+        "the exit code of a verdict, not {:?}: {stderr}",
+        output.status.code(),
+    );
+    assert!(!stderr.contains("panicked"), "no panic: {stderr}");
+}
+
+/// The longest time that a run with no room for its output may take.
+///
+/// A `--watch` run whose write does not fail never ends, thus the helper stops
+/// it at this bound.
+#[cfg(target_os = "macos")]
+const NO_ROOM_BOUND: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Runs `faulte` with `args` and a file size limit of 0 on its output file.
+///
+/// The first write to the file fails with `EFBIG`. The shell ignores
+/// `SIGXFSZ`, thus the write gives an error and the signal does not stop the
+/// run. `exec` makes the child process the `faulte` binary itself. `name`
+/// keeps two parallel tests apart. Gives the exit code and the glyphs of the
+/// error output.
+#[cfg(target_os = "macos")]
+fn run_with_no_room_for_output(name: &str, args: &[&str]) -> (Option<i32>, String) {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_nanos();
+    let file = std::env::temp_dir().join(format!(
+        "faulte-no-room-{name}-{}-{nanos}.txt",
+        std::process::id()
+    ));
+    let mut child = childenv::fixture_command("/bin/sh")
+        .args([
+            "-c",
+            r#"trap "" XFSZ; ulimit -f 0; output=$1; shift; exec "$@" > "$output""#,
+            "sh",
+        ])
+        .arg(&file)
+        .arg(BIN)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the shell starts");
+    let start = Instant::now();
+    loop {
+        if child.try_wait().expect("the child can be polled").is_some() {
+            break;
+        }
+        if start.elapsed() >= NO_ROOM_BOUND {
+            child.kill().expect("the child can be killed");
+            child.wait().expect("the child ends after the kill");
+            let _ = std::fs::remove_file(&file);
+            panic!("the run did not end within {NO_ROOM_BOUND:?}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().expect("the output is read");
+    std::fs::remove_file(&file).expect("the shell made the file");
+    (output.status.code(), glyphs(&output.stderr))
+}
+
+/// A report that cannot be written gives the exit code 2 and a message.
+#[cfg(target_os = "macos")]
+#[test]
+fn check_with_no_room_for_its_report_is_an_error() {
+    let (code, stderr) = run_with_no_room_for_output("report", &["check", "--interval", "1s"]);
+
+    assert_eq!(code, Some(2), "stderr: {stderr}");
+    assert!(
+        stderr.contains("the check did not write its output"),
+        "the message: {stderr}"
+    );
+}
+
+/// A watch line that cannot be written gives the exit code 2 and a message.
+#[cfg(target_os = "macos")]
+#[test]
+fn check_watch_with_no_room_for_its_line_is_an_error() {
+    let (code, stderr) =
+        run_with_no_room_for_output("watch", &["check", "--watch", "--interval", "1s"]);
+
+    assert_eq!(code, Some(2), "stderr: {stderr}");
+    assert!(
+        stderr.contains("the check did not write its output"),
+        "the message: {stderr}"
+    );
 }

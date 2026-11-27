@@ -2,8 +2,8 @@
 //! with a fake `op` on PATH and runs the real `op-cache` binary against it.
 //! The process environment of the test is never changed.
 
+use gitscratch::testing::executable::write_executable;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use tempfile::TempDir;
@@ -37,8 +37,7 @@ impl Fixture {
     /// Writes an executable `#!/bin/sh` script named `name` into `<fixture>/bin`.
     fn install_script(&self, name: &str, body: &str) {
         let script = self.path("bin").join(name);
-        fs::write(&script, format!("#!/bin/sh\n{body}\n")).expect("write script");
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod script");
+        write_executable(&script, format!("#!/bin/sh\n{body}\n")).expect("write script");
     }
 
     fn install_fake_op(&self, body: &str) {
@@ -300,8 +299,7 @@ fn unstartable_op_writes_spawn_error_pairs() {
     let fixture = Fixture::new();
     let interpreter = unique_token("interpreter");
     let script = fixture.path("bin").join("op");
-    fs::write(&script, format!("#!/nonexistent/{interpreter}\n")).expect("write script");
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod script");
+    write_executable(&script, format!("#!/nonexistent/{interpreter}\n")).expect("write script");
 
     let output = fixture.read(REFERENCE);
 
@@ -360,6 +358,259 @@ fn read_binary_writes_a_pair_with_operation_read_binary() {
     assert_eq!(records[0]["reference"], "op://Private/Item/file.png");
     assert_eq!(records[1]["event"], "op_end");
     assert_eq!(records[1]["outcome"], "ok");
+}
+
+#[test]
+fn list_fields_writes_a_pair_with_operation_item_get_and_never_a_value() {
+    let fixture = Fixture::new();
+    let value = unique_token("field");
+    // Called as: op item get --vault <vault> --format json -- <item>
+    fixture.install_fake_op(&format!(
+        r#"[ "$*" = "item get --vault Private --format json -- Item" ] || exit 9
+printf '%s' '{{"title":"Item","fields":[{{"label":"credential","value":"{value}"}}]}}'"#
+    ));
+
+    let output = fixture
+        .command()
+        .args(["list-fields", "op://Private/Item"])
+        .output()
+        .expect("run op-cache");
+
+    assert!(
+        output.status.success(),
+        "op-cache failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "  credential\n");
+    let text = audit_text(&fixture);
+    assert!(!text.contains(&value), "a field value reached the trail");
+    let records = records(&text);
+    assert_eq!(records.len(), 2, "audit file: {text}");
+    assert_eq!(records[0]["event"], "op_start");
+    assert_eq!(records[0]["operation"], "item-get");
+    assert_eq!(records[0]["reference"], "op://Private/Item");
+    assert_eq!(records[1]["event"], "op_end");
+    assert_eq!(records[1]["request_id"], records[0]["request_id"]);
+    assert_eq!(records[1]["outcome"], "ok");
+}
+
+#[test]
+fn list_fields_gives_an_item_title_that_starts_with_a_dash_after_the_end_of_the_flags() {
+    for title in ["-old key", "--help"] {
+        let fixture = Fixture::new();
+        // op reads an argument that starts with '-' as a flag until `--`.
+        fixture.install_fake_op(&format!(
+            r#"[ "$#" = 8 ] && [ "$1 $2 $3 $4 $5 $6 $7" = "item get --vault Private --format json --" ] && [ "$8" = '{title}' ] || exit 9
+printf '%s' '{{"title":"x","fields":[{{"label":"credential","value":"v"}}]}}'"#
+        ));
+
+        let output = fixture
+            .command()
+            .args(["list-fields", &format!("op://Private/{title}")])
+            .output()
+            .expect("run op-cache");
+
+        assert!(
+            output.status.success(),
+            "op got the title {title:?} as a flag: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "  credential\n");
+    }
+}
+
+#[test]
+fn list_fields_fetches_again_when_the_cached_field_list_cannot_be_read() {
+    let fixture = Fixture::new();
+    let value = unique_token("refetched-field");
+    fixture.install_fake_op(&format!(
+        r#"printf '%s' '{{"title":"Item","fields":[{{"label":"credential","value":"{value}"}}]}}'"#
+    ));
+    // An entry of another shape, as a hand edit or an earlier build can leave.
+    let key = "op://Private/Item/__item_fields__/credential";
+    let cache_path = fixture.path("repo").join(".op-cache.json");
+    let mut cache = serde_json::Map::new();
+    cache.insert(
+        key.to_owned(),
+        serde_json::json!({
+            "value": r#"{"credential":"old shape"}"#,
+            "fetchedAt": "2026-01-01T00:00:00Z",
+        }),
+    );
+    fs::write(&cache_path, serde_json::Value::Object(cache).to_string()).expect("write cache");
+
+    let output = fixture
+        .command()
+        .args(["list-fields", "op://Private/Item"])
+        .output()
+        .expect("run op-cache");
+
+    assert!(
+        output.status.success(),
+        "a cached field list that cannot be read stopped list-fields: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "  credential\n");
+    let text = audit_text(&fixture);
+    assert_eq!(
+        records(&text).len(),
+        2,
+        "the field list must come from op again: {text}"
+    );
+    let cache: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cache_path).expect("read cache"))
+            .expect("the cache is JSON");
+    let entry = cache[key]["value"]
+        .as_str()
+        .expect("the entry holds a string");
+    let pairs: Vec<(String, String)> =
+        serde_json::from_str(entry).expect("the new entry is a list of pairs");
+    assert_eq!(pairs, vec![("credential".to_owned(), value)]);
+}
+
+/// serde_json quotes a string of the wrong type in the text of its error, so
+/// a warning that prints that text prints a cached secret.
+#[test]
+fn list_fields_never_prints_a_value_of_a_cached_field_list_that_cannot_be_read() {
+    let token = unique_token("cached-field-secret");
+    let shapes = [
+        ("a JSON string", serde_json::json!(token)),
+        ("a list of strings", serde_json::json!([token])),
+    ];
+    for (shape, entry) in shapes {
+        let fixture = Fixture::new();
+        fixture.install_fake_op(
+            r#"printf '%s' '{"title":"Item","fields":[{"label":"credential","value":"fresh"}]}'"#,
+        );
+        let mut cache = serde_json::Map::new();
+        cache.insert(
+            "op://Private/Item/__item_fields__/credential".to_owned(),
+            serde_json::json!({
+                "value": entry.to_string(),
+                "fetchedAt": "2026-01-01T00:00:00Z",
+            }),
+        );
+        fs::write(
+            fixture.path("repo").join(".op-cache.json"),
+            serde_json::Value::Object(cache).to_string(),
+        )
+        .expect("write cache");
+
+        let output = fixture
+            .command()
+            .args(["list-fields", "op://Private/Item"])
+            .output()
+            .expect("run op-cache");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "a cached field list that holds {shape} stopped list-fields: {stderr}"
+        );
+        assert!(
+            stderr.contains("cached field list"),
+            "no warning for a cached field list that holds {shape}: {stderr}"
+        );
+        assert!(
+            !stderr.contains(&token),
+            "the warning for a cached field list that holds {shape} printed its value: {stderr}"
+        );
+    }
+}
+
+/// The same leak through the parse of the whole cache file.
+#[test]
+fn read_never_prints_a_value_of_a_cache_file_that_cannot_be_read() {
+    let fixture = Fixture::new();
+    let token = unique_token("cache-file-secret");
+    fixture.install_fake_op("printf '%s' fresh");
+    let mut cache = serde_json::Map::new();
+    cache.insert(REFERENCE.to_owned(), serde_json::json!(token));
+    fs::write(
+        fixture.path("repo").join(".op-cache.json"),
+        serde_json::Value::Object(cache).to_string(),
+    )
+    .expect("write cache");
+
+    let output = fixture.read(REFERENCE);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "a cache file that cannot be read stopped read: {stderr}"
+    );
+    assert!(
+        stderr.contains("op-cache file is corrupted"),
+        "no warning for a cache file that cannot be read: {stderr}"
+    );
+    assert!(
+        !stderr.contains(&token),
+        "the warning for a cache file that cannot be read printed a value: {stderr}"
+    );
+}
+
+#[test]
+fn list_fields_caches_the_field_list_so_a_second_call_runs_no_op() {
+    let fixture = Fixture::new();
+    let value = unique_token("cached-field");
+    fixture.install_fake_op(&format!(
+        r#"printf '%s' '{{"title":"Item","fields":[{{"label":"credential","value":"{value}"}}]}}'"#
+    ));
+    let first = fixture
+        .command()
+        .args(["list-fields", "op://Private/Item"])
+        .output()
+        .expect("run op-cache");
+    assert!(
+        first.status.success(),
+        "the first call failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    fixture.install_fake_op(OP_MUST_NOT_RUN);
+    let second = fixture
+        .command()
+        .args(["list-fields", "op://Private/Item"])
+        .output()
+        .expect("run op-cache");
+
+    assert!(
+        second.status.success(),
+        "the second call asked op again: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(second.stdout, first.stdout);
+    let text = audit_text(&fixture);
+    assert_eq!(
+        records(&text).len(),
+        2,
+        "only the first call may run op: {text}"
+    );
+}
+
+#[test]
+fn list_fields_output_that_is_not_json_fails_at_once_with_no_second_attempt() {
+    let fixture = Fixture::new();
+    fixture.install_fake_op("echo 'this is not json'");
+
+    let output = fixture
+        .command()
+        .args(["list-fields", "op://Private/Item"])
+        .output()
+        .expect("run op-cache");
+
+    assert!(!output.status.success(), "output that is not JSON passed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invalid JSON from `op item get`"),
+        "the error must name the JSON: {stderr}"
+    );
+    let text = audit_text(&fixture);
+    assert_eq!(
+        records(&text).len(),
+        2,
+        "one attempt is one op_start and one op_end: {text}"
+    );
 }
 
 const OP_MUST_NOT_RUN: &str = "echo 'op must not run' >&2\nexit 1";

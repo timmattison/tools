@@ -20,6 +20,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
 toml_edit = "0.22"
+yaml-rust2 = "0.12"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -95,6 +96,9 @@ trippy-privilege = "0.13.0"
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }
 chrono-english = "0.1"
+# The IANA time zone database, for tests that need a zone with summer time
+# without a change to TZ for the whole process.
+chrono-tz = "0.10.4"
 
 # Concurrency
 rayon = "1.11"
@@ -220,6 +224,54 @@ windows-sys = { version = "0.60", features = [
     "Win32_System_Threading"
 ] }
 
+# Tauri
+#
+# The `~2.9` pins hold msgs on the Tauri 2.9 line. One Cargo.lock cannot hold
+# webkit2gtk 2.0.1 and 2.0.2, and the lock includes the Linux targets:
+#
+# - nle uses dioxus-desktop 0.7, which needs wry 0.53 and webkit2gtk =2.0.1.
+# - tauri 2.10 and later need wry 0.54 or later, and webkit2gtk =2.0.2.
+#
+# tauri 2.9 uses tauri-runtime-wry 2.9, which uses wry 0.53. Two crates under
+# tauri accept versions that do not compile with tauri 2.9.5, so each one has
+# its own pin, and msgs names each one only to apply that pin:
+#
+# - tauri-runtime-wry 2.9.3 accepts tauri-runtime ^2.9.2, but it does not
+#   compile against tauri-runtime 2.11.3 (E0046). The pin holds tauri-runtime
+#   on the 2.9 line of tauri-runtime-wry.
+# - tauri 2.9.5 accepts tauri-macros ^2.5.2, but it does not compile against
+#   tauri-macros 2.7.6 (E0599). The 2.7 line of tauri-macros, tauri-codegen,
+#   tauri-build, and tauri-plugin needs tauri-utils ~2.10, so the tauri-utils
+#   pin holds all four on 2.6.
+#
+# tauri-plugin-dialog 2.7 and later need tauri ^2.10, so the tauri pin also
+# holds the dialog plugin on 2.6.
+#
+# src/msgs/frontend/package.json pins @tauri-apps/api to ~2.9 and
+# @tauri-apps/plugin-dialog to ~2.6, because the Tauri CLI refuses a build
+# when a crate and its npm package differ in the minor version.
+# src/msgs/tests/tauri-versions.rs holds that rule.
+#
+# Remove the pins and the two npm pins when a stable dioxus-desktop uses
+# wry >= 0.54.
+tauri = "~2.9"
+tauri-runtime = "~2.9"
+tauri-utils = "~2.9"
+tauri-build = "2"
+tauri-plugin-dialog = "2"
+
+# SQLite: The "bundled" feature compiles SQLite from source with SQLITE_THREADSAFE=1,
+# which enables multi-thread/serialized mode by default. There is no separate
+# "multi-thread" feature in rusqlite -- bundled already guarantees that
+# Connection is Send, which is required for Tauri's thread pool.
+rusqlite = { version = "0.43", features = ["bundled"] }
+
+# Type generation. The `specta::Type` derives on the msgs IPC types feed the
+# TypeScript exporter below.
+specta = { version = "=2.0.0-rc.22", features = ["derive", "chrono"] }
+# TypeScript exporter for the specta types. It needs the pinned specta version.
+specta-typescript = "=0.0.9"
+
 # Internal crates
 buildinfo = { path = "src/buildinfo" }
 childenv = { path = "src/childenv" }
@@ -243,6 +295,7 @@ shellsetup = { path = "src/shellsetup" }
 termbar = { path = "src/termbar" }
 termgfx = { path = "src/termgfx" }
 termsize = { path = "src/termsize" }
+termstate = { path = "src/termstate" }
 termwindow = { path = "src/termwindow" }
 testcolor = { path = "src/testcolor" }
 textfit = { path = "src/textfit" }
