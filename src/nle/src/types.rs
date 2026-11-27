@@ -229,7 +229,25 @@ pub struct EditProject {
     pub filters: Vec<AppliedFilter>,
 }
 
+/// The size of a terminal, in character cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalSize {
+    /// The number of columns.
+    pub columns: u16,
+    /// The number of rows.
+    pub rows: u16,
+}
+
 impl Recording {
+    /// The size of the terminal that made this recording.
+    #[must_use]
+    pub fn size(&self) -> TerminalSize {
+        TerminalSize {
+            columns: self.width,
+            rows: self.height,
+        }
+    }
+
     /// Load a recording from a file, auto-detecting gzip compression via magic bytes.
     ///
     /// # Errors

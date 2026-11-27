@@ -8,6 +8,7 @@ use std::sync::Arc;
 use crate::error::NleError;
 use crate::types::{
     AppliedFilter, Clip, EditProject, Event, FilterKind, FilterOptions, FilterRegion, Recording,
+    TerminalSize,
 };
 
 /// A filter: a pure function from the events of a region to new events.
@@ -82,11 +83,26 @@ pub struct Span {
 ///    of the timeline moves by the shift as in step 8 of `FilterFn`.
 pub type SpanFilterFn = dyn Fn(Span, &FilterOptions) -> Result<Span, String> + Send + Sync;
 
-/// A filter in one of its two forms.
+/// What a screen filter sees beside its region.
+#[derive(Debug, Clone, Copy)]
+pub struct Screen<'a> {
+    /// The size of the terminal.
+    pub size: TerminalSize,
+    /// The events before the region, in the order of the timeline, with their
+    /// times on the timeline.
+    pub before: &'a [Event],
+}
+
+/// A screen filter. The rules are not done yet.
+pub type ScreenFilterFn =
+    dyn Fn(&Screen<'_>, Span, &FilterOptions) -> Result<Vec<Event>, String> + Send + Sync;
+
+/// A filter in one of its three forms.
 #[derive(Clone)]
 enum Registered {
     Events(Arc<FilterFn>),
     Span(Arc<SpanFilterFn>),
+    Screen(Arc<ScreenFilterFn>),
 }
 
 /// The filters that a project can use, by kind.
@@ -137,6 +153,20 @@ impl FilterRegistry {
             .insert(kind, Registered::Span(Arc::new(filter)));
     }
 
+    /// Register `filter` as a screen filter under `kind`. A filter of any form
+    /// that is already under `kind` is replaced.
+    pub fn register_screen(
+        &mut self,
+        kind: FilterKind,
+        filter: impl Fn(&Screen<'_>, Span, &FilterOptions) -> Result<Vec<Event>, String>
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        self.filters
+            .insert(kind, Registered::Screen(Arc::new(filter)));
+    }
+
     /// Whether a filter is registered under `kind`.
     #[must_use]
     pub fn contains(&self, kind: &FilterKind) -> bool {
@@ -184,6 +214,23 @@ impl FilterRegistry {
 
         // The answer, and how far the events after the region move.
         let (answer, shift) = match filter {
+            Registered::Screen(filter) => {
+                let screen = Screen {
+                    size: TerminalSize {
+                        columns: 0,
+                        rows: 0,
+                    },
+                    before: &[],
+                };
+                let length = (region_end.min(*end) - start).max(0.0);
+                let span = Span {
+                    events: inside,
+                    length,
+                };
+                let answer =
+                    filter(&screen, span, &applied.options).map_err(NleError::RenderError)?;
+                (answer, 0.0)
+            }
             Registered::Events(filter) => {
                 let answer = filter(&inside, &applied.options);
                 let shift = last_time(&answer) - last_time(&inside);
@@ -261,6 +308,19 @@ impl FilterRegistry {
         let end = last_time(&events);
         self.run_with_end(events, filters, end)
             .map(|(events, _end)| events)
+    }
+
+    /// Run `filters` in order over `events` with a terminal size. Not done yet.
+    ///
+    /// # Errors
+    /// Returns the errors of `FilterRegistry::run`.
+    pub fn run_on(
+        &self,
+        events: Vec<Event>,
+        filters: &[AppliedFilter],
+        _size: TerminalSize,
+    ) -> Result<Vec<Event>, NleError> {
+        self.run(events, filters)
     }
 
     /// Run `filters` in order, and follow the end of the timeline, which

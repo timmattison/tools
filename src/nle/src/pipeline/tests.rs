@@ -1,7 +1,9 @@
 //! Tests for the filter pipeline and the render.
 
 use super::*;
-use crate::types::{Clip, ClipId, EventType, FilterRegion, Seconds, TimelineTrack, TrackId};
+use crate::types::{
+    Clip, ClipId, EventType, FilterRegion, Seconds, TerminalSize, TimelineTrack, TrackId,
+};
 
 fn ev(time: f64) -> Event {
     Event {
@@ -800,4 +802,181 @@ fn register_span_and_register_replace_each_other_under_one_kind() {
     registry.register_span(kind("f"), scale_span(2.0));
     let out = registry.run(events(&[1.0, 2.0]), &[all("f")]).unwrap();
     assert_eq!(times(&out), vec![2.0, 4.0]);
+}
+
+// Tests of the screen form.
+
+/// What the spy of a screen filter saw.
+#[derive(Debug, Default)]
+struct ScreenSeen {
+    sizes: Vec<TerminalSize>,
+    before: Vec<f64>,
+    inside: Vec<f64>,
+    lengths: Vec<f64>,
+}
+
+/// Registers a screen filter `spy` that records what it sees and answers its
+/// own region unchanged.
+fn screen_spy_registry() -> (FilterRegistry, TestArc<Mutex<ScreenSeen>>) {
+    let seen = TestArc::new(Mutex::new(ScreenSeen::default()));
+    let captured = TestArc::clone(&seen);
+    let mut registry = FilterRegistry::new();
+    registry.register_screen(kind("spy"), move |screen, span, _| {
+        let mut seen = captured.lock().unwrap();
+        seen.sizes.push(screen.size);
+        seen.before.extend(times(screen.before));
+        seen.inside.extend(times(&span.events));
+        seen.lengths.push(span.length);
+        Ok(span.events)
+    });
+    (registry, seen)
+}
+
+/// Registers a screen filter `draw` that answers one event at `relative`.
+fn screen_drawer(relative: f64) -> FilterRegistry {
+    let mut registry = FilterRegistry::new();
+    registry.register_screen(kind("draw"), move |_, span, _| {
+        let mut out = span.events;
+        out.push(ev(relative));
+        Ok(out)
+    });
+    registry
+}
+
+const SIZE_100_30: TerminalSize = TerminalSize {
+    columns: 100,
+    rows: 30,
+};
+
+#[test]
+fn a_screen_filter_sees_the_size_the_events_before_and_its_region() {
+    let (registry, seen) = screen_spy_registry();
+
+    registry
+        .run_on(
+            events(&[0.5, 0.8, 1.5, 5.0]),
+            &[range("spy", 1.0, 3.0)],
+            SIZE_100_30,
+        )
+        .unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.sizes, vec![SIZE_100_30]);
+    assert_eq!(seen.before, vec![0.5, 0.8]);
+    assert_eq!(seen.inside, vec![0.5]);
+    assert_eq!(seen.lengths, vec![2.0]);
+}
+
+#[test]
+fn render_gives_a_screen_filter_the_size_of_the_header() {
+    let (registry, seen) = screen_spy_registry();
+    let mut recording = source("one", &[0.0, 8.0], 10.0);
+    recording.width = 80;
+    recording.height = 24;
+    let mut project = EditProject::from_recording(Arc::new(recording)).unwrap();
+    project.filters = vec![all("spy")];
+
+    registry.render(&project).unwrap();
+
+    assert_eq!(
+        seen.lock().unwrap().sizes,
+        vec![TerminalSize {
+            columns: 80,
+            rows: 24
+        }]
+    );
+}
+
+#[test]
+fn run_without_a_size_fails_for_a_screen_filter_and_names_the_kind() {
+    let (registry, seen) = screen_spy_registry();
+
+    let result = registry.run(events(&[1.0]), &[all("spy")]);
+
+    match result {
+        Err(NleError::RenderError(message)) => {
+            assert!(message.contains("\"spy\""), "{message}");
+            assert!(message.contains("no terminal size"), "{message}");
+        }
+        other => panic!("expected a RenderError, got {other:?}"),
+    }
+    assert!(seen.lock().unwrap().sizes.is_empty());
+}
+
+#[test]
+fn a_screen_filter_keeps_the_later_events_and_the_end_in_place() {
+    let registry = screen_drawer(0.5);
+
+    let out = registry
+        .run_on(
+            events(&[0.5, 1.5, 5.0]),
+            &[range("draw", 1.0, 3.0)],
+            SIZE_100_30,
+        )
+        .unwrap();
+
+    assert_eq!(times(&out), vec![0.5, 1.5, 1.5, 5.0]);
+
+    let rendered = registry
+        .render(&one_clip_project(vec![range("draw", 1.0, 3.0)]))
+        .unwrap();
+    assert_eq!(rendered.duration, 10.0);
+    assert_eq!(times(&rendered.events), vec![0.0, 1.5, 8.0]);
+}
+
+#[test]
+fn a_screen_filter_that_answers_a_time_after_its_region_fails() {
+    let registry = screen_drawer(2.5);
+
+    let result = registry.run_on(events(&[0.5, 5.0]), &[range("draw", 1.0, 3.0)], SIZE_100_30);
+
+    match result {
+        Err(NleError::RenderError(message)) => {
+            assert!(message.contains("\"draw\""), "{message}");
+            assert!(message.contains("after the end of its region"), "{message}");
+            assert!(message.contains("at 3 s"), "{message}");
+        }
+        other => panic!("expected a RenderError, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_screen_filter_may_answer_exactly_the_length_of_its_region() {
+    let registry = screen_drawer(2.0);
+
+    let out = registry
+        .run_on(events(&[0.5, 5.0]), &[range("draw", 1.0, 3.0)], SIZE_100_30)
+        .unwrap();
+
+    assert_eq!(times(&out), vec![0.5, 3.0, 5.0]);
+}
+
+#[test]
+fn a_screen_filter_that_answers_an_error_fails_with_the_kind_and_the_message() {
+    let mut registry = FilterRegistry::new();
+    registry.register_screen(kind("bad"), |_, _, _| Err("no room".to_string()));
+
+    let result = registry.run_on(events(&[1.0]), &[all("bad")], SIZE_100_30);
+
+    match result {
+        Err(NleError::RenderError(message)) => {
+            assert_eq!(message, "filter \"bad\" failed: no room");
+        }
+        other => panic!("expected a RenderError, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_screen_filter_that_answers_nan_fails_and_names_the_kind() {
+    let registry = screen_drawer(f64::NAN);
+
+    let result = registry.run_on(events(&[1.0]), &[all("draw")], SIZE_100_30);
+
+    match result {
+        Err(NleError::RenderError(message)) => {
+            assert!(message.contains("\"draw\""), "{message}");
+            assert!(message.contains("not finite"), "{message}");
+        }
+        other => panic!("expected a RenderError, got {other:?}"),
+    }
 }
