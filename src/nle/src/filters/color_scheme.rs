@@ -738,6 +738,64 @@ enum DefaultColor {
     Spec(String),
 }
 
+/// The state of one SGR color slot, as the recording set it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SlotState {
+    /// The default color of the slot.
+    Default,
+    /// A color that the recording set. `text` is its parameters as written,
+    /// and `converted` is true when the filter changed its color.
+    Set { text: String, converted: bool },
+}
+
+/// The state of the three slots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SlotStates {
+    foreground: SlotState,
+    background: SlotState,
+    underline: SlotState,
+}
+
+impl SlotStates {
+    /// All three slots at their defaults.
+    fn new() -> Self {
+        Self {
+            foreground: SlotState::Default,
+            background: SlotState::Default,
+            underline: SlotState::Default,
+        }
+    }
+
+    /// The state of `slot`.
+    fn get_mut(&mut self, slot: Slot) -> &mut SlotState {
+        match slot {
+            Slot::Foreground => &mut self.foreground,
+            Slot::Background => &mut self.background,
+            Slot::Underline => &mut self.underline,
+        }
+    }
+
+    /// The SGR that sets each slot that the recording set to a color that
+    /// the filter changed, or an empty string when no slot is so.
+    fn restore(&self) -> String {
+        let texts: Vec<&str> = [&self.foreground, &self.background, &self.underline]
+            .into_iter()
+            .filter_map(|state| match state {
+                SlotState::Set {
+                    text,
+                    converted: true,
+                } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        if texts.is_empty() {
+            String::new()
+        } else {
+            format!("\x1b[{}m", texts.join(";"))
+        }
+    }
+}
+
 /// The color scheme that the filter follows while a `Splicer` rewrites the
 /// events of one region.
 struct SchemeEditor {
@@ -756,6 +814,8 @@ struct SchemeEditor {
     recording_foreground: DefaultColor,
     /// The default background that the recording set.
     recording_background: DefaultColor,
+    /// The SGR colors that the recording set.
+    slots: SlotStates,
 }
 
 impl SchemeEditor {
@@ -768,6 +828,7 @@ impl SchemeEditor {
             shown_background: None,
             recording_foreground: DefaultColor::Default,
             recording_background: DefaultColor::Default,
+            slots: SlotStates::new(),
         }
     }
 
@@ -844,9 +905,37 @@ impl SchemeEditor {
         dropped.then_some(rest)
     }
 
-    /// The sequences for the end of a region that is not open.
+    /// Follow what the SGR `params` do to the three color slots of the
+    /// recording.
+    fn follow(&mut self, params: &str) {
+        for item in sgr_items(params) {
+            match item {
+                SgrItem::Reset(_) => self.slots = SlotStates::new(),
+                SgrItem::Default(slot, _) => *self.slots.get_mut(slot) = SlotState::Default,
+                SgrItem::Color { slot, text, color } => {
+                    let converted = self.converter.convert(slot, color).is_some();
+                    *self.slots.get_mut(slot) = SlotState::Set { text, converted };
+                }
+                SgrItem::Other(_) => {}
+            }
+        }
+    }
+
+    /// The sequences for the end of a region that is not open: the default
+    /// colors of the recording, and one SGR for each slot that the filter
+    /// changed, so the text after the range has the colors that the recording
+    /// gave it.
     fn restore(&self) -> String {
-        String::new()
+        let mut text = format!("\x1b]{RESET_FOREGROUND}{ST}");
+        if let DefaultColor::Spec(value) = &self.recording_foreground {
+            text.push_str(&format!("\x1b]{FOREGROUND_NUMBER};{value}{ST}"));
+        }
+        text.push_str(&format!("\x1b]{RESET_BACKGROUND}{ST}"));
+        if let DefaultColor::Spec(value) = &self.recording_background {
+            text.push_str(&format!("\x1b]{BACKGROUND_NUMBER};{value}{ST}"));
+        }
+        text.push_str(&self.slots.restore());
+        text
     }
 }
 
@@ -873,6 +962,7 @@ impl SequenceEditor for SchemeEditor {
                 final_char: 'm',
                 controls,
             } if intermediates.is_empty() && !params.starts_with(|c| ('<'..='?').contains(&c)) => {
+                self.follow(params);
                 let new = self.converter.rewrite(params)?;
                 Some(format!("{controls}\x1b[{new}m"))
             }
@@ -881,6 +971,7 @@ impl SequenceEditor for SchemeEditor {
             Sequence::Escape('c') => {
                 self.recording_foreground = DefaultColor::Default;
                 self.recording_background = DefaultColor::Default;
+                self.slots = SlotStates::new();
                 self.shown_foreground = None;
                 self.shown_background = None;
                 None
