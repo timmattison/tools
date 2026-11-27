@@ -651,7 +651,7 @@ fn reasons_tally() -> Tally {
 fn the_text_lists_the_definitions_that_run_without_typing_with_their_reasons() {
     let report = text(&reasons_tally(), &window(), "/bin/zsh", None);
     assert!(
-        report.ends_with(
+        report.contains(
             "Runs without typing:\n\
              \x20 handler (function, command not found)\n\
              \x20 helper (function, precmd hook, through myprecmd; INT trap)\n\
@@ -661,8 +661,13 @@ fn the_text_lists_the_definitions_that_run_without_typing_with_their_reasons() {
              \x20 precmd (function, precmd hook)\n\
              \x20 searchfn (function, widget atuin-search, key ^R)\n\
              \x20 spacefn (function, widget expand, key \" \")\n\
-             \x20 twokeys (function, widget w, keys ^R, ^S, through _twokeys)\n"
+             \x20 twokeys (function, widget w, keys ^R, ^S, through _twokeys)\n\n\
+             Duplicates and shadows: none\n"
         ),
+        "{report}"
+    );
+    assert!(
+        report.ends_with("Duplicates and shadows: none\n"),
         "{report}"
     );
     let empty = text(&tally(Vec::new()), &window(), "/bin/zsh", None);
