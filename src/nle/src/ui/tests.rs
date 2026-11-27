@@ -986,14 +986,13 @@ fn edited_row(text: &str) -> String {
     metadata_row("Edited duration", text, None)
 }
 
-/// Opens the fixture recording through the fakes, and notes the Apply Speed,
-/// Apply Redaction, Play, and Stop buttons of the open render
-/// (`Window::note_open_buttons`).
+/// Opens the fixture recording through the fakes, and notes the buttons of the
+/// open render that `Window::note_open_buttons` names.
 async fn open_recording() -> Window {
     open_loaded(fixture()).await
 }
 
-/// Opens `loaded` through the fakes, and notes the four buttons as
+/// Opens `loaded` through the fakes, and notes the same buttons as
 /// `open_recording` does. `loaded` must hold no chapter.
 async fn open_loaded(loaded: LoadedRecording) -> Window {
     let fakes = Fakes::new().pick(picked()).load(Answer::Ready(Ok(loaded)));
