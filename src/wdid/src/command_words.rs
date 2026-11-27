@@ -80,7 +80,7 @@
 //! This module owns the parser. No type of the parser is part of a public
 //! signature, and no other module sees one.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
 use std::ops::Range;
 
@@ -1684,7 +1684,7 @@ impl Argument {
             }
             Self::Operator(_) => {}
         }
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         names.retain(|name| !name.is_empty() && seen.insert(name.clone()));
         names
     }
@@ -1816,8 +1816,8 @@ struct NameScan {
 }
 
 impl NameScan {
-    /// Adds `text` and stops at its first `=`. Gives `Some(true)` when the
-    /// `=` was found. `quoted` makes the probe take a stand-in for the text.
+    /// Adds `text` and stops at its first `=`. Gives `true` when the `=` was
+    /// found. `quoted` makes the probe take a stand-in for the text.
     fn add(&mut self, text: &str, quoted: bool) -> bool {
         let (before, found) = match text.split_once(ASSIGNMENT) {
             Some((before, _)) => (before, true),
