@@ -258,12 +258,12 @@ fn the_fade_steps_blend_the_colors() {
 
     assert_same_screen(&replay(&result, 1.0, WIDE), &replay(&events, 1.0, WIDE));
     let step = replay(&result, 1.0 + 0.2 / 6.0 + 1e-6, WIDE);
-    let (red, green, blue) = step.get_grid()[1][33].fg_color;
+    let (red, green, blue) = step.get_grid()[1][34].fg_color;
     for channel in [red, green, blue] {
         assert!(0 < channel && channel < 128, "channel {channel}");
     }
     assert_eq!(
-        replay(&result, 1.5, WIDE).get_grid()[1][33].fg_color,
+        replay(&result, 1.5, WIDE).get_grid()[1][34].fg_color,
         (128, 128, 128)
     );
     assert_same_screen(
