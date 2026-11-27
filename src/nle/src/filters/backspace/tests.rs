@@ -158,3 +158,15 @@ fn consecutive_backspaces_erase_a_word() {
     }
     assert_eq!(run(events), expected);
 }
+
+#[test]
+fn a_backspace_that_does_not_restore_the_screen_stays_with_its_typed_key() {
+    let events = vec![
+        out(0.0, "$ "),
+        input(1.0, "x"),
+        out(1.0, "x"),
+        input(2.0, "\x7f"),
+        out(2.0, "\x1b[2J"),
+    ];
+    assert_eq!(run(events.clone()), events);
+}
