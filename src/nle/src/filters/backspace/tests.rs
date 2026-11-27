@@ -272,3 +272,16 @@ fn ctrl_w_erases_the_typed_word() {
     expected.extend(typed(&[("l", 1.0), ("s", 1.25), (" ", 1.5), ("x", 1.75)]));
     assert_eq!(run(events), expected);
 }
+
+#[test]
+fn ctrl_u_erases_the_typed_line() {
+    let mut events = vec![out(0.0, "$ ")];
+    events.extend(typed(&[("l", 1.0), ("s", 1.25)]));
+    events.push(input(1.5, "\x15"));
+    events.push(out(1.5, "\x08\x08  \x08\x08"));
+    events.extend(typed(&[("p", 1.75), ("w", 2.0), ("d", 2.25)]));
+
+    let mut expected = vec![out(0.0, "$ ")];
+    expected.extend(typed(&[("p", 1.0), ("w", 1.25), ("d", 1.5)]));
+    assert_eq!(run(events), expected);
+}
