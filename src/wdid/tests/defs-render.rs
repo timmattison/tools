@@ -971,3 +971,91 @@ fn no_finding_gives_none_in_the_last_block() {
         "{hidden}"
     );
 }
+
+#[test]
+fn the_json_holds_each_finding_also_one_with_no_member_of_mine() {
+    let mut others = same_expansion();
+    for member in &mut others.definitions {
+        member.mine = false;
+    }
+    let more = Finding {
+        places: vec![
+            Some(Origin {
+                file: PathBuf::from("/home/me/omz/lib/directories.zsh"),
+                line: Some(30),
+            }),
+            None,
+        ],
+        ..finding(
+            FindingKind::DefinedMoreThanOnce,
+            vec![member("ll", Kind::Alias, None, 4)],
+        )
+    };
+    let hides = Finding {
+        program: Some(PathBuf::from("/home/me/bin/hidden")),
+        ..finding(
+            FindingKind::HidesProgram,
+            vec![member(
+                "hidden",
+                Kind::Function,
+                Some(("/home/me/.zshrc", None)),
+                0,
+            )],
+        )
+    };
+    let counts = with_findings(vec![others, more, hides]);
+    let document: serde_json::Value =
+        serde_json::from_str(&json(&counts, &window(), "/bin/zsh")).unwrap();
+    let found = document["findings"].as_array().unwrap();
+    assert_eq!(found.len(), 3, "{document}");
+
+    let first = &found[0];
+    assert_eq!(first["kind"], "same_expansion");
+    assert_eq!(first["mine"], false);
+    assert_eq!(first["words"], serde_json::json!(["git", "status"]));
+    assert_eq!(first["places"], serde_json::json!([]));
+    assert_eq!(first["program"], serde_json::Value::Null);
+    let members = first["definitions"].as_array().unwrap();
+    assert_eq!(
+        members[0],
+        serde_json::json!({
+            "name": "gs",
+            "kind": "alias",
+            "origin": {"file": "/home/me/.zshrc", "line": 3},
+            "uses": 3,
+            "mine": false,
+        })
+    );
+    assert_eq!(members[1]["name"], "gst");
+    assert_eq!(members[1]["uses"], 2);
+
+    let second = &found[1];
+    assert_eq!(second["kind"], "defined_more_than_once");
+    assert_eq!(second["mine"], true);
+    assert_eq!(second["words"], serde_json::json!([]));
+    assert_eq!(
+        second["places"],
+        serde_json::json!([
+            {"file": "/home/me/omz/lib/directories.zsh", "line": 30},
+            null
+        ])
+    );
+    assert_eq!(second["definitions"][0]["origin"], serde_json::Value::Null);
+    assert_eq!(second["definitions"][0]["mine"], true);
+
+    let third = &found[2];
+    assert_eq!(third["kind"], "hides_program");
+    assert_eq!(third["program"], "/home/me/bin/hidden");
+    assert_eq!(third["definitions"][0]["kind"], "function");
+    assert_eq!(
+        third["definitions"][0]["origin"],
+        serde_json::json!({"file": "/home/me/.zshrc", "line": null})
+    );
+}
+
+#[test]
+fn the_json_findings_are_an_empty_list_when_there_is_none() {
+    let document: serde_json::Value =
+        serde_json::from_str(&json(&tally(Vec::new()), &window(), "/bin/zsh")).unwrap();
+    assert_eq!(document["findings"], serde_json::json!([]), "{document}");
+}
