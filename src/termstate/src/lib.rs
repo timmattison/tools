@@ -298,8 +298,10 @@ pub struct Cell {
 
 /// Tells if the parser is settled after one character: in the ground state, with
 /// no unfinished sequence. `was_settled` is the answer before the character.
-/// `printed` tells that the parser called `print` for the character, and `ended`
-/// that it called `csi_dispatch`, `esc_dispatch`, `osc_dispatch`, or `unhook`.
+/// `printed` tells that the parser called `print` for the character. `ended`
+/// tells that it called `csi_dispatch`, `esc_dispatch`, `osc_dispatch`, or
+/// `unhook`, that it ran CAN or SUB, or that the character is the final byte of
+/// a CSI sequence.
 ///
 /// The proof, for vte 0.15 and for text that arrives as valid UTF-8, one whole
 /// character at a time:
@@ -309,14 +311,62 @@ pub struct Cell {
 /// - `print` fires only in the ground state. The character is whole, so the
 ///   print takes all of it, and no part of a UTF-8 sequence stays behind.
 /// - A CSI dispatch or an ESC dispatch returns the parser to the ground state.
-///   An OSC string ends in the ground state on BEL, CAN, or SUB. A DCS string
-///   ends in the ground state on CAN, SUB, or 0x9C. They end in the Escape state
-///   only on ESC, and the rule excludes ESC.
-/// - A settle point that the rule misses, for example the end of an ignored CSI
-///   sequence, which calls nothing, only keeps bytes in the buffer until the next
-///   print or dispatch. That makes the replay longer. It never makes it wrong.
+///   An OSC string ends in the ground state on BEL. A DCS string ends in the
+///   ground state on 0x9C. They end in the Escape state only on ESC, and the
+///   rule excludes ESC.
+/// - CAN and SUB move the parser from each state to the ground state, and the
+///   parser runs them.
+/// - A CSI sequence ends in the ground state on its final byte, 0x40 to 0x7E.
+///   When vte ignores the sequence, for example `ESC [ 1 ; ? h`, it calls
+///   nothing at that byte. [`Track`] tells that the parser is in a CSI sequence.
+///
+/// These are all the ways back to the ground state, thus the rule misses no
+/// settle point.
 fn ends_settled(ch: char, was_settled: bool, printed: bool, ended: bool) -> bool {
     ch != '\x1b' && (printed || ended || was_settled)
+}
+
+/// Where the parser of vte 0.15 is, for the one end of a sequence that calls
+/// back nothing: the final byte of a CSI sequence that vte ignores.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Track {
+    /// The parser is in no state below.
+    #[default]
+    Elsewhere,
+    /// The parser is in the escape state. A `[` starts a CSI sequence.
+    Escape,
+    /// The parser is in a CSI sequence. A final byte ends it.
+    Csi,
+}
+
+impl Track {
+    /// Returns where the parser is after `ch`, from where it was before.
+    ///
+    /// ESC moves the parser from each state to the escape state, and CAN and
+    /// SUB move it to the ground state. In the escape state and in a CSI
+    /// sequence, a control, DEL, and each byte of a character that is not ASCII
+    /// keep the state. In a CSI sequence, each byte from 0x20 to 0x3F does too.
+    fn after(self, ch: char) -> Self {
+        match (self, ch) {
+            (_, '\x1b') => Self::Escape,
+            (_, '\x18' | '\x1a') => Self::Elsewhere,
+            (Self::Escape, '[') => Self::Csi,
+            (Self::Escape, ch) if ch.is_ascii_control() || !ch.is_ascii() => Self::Escape,
+            (Self::Csi, ch) if Self::is_final_byte(ch) => Self::Elsewhere,
+            (Self::Csi, _) => Self::Csi,
+            _ => Self::Elsewhere,
+        }
+    }
+
+    /// Tells if `ch` ends the CSI sequence that the parser is in.
+    fn ends_csi(self, ch: char) -> bool {
+        self == Self::Csi && Self::is_final_byte(ch)
+    }
+
+    /// Tells if `ch` is a final byte of a CSI sequence: 0x40 to 0x7E.
+    fn is_final_byte(ch: char) -> bool {
+        ('\x40'..='\x7e').contains(&ch)
+    }
 }
 
 /// Makes a parser in the state that `Parser::new()` reaches after it has read
@@ -358,6 +408,9 @@ impl Perform for Feed<'_> {
     }
 
     fn execute(&mut self, byte: u8) {
+        if matches!(byte, CAN | SUB) {
+            self.ended = true;
+        }
         self.state.execute(byte);
     }
 
@@ -410,6 +463,7 @@ impl Clone for TerminalState {
             underline: self.underline,
             parser: replayed_parser(&self.pending),
             pending: self.pending.clone(),
+            track: self.track,
             saved: self.saved,
             restores: self.restores,
             alt_screen: self.alt_screen,
@@ -482,6 +536,8 @@ pub struct TerminalState {
     // The bytes fed since the parser was last settled: in the ground state with
     // no unfinished sequence. Empty means the parser equals `Parser::new()`.
     pending: Vec<u8>,
+    // Where the parser is, for the end of a CSI sequence that calls nothing.
+    track: Track,
     // The count of restores of a save slot.
     restores: u64,
     // The saved cursor states. Slot 0 is for the normal screen.
@@ -555,6 +611,7 @@ impl TerminalState {
             theme,
             parser: Parser::new(),
             pending: Vec::new(),
+            track: Track::default(),
             saved: [initial_cursor; 2],
             restores: 0,
             alt_screen: false,
@@ -593,7 +650,8 @@ impl TerminalState {
             for byte in bytes {
                 parser.advance(&mut feed, &[*byte]);
             }
-            let (printed, ended) = (feed.printed, feed.ended);
+            let (printed, ended) = (feed.printed, feed.ended || self.track.ends_csi(ch));
+            self.track = self.track.after(ch);
             if ends_settled(ch, was_settled, printed, ended) {
                 self.pending.clear();
             } else {
@@ -659,16 +717,12 @@ impl TerminalState {
     /// parameters, thus the bytes before the last `ESC` do not matter. The text
     /// holds no C0 control, because inside a sequence a control runs and does
     /// not change the state. A terminal that reads the text then runs no
-    /// control twice. `CAN` and `SUB` end each sequence. When the unfinished
-    /// sequence holds one of them after its last `ESC`, the text is empty.
+    /// control twice.
     pub fn unfinished_sequence(&self) -> String {
         let Some(start) = self.pending.iter().rposition(|byte| *byte == ESC) else {
             return String::new();
         };
         let tail = self.pending.get(start..).unwrap_or_default();
-        if tail.iter().any(|byte| matches!(*byte, CAN | SUB)) {
-            return String::new();
-        }
         let kept: Vec<u8> = tail
             .iter()
             .copied()
