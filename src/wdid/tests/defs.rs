@@ -1,9 +1,12 @@
 //! Tests of the count of the uses of each alias and each function.
 
+use std::path::PathBuf;
+
 use chrono::{Days, NaiveDate, NaiveDateTime};
 use wdid::command_words::{command_words, Aliases, Parsed};
 use wdid::defs::{tally, Classification, Kind, Tally, Usage, Window};
 use wdid::history::{Exit, HistoryEntry};
+use wdid::origin::{Origin, Places};
 use wdid::shell::Definitions;
 
 /// The idle limit of the default window.
@@ -25,6 +28,7 @@ fn window() -> Window {
         today: today(),
         since: None,
         idle_days: IDLE_DAYS,
+        all: false,
     }
 }
 
@@ -426,4 +430,119 @@ fn multibyte_names_and_values_stay_whole() {
     let alias = usage(&result, "日本", Kind::Alias);
     assert_eq!(alias.typed, 1);
     assert_eq!(alias.definition, "echo 日本語 🎉");
+}
+
+/// The places of the origin tests: the home is `/home/me`, and oh-my-zsh is
+/// in `/home/me/omz`.
+fn places() -> Places {
+    Places {
+        home: Some(PathBuf::from("/home/me")),
+        zsh: Some(PathBuf::from("/home/me/omz")),
+        zsh_custom: Some(PathBuf::from("/home/me/omz/custom")),
+    }
+}
+
+/// Makes an origin in `file`, at `line` when it is given.
+fn origin(file: &str, line: Option<u32>) -> Origin {
+    Origin {
+        file: PathBuf::from(file),
+        line,
+    }
+}
+
+/// The file of the git plugin of the oh-my-zsh of [`places`].
+const GIT_PLUGIN: &str = "/home/me/omz/plugins/git/git.plugin.zsh";
+
+/// Makes definitions with an origin for each kind of entry. `bare` has no
+/// origin, and `_comp` is a private function in a file outside the home.
+fn with_origins() -> Definitions {
+    let mut defs = definitions(
+        &[("wt", "cwt"), ("gst", "git status"), ("bare", "ls")],
+        &[("G", "| grep")],
+        &[("md", "glow")],
+        &[
+            ("myf", "\techo"),
+            ("gfun", "\tgit log"),
+            ("_comp", "\techo"),
+        ],
+    );
+    for (name, file, line) in [
+        ("wt", "/home/me/.zshrc", 3),
+        ("gst", GIT_PLUGIN, 1),
+        ("G", "/home/me/.zshrc", 4),
+    ] {
+        defs.alias_origins
+            .insert(name.to_string(), origin(file, Some(line)));
+    }
+    defs.suffix_origins
+        .insert("md".to_string(), origin("/home/me/.zshrc", Some(5)));
+    for (name, file) in [
+        ("myf", "/home/me/.zshrc"),
+        ("gfun", GIT_PLUGIN),
+        ("_comp", "/usr/share/zsh/functions/_comp"),
+    ] {
+        defs.function_origins
+            .insert(name.to_string(), origin(file, None));
+    }
+    defs.places = places();
+    defs
+}
+
+#[test]
+fn each_entry_has_the_origin_of_its_definition() {
+    let result = run(&[], &with_origins());
+    let rows = [
+        ("wt", Kind::Alias, Some(origin("/home/me/.zshrc", Some(3)))),
+        (
+            "G",
+            Kind::GlobalAlias,
+            Some(origin("/home/me/.zshrc", Some(4))),
+        ),
+        (
+            "*.md",
+            Kind::SuffixAlias,
+            Some(origin("/home/me/.zshrc", Some(5))),
+        ),
+        ("myf", Kind::Function, Some(origin("/home/me/.zshrc", None))),
+        ("bare", Kind::Alias, None),
+    ];
+    for (name, kind, expected) in rows {
+        assert_eq!(usage(&result, name, kind).origin, expected, "{name}");
+    }
+}
+
+#[test]
+fn an_entry_is_mine_by_its_origin() {
+    let result = run(&[], &with_origins());
+    let rows = [
+        ("wt", Kind::Alias, true),
+        ("gst", Kind::Alias, false),
+        ("bare", Kind::Alias, true),
+        ("myf", Kind::Function, true),
+        ("gfun", Kind::Function, false),
+    ];
+    for (name, kind, mine) in rows {
+        assert_eq!(usage(&result, name, kind).mine, mine, "{name}");
+    }
+}
+
+/// The summary counts the entries of the report. Without `all`, the private
+/// function `_comp` is not an entry, thus it is in neither count.
+#[test]
+fn the_summary_counts_mine_and_the_others() {
+    let result = run(&[], &with_origins());
+    assert_eq!((result.summary.mine, result.summary.others), (5, 2));
+    assert_eq!(result.places, places());
+}
+
+#[test]
+fn all_lists_the_private_functions_with_their_uses() {
+    let mut all = window();
+    all.all = true;
+    let result = tally(&[row("_comp"), row("_comp x")], &with_origins(), &all);
+    let comp = usage(&result, "_comp", Kind::Function);
+    assert_eq!((comp.uses, comp.typed), (2, 2));
+    assert!(!comp.mine);
+    assert_eq!(result.summary.functions, 3);
+    assert_eq!((result.summary.mine, result.summary.others), (5, 3));
 }

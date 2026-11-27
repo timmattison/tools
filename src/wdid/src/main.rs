@@ -233,6 +233,7 @@ fn run_defs(args: &DefsArgs) -> Result<String, Error> {
         today,
         since: args.since,
         idle_days: args.idle_days,
+        all: false,
     };
     let tally = defs::tally(&entries, &definitions, &window);
     Ok(if args.json {

@@ -4,6 +4,7 @@ use chrono::NaiveDate;
 use unicode_width::UnicodeWidthStr;
 use wdid::defs::render::{json, text};
 use wdid::defs::{Classification, Kind, Summary, Tally, Usage, Window};
+use wdid::origin::Places;
 
 /// The characters that start a line of the table.
 const BOX_CHARS: [char; 5] = ['┌', '│', '├', '╞', '└'];
@@ -19,6 +20,7 @@ fn window() -> Window {
         today: date(2026, 11, 26),
         since: None,
         idle_days: 180,
+        all: false,
     }
 }
 
@@ -33,6 +35,8 @@ fn summary() -> Summary {
         functions: 1267,
         unparsed_functions: 24,
         unparsed_aliases: 0,
+        mine: 0,
+        others: 0,
     }
 }
 
@@ -48,6 +52,8 @@ fn never(name: &str, kind: Kind, definition: &str) -> Usage {
         first_use: None,
         last_use: None,
         classification: Classification::NeverUsed,
+        origin: None,
+        mine: true,
     }
 }
 
@@ -68,6 +74,7 @@ fn tally(definitions: Vec<Usage>) -> Tally {
     Tally {
         definitions,
         summary: summary(),
+        places: Places::default(),
     }
 }
 

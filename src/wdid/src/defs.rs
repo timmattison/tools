@@ -13,6 +13,7 @@ use chrono::NaiveDate;
 
 use crate::command_words::{parse_line, AliasKind, CommandWord, Line};
 use crate::history::HistoryEntry;
+use crate::origin::{Origin, Places};
 use crate::shell::Definitions;
 use crate::tally::days_since;
 
@@ -39,6 +40,10 @@ pub struct Window {
     pub since: Option<NaiveDate>,
     /// A definition whose last use is older than this many days is idle.
     pub idle_days: u32,
+    /// The report lists each definition: the functions whose name starts
+    /// with `_` too, and in the text report the definitions that are not
+    /// mine.
+    pub all: bool,
 }
 
 /// The kind of a definition.
@@ -113,6 +118,10 @@ pub struct Usage {
     pub last_use: Option<NaiveDate>,
     /// The state of the definition.
     pub classification: Classification,
+    /// The file that defined the definition, or `None` when it is unknown.
+    pub origin: Option<Origin>,
+    /// True when the definition is mine (see [`Places::is_mine`]).
+    pub mine: bool,
 }
 
 /// The counts about the history and about the shell.
@@ -134,6 +143,10 @@ pub struct Summary {
     pub unparsed_functions: usize,
     /// The alias lines that did not parse.
     pub unparsed_aliases: usize,
+    /// The entries of the report that are mine.
+    pub mine: usize,
+    /// The entries of the report that are not mine.
+    pub others: usize,
 }
 
 /// The result of the count.
@@ -143,6 +156,9 @@ pub struct Tally {
     pub definitions: Vec<Usage>,
     /// The counts about the history and about the shell.
     pub summary: Summary,
+    /// The directories that decide which definitions are mine. The text
+    /// report shows the home directory as `~`.
+    pub places: Places,
 }
 
 /// Gives the first line of `text`, with its other characters unchanged.
@@ -181,6 +197,8 @@ fn empty_usages(definitions: &Definitions) -> Vec<Usage> {
             first_use: None,
             last_use: None,
             classification: Classification::NeverUsed,
+            origin: None,
+            mine: false,
         })
         .collect()
 }
@@ -379,6 +397,9 @@ pub fn tally(entries: &[HistoryEntry], definitions: &Definitions, window: &Windo
             functions,
             unparsed_functions,
             unparsed_aliases: definitions.unparsed_aliases.len(),
+            mine: 0,
+            others: 0,
         },
+        places: Places::default(),
     }
 }
