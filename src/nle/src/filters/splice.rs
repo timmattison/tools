@@ -227,3 +227,6 @@ pub(super) fn output_event(time: f64, data: String) -> Event {
         data,
     }
 }
+
+#[cfg(test)]
+mod tests;
