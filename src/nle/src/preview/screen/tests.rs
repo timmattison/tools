@@ -169,3 +169,28 @@ fn the_background_of_the_screen_follows_an_osc_11_change() {
     let state = terminal(2, 1, "\x1b]11;rgb:10/20/30\x07");
     assert_eq!(Screen::of(&state).background, (0x10, 0x20, 0x30));
 }
+
+#[test]
+fn each_pair_of_cell_colors_resolves_one_time() {
+    let state = terminal(
+        200,
+        60,
+        "\x1b[31mred\x1b[0m plain \x1b[42mgreen\x1b[0m\r\n\x1b[1;34mblue\x1b[0m",
+    );
+    let pairs: std::collections::HashSet<_> = state
+        .get_grid()
+        .iter()
+        .flatten()
+        .map(|cell| (cell.fg_color, cell.bg_color))
+        .collect();
+    let mut colors = Colors::new(&state);
+    let screen = Screen::of_with(&mut colors);
+    // The `+ 1` is the blank cell that gives the background of the screen.
+    assert!(
+        colors.resolutions() <= pairs.len() + 1,
+        "{} resolutions for {} pairs of colors",
+        colors.resolutions(),
+        pairs.len()
+    );
+    assert_eq!(screen, Screen::of(&state));
+}

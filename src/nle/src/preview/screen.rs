@@ -4,6 +4,8 @@
 //! `日` and a zero-width mark. The UI draws a run with `single_cell` set in a
 //! box of one cell width, so the columns stay aligned.
 
+use std::collections::HashMap;
+
 use unicode_width::UnicodeWidthChar;
 
 /// The CSS property of the text color.
@@ -92,6 +94,12 @@ pub struct Screen {
 impl Screen {
     /// The screen of `state`.
     pub fn of(state: &termstate::TerminalState) -> Self {
+        Self::of_with(&mut Colors::new(state))
+    }
+
+    /// The screen of the state of `colors`. `colors` resolves the cell colors.
+    fn of_with(colors: &mut Colors<'_>) -> Self {
+        let state = colors.state;
         let cursor = state
             .is_cursor_visible()
             .then(|| state.get_cursor_position());
@@ -104,7 +112,7 @@ impl Screen {
                     .filter(|&(_, cursor_row)| cursor_row == row_index)
                     .map(|(column, _)| column);
                 Row {
-                    runs: runs_of(state, cells, cursor_column),
+                    runs: runs_of(colors, cells, cursor_column),
                 }
             })
             .collect();
@@ -118,7 +126,7 @@ impl Screen {
         Self {
             columns: state.width,
             rows,
-            background: state.resolve_cell_colors(&blank).1,
+            background: colors.of(&blank).1,
         }
     }
 
@@ -131,9 +139,49 @@ impl Screen {
     }
 }
 
-/// The style of one cell of `state`.
-fn style_of(state: &termstate::TerminalState, cell: &termstate::Cell) -> Style {
-    let (foreground, background) = state.resolve_cell_colors(cell);
+/// The two colors of a cell: the foreground and the background.
+type ColorPair = (Rgb, Rgb);
+
+/// The colors that one terminal draws its cells with. `resolve_cell_colors`
+/// walks the 256 entries of the palette at each call, but its answer depends
+/// only on the two colors of the cell, and a screen holds few pairs. Thus
+/// each pair resolves one time.
+struct Colors<'a> {
+    state: &'a termstate::TerminalState,
+    /// The count of calls of `resolve_cell_colors`.
+    #[cfg(test)]
+    resolutions: usize,
+}
+
+impl<'a> Colors<'a> {
+    /// The colors of the cells of `state`.
+    fn new(state: &'a termstate::TerminalState) -> Self {
+        Self {
+            state,
+            #[cfg(test)]
+            resolutions: 0,
+        }
+    }
+
+    /// The foreground and the background that `cell` draws with.
+    fn of(&mut self, cell: &termstate::Cell) -> ColorPair {
+        #[cfg(test)]
+        {
+            self.resolutions += 1;
+        }
+        self.state.resolve_cell_colors(cell)
+    }
+
+    /// The count of calls of `resolve_cell_colors` so far.
+    #[cfg(test)]
+    fn resolutions(&self) -> usize {
+        self.resolutions
+    }
+}
+
+/// The style of one cell.
+fn style_of(colors: &mut Colors<'_>, cell: &termstate::Cell) -> Style {
+    let (foreground, background) = colors.of(cell);
     Style {
         foreground,
         background,
@@ -146,13 +194,13 @@ fn style_of(state: &termstate::TerminalState, cell: &termstate::Cell) -> Style {
 /// The runs of one row of cells. Cells next to each other with one style merge.
 /// The cell at `cursor_column` swaps its foreground and its background.
 fn runs_of(
-    state: &termstate::TerminalState,
+    colors: &mut Colors<'_>,
     cells: &[termstate::Cell],
     cursor_column: Option<usize>,
 ) -> Vec<Run> {
     let mut runs: Vec<Run> = Vec::new();
     for (column, cell) in cells.iter().enumerate() {
-        let mut style = style_of(state, cell);
+        let mut style = style_of(colors, cell);
         if cursor_column == Some(column) {
             style = Style {
                 foreground: style.background,
