@@ -9,6 +9,8 @@
 # Add a new check to this script, not to a caller. Then the hook and CI cannot
 # run different checks.
 #
+# CLAUDE.md, "Checks in an issue-fleet Step", gives what a step runs instead.
+#
 # The four Rust gates run cheapest-first so a run fails fast on the quickest
 # check:
 #

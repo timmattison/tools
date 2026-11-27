@@ -1235,7 +1235,8 @@ only when a staged path is one that the script reads.
 To run the full list by hand, run `./scripts/rust-checks.sh`, then
 `./scripts/plugin-checks.sh`, from the repository root. Do this at the end of a
 TDD run. A `git commit --allow-empty` stages no file, thus the hook runs no
-check in this repository.
+check in this repository. A step of issue-fleet does not run the full list. It
+obeys [Checks in an issue-fleet Step](#checks-in-an-issue-fleet-step).
 
 ### What CI does
 
@@ -1291,3 +1292,71 @@ Linux runner is small.
 - Pin each third-party action to a full commit SHA, and write its release tag
   in a comment. A tag can move, but a commit SHA cannot.
 - Run `actionlint .github/workflows/ci.yml` after each change to the workflow.
+
+## Checks in an issue-fleet Step
+
+A step of issue-fleet runs the checks of the crates that its change touches,
+and not the full list. CI runs the full list on the pull request. This section
+applies when `ISSUE_FLEET_RUN` is set. issue-fleet sets that variable in each
+step, also in each step of the `review-loop` that it starts. Each other session
+keeps the full list at the end of a TDD run, as
+[Continuous Integration](#continuous-integration) says.
+
+### Why
+
+On 2026-11-26, three runs of issue-fleet on one Mac of 14 cores held new work at
+the load gate for 5.7 of 10.5 hours. The steps of this repository made most of
+that load. A sample of 90 s counted 681 new processes each second, and 91% came
+from one `/address-issues` step that ran the full list by hand. The test
+binaries of `gsw`, `cwt` and `gitscratch` start `git` and the tool under test
+for each test. Each new process costs kernel time and a check by `syspolicyd`.
+In the steps of that day, `cargo test` ran 1,191 times, for 6.4 hours of wall
+time.
+
+CI runs `scripts/rust-checks.sh` on each pull request, as
+[What CI does](#what-ci-does) says. issue-fleet opens a pull request for each
+issue, and it merges only after the CI run is green. Thus a full run in a step
+does the work of CI a second time, and it slows each other step on the machine.
+
+### The Rule
+
+1. Do not run `scripts/rust-checks.sh`, `test.sh`, `cargo test --workspace`,
+   `cargo clippy --workspace`, or a `cargo test` or a `cargo clippy` with no
+   `-p`.
+2. For each crate that the change touches, run `cargo test -p <crate>` and
+   `cargo clippy -p <crate> --all-targets -- -D warnings`. Also run these
+   tests:
+   - When the change touches a crate that other crates of the workspace use,
+     run the tests of each crate that depends on it. Do this also when that is
+     most of the workspace. `childenv` has 74 dependents, and `buildinfo` has
+     88, of 115 members.
+   - When the change touches a file that a guard of `repo-guards` reads, run
+     `cargo test -p repo-guards`. The guards read each Rust file that cargo
+     compiles, each `Cargo.toml`, `README.md`, `TLDR.md`, `clippy.toml`,
+     `.gitignore`, `rust-toolchain.toml`, `.husky/pre-commit`, the scripts that
+     the hook starts, `test.sh`, and each file in a `specs` or `plans`
+     directory. Thus a change to Rust code also needs the tests of
+     `repo-guards`.
+3. Commit with `--no-verify`. The pre-commit hook runs the full list for each
+   commit that stages a Rust file, a `Cargo.toml`, `Cargo.lock`, or
+   `scripts/rust-checks.sh`.
+4. Do not end a TDD run with the full list. Make no closing
+   `git commit --allow-empty`, and do not run the list by hand in its place.
+   The CI run of the pull request ends the TDD run.
+
+This command tests a crate together with each workspace crate that names it in
+a dependency table:
+
+```bash
+crate=childenv
+cargo metadata --format-version 1 --no-deps \
+  | jq -r --arg crate "$crate" '[.packages[]
+      | select(any(.dependencies[]; .name == $crate and .path != null))
+      | .name] | unique | .[] | ("-p", .)' \
+  | xargs cargo test -p "$crate"
+```
+
+Keep `-p "$crate"` in the command. GNU `xargs` runs its command one time when
+the list is empty, and a `cargo test` with no `-p` tests the whole workspace.
+BSD `xargs` on macOS runs nothing when the list is empty, thus the
+`cargo test -p <crate>` of part 2 stays necessary.
