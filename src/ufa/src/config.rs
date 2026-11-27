@@ -9,6 +9,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 /// Prefix identifying a 1Password secret reference.
@@ -124,6 +125,65 @@ fn newlines_inside(text: &str) -> usize {
     } else {
         breaks
     }
+}
+
+/// The error for TOML text that cannot be parsed, with no text of the TOML.
+///
+/// The parse errors of `toml` and `toml_edit` write the line of the error,
+/// and `main` prints the chain of the error. A line of the config file can
+/// hold a key, because setup writes a pasted key there. The reason that the
+/// parser gives is not shown either: for a type error, serde quotes the string
+/// that it found, and that string can be a key. Thus the error names only the
+/// position, and the parse error is not its source.
+///
+/// # Arguments
+///
+/// * `subject` - What could not be parsed, for example `config file <path>`.
+/// * `text` - The text that the parser read.
+/// * `span` - The byte range of the error in `text`, when the parser gives one.
+///
+/// # Returns
+///
+/// The error to report.
+fn unparsable_toml(subject: &str, text: &str, span: Option<Range<usize>>) -> anyhow::Error {
+    match span {
+        Some(span) => {
+            let (line, column) = line_and_column(text, span.start);
+            anyhow::anyhow!(
+                "Failed to parse {subject}: the error is at line {line}, column {column}. \
+                 The line and the reason are not shown, because they can hold a key."
+            )
+        }
+        None => anyhow::anyhow!(
+            "Failed to parse {subject}. The text and the reason are not shown, \
+             because they can hold a key."
+        ),
+    }
+}
+
+/// The line and the column of a byte offset in a text, both counted from 1.
+///
+/// The column counts characters, not bytes, as the parse error of `toml_edit`
+/// counts them, so the two give the same position.
+///
+/// # Arguments
+///
+/// * `text` - The text that holds the offset.
+/// * `offset` - A byte offset at a character boundary of `text`.
+///
+/// # Returns
+///
+/// The line and the column of the character that starts at `offset`.
+fn line_and_column(text: &str, offset: usize) -> (usize, usize) {
+    text.char_indices()
+        .take_while(|(index, _)| *index < offset)
+        .fold((1, 1), |(line, column), (_, character)| {
+            if character == '\n' {
+                (line.saturating_add(1), 1)
+            } else {
+                (line, column.saturating_add(1))
+            }
+        })
 }
 
 /// A reader that counts the physical lines it has handed out.
@@ -415,6 +475,12 @@ impl Config {
     /// Load configuration from an explicit path.
     ///
     /// Returns `Ok(None)` when the file does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or parsed. A parse error
+    /// names the position of the error and no text of the file, as
+    /// [`unparsable_toml`] says.
     fn load_from(config_path: &Path) -> Result<Option<Self>> {
         if !config_path.exists() {
             return Ok(None);
@@ -423,8 +489,13 @@ impl Config {
         let contents = fs::read_to_string(config_path)
             .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
 
-        let config: Config = toml::from_str(&contents)
-            .with_context(|| format!("Failed to parse config file: {}", config_path.display()))?;
+        let config: Config = toml::from_str(&contents).map_err(|error| {
+            unparsable_toml(
+                &format!("config file {}", config_path.display()),
+                &contents,
+                error.span(),
+            )
+        })?;
 
         Ok(Some(config))
     }
@@ -575,15 +646,19 @@ impl Config {
     /// # Errors
     ///
     /// Returns an error if `existing` is not TOML, or if `self` cannot be
-    /// serialized.
+    /// serialized. A parse error names the position of the error and no text
+    /// of the TOML, as [`unparsable_toml`] says.
     fn written_over(&self, existing: &str) -> Result<String> {
-        let mut document: toml_edit::DocumentMut = existing
-            .parse()
-            .context("Failed to parse the config file")?;
-        let fields: toml_edit::DocumentMut = toml::to_string_pretty(self)
-            .context("Failed to serialize configuration")?
-            .parse()
-            .context("Failed to read the serialized configuration")?;
+        let mut document = existing
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|error| unparsable_toml("the config file", existing, error.span()))?;
+        let serialized =
+            toml::to_string_pretty(self).context("Failed to serialize configuration")?;
+        let fields = serialized
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|error| {
+                unparsable_toml("the serialized configuration", &serialized, error.span())
+            })?;
 
         for name in Self::field_names()? {
             match fields.get(&name).and_then(toml_edit::Item::as_value) {
@@ -2273,6 +2348,22 @@ mod tests {
             .expect_err("a config file that cannot be parsed is a fault");
 
         assert_report_hides_the_key(&error, position, &contents);
+    }
+
+    /// The column counts characters, as the parse error of `toml_edit` does,
+    /// so a line with multi-byte characters before the error names the same
+    /// column that a person sees. A count of bytes gives column 46.
+    #[test]
+    fn the_column_of_a_parse_error_counts_characters() {
+        let contents = format!(
+            "# 日本語 café\nurl = \"https://192.168.1.1\"\napi_key = \"日本語🎉{PASTED_KEY}\n"
+        );
+
+        let error = Config::default()
+            .written_over(&contents)
+            .expect_err("a config file that cannot be parsed is a fault");
+
+        assert_report_hides_the_key(&error, "line 3, column 37", &contents);
     }
 
     /// A config file that a person wrote, with comments as in the sample of
