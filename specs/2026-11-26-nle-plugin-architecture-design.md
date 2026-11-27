@@ -221,6 +221,13 @@ interface types {
         data: string,
     }
 
+    /// A point on the timeline, for example the start of a command or of a
+    /// compressed idle time. `time` is in seconds, as for an event.
+    record mark {
+        time: f64,
+        label: string,
+    }
+
     /// The value of one option. The manifest declares its type.
     variant option-value {
         number(f64),
@@ -317,7 +324,7 @@ of a region that holds no event.
 
 ```wit
 interface span-filter {
-    use types.{event, option-entry};
+    use types.{event, mark, option-entry};
 
     /// A region of the timeline.
     record span {
@@ -325,12 +332,16 @@ interface span-filter {
         events: list<event>,
         /// The length of the region in seconds.
         length: f64,
+        /// The marks of the region, with times relative to its start.
+        marks: list<mark>,
     }
 
     /// The span filter. It obeys the steps on `SpanFilterFn` in
-    /// `src/nle/src/pipeline.rs`: it gets the events and the length of its
-    /// region, and it answers new events and a new length. The pipeline
-    /// moves the events after the region by the change in the length.
+    /// `src/nle/src/pipeline.rs`: it gets the events, the length, and the
+    /// marks of its region, and it answers new events, a new length, and the
+    /// marks of its result. It moves each mark that it keeps as it moves
+    /// time, and it can add marks. The pipeline moves the events and the
+    /// marks after the region by the change in the length.
     ///
     /// An `err` answer fails the render with the message.
     apply: func(region: span, options: list<option-entry>) -> result<span, string>;
@@ -356,13 +367,7 @@ This sketch shows the direction. Slice 5 makes it final.
 
 ```wit
 interface analyzer {
-    use types.{event, option-entry};
-
-    /// A point on the timeline, for example the start of a command.
-    record marker {
-        time: f64,
-        label: string,
-    }
+    use types.{event, mark, option-entry};
 
     /// A named number, for example the count of the commands.
     record metric {
@@ -372,7 +377,7 @@ interface analyzer {
     }
 
     record analysis {
-        markers: list<marker>,
+        markers: list<mark>,
         metrics: list<metric>,
     }
 
@@ -816,7 +821,8 @@ A new library crate, `src/nle-plugins`, with no WASM runtime yet.
   in-place filter adds one event at the length of its region when the region
   is not open. The test asserts these results:
   - The span filter and the native time dilation filter give equal answers on
-    one fixture.
+    one fixture. A mark of an earlier filter is inside the region of the
+    dilation, and the two filters move it to the same time.
   - The in-place filter gets the view of the region from the pipeline. On a
     range that events come after, its event lands at the end of the range. On
     the region `All`, which is open, it adds no event.
