@@ -1403,3 +1403,26 @@ fn a_span_filter_scales_a_chapter_after_the_last_event_of_its_region() {
 
     assert_close(&chapter_times(&rendered), &[10.25, 13.0]);
 }
+
+#[test]
+fn a_span_filter_that_drops_an_event_scales_a_chapter_by_the_length_of_its_region() {
+    // The filter halves its region and drops the last event of it, thus the
+    // count of times before the filter is not the count after it.
+    let mut registry = FilterRegistry::new();
+    let halve = scale_span(0.5);
+    registry.register_span(kind("halve-and-drop"), move |span, options| {
+        let mut answer = halve(span, options)?;
+        answer.events.pop();
+        Ok(answer)
+    });
+    let project = chapter_project(
+        &[1.0, 11.0, 13.0, 25.0],
+        30.0,
+        vec![marker(1, 16.0, "middle")],
+        vec![range("halve-and-drop", 10.0, 20.0)],
+    );
+
+    let rendered = registry.render(&project).unwrap();
+
+    assert_close(&chapter_times(&rendered), &[13.0]);
+}
