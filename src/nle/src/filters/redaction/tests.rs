@@ -703,7 +703,24 @@ fn the_token_preset_masks_known_token_formats() {
 
 #[test]
 fn the_token_preset_masks_only_the_token_after_bearer() {
-    assert_value_masked(Preset::Token, "Authorization: Bearer ", "abc.def-ghi", "");
+    assert_value_masked(
+        Preset::Token,
+        "Authorization: Bearer ",
+        "abc.def-ghi.jkl-mno",
+        "",
+    );
+}
+
+#[test]
+fn the_token_preset_keeps_prose_that_holds_the_word_bearer() {
+    for text in [
+        "the bearer of the key",
+        "his forbearer Washington",
+        "bearer\nREADME.markdown",
+        "forbearer\nls",
+    ] {
+        assert_unchanged(Preset::Token, text);
+    }
 }
 
 #[test]
