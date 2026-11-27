@@ -763,12 +763,12 @@ fn with_findings(findings: Vec<Finding>) -> Tally {
     counts
 }
 
-/// Gives the block that starts with `Duplicates and shadows` in `report`.
+/// Gives the text of `report` after the heading `Duplicates and shadows`.
 fn findings_block(report: &str) -> &str {
-    let start = report
-        .find("Duplicates and shadows")
+    let (_, block) = report
+        .split_once("Duplicates and shadows")
         .unwrap_or_else(|| panic!("no findings block in:\n{report}"));
-    &report[start..]
+    block
 }
 
 /// The same-expansion finding of two aliases of git status.
