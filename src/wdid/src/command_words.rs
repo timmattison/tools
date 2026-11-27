@@ -1691,9 +1691,10 @@ impl Argument {
 }
 
 /// The character that stands for each piece of a word other than unquoted
-/// text in the probe of [`argument_from`]. It has no meaning in a glob or in a
-/// brace expansion, so a quoted `,` or `}` stays out of the probe, as the
-/// shell keeps it out.
+/// text and a line join in the probe of [`argument_from`]. It has no meaning
+/// in a glob or in a brace expansion, so a quoted `,` or `}` stays out of the
+/// probe, as the shell keeps it out. A line join gives nothing, as in
+/// [`literal_of`], because the shell removes it.
 const PIECE_STAND_IN: char = 'x';
 
 /// Says if the probe text `probe` of a word holds a pattern that the shell
@@ -1721,14 +1722,16 @@ fn is_pattern(probe: &str) -> bool {
 /// the literal `'*.c'`. This is the one place of that rule.
 ///
 /// The pattern rule reads one probe of the whole word: the text of each
-/// unquoted piece, and [`PIECE_STAND_IN`] for each other piece. Thus a quoted
-/// piece does not divide `{a,"b"}` into two texts that hold no pattern.
+/// unquoted piece, nothing for a line join, and [`PIECE_STAND_IN`] for each
+/// other piece. Thus a quoted piece does not divide `{a,"b"}` into two texts
+/// that hold no pattern, and a line join does not divide `{1..3}`.
 fn argument_from(raw: &str, pieces: &[WordPieceWithSource]) -> Argument {
     let mut probe = String::new();
     for WordPieceWithSource { piece, .. } in pieces {
         match piece {
             WordPiece::TildeExpansion(_) => return Argument::Expansion(raw.to_string()),
             WordPiece::Text(text) => probe.push_str(text),
+            WordPiece::EscapeSequence(escape) if unescape(escape).is_empty() => {}
             _ => probe.push(PIECE_STAND_IN),
         }
     }
