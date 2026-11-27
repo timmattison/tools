@@ -305,6 +305,8 @@ struct Window {
     changes: Vec<ElementId>,
     /// The Apply Speed button, when a test noted it.
     apply: Option<ElementId>,
+    /// The Apply Redaction button, when a test noted it.
+    redact: Option<ElementId>,
     /// The Play and Pause button, when a test noted it.
     play: Option<ElementId>,
     /// The Stop button, when a test noted it.
@@ -328,6 +330,7 @@ impl Window {
             first_render: Vec::new(),
             changes: Vec::new(),
             apply: None,
+            redact: None,
             play: None,
             stop: None,
         };
@@ -420,10 +423,12 @@ impl Window {
 
     /// The input listeners that the open render of one recording created, in
     /// creation order: the Start, End, and Speed fields of the speed panel,
-    /// the time, the label, and the search fields of the chapter panel, then
-    /// the playhead control of the timeline. The properties panel mounts
-    /// before the timeline, so the playhead is the last one.
-    fn open_inputs(&self) -> [ElementId; 7] {
+    /// then the Find, Pattern, Replace with, Replacement text, and Events
+    /// fields of the redaction panel, then the time, the label, and the search
+    /// fields of the chapter panel, then the playhead control of the timeline.
+    /// The properties panel mounts before the timeline, so the playhead is the
+    /// last one.
+    fn open_inputs(&self) -> [ElementId; 12] {
         self.inputs
             .clone()
             .try_into()
@@ -436,10 +441,17 @@ impl Window {
         [start, end, speed]
     }
 
+    /// The Find, Pattern, Replace with, Replacement text, and Events fields,
+    /// in this order.
+    fn redaction_fields(&self) -> [ElementId; 5] {
+        let [_, _, _, find, pattern, replace, replacement, events, ..] = self.open_inputs();
+        [find, pattern, replace, replacement, events]
+    }
+
     /// The time, the label, and the search fields of the chapter panel, in
     /// this order.
     fn chapter_fields(&self) -> [ElementId; 3] {
-        let [_, _, _, time, label, search, _] = self.open_inputs();
+        let [.., time, label, search, _] = self.open_inputs();
         [time, label, search]
     }
 
@@ -450,16 +462,52 @@ impl Window {
     }
 
     /// The click listeners that the render of a load creates, in creation
-    /// order: Apply Speed of the speed panel, Add Chapter of the chapter
-    /// panel, then Play and Stop of the preview toolbar. The properties panel
-    /// mounts before the preview toolbar, as it does for the input listeners.
-    /// A recording with chapters adds the buttons of its rows, thus this list
-    /// is for a recording with no chapter.
-    fn load_buttons(&self) -> [ElementId; 4] {
+    /// order: Apply Speed of the speed panel, Apply Redaction of the redaction
+    /// panel, Add Chapter of the chapter panel, then Play and Stop of the
+    /// preview toolbar. The properties panel mounts before the preview
+    /// toolbar, as it does for the input listeners. A recording with chapters
+    /// adds the buttons of its rows, thus this list is for a recording with no
+    /// chapter.
+    fn load_buttons(&self) -> [ElementId; 5] {
         self.newest
             .clone()
             .try_into()
             .unwrap_or_else(|ids: Vec<ElementId>| panic!("the load made the buttons {ids:?}"))
+    }
+
+    /// The Apply Redaction button. `open_recording` noted it.
+    fn redact_button(&self) -> ElementId {
+        self.redact.expect("a window with an open recording")
+    }
+
+    /// Fills the five fields of the redaction panel and clicks Apply Redaction.
+    fn apply_redaction(
+        &mut self,
+        find: &str,
+        pattern: &str,
+        replace: &str,
+        replacement: &str,
+        events: &str,
+    ) {
+        let fields = self.redaction_fields();
+        for (field, text) in fields
+            .into_iter()
+            .zip([find, pattern, replace, replacement, events])
+        {
+            self.type_into(field, text);
+        }
+        self.click(self.redact_button());
+    }
+
+    /// Notes the Apply Speed, Apply Redaction, Play, and Stop buttons of the
+    /// render of an open recording. `Window::load_buttons` gives their order,
+    /// thus the recording must hold no chapter.
+    fn note_open_buttons(&mut self) {
+        let [apply, redact, _, play, stop] = self.load_buttons();
+        self.apply = Some(apply);
+        self.redact = Some(redact);
+        self.play = Some(play);
+        self.stop = Some(stop);
     }
 
     /// The Apply Speed button. `open_recording` noted it.
@@ -529,6 +577,16 @@ impl Window {
             .unwrap_or_else(|| panic!("no Open Recording button in {page}"));
         let (_, tag) = before.rsplit_once("<button").expect("a button start tag");
         tag.split([' ', '>', '=']).any(|word| word == "disabled")
+    }
+
+    /// Whether the start tag of the input after the text `label` holds `disabled`.
+    fn field_is_disabled(&self, label: &str) -> bool {
+        let page = self.html();
+        let (_, after) = page
+            .split_once(&format!(">{label}<input"))
+            .unwrap_or_else(|| panic!("no field {label} in {page}"));
+        let (tag, _) = after.split_once('>').expect("an input start tag");
+        tag.split([' ', '/', '=']).any(|word| word == "disabled")
     }
 }
 
@@ -835,7 +893,7 @@ async fn a_failed_chapter_action_shows_the_banner_and_a_good_one_removes_it() {
         "{}",
         window.html()
     );
-    let [_, add, _, _] = window.load_buttons();
+    let [_, _, add, _, _] = window.load_buttons();
     let [time, label, _] = window.chapter_fields();
     window.click(add);
     let page = window.html();
@@ -872,7 +930,7 @@ async fn a_second_recording_starts_the_chapter_panel_with_no_edit_and_no_search(
     let mut window = Window::open(&fakes);
     window.click(window.open_button());
     window.settle().await;
-    let [_, add, _, _] = window.load_buttons();
+    let [_, _, add, _, _] = window.load_buttons();
     let [time, label, search] = window.chapter_fields();
     window.type_into(time, "5");
     window.type_into(label, "Intro");
@@ -911,24 +969,26 @@ fn edited_row(text: &str) -> String {
 }
 
 /// Opens the fixture recording through the fakes, and notes the Apply Speed,
-/// Play, and Stop buttons of the open render. `Window::load_buttons` gives
-/// their order.
+/// Apply Redaction, Play, and Stop buttons of the open render
+/// (`Window::note_open_buttons`).
 async fn open_recording() -> Window {
     open_loaded(fixture()).await
 }
 
-/// Opens `loaded` through the fakes, and notes the three buttons as
+/// Opens `loaded` through the fakes, and notes the four buttons as
 /// `open_recording` does. `loaded` must hold no chapter.
 async fn open_loaded(loaded: LoadedRecording) -> Window {
     let fakes = Fakes::new().pick(picked()).load(Answer::Ready(Ok(loaded)));
     let mut window = Window::open(&fakes);
     window.click(window.open_button());
     window.settle().await;
-    let [apply, _, play, stop] = window.load_buttons();
-    window.play = Some(play);
-    window.stop = Some(stop);
-    window.apply = Some(apply);
+    window.note_open_buttons();
     window
+}
+
+/// The row text of a redaction as the page shows it.
+fn redaction_row(text: &str) -> String {
+    format!("<span>{text}</span>")
 }
 
 #[tokio::test]
@@ -946,6 +1006,26 @@ async fn the_speed_panel_shows_its_fields_and_the_edited_duration() {
     }
     assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
     assert_eq!(window.speed_fields().len(), 3);
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn the_redaction_panel_shows_its_fields_and_its_button() {
+    let window = open_recording().await;
+    let page = window.html();
+    for text in [
+        "Redaction",
+        "Each redaction covers the whole timeline. Escape sequences do not change.",
+        "Find",
+        "Pattern",
+        "Replace with",
+        "Replacement text",
+        "Events",
+        "Apply Redaction",
+    ] {
+        assert!(page.contains(text), "{text} missing in {page}");
+    }
+    assert_eq!(window.redaction_fields().len(), 5);
     assert!(!page.contains("role=\"alert\""), "{page}");
 }
 
@@ -1180,6 +1260,173 @@ fn an_edit_after_a_speed_change_shows_the_duration_after_it() {
     );
 }
 
+// The redaction panel.
+
+#[tokio::test]
+async fn applying_a_text_redaction_adds_a_row_and_keeps_the_duration() {
+    let mut window = open_recording().await;
+    window.apply_redaction("text", "hunter2", "asterisks", "", "output");
+    let page = window.html();
+    let row = redaction_row("text \u{201c}hunter2\u{201d} \u{2192} asterisks (output)");
+    assert!(page.contains(&row), "{row} missing in {page}");
+    assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn a_preset_redaction_shows_the_label_of_the_preset() {
+    let mut window = open_recording().await;
+    window.apply_redaction("email", "ignored", "asterisks", "", "output");
+    let page = window.html();
+    let row = redaction_row("Email addresses \u{2192} asterisks (output)");
+    assert!(page.contains(&row), "{row} missing in {page}");
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn every_preset_of_the_menu_applies() {
+    for preset in crate::filters::redaction::Preset::ALL {
+        let mut window = open_recording().await;
+        window.apply_redaction(preset.key(), "", "blocks", "", "output");
+        let page = window.html();
+        let row = redaction_row(&format!("{} \u{2192} blocks (output)", preset.label()));
+        assert!(page.contains(&row), "{row} missing in {page}");
+    }
+}
+
+#[tokio::test]
+async fn a_text_replacement_and_both_kinds_of_events_show_in_the_row() {
+    let mut window = open_recording().await;
+    window.apply_redaction("email", "", "text", "[REDACTED]", "output-and-input");
+    let page = window.html();
+    let row =
+        redaction_row("Email addresses \u{2192} \u{201c}[REDACTED]\u{201d} (output and input)");
+    assert!(page.contains(&row), "{row} missing in {page}");
+}
+
+#[tokio::test]
+async fn a_regex_redaction_shows_its_pattern() {
+    let mut window = open_recording().await;
+    window.apply_redaction("regex", "a+b", "blocks", "", "output");
+    let page = window.html();
+    let row = redaction_row("regex /a+b/ \u{2192} blocks (output)");
+    assert!(page.contains(&row), "{row} missing in {page}");
+}
+
+#[tokio::test]
+async fn a_pattern_keeps_its_spaces() {
+    let mut window = open_recording().await;
+    window.apply_redaction("text", " a ", "text", " x ", "output");
+    let page = window.html();
+    let row = redaction_row("text \u{201c} a \u{201d} \u{2192} \u{201c} x \u{201d} (output)");
+    assert!(page.contains(&row), "{row} missing in {page}");
+}
+
+#[tokio::test]
+async fn a_bad_redaction_shows_the_reason_and_adds_no_row() {
+    let cases = [
+        (
+            ("text", "", "asterisks", ""),
+            "Invalid redaction: the text to find is empty",
+        ),
+        (
+            ("regex", "(", "asterisks", ""),
+            "Invalid redaction: the regular expression does not compile",
+        ),
+        (
+            ("text", "a", "text", "a\tb"),
+            "Invalid redaction: the replacement holds a control character",
+        ),
+    ];
+    for ((find, pattern, replace, replacement), reason) in cases {
+        let mut window = open_recording().await;
+        window.apply_redaction(find, pattern, replace, replacement, "output");
+        let page = window.html();
+        let banner = format!("Failed to redact: {reason}");
+        assert!(page.contains(&banner), "{banner} missing in {page}");
+        assert!(!page.contains("class=\"redaction-row\""), "{page}");
+    }
+}
+
+#[tokio::test]
+async fn a_good_redaction_after_a_bad_one_removes_the_banner() {
+    let mut window = open_recording().await;
+    window.apply_redaction("text", "", "asterisks", "", "output");
+    assert!(window.html().contains("role=\"alert\""));
+    let [_, pattern_field, ..] = window.redaction_fields();
+    window.type_into(pattern_field, "hunter2");
+    window.click(window.redact_button());
+    let page = window.html();
+    let row = redaction_row("text \u{201c}hunter2\u{201d} \u{2192} asterisks (output)");
+    assert!(page.contains(&row), "{row} missing in {page}");
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn a_field_that_the_menus_ignore_is_disabled() {
+    let mut window = open_recording().await;
+    let [find, _, replace, ..] = window.redaction_fields();
+    let disabled = |window: &Window| {
+        [PATTERN_LABEL, REPLACEMENT_LABEL].map(|label| window.field_is_disabled(label))
+    };
+    assert_eq!(disabled(&window), [false, true], "{}", window.html());
+    window.type_into(find, "email");
+    window.type_into(replace, REPLACE_TEXT);
+    assert_eq!(disabled(&window), [true, false], "{}", window.html());
+}
+
+#[tokio::test]
+async fn removing_a_redaction_row_removes_it() {
+    let mut window = open_recording().await;
+    window.apply_redaction("text", "hunter2", "asterisks", "", "output");
+    window.click(window.remove_button());
+    let page = window.html();
+    assert!(!page.contains("class=\"redaction-row\""), "{page}");
+    assert!(!page.contains("\u{2192} asterisks"), "{page}");
+    assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
+}
+
+#[tokio::test]
+async fn each_remove_button_keeps_the_rows_of_the_other_panel() {
+    let speed = speed_row("10 s to 20 s", "2");
+    let redaction = redaction_row("text \u{201c}hunter2\u{201d} \u{2192} asterisks (output)");
+
+    // The speed filter comes first, and the redaction row is removed.
+    let mut window = open_recording().await;
+    window.apply_speed("10", "20", "2");
+    window.apply_redaction("text", "hunter2", "asterisks", "", "output");
+    window.click(window.remove_button());
+    let page = window.html();
+    assert!(page.contains(&speed), "{page}");
+    assert!(!page.contains(&redaction), "{page}");
+    assert!(page.contains(&edited_row("1m 0.3s")), "{page}");
+
+    // The redaction filter comes first, and the speed row is removed.
+    let mut window = open_recording().await;
+    window.apply_redaction("text", "hunter2", "asterisks", "", "output");
+    window.apply_speed("10", "20", "2");
+    window.click(window.remove_button());
+    let page = window.html();
+    assert!(!page.contains(&speed), "{page}");
+    assert!(page.contains(&redaction), "{page}");
+    assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
+}
+
+#[test]
+fn a_redaction_of_a_range_shows_its_region() {
+    use crate::filters::redaction::{self, Find, Redaction, Replacement};
+    let redaction =
+        Redaction::new(Find::Text("key".into()), Replacement::Blocks, false).expect("a redaction");
+    let region = FilterRegion::Range {
+        start: Seconds::new(10.0).expect("a time"),
+        end: Seconds::new(20.0).expect("a time"),
+    };
+    let filter = redaction::applied(region, &redaction);
+    let page = render_edited_panels(fixture(), vec![Edit::AddFilter { index: 0, filter }]);
+    let row = redaction_row("text \u{201c}key\u{201d} \u{2192} blocks (output), 10 s to 20 s");
+    assert!(page.contains(&row), "{row} missing in {page}");
+}
+
 /// The page markup of a run of `count` letters x: the run ends at the cursor.
 fn x_run(count: usize) -> String {
     format!(">{}</span>", "x".repeat(count))
@@ -1336,8 +1583,8 @@ async fn a_new_recording_opens_stopped() {
     let mut window = Window::open(&fakes);
     window.click(window.open_button());
     window.settle().await;
-    let [_, _, play, _] = window.load_buttons();
-    window.click(play);
+    window.note_open_buttons();
+    window.click(window.play_button());
     assert_eq!(window.play_label(), "Pause");
 
     window.click(window.open_button());
@@ -1361,10 +1608,13 @@ fn theme_option(choice: PreviewTheme, selected: bool) -> String {
 async fn the_theme_menu_lists_the_five_themes() {
     let window = open_recording().await;
     let page = window.html();
-    assert!(page.contains("Theme"), "{page}");
-    assert_eq!(page.matches("<select").count(), 1, "{page}");
-    assert_eq!(page.matches("<option").count(), 5, "{page}");
-    let menu = text_between(&page, "<select", "</select>");
+    // The redaction panel has menus of its own, so the test reads only the
+    // label of the theme menu.
+    let theme = text_between(&page, "<label class=\"preview-theme\">", "</label>");
+    assert!(theme.starts_with("Theme<select"), "{theme}");
+    assert_eq!(theme.matches("<select").count(), 1, "{theme}");
+    assert_eq!(theme.matches("<option").count(), 5, "{theme}");
+    let menu = text_between(&theme, "<select", "</select>");
     let listed: String = PreviewTheme::ALL
         .into_iter()
         .map(|choice| theme_option(choice, choice == PreviewTheme::Auto))

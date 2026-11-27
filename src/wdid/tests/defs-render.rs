@@ -1,9 +1,13 @@
 //! Tests of the report of `wdid defs`: the text and the JSON.
 
 use chrono::NaiveDate;
+use std::path::PathBuf;
 use unicode_width::UnicodeWidthStr;
 use wdid::defs::render::{json, text};
-use wdid::defs::{Classification, Kind, Summary, Tally, Usage, Window};
+use wdid::defs::{Classification, Kind, Reason, Summary, Tally, Usage, Window};
+use wdid::starts::Trigger;
+
+use wdid::origin::{Origin, Places};
 
 /// The characters that start a line of the table.
 const BOX_CHARS: [char; 5] = ['┌', '│', '├', '╞', '└'];
@@ -19,6 +23,7 @@ fn window() -> Window {
         today: date(2026, 11, 26),
         since: None,
         idle_days: 180,
+        all: false,
     }
 }
 
@@ -33,6 +38,8 @@ fn summary() -> Summary {
         functions: 1267,
         unparsed_functions: 24,
         unparsed_aliases: 0,
+        mine: 0,
+        others: 0,
     }
 }
 
@@ -48,6 +55,9 @@ fn never(name: &str, kind: Kind, definition: &str) -> Usage {
         first_use: None,
         last_use: None,
         classification: Classification::NeverUsed,
+        origin: None,
+        mine: true,
+        reasons: Vec::new(),
     }
 }
 
@@ -68,6 +78,7 @@ fn tally(definitions: Vec<Usage>) -> Tally {
     Tally {
         definitions,
         summary: summary(),
+        places: Places::default(),
     }
 }
 
@@ -107,7 +118,8 @@ fn header_lines() {
     assert!(
         report.starts_with(
             "History: 1,234 rows. 3 not counted (exit 127). 2 did not parse.\n\
-             Shell: /bin/zsh, 276 aliases, 1,267 functions (24 did not parse).\n\n"
+             Shell: /bin/zsh, 276 aliases, 1,267 functions (24 did not parse).\n\
+             Definitions: 0 mine, 0 others.\n\n"
         ),
         "{report}"
     );
@@ -156,12 +168,13 @@ fn table_rows() {
             "wtf 3, wtm 1",
             "2026-01-02",
             "2026-11-01",
+            "-",
             "cwt"
         ]
     );
     assert_eq!(
         row(&report, "zz"),
-        ["zz", "function", "0", "0", "", "-", "-", "echo zz"]
+        ["zz", "function", "0", "0", "", "-", "-", "-", "echo zz"]
     );
     assert_eq!(row(&report, "gx")[1], "global alias");
     let names: Vec<&str> = table_lines(&report)
@@ -180,13 +193,17 @@ fn assert_fits(report: &str, width: usize) {
     }
 }
 
+/// The width of the cut tests. The table of one definition with dates fits in
+/// it, so the test sees only the cut.
+const WIDTH: u16 = 100;
+
 /// A long definition is cut to one line that ends with an ellipsis.
 #[test]
 fn long_definition_is_cut() {
-    let report = text(&one(&"a".repeat(200)), &window(), "/bin/zsh", Some(80));
-    assert_fits(&report, 80);
+    let report = text(&one(&"a".repeat(200)), &window(), "/bin/zsh", Some(WIDTH));
+    assert_fits(&report, usize::from(WIDTH));
     let cells = row(&report, "wide");
-    assert!(cells[7].ends_with('…'), "{report}");
+    assert!(cells[8].ends_with('…'), "{report}");
     assert_eq!(
         table_lines(&report).len(),
         5,
@@ -201,18 +218,18 @@ fn multibyte_definition_is_cut() {
         &one(&"日本語🎉".repeat(60)),
         &window(),
         "/bin/zsh",
-        Some(80),
+        Some(WIDTH),
     );
-    assert_fits(&report, 80);
-    assert!(row(&report, "wide")[7].ends_with('…'), "{report}");
+    assert_fits(&report, usize::from(WIDTH));
+    assert!(row(&report, "wide")[8].ends_with('…'), "{report}");
 }
 
 /// A short definition is not cut.
 #[test]
 fn short_definition_is_not_cut() {
-    let report = text(&one("echo hi"), &window(), "/bin/zsh", Some(80));
+    let report = text(&one("echo hi"), &window(), "/bin/zsh", Some(WIDTH));
     assert!(!report.contains('…'), "{report}");
-    assert_eq!(row(&report, "wide")[7], "echo hi");
+    assert_eq!(row(&report, "wide")[8], "echo hi");
 }
 
 /// A long `Through` cell wraps inside 30 columns when the report has a width,
@@ -370,4 +387,336 @@ fn json_document() {
         value["idle"],
         serde_json::json!([{"name": "old", "kind": "alias"}])
     );
+}
+
+/// The places of the origin tests: the home is `/home/me`, and oh-my-zsh is
+/// in `/home/me/omz`.
+fn places() -> Places {
+    Places {
+        home: Some(PathBuf::from("/home/me")),
+        zsh: Some(PathBuf::from("/home/me/omz")),
+        zsh_custom: None,
+    }
+}
+
+/// The file of the git plugin of the oh-my-zsh of [`places`].
+const GIT_PLUGIN: &str = "/home/me/omz/plugins/git/git.plugin.zsh";
+
+/// Makes a definition that never ran, defined in `file` at `line`, and mine
+/// when `mine` is true.
+fn from(name: &str, kind: Kind, file: &str, line: Option<u32>, mine: bool) -> Usage {
+    Usage {
+        origin: Some(Origin {
+            file: PathBuf::from(file),
+            line,
+        }),
+        mine,
+        ..never(name, kind, "x")
+    }
+}
+
+/// Makes a tally with two of my definitions and three others, in tally
+/// order. `bare` has an unknown origin.
+fn mixed() -> Tally {
+    let mut counts = tally(vec![
+        from("wt", Kind::Alias, "/home/me/.zshrc", Some(3), true),
+        from("gst", Kind::Alias, GIT_PLUGIN, Some(1), false),
+        never("bare", Kind::Alias, "ls"),
+        from("gfun", Kind::Function, GIT_PLUGIN, None, false),
+        from(
+            "_comp",
+            Kind::Function,
+            "/usr/share/zsh/functions/_comp",
+            None,
+            false,
+        ),
+    ]);
+    counts.summary.mine = 2;
+    counts.summary.others = 3;
+    counts.places = places();
+    counts
+}
+
+/// Makes the window of the tests of `--all`.
+fn all_window() -> Window {
+    Window {
+        all: true,
+        ..window()
+    }
+}
+
+/// Gives the names in the first cells of the rows of the table lines in
+/// `text`, the header included.
+fn names(text: &str) -> Vec<&str> {
+    table_lines(text)
+        .iter()
+        .filter_map(|line| line.strip_prefix('│'))
+        .filter_map(|line| line.split('┆').next())
+        .map(str::trim)
+        .collect()
+}
+
+#[test]
+fn the_header_counts_mine_and_the_others() {
+    let report = text(&mixed(), &window(), "/bin/zsh", None);
+    assert!(
+        report.contains(
+            "(24 did not parse).\nDefinitions: 2 mine, 3 others (--all shows the others).\n\n"
+        ),
+        "{report}"
+    );
+    let report = text(&mixed(), &all_window(), "/bin/zsh", None);
+    assert!(
+        report.contains("(24 did not parse).\nDefinitions: 2 mine, 3 others.\n\n"),
+        "{report}"
+    );
+}
+
+#[test]
+fn the_origin_column_shows_a_tilde_for_home_and_a_dash_when_unknown() {
+    let report = text(&mixed(), &all_window(), "/bin/zsh", None);
+    assert_eq!(row(&report, "wt")[7], "~/.zshrc:3");
+    assert_eq!(row(&report, "bare")[7], "-");
+    assert_eq!(row(&report, "gfun")[7], "~/omz/plugins/git/git.plugin.zsh");
+    assert_eq!(row(&report, "_comp")[7], "/usr/share/zsh/functions/_comp");
+    assert!(report.contains("│ Name "), "{report}");
+    assert!(report.contains("┆ Origin "), "{report}");
+}
+
+#[test]
+fn by_default_the_text_shows_only_my_definitions() {
+    let report = text(&mixed(), &window(), "/bin/zsh", None);
+    assert_eq!(names(&report), ["Name", "wt", "bare"]);
+    assert!(
+        report.contains("Never used:\n  bare (alias)\n  wt (alias)\nIdle"),
+        "{report}"
+    );
+    for other in ["gst", "gfun", "_comp", "git.plugin.zsh"] {
+        assert!(!report.contains(other), "{other}: {report}");
+    }
+}
+
+/// With `--all`, my definitions come first under their own heading. Then
+/// each other file has a heading with its count and a table, in path order.
+#[test]
+fn all_groups_the_others_by_origin_with_a_count() {
+    let report = text(&mixed(), &all_window(), "/bin/zsh", None);
+    let mine = report.find("\nMine: 2 definitions\n┌").expect(&report);
+    let plugin = report
+        .find("\n~/omz/plugins/git/git.plugin.zsh: 2 definitions\n┌")
+        .expect(&report);
+    let comp = report
+        .find("\n/usr/share/zsh/functions/_comp: 1 definition\n┌")
+        .expect(&report);
+    assert!(mine < plugin && plugin < comp, "{report}");
+    assert_eq!(
+        names(report.get(mine..plugin).unwrap()),
+        ["Name", "wt", "bare"]
+    );
+    assert_eq!(
+        names(report.get(plugin..comp).unwrap()),
+        ["Name", "gst", "gfun"]
+    );
+    assert_eq!(names(report.get(comp..).unwrap()), ["Name", "_comp"]);
+    assert!(
+        report.contains(
+            "Never used:\n  _comp (function)\n  bare (alias)\n  gfun (function)\n  gst (alias)\n  wt (alias)\n"
+        ),
+        "{report}"
+    );
+}
+
+/// The JSON document holds the others too, also without `--all`, with the
+/// origin of each definition and a field that says if it is mine.
+#[test]
+fn the_json_holds_the_origin_and_mine_of_each_definition() {
+    let value: serde_json::Value =
+        serde_json::from_str(&json(&mixed(), &window(), "/bin/zsh")).unwrap();
+    assert_eq!(value["shell"]["mine"], 2);
+    assert_eq!(value["shell"]["others"], 3);
+    let defs = value["definitions"].as_array().unwrap();
+    assert_eq!(defs.len(), 5);
+    assert_eq!(
+        defs[0]["origin"],
+        serde_json::json!({ "file": "/home/me/.zshrc", "line": 3 })
+    );
+    assert_eq!(defs[0]["mine"], true);
+    assert_eq!(defs[1]["name"], "gst");
+    assert_eq!(defs[1]["mine"], false);
+    assert!(defs[2]["origin"].is_null(), "{value}");
+    assert_eq!(defs[2]["mine"], true);
+    assert_eq!(
+        defs[3]["origin"],
+        serde_json::json!({ "file": GIT_PLUGIN, "line": null })
+    );
+    let never: Vec<&str> = value["never_used"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["name"].as_str())
+        .collect();
+    assert_eq!(never, ["_comp", "bare", "gfun", "gst", "wt"]);
+}
+
+/// Makes a definition that the shell runs without a typed name, for
+/// `reasons`.
+fn starts(name: &str, kind: Kind, reasons: Vec<Reason>) -> Usage {
+    Usage {
+        classification: Classification::RunsWithoutTyping,
+        reasons,
+        ..never(name, kind, "x")
+    }
+}
+
+/// Makes the reason that `trigger` runs a definition, through `through`
+/// when it is given.
+fn runs(trigger: Trigger, through: Option<&str>) -> Reason {
+    Reason::Runs {
+        trigger,
+        through: through.map(str::to_owned),
+    }
+}
+
+/// Makes the trigger of the widget `widget` with `keys`.
+fn widget(widget: &str, keys: &[&str]) -> Trigger {
+    Trigger::Widget {
+        widget: widget.to_owned(),
+        keys: keys.iter().map(|key| (*key).to_owned()).collect(),
+    }
+}
+
+/// The tally of the tests of the reasons: one definition for each trigger,
+/// one with two reasons, and the widget with no key in each other state.
+fn reasons_tally() -> Tally {
+    let mut lonely = never("lonely", Kind::Function, "x");
+    lonely.reasons = vec![Reason::WidgetWithoutKey];
+    let mut old = idle("oldwidget", Kind::Function, 5);
+    old.reasons = vec![Reason::WidgetWithoutKey];
+    tally(vec![
+        starts(
+            "precmd",
+            Kind::Function,
+            vec![runs(Trigger::Hook("precmd".into()), None)],
+        ),
+        starts(
+            "helper",
+            Kind::Function,
+            vec![
+                runs(Trigger::Hook("precmd".into()), Some("myprecmd")),
+                runs(Trigger::Trap("INT".into()), None),
+            ],
+        ),
+        starts(
+            "handler",
+            Kind::Function,
+            vec![runs(Trigger::CommandNotFound, None)],
+        ),
+        starts(
+            "searchfn",
+            Kind::Function,
+            vec![runs(widget("atuin-search", &["^R"]), None)],
+        ),
+        starts(
+            "twokeys",
+            Kind::Function,
+            vec![runs(widget("w", &["^R", "^S"]), Some("_twokeys"))],
+        ),
+        starts(
+            "spacefn",
+            Kind::Function,
+            vec![runs(widget("expand", &[" "]), None)],
+        ),
+        starts(
+            "initfn",
+            Kind::Function,
+            vec![runs(Trigger::SpecialWidget("zle-line-init".into()), None)],
+        ),
+        starts("pc", Kind::Alias, vec![runs(Trigger::PromptCommand, None)]),
+        starts(
+            "keyfn",
+            Kind::Function,
+            vec![runs(Trigger::KeyCommand("\\C-x\\C-r".into()), None)],
+        ),
+        lonely,
+        old,
+    ])
+}
+
+/// The group "Runs without typing" lists each definition that the shell runs
+/// without a typed name, in name order, with its kind and its reasons.
+#[test]
+fn the_text_lists_the_definitions_that_run_without_typing_with_their_reasons() {
+    let report = text(&reasons_tally(), &window(), "/bin/zsh", None);
+    assert!(
+        report.ends_with(
+            "Runs without typing:\n\
+             \x20 handler (function, command not found)\n\
+             \x20 helper (function, precmd hook, through myprecmd; INT trap)\n\
+             \x20 initfn (function, widget zle-line-init)\n\
+             \x20 keyfn (function, bind -x, key \\C-x\\C-r)\n\
+             \x20 pc (alias, PROMPT_COMMAND)\n\
+             \x20 precmd (function, precmd hook)\n\
+             \x20 searchfn (function, widget atuin-search, key ^R)\n\
+             \x20 spacefn (function, widget expand, key \" \")\n\
+             \x20 twokeys (function, widget w, keys ^R, ^S, through _twokeys)\n"
+        ),
+        "{report}"
+    );
+    let empty = text(&tally(Vec::new()), &window(), "/bin/zsh", None);
+    assert!(empty.contains("Runs without typing: none"), "{empty}");
+}
+
+/// A widget that no key starts stays in its group with its reason.
+#[test]
+fn a_widget_with_no_key_shows_its_reason_in_its_group() {
+    let report = text(&reasons_tally(), &window(), "/bin/zsh", None);
+    assert!(
+        report.contains("Never used:\n  lonely (function, widget, no key)\n"),
+        "{report}"
+    );
+    assert!(
+        report.contains(
+            "Idle (no use in the last 180 days):\n  oldwidget (function, 5 uses, last use 2025-01-01, widget, no key)\n"
+        ),
+        "{report}"
+    );
+}
+
+/// The JSON document gives the state and the text of each reason of each
+/// definition, and a list of the definitions that run without a typed name.
+#[test]
+fn the_json_gives_the_state_and_the_reasons() {
+    let document: serde_json::Value =
+        serde_json::from_str(&json(&reasons_tally(), &window(), "/bin/zsh")).unwrap();
+    let entry = |name: &str| {
+        document["definitions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == name)
+            .unwrap_or_else(|| panic!("no {name} in {document}"))
+            .clone()
+    };
+    let helper = entry("helper");
+    assert_eq!(helper["classification"], "runs_without_typing");
+    assert_eq!(
+        helper["reasons"],
+        serde_json::json!(["precmd hook, through myprecmd", "INT trap"])
+    );
+    let lonely = entry("lonely");
+    assert_eq!(lonely["classification"], "never_used");
+    assert_eq!(lonely["reasons"], serde_json::json!(["widget, no key"]));
+    let pc = entry("pc");
+    assert_eq!(pc["reasons"], serde_json::json!(["PROMPT_COMMAND"]));
+    let starts = document["runs_without_typing"].as_array().unwrap();
+    assert_eq!(starts.len(), 9, "{document}");
+    assert_eq!(
+        starts[0],
+        serde_json::json!({"name": "handler", "kind": "function"})
+    );
+    assert!(document["never_used"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|entry| entry["name"] == "lonely"));
 }

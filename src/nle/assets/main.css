@@ -227,17 +227,20 @@ h3 {
   font-size: 12px;
 }
 
-.speed-panel {
+.speed-panel,
+.redaction-panel {
   margin-top: 16px;
 }
 
-.speed-hint {
+.speed-hint,
+.redaction-hint {
   color: #6c7086;
   font-size: 12px;
   margin-bottom: 8px;
 }
 
-.speed-field {
+.speed-field,
+.redaction-field {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -246,7 +249,9 @@ h3 {
   font-size: 12px;
 }
 
-.speed-field input {
+.speed-field input,
+.redaction-field input,
+.redaction-field select {
   width: 100%;
   background: #1e1e2e;
   color: #cdd6f4;
@@ -256,7 +261,8 @@ h3 {
   font-size: 13px;
 }
 
-.speed-row {
+.speed-row,
+.redaction-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
