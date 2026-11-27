@@ -132,8 +132,8 @@ const YADM_REPO_ARGUMENTS: [&str; 2] = ["introspect", "repo"];
 /// each one ended by a NUL.
 const LIST_ARGUMENTS: [&str; 2] = ["ls-files", "-z"];
 
-/// The character that ends each path of [`LIST_ARGUMENTS`].
-const LIST_SEPARATOR: char = '\0';
+/// The byte that ends each path of [`LIST_ARGUMENTS`].
+const LIST_SEPARATOR: u8 = b'\0';
 
 /// The option of git that names the git directory.
 const GIT_DIR_OPTION: &str = "--git-dir";
@@ -200,8 +200,9 @@ struct Yadm<'a> {
     git_dir: PathBuf,
     /// The work tree: the home directory.
     home: &'a Path,
-    /// Each path that yadm tracks, relative to the home directory.
-    tracked: BTreeSet<String>,
+    /// Each path that yadm tracks, relative to the home directory. The paths
+    /// keep their bytes, also when a name is not UTF-8.
+    tracked: BTreeSet<OsString>,
 }
 
 impl<'a> Yadm<'a> {
@@ -212,8 +213,14 @@ impl<'a> Yadm<'a> {
         let mut command = childenv::command(&programs.yadm);
         command.args(YADM_REPO_ARGUMENTS);
         let output = succeeded(&mut command)?;
-        let text = String::from_utf8_lossy(&output);
-        let git_dir = PathBuf::from(text.trim_end_matches(['\n', '\r']));
+        let mut line = output;
+        while line
+            .last()
+            .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
+        {
+            line.pop();
+        }
+        let git_dir = PathBuf::from(os_string_from_bytes(line)?);
         if git_dir.as_os_str().is_empty() {
             return None;
         }
@@ -224,10 +231,10 @@ impl<'a> Yadm<'a> {
         };
         let mut list = yadm.git(programs);
         list.args(LIST_ARGUMENTS);
-        yadm.tracked = String::from_utf8_lossy(&succeeded(&mut list)?)
-            .split(LIST_SEPARATOR)
+        yadm.tracked = succeeded(&mut list)?
+            .split(|byte| *byte == LIST_SEPARATOR)
             .filter(|path| !path.is_empty())
-            .map(String::from)
+            .filter_map(|path| os_string_from_bytes(path.to_vec()))
             .collect();
         Some(yadm)
     }
@@ -250,17 +257,32 @@ impl<'a> Yadm<'a> {
     /// when yadm tracks it, else each tracked alternate `<path>##<condition>`.
     /// The list is empty when yadm tracks neither.
     fn tracked_files(&self, path: &Path) -> Vec<PathBuf> {
-        let text = path.to_string_lossy();
-        if self.tracked.contains(text.as_ref()) {
+        if self.tracked.contains(path.as_os_str()) {
             return vec![path.to_path_buf()];
         }
-        let prefix = format!("{text}{ALTERNATE_SEPARATOR}");
+        let mut prefix = path.as_os_str().as_encoded_bytes().to_vec();
+        prefix.extend_from_slice(ALTERNATE_SEPARATOR.as_bytes());
         self.tracked
             .iter()
-            .filter(|tracked| tracked.starts_with(&prefix))
-            .map(PathBuf::from)
+            .filter(|tracked| tracked.as_encoded_bytes().starts_with(&prefix))
+            .map(|tracked| PathBuf::from(tracked.clone()))
             .collect()
     }
+}
+
+/// Makes a name from the bytes that a program wrote. On Unix a name is any
+/// sequence of bytes, so each sequence gives a name.
+#[cfg(unix)]
+fn os_string_from_bytes(bytes: Vec<u8>) -> Option<OsString> {
+    use std::os::unix::ffi::OsStringExt;
+    Some(OsString::from_vec(bytes))
+}
+
+/// Makes a name from the bytes that a program wrote. git on Windows writes
+/// UTF-8, so bytes that are not UTF-8 give no name.
+#[cfg(not(unix))]
+fn os_string_from_bytes(bytes: Vec<u8>) -> Option<OsString> {
+    String::from_utf8(bytes).ok().map(OsString::from)
 }
 
 /// A place that holds the history of one tracked file.
