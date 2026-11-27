@@ -8,6 +8,7 @@ mod json_file;
 pub mod pipeline;
 pub mod preview;
 mod project;
+mod splice;
 pub mod timeline;
 pub mod types;
 mod ui;

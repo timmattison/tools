@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::error::NleError;
 use crate::types::{
-    AppliedFilter, Clip, EditProject, Event, FilterKind, FilterOptions, FilterRegion, Recording,
+    AppliedFilter, EditProject, Event, FilterKind, FilterOptions, FilterRegion, Recording,
 };
 
 /// A filter: a pure function from the events of a region to new events.
@@ -437,9 +437,10 @@ impl FilterRegistry {
     /// The rules:
     /// 0. A project that breaks a rule of `EditProject::validate` is refused.
     /// 1. A project with no clip fails with `NleError::RenderError`.
-    /// 2. The events are the events of each clip on the timeline, track by
-    ///    track and clip by clip, in a stable time order. Events at one time
-    ///    keep track order, then clip order.
+    /// 2. The events are the clips spliced by the rules of the private
+    ///    `splice` module: the clips play in the order of their start (a tie
+    ///    keeps track order, then clip order), and each clip after the first
+    ///    starts with a hard cut that clears the screen.
     /// 3. The filters of the project run on them by the steps of their form,
     ///    with the end of the timeline starting at `EditProject::duration`. A
     ///    span filter gets the terminal size of the clip that starts first.
@@ -460,37 +461,18 @@ impl FilterRegistry {
     /// and the errors of `FilterRegistry::run`.
     pub fn render(&self, project: &EditProject) -> Result<Recording, NleError> {
         project.validate()?;
-        // The clips in track order, then in the order on their track.
-        let ordered: Vec<&Clip> = project
-            .timeline
-            .iter()
-            .flat_map(|track| &track.clips)
-            .filter_map(|id| project.clips.iter().find(|clip| clip.id == *id))
-            .collect();
-        // `min_by` gives the first of several equal clips, so a tie goes to
-        // the earlier clip in that order.
-        let Some(first) = ordered
-            .iter()
-            .min_by(|a, b| a.timeline_offset.get().total_cmp(&b.timeline_offset.get()))
-        else {
+        let Some(spliced) = crate::splice::splice(project) else {
             return Err(NleError::RenderError(
                 "the project has no clip to render".to_string(),
             ));
         };
-
-        let mut events: Vec<Event> = ordered
-            .iter()
-            .flat_map(|clip| clip.timeline_events())
-            .collect();
-        // A stable sort keeps track order, then clip order, on a tie.
-        events.sort_by(|a, b| a.time.total_cmp(&b.time));
-        let header = &first.source;
+        let header = &spliced.header.source;
         let size = TerminalSize {
             width: header.width,
             height: header.height,
         };
         let (events, end) =
-            self.run_with_end(events, &project.filters, project.duration(), size)?;
+            self.run_with_end(spliced.events, &project.filters, spliced.end, size)?;
 
         Ok(Recording {
             version: header.version,
