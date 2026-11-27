@@ -441,10 +441,149 @@ fn invert_gray(index: u8) -> u8 {
     u8::try_from(GRAYSCALE_MIRROR.saturating_sub(u16::from(index))).unwrap_or(index)
 }
 
+/// The value of a parameter that is a plain number: only ASCII digits, or
+/// nothing, which is 0. It is `None` for any other text, and for a number that
+/// does not fit in `u32`.
+fn plain_number(text: &str) -> Option<u32> {
+    if text.is_empty() {
+        Some(0)
+    } else if text.bytes().all(|byte| byte.is_ascii_digit()) {
+        text.parse().ok()
+    } else {
+        None
+    }
+}
+
+/// The value of an operand of a color: a plain number from 0 to 255.
+fn operand(text: &str) -> Option<u8> {
+    plain_number(text).and_then(|number| u8::try_from(number).ok())
+}
+
+/// The slot of an extended color code: 38, 48, or 58.
+fn extended_slot(code: u32) -> Option<Slot> {
+    match code {
+        38 => Some(Slot::Foreground),
+        48 => Some(Slot::Background),
+        58 => Some(Slot::Underline),
+        _ => None,
+    }
+}
+
+/// The color of the operands of an extended color, after its mode: one index
+/// for the mode 5, or three channels for the mode 2.
+fn color_of_operands(mode: &str, operands: &[&str]) -> Option<SgrColor> {
+    let values: Option<Vec<u8>> = operands.iter().map(|text| operand(text)).collect();
+    match (mode, values?.as_slice()) {
+        ("5", [index]) => Some(SgrColor::Index(*index)),
+        ("2", [red, green, blue]) => Some(SgrColor::Rgb((*red, *green, *blue))),
+        _ => None,
+    }
+}
+
+/// The item of a parameter that holds a `:`.
+fn colon_item(parameter: &str) -> SgrItem {
+    let parts: Vec<&str> = parameter.split(':').collect();
+    let color = match parts.as_slice() {
+        [head, rest @ ..] => plain_number(head).and_then(extended_slot).and_then(|slot| {
+            let color = match rest {
+                ["5", index] => color_of_operands("5", &[index]),
+                ["2", red, green, blue] | ["2", _, red, green, blue] => {
+                    color_of_operands("2", &[red, green, blue])
+                }
+                _ => None,
+            };
+            color.map(|color| (slot, color))
+        }),
+        [] => None,
+    };
+    match color {
+        Some((slot, color)) => SgrItem::Color {
+            slot,
+            text: parameter.to_string(),
+            color,
+        },
+        None => SgrItem::Other(parameter.to_string()),
+    }
+}
+
+/// The color of a parameter with no `:` and a value of the 16 base colors.
+fn base_color(value: u32) -> Option<(Slot, u8)> {
+    let (slot, offset) = match value {
+        30..=37 => (Slot::Foreground, 30),
+        40..=47 => (Slot::Background, 40),
+        90..=97 => (Slot::Foreground, 82),
+        100..=107 => (Slot::Background, 92),
+        _ => return None,
+    };
+    u8::try_from(value - offset).ok().map(|index| (slot, index))
+}
+
 /// The items of a list of SGR parameters, read from left to right. The texts of
 /// the items, joined with `;`, give back `params`.
 fn sgr_items(params: &str) -> Vec<SgrItem> {
-    vec![SgrItem::Other(params.to_string())]
+    let parts: Vec<&str> = params.split(';').collect();
+    let mut items = Vec::new();
+    let mut at = 0;
+    while let Some(&parameter) = parts.get(at) {
+        at += 1;
+        if parameter.contains(':') {
+            items.push(colon_item(parameter));
+            continue;
+        }
+        let text = parameter.to_string();
+        let Some(value) = plain_number(parameter) else {
+            items.push(SgrItem::Other(text));
+            continue;
+        };
+        if let Some((slot, index)) = base_color(value) {
+            items.push(SgrItem::Color {
+                slot,
+                text,
+                color: SgrColor::Index(index),
+            });
+            continue;
+        }
+        match value {
+            0 => items.push(SgrItem::Reset(text)),
+            39 => items.push(SgrItem::Default(Slot::Foreground, text)),
+            49 => items.push(SgrItem::Default(Slot::Background, text)),
+            59 => items.push(SgrItem::Default(Slot::Underline, text)),
+            _ => {
+                let Some(slot) = extended_slot(value) else {
+                    items.push(SgrItem::Other(text));
+                    continue;
+                };
+                let mode = parts.get(at).copied();
+                let count = match mode {
+                    Some("5") => 1,
+                    Some("2") => 3,
+                    _ => {
+                        items.push(SgrItem::Other(text));
+                        continue;
+                    }
+                };
+                let Some(group) = parts.get(at - 1..at + 1 + count) else {
+                    // The list ends before the operands end.
+                    items.push(SgrItem::Other(
+                        parts.get(at - 1..).unwrap_or_default().join(";"),
+                    ));
+                    at = parts.len();
+                    continue;
+                };
+                at += 1 + count;
+                let color = group
+                    .get(1)
+                    .zip(group.get(2..))
+                    .and_then(|(mode, operands)| color_of_operands(mode, operands));
+                let text = group.join(";");
+                items.push(match color {
+                    Some(color) => SgrItem::Color { slot, text, color },
+                    None => SgrItem::Other(text),
+                });
+            }
+        }
+    }
+    items
 }
 
 /// The colors of the filter: the 16 colors of the target theme and the three
@@ -468,16 +607,61 @@ impl Converter {
         }
     }
 
+    /// The color after the rules.
+    fn map(&self, color: SgrColor) -> SgrColor {
+        match color {
+            SgrColor::Index(index) if usize::from(index) < THEME_COLORS => SgrColor::Rgb(
+                self.palette
+                    .get(usize::from(index))
+                    .copied()
+                    .unwrap_or_default(),
+            ),
+            SgrColor::Index(index) if index < GRAYSCALE_START => match self.cube {
+                CubeRule::Keep => color,
+                CubeRule::Nearest => {
+                    SgrColor::Rgb(nearest(&self.palette, TerminalTheme::get_256_color(index)))
+                }
+            },
+            SgrColor::Index(index) => match self.grayscale {
+                GrayscaleRule::Keep => color,
+                GrayscaleRule::Invert => SgrColor::Index(invert_gray(index)),
+            },
+            SgrColor::Rgb(rgb) => match self.truecolor {
+                TruecolorRule::Keep => color,
+                TruecolorRule::InvertLightness => SgrColor::Rgb(invert_lightness(rgb)),
+            },
+        }
+    }
+
     /// The replacement text of one color item, or `None` when the rules leave
     /// its color as it is.
-    fn convert(&self, _slot: Slot, _color: SgrColor) -> Option<String> {
-        None
+    fn convert(&self, slot: Slot, color: SgrColor) -> Option<String> {
+        let code = slot.code();
+        match self.map(color) {
+            converted if converted == color => None,
+            SgrColor::Index(index) => Some(format!("{code};5;{index}")),
+            SgrColor::Rgb((red, green, blue)) => Some(format!("{code};2;{red};{green};{blue}")),
+        }
     }
 
     /// The parameters with each color converted, or `None` when no item
     /// changes.
-    fn rewrite(&self, _params: &str) -> Option<String> {
-        None
+    fn rewrite(&self, params: &str) -> Option<String> {
+        let mut changed = false;
+        let texts: Vec<String> = sgr_items(params)
+            .into_iter()
+            .map(|item| match &item {
+                SgrItem::Color { slot, color, .. } => match self.convert(*slot, *color) {
+                    Some(text) => {
+                        changed = true;
+                        text
+                    }
+                    None => item.text().to_string(),
+                },
+                _ => item.text().to_string(),
+            })
+            .collect();
+        changed.then(|| texts.join(";"))
     }
 }
 
