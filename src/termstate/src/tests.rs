@@ -405,6 +405,7 @@ fn a_deleted_line_pulls_its_neighbor_with_its_own_sources() {
 fn a_clone_keeps_the_pen_sources_and_the_cell_sources() {
     let state = feed_text("\x1b[31;48;5;17mA\x1b[38;2;1;2;3m");
     let copy = state.clone();
+    assert_eq!(copy.get_grid(), state.get_grid());
     assert_eq!(copy.current_fg_source, ColorSource::Rgb(1, 2, 3));
     assert_eq!(copy.current_bg_source, ColorSource::Indexed(17));
     assert_eq!(
