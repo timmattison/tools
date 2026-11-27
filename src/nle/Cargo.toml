@@ -16,6 +16,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 flate2 = "1.0"
 buildinfo = { workspace = true }
+# The emulator of the preview. It is the same emulator that beta uses to export.
+termstate = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
 # Every child process starts through childenv::command, because clippy.toml

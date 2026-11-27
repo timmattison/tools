@@ -5,6 +5,7 @@ pub mod filters;
 mod format;
 mod json_file;
 pub mod pipeline;
+pub mod preview;
 mod project;
 pub mod types;
 mod ui;
