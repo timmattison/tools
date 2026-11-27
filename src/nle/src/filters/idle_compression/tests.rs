@@ -205,13 +205,25 @@ fn mark_times(marks: &[Mark]) -> Vec<f64> {
     marks.iter().map(|mark| mark.time).collect()
 }
 
-/// A project of one recording of `duration` seconds on the 20x5 screen of
-/// `settings()`, with `events` and `filters`.
+/// A project of one recording of `duration` seconds on a screen of 20 columns
+/// and 5 rows, with `events` and `filters`.
 fn project_of(events: Vec<Event>, duration: f64, filters: Vec<AppliedFilter>) -> EditProject {
+    project_on(20, 5, events, duration, filters)
+}
+
+/// A project of one recording of `duration` seconds on a screen of `width`
+/// columns and `height` rows, with `events` and `filters`.
+fn project_on(
+    width: u16,
+    height: u16,
+    events: Vec<Event>,
+    duration: f64,
+    filters: Vec<AppliedFilter>,
+) -> EditProject {
     let recording = Recording {
         version: 2,
-        width: 20,
-        height: 5,
+        width,
+        height,
         timestamp: 0.0,
         duration,
         command: String::new(),
@@ -406,49 +418,162 @@ fn a_range_with_no_event_shrinks_and_the_later_events_move() {
     assert_eq!(rendered.recording.duration, 6.0);
 }
 
-#[test]
-fn a_range_replays_from_a_blank_screen_at_its_start_and_marks_its_periods() {
-    let region = FilterRegion::Range {
+/// The region from 10 s to 30 s.
+fn ten_to_thirty() -> FilterRegion {
+    FilterRegion::Range {
         start: Seconds::new(10.0).unwrap(),
         end: Seconds::new(30.0).unwrap(),
-    };
+    }
+}
+
+#[test]
+fn a_range_replays_the_screen_before_its_start_and_marks_its_periods() {
     let events = vec![
         output(0.0, "a"),
-        // A redraw of the "a" from before the range. The replay starts from a
-        // blank screen at 10 s, so this redraw is activity.
-        output(12.0, "\x1b[1;1Ha"),
+        // A key before the range. Only output draws on the screen, so the
+        // replay does not write this "b" after the "a".
+        input(5.0, "b"),
+        // A redraw of the "a" from before the range. The replay starts from
+        // the screen at 10 s, which shows the "a", so this redraw changes no
+        // cell.
+        output(16.0, "\x1b[1;1Ha"),
+        // A "b" in the blank cell after the "a".
         output(22.0, "b"),
         // A cursor move inside the idle period from 22 s to the end at 30 s.
         output(26.0, "\x1b[H"),
         output(35.0, "c"),
     ];
-    let project = project_of(events, 40.0, vec![applied(region, settings())]);
+    let project = project_of(events, 40.0, vec![applied(ten_to_thirty(), settings())]);
 
     let rendered = filters::registry().render_with_marks(&project).unwrap();
 
-    // Relative to 10 s, the activity is at 2 and 12, and the range ends at
-    // 20. The gap from 0 to 2 stays. The periods from 2 to 12 and from 12 to
-    // 20 each become 1 s, so the range of 20 s becomes 4 s. The cursor move
-    // at 16 is half way into its period of 8 s, and the event at 35 s moves
-    // by -16 s.
+    // Relative to 10 s, the activity is at 12, and the range ends at 20. The
+    // periods from 0 to 12 and from 12 to 20 each become 1 s, so the range of
+    // 20 s becomes 2 s. The redraw at 6 is half way into its period of 12 s,
+    // the cursor move at 16 is half way into its period of 8 s, and the event
+    // at 35 s moves by -18 s.
     assert_eq!(
         times(&rendered.recording.events),
-        vec![0.0, 12.0, 13.0, 13.5, 19.0]
+        vec![0.0, 5.0, 10.5, 11.0, 11.5, 17.0]
     );
-    assert_eq!(rendered.recording.duration, 24.0);
+    assert_eq!(rendered.recording.duration, 22.0);
     assert_eq!(
         rendered.marks,
         vec![
             Mark {
-                time: 12.0,
-                label: "Idle time: 0m 10.0s compressed to 0m 1.0s".to_string()
+                time: 10.0,
+                label: "Idle time: 0m 12.0s compressed to 0m 1.0s".to_string()
             },
             Mark {
-                time: 13.0,
+                time: 11.0,
                 label: "Idle time: 0m 8.0s compressed to 0m 1.0s".to_string()
             },
         ]
     );
+}
+
+#[test]
+fn a_clear_inside_a_range_erases_the_text_from_before_it_and_is_activity() {
+    let events = vec![output(0.0, "hello"), output(20.0, "\x1b[2J")];
+    let project = project_of(events, 30.0, vec![applied(ten_to_thirty(), settings())]);
+
+    let rendered = filters::registry().render_with_marks(&project).unwrap();
+
+    // Relative to 10 s, the clear at 10 is activity, so the range holds two
+    // periods of 10 s, and each becomes 1 s.
+    assert_eq!(times(&rendered.recording.events), vec![0.0, 11.0]);
+    assert_eq!(rendered.recording.duration, 12.0);
+    assert_eq!(mark_times(&rendered.marks), vec![10.0, 11.0]);
+}
+
+#[test]
+fn the_filter_replays_on_the_columns_of_the_recording() {
+    let events = vec![
+        output(0.0, "\x1b[1;30Hb"),
+        // Column 25 is a blank cell on a screen of 40 columns.
+        output(5.0, "\x1b[1;25Hb"),
+        output(10.0, "\x1b[2;1Hc"),
+    ];
+    let filter = applied(FilterRegion::All, settings());
+    let project = project_on(40, 10, events, 10.0, vec![filter]);
+
+    let rendered = filters::registry().render_with_marks(&project).unwrap();
+
+    // Each event changes a cell, so the two periods of 5 s each become 1 s.
+    assert_eq!(times(&rendered.recording.events), vec![0.0, 1.0, 2.0]);
+}
+
+#[test]
+fn the_ignored_rows_are_the_rows_of_the_recording() {
+    let ignoring = settings().ignoring_rows(0, 1).unwrap();
+    let events = vec![
+        output(0.0, "a"),
+        // Row 5 of a screen of 10 rows is not its bottom row.
+        output(5.0, "\x1b[5;1Hb"),
+        output(10.0, "\x1b[1;2Hc"),
+    ];
+    let filter = applied(FilterRegion::All, ignoring);
+    let project = project_on(20, 10, events, 10.0, vec![filter]);
+
+    let rendered = filters::registry().render_with_marks(&project).unwrap();
+
+    assert_eq!(times(&rendered.recording.events), vec![0.0, 1.0, 2.0]);
+}
+
+/// The message of the render error of `project`.
+fn render_error(project: &EditProject) -> String {
+    match filters::registry().render_with_marks(project) {
+        Err(NleError::RenderError(message)) => message,
+        other => panic!("expected a RenderError, got {other:?}"),
+    }
+}
+
+#[test]
+fn more_ignored_rows_than_the_recording_has_fail_the_render() {
+    let ignoring = settings().ignoring_rows(2, 2).unwrap();
+    let filter = applied(FilterRegion::All, ignoring);
+    let project = project_on(20, 3, vec![output(0.0, "a")], 5.0, vec![filter]);
+
+    let message = render_error(&project);
+
+    assert!(message.contains(KIND), "{message}");
+    assert!(
+        message.contains("the 2 top and 2 bottom rows to ignore are more than the 3 rows of the screen"),
+        "{message}"
+    );
+}
+
+/// The answer of the filter for one event on a screen of `width` columns and
+/// `height` rows.
+fn compress_on(width: u16, height: u16) -> Result<Span, String> {
+    let span = Span {
+        events: vec![output(0.0, "a")],
+        length: 5.0,
+        marks: Vec::new(),
+    };
+    let context = SpanContext {
+        before: &[],
+        after: &[],
+        size: crate::pipeline::TerminalSize { width, height },
+    };
+    compress(span, context, &applied(FilterRegion::All, settings()).options)
+}
+
+#[test]
+fn a_screen_with_no_cell_or_too_many_cells_fails_the_filter() {
+    for (width, height) in [(0, 24), (80, 0), (0, 0), (u16::MAX, u16::MAX), (4097, 1024)] {
+        let message = compress_on(width, height).unwrap_err();
+        assert!(
+            message.contains(&format!("the screen of {width}x{height} cells")),
+            "{message}"
+        );
+        assert!(
+            message.contains(&MAX_SCREEN_CELLS.to_string()),
+            "{message}"
+        );
+    }
+    // Exactly `MAX_SCREEN_CELLS` cells.
+    assert!(compress_on(4096, 1024).is_ok());
 }
 
 #[test]

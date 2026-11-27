@@ -1299,9 +1299,11 @@ async fn a_bad_idle_change_shows_the_reason_and_adds_no_row() {
             ("3", "5", "0", "0"),
             "Invalid idle compression: the compressed length 5 s",
         ),
+        // The filter takes the rows of the screen from the recording, so the
+        // render refuses the rows to ignore.
         (
             ("3", "1", "30", "20"),
-            "Invalid idle compression: the 30 top and 20 bottom rows to ignore are more than the 40 rows of the screen",
+            "Render failed: filter &quot;idle-compression&quot; failed: the 30 top and 20 bottom rows to ignore are more than the 40 rows of the screen",
         ),
     ];
     for ((threshold, compress_to, top, bottom), reason) in cases {
