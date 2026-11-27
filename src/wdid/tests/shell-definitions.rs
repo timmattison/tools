@@ -1909,6 +1909,34 @@ fn the_key_command_lines_give_the_command_of_each_key() {
     );
 }
 
+/// readline writes each control byte and each byte with the high bit of a
+/// `bind -x` command as an escape: `\C-j` for a newline, `\C-?` for DEL, `\e`
+/// for the escape character, and `\M-` before the form of the byte without
+/// its high bit. The command gets back each byte, thus a second line and a
+/// name in UTF-8. A backslash before a different character stays.
+#[test]
+fn the_key_command_lines_decode_the_escapes_of_readline() {
+    let starts = starts_of(&[
+        "M KEY_COMMANDS",
+        r#""\C-g" "printf a\C-jecho b""#,
+        r#""\C-t" "caf\M-C\M-)_fn""#,
+        r#""\C-u" "printf \"\C-ix\"""#,
+        r#""\C-v" "go_\M-b\M-\C-f\M-\C-r""#,
+        r#""\C-w" "x\e[A\C-?\q""#,
+    ]);
+    let key = |key: &str| Trigger::KeyCommand(key.to_owned());
+    assert_eq!(
+        starts.code,
+        [
+            (key("\\C-g"), "printf a\necho b".to_owned()),
+            (key("\\C-t"), "café_fn".to_owned()),
+            (key("\\C-u"), "printf \"\tx\"".to_owned()),
+            (key("\\C-v"), "go_→".to_owned()),
+            (key("\\C-w"), "x\u{1b}[A\u{7f}\\q".to_owned()),
+        ]
+    );
+}
+
 /// The `.bashrc` of the test of the starts of a real bash. `set -u` must not
 /// stop the script. The script removes the `DEBUG` trap before it lists the
 /// functions, thus it must list the traps first.
@@ -1971,7 +1999,17 @@ fn bash_with_key_listing() -> Option<PathBuf> {
     })
 }
 
-/// A real bash gives the command of each `bind -x` key.
+/// The `.bashrc` of the test of the `bind -x` keys of a real bash: one command
+/// of one line, one command of two lines, and one command with a name in
+/// UTF-8.
+const KEY_COMMANDS_BASHRC: &str = "keyfn() { true; }\n\
+bind -x '\"\\C-x\\C-r\": keyfn' 2>/dev/null\n\
+bind -x '\"\\C-g\": printf a\n\
+echo b' 2>/dev/null\n\
+bind -x '\"\\C-t\": café_fn' 2>/dev/null\n";
+
+/// A real bash gives the command of each `bind -x` key, with each line and
+/// each byte of the command.
 #[test]
 fn a_real_bash_gives_its_key_commands() {
     let Some(bash) = bash_with_key_listing() else {
@@ -1979,20 +2017,21 @@ fn a_real_bash_gives_its_key_commands() {
         return;
     };
     let home = tempfile::tempdir().unwrap();
-    write_file(
-        home.path(),
-        ".bashrc",
-        "keyfn() { true; }\nbind -x '\"\\C-x\\C-r\": keyfn' 2>/dev/null\n",
-    );
+    write_file(home.path(), ".bashrc", KEY_COMMANDS_BASHRC);
     let definitions = read(
         real_shell(&bash, home.path()),
         ShellKind::Bash,
         Duration::from_secs(60),
     )
     .unwrap();
-    assert_eq!(
-        definitions.starts.code,
-        [(Trigger::KeyCommand("\\C-x\\C-r".into()), "keyfn".to_owned())],
-        "{bash:?}"
-    );
+    let code = &definitions.starts.code;
+    for (key, command) in [
+        ("\\C-x\\C-r", "keyfn"),
+        ("\\C-g", "printf a\necho b"),
+        ("\\C-t", "café_fn"),
+    ] {
+        let expected = (Trigger::KeyCommand(key.to_owned()), command.to_owned());
+        assert!(code.contains(&expected), "{bash:?}: {expected:?}: {code:?}");
+    }
+    assert_eq!(code.len(), 3, "{bash:?}: {code:?}");
 }
