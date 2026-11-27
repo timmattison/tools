@@ -1298,10 +1298,10 @@ Linux runner is small.
 A step of issue-fleet runs the checks of the crates that its change touches,
 and not the full list. CI runs the full list on the pull request. CI does not
 run the checks of the msgs frontend, thus a step that changes that frontend
-runs them itself. This section applies when `ISSUE_FLEET_RUN` is set. issue-fleet sets that variable in each
-step, also in each step of the `review-loop` that it starts. Each other session
-keeps the full list at the end of a TDD run, as
-[Continuous Integration](#continuous-integration) says.
+runs them itself. This section applies when `ISSUE_FLEET_RUN` is set.
+issue-fleet sets that variable in each step, also in each step of the
+`review-loop` that it starts. Each other session keeps the full list at the end
+of a TDD run, as [Continuous Integration](#continuous-integration) says.
 
 ### Why
 
