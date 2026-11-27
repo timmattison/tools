@@ -205,6 +205,14 @@ impl FilterOptions {
     pub fn get(&self, key: &str) -> Option<&serde_json::Value> {
         self.0.get(key)
     }
+
+    /// Parse the options as the type `O`.
+    ///
+    /// # Errors
+    /// Returns the error of `serde_json` when the options do not parse as `O`.
+    pub(crate) fn parse<O: serde::de::DeserializeOwned>(&self) -> Result<O, serde_json::Error> {
+        serde_json::from_value(serde_json::Value::Object(self.0.clone()))
+    }
 }
 
 /// The part of the timeline that a filter works on.
