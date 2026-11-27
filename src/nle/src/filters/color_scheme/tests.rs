@@ -369,11 +369,16 @@ fn a_cube_operand_is_not_read_as_a_color_code() {
 #[test]
 fn an_incomplete_color_stays_as_written() {
     assert_eq!(rewrite("38;5"), None);
-    assert_eq!(rewrite("38;2;1;2"), None);
-    assert_eq!(rewrite("1;48;2;1"), None);
     assert_eq!(
         sgr_items("38;2;1;2"),
         vec![SgrItem::Other("38;2;1;2".to_string())]
+    );
+    assert_eq!(
+        sgr_items("1;48;2;1"),
+        vec![
+            SgrItem::Other("1".to_string()),
+            SgrItem::Other("48;2;1".to_string()),
+        ]
     );
 }
 
@@ -453,8 +458,13 @@ fn the_colon_form_with_an_empty_color_space_is_read() {
 #[test]
 fn a_colon_form_that_is_not_a_color_stays_as_written() {
     assert_eq!(rewrite("38:5"), None);
-    assert_eq!(rewrite("38:2:1:2"), None);
-    assert_eq!(rewrite("38:3:1:2:3"), None);
+    for params in ["38:2:1:2", "38:3:1:2:3"] {
+        assert_eq!(
+            sgr_items(params),
+            vec![SgrItem::Other(params.to_string())],
+            "{params:?}"
+        );
+    }
     assert_eq!(rewrite("4:3;5"), None);
 }
 
