@@ -1143,6 +1143,19 @@ fn a_range_gives_the_line_drawing_set_back_when_the_range_turns_it_on() {
 }
 
 #[test]
+fn a_range_that_starts_in_the_line_drawing_set_repaints_ascii_text_as_ascii() {
+    // The letters q, u and k of "quick" are line-drawing characters in the
+    // DEC set. The scroll in the range makes the filter paint them again.
+    let stream = [
+        (1.0, "\r\nquick\x1b(0"),
+        (4.0, "\x1b[1S"),
+        (7.0, "\x1b(Bdone"),
+    ];
+
+    assert_range_property_each_shape(&stream, 3.0, 6.0);
+}
+
+#[test]
 fn a_range_gives_the_cursor_visibility_back_after_the_range() {
     for stream in [
         [(1.0, "abc"), (4.0, "\x1b[?25ldef"), (7.0, "ghi")],
