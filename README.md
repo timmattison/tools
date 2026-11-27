@@ -6393,12 +6393,24 @@ The editing engine of the crate has four parts:
   a new length, and the later events move by the change in the length.
   `filters::registry()` holds the filters that ship: the cursor filter
   (`cursor`, issue #168) is an in-place filter, and time dilation
-  (`time-dilation`, issue #153) is a span filter. Issues #152 to #167 add the
-  others.
+  (`time-dilation`, issue #153) and typing speed (`typing-speed`, issue #155)
+  are span filters. Issues #152 to #167 add the others.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
   undo and redo history.
+
+The typing speed filter plays each burst of typing at one rate. Its option
+`chars_per_second` sets the rate, and each input event counts as one
+character. A gap between two keys that is longer than `pause` (2 s when the
+option is missing) keeps its length, and so does the gap after a key that
+holds a line end. Thus each hesitation inside a command goes away, and each
+pause between two commands stays. An output keeps its delay after the key
+before it, so the echo of a key follows the key. When the gap to the next key
+becomes shorter, the delay becomes shorter by the same ratio. The option
+`jitter` (0 when missing, and below 1) changes each interval by up to that
+fraction, so the typing does not look mechanical. Each render gives the same
+times. The window cannot add the filter to a project yet.
 
 The crate also has functions that save the rendered recording
 (`Editor::save_recording`), list the recordings in a directory, and export a
