@@ -25,8 +25,9 @@
 //! - A color of the 16 base colors, from `30` to `37`, `40` to `47`, `90` to
 //!   `97`, `100` to `107`, and `38;5;n`, `48;5;n`, `58;5;n` with n below 16,
 //!   becomes the 24-bit color of the same index in the theme.
-//! - The cube, the grayscale ramp, and the 24-bit colors follow the three rules
-//!   above.
+//! - A color of the cube, a color of the grayscale ramp, and a 24-bit color
+//!   each obey their own option: `cube`, `grayscale`, and `truecolor`. A `keep`
+//!   option leaves the color as written.
 //! - The filter writes each new color in the form `38;2;r;g;b` or `38;5;n`,
 //!   with the codes 48 and 58 for the background and the underline. It always
 //!   uses the semicolon form. The emulator of `termstate` puts the
