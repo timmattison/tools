@@ -232,6 +232,8 @@ struct Window {
     inputs: Vec<ElementId>,
     /// The Apply Speed button, when a test noted it.
     apply: Option<ElementId>,
+    /// The Compress Idle Time button, when a test noted it.
+    compress: Option<ElementId>,
 }
 
 impl Window {
@@ -250,6 +252,7 @@ impl Window {
             first_render: Vec::new(),
             inputs: Vec::new(),
             apply: None,
+            compress: None,
         };
         window.note_listeners(&edits);
         window.first_render = window.clicks.clone();
@@ -317,14 +320,41 @@ impl Window {
         self.render();
     }
 
-    /// The Start, End, and Speed fields, in this order.
+    /// The Start, End, and Speed fields, in this order. They are the first
+    /// three inputs of the page.
     fn speed_fields(&self) -> [ElementId; 3] {
-        let fields: [ElementId; 3] = self
-            .inputs
-            .clone()
-            .try_into()
-            .unwrap_or_else(|ids: Vec<ElementId>| panic!("the page has the inputs {ids:?}"));
-        fields
+        self.fields(0)
+    }
+
+    /// The four fields of the idle panel, in the order of the page. They come
+    /// after the three fields of the speed panel.
+    fn idle_fields(&self) -> [ElementId; 4] {
+        self.fields(3)
+    }
+
+    /// The `N` inputs of the page from index `first`.
+    fn fields<const N: usize>(&self, first: usize) -> [ElementId; N] {
+        self.inputs
+            .get(first..first + N)
+            .and_then(|ids| ids.try_into().ok())
+            .unwrap_or_else(|| panic!("the page has the inputs {:?}", self.inputs))
+    }
+
+    /// The Compress Idle Time button. `open_recording` noted it.
+    fn compress_button(&self) -> ElementId {
+        self.compress.expect("a window with an idle panel")
+    }
+
+    /// Fills the four fields of the idle panel and clicks Compress Idle Time.
+    fn compress_idle(&mut self, threshold: &str, compress_to: &str, top: &str, bottom: &str) {
+        let fields = self.idle_fields();
+        for (field, text) in fields
+            .into_iter()
+            .zip([threshold, compress_to, top, bottom])
+        {
+            self.type_into(field, text);
+        }
+        self.click(self.compress_button());
     }
 
     /// The Apply Speed button. `open_recording` noted it.
@@ -670,8 +700,8 @@ async fn open_recording() -> Window {
     let mut window = Window::open(&fakes);
     window.click(window.open_button());
     window.settle().await;
-    assert_eq!(window.newest.len(), 1, "{:?}", window.newest);
-    window.apply = Some(window.newest[0]);
+    window.apply = window.newest.first().copied();
+    window.compress = window.newest.get(1).copied();
     window
 }
 
@@ -681,7 +711,7 @@ async fn the_speed_panel_shows_its_fields_and_the_edited_duration() {
     let page = window.html();
     for text in [
         "Speed",
-        "Times are in seconds, on the timeline after the speed changes above.",
+        "Times are in seconds, on the timeline after each earlier speed change and idle compression.",
         "Start (s)",
         "End (s)",
         "Apply Speed",
@@ -922,4 +952,137 @@ fn an_edit_after_a_speed_change_shows_the_duration_after_it() {
         edited_duration(&Some(document)),
         format_duration(65.3 / 4.0)
     );
+}
+
+// The idle panel and the marks of the timeline.
+
+/// The row text of an idle compression of the whole timeline.
+fn idle_row(text: &str) -> String {
+    format!("<span>the whole timeline, {text}</span>")
+}
+
+#[tokio::test]
+async fn the_idle_panel_shows_its_fields_with_their_defaults() {
+    let window = open_recording().await;
+    let page = window.html();
+    for text in [
+        "Idle Time",
+        "Compresses each stretch of the whole timeline with no key and no change on the screen.",
+        "Idle after (s)",
+        "Compress to (s)",
+        "Ignore top rows",
+        "Ignore bottom rows",
+        "Compress Idle Time",
+    ] {
+        assert!(page.contains(text), "{text} missing in {page}");
+    }
+    let (_, idle) = page.split_once("Idle after (s)").expect("an idle panel");
+    let values: Vec<&str> = idle
+        .split("value=\"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .collect();
+    assert_eq!(values, vec!["3", "1", "0", "0"], "{page}");
+    assert!(!page.contains("mark-strip"), "{page}");
+}
+
+#[tokio::test]
+async fn compressing_idle_time_adds_a_row_shortens_the_recording_and_marks_the_timeline() {
+    let mut window = open_recording().await;
+
+    window.compress_idle("3", "1", "0", "0");
+
+    let page = window.html();
+    assert!(!page.contains("role=\"alert\""), "{page}");
+    assert!(
+        page.contains(&idle_row("idle of 3 s or more to 1 s")),
+        "{page}"
+    );
+    // The 42 events end at 4.1 s, and the idle time to 65.3 s becomes 1 s.
+    assert!(page.contains(&edited_row("0m 5.1s")), "{page}");
+    assert!(page.contains("1 mark on the edited recording"), "{page}");
+    let mark = "title=\"Idle time: 1m 1.2s compressed to 0m 1.0s at 0m 4.1s\"";
+    assert!(page.contains(mark), "{mark} missing in {page}");
+    // 4.1 s of 5.1 s.
+    assert!(page.contains("left: 80.39%"), "{page}");
+}
+
+#[tokio::test]
+async fn removing_an_idle_row_restores_the_duration_and_removes_the_marks() {
+    let mut window = open_recording().await;
+    window.compress_idle("3", "1", "0", "0");
+    assert!(window.html().contains("mark-strip"), "{}", window.html());
+
+    window.click(window.remove_button());
+
+    let page = window.html();
+    assert!(!page.contains("idle of 3 s"), "{page}");
+    assert!(!page.contains("mark-strip"), "{page}");
+    assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
+}
+
+#[tokio::test]
+async fn an_idle_row_shows_the_ignored_rows() {
+    let mut window = open_recording().await;
+
+    window.compress_idle("2.5", "0", "1", "2");
+
+    let page = window.html();
+    let row = idle_row("idle of 2.5 s or more to 0 s, ignores 1 top and 2 bottom rows");
+    assert!(page.contains(&row), "{row} missing in {page}");
+    // Each event of the fixture writes on the top row, which is ignored, so
+    // the whole recording is one idle period.
+    let mark = "title=\"Idle time: 1m 5.3s removed at 0m 0.0s\"";
+    assert!(page.contains(mark), "{mark} missing in {page}");
+    assert!(page.contains(&edited_row("0m 0.0s")), "{page}");
+    assert!(page.contains("left: 0.00%"), "{page}");
+}
+
+#[tokio::test]
+async fn a_bad_idle_change_shows_the_reason_and_adds_no_row() {
+    let cases = [
+        (("abc", "1", "0", "0"), "the idle threshold is not a number"),
+        (("3", "", "0", "0"), "the compressed length is not a number"),
+        (
+            ("3", "1", "1.5", "0"),
+            "the top rows are not a whole number from 0 to 65535",
+        ),
+        (
+            ("3", "1", "0", "-1"),
+            "the bottom rows are not a whole number from 0 to 65535",
+        ),
+        (
+            ("0", "0", "0", "0"),
+            "Invalid idle compression: the threshold 0 s must be finite and above zero",
+        ),
+        (("3", "5", "0", "0"), "the compressed length 5 s"),
+        (
+            ("3", "1", "30", "20"),
+            "are more than the 40 rows of the screen",
+        ),
+    ];
+    for ((threshold, compress_to, top, bottom), reason) in cases {
+        let mut window = open_recording().await;
+        window.compress_idle(threshold, compress_to, top, bottom);
+        let page = window.html();
+        let banner = format!("Failed to compress idle time: {reason}");
+        assert!(page.contains(&banner), "{banner} missing in {page}");
+        assert!(!page.contains("idle of "), "{page}");
+        assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
+    }
+}
+
+#[tokio::test]
+async fn a_speed_change_after_an_idle_compression_moves_the_mark() {
+    let mut window = open_recording().await;
+    window.compress_idle("3", "1", "0", "0");
+
+    // The region from 0 s to 4 s plays twice as fast, so the edited recording
+    // is 3.1 s, and the mark moves from 4.1 s to 2.1 s.
+    window.apply_speed("0", "4", "2");
+
+    let page = window.html();
+    assert!(page.contains(&edited_row("0m 3.1s")), "{page}");
+    assert!(page.contains("at 0m 2.1s\""), "{page}");
+    assert!(page.contains("left: 67.74%"), "{page}");
 }
