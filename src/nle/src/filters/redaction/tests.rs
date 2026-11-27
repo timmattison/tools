@@ -176,7 +176,7 @@ fn an_unterminated_osc_ends_at_the_next_escape() {
         Replacement::Asterisks,
         vec![out(1.0, "\x1b]0;t\x1b[31mred")],
     );
-    assert_eq!(datas(&got), vec!["\x1b]0;t\x1b[31mred"]);
+    assert_eq!(datas(&got), vec!["\x1b]*;t\x1b[31mred"]);
 }
 
 #[test]

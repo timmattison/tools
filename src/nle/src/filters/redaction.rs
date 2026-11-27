@@ -22,12 +22,17 @@
 //! - `ESC [` starts a CSI sequence. Parameter bytes (0x20 to 0x3F) follow, and
 //!   one final byte (0x40 to 0x7E) ends it.
 //! - `ESC ]` starts an OSC sequence, for example a window title. Its payload
-//!   runs up to the first BEL or `ESC \`, or to the end of the stream. The
-//!   introducer and the terminator are escape bytes. The payload is text, and
-//!   it is a segment of its own.
+//!   is text, and it is a segment of its own.
 //! - `ESC P`, `ESC X`, `ESC ^`, and `ESC _` start a DCS, SOS, PM, or APC
-//!   string. It runs up to and including the next `ESC \`, or to the end of the
-//!   stream. Nothing in it is text, because it can hold image data.
+//!   string. Nothing in it is text, because it can hold image data.
+//! - An OSC sequence or a string ends where a terminal ends it: at `ESC \`, at
+//!   CAN or SUB, at BEL for an OSC sequence, or at the end of the stream. These
+//!   terminators are escape bytes. Each other ESC ends it too, and that ESC
+//!   starts the next sequence. Thus a string with no terminator does not hide
+//!   the text after the next escape sequence.
+//! - In the input stream, `ESC ]`, `ESC P`, `ESC X`, `ESC ^`, and `ESC _` are
+//!   one key press of two bytes, for example `ESC` and then `P` in vim. A key
+//!   press sends no string, thus the bytes after it are text.
 //! - Another `ESC` takes intermediate bytes (0x20 to 0x2F) and one final byte
 //!   (0x30 to 0x7E), for example `ESC ( B` or `ESC 7`. If the final byte is
 //!   missing, the sequence ends before the bad byte.

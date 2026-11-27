@@ -63,7 +63,7 @@ pub(super) fn rewrite(events: Vec<Event>, redaction: &Redaction) -> Result<Vec<E
             .filter(|(_, event)| event.event_type == event_type)
             .map(|(index, _)| index)
             .collect();
-        edit_stream(&events, &stream, redaction, &mut edits)?;
+        edit_stream(&events, &stream, &event_type, redaction, &mut edits)?;
     }
     events
         .into_iter()
@@ -76,6 +76,7 @@ pub(super) fn rewrite(events: Vec<Event>, redaction: &Redaction) -> Result<Vec<E
 fn edit_stream(
     events: &[Event],
     stream: &[usize],
+    event_type: &EventType,
     redaction: &Redaction,
     edits: &mut [Vec<Edit>],
 ) -> Result<(), String> {
@@ -91,7 +92,7 @@ fn edit_stream(
         total += data.len();
     }
     starts.push(total);
-    let segments = build_segments(&joined, &runs(&joined), &starts, stream)?;
+    let segments = build_segments(&joined, &runs(&joined, event_type), &starts, stream)?;
     for segment in &segments {
         edit_segment(segment, events, redaction, edits)?;
     }
@@ -104,12 +105,19 @@ const ESC: u8 = 0x1B;
 /// The bell byte. It ends an OSC sequence.
 const BEL: u8 = 0x07;
 
+/// The cancel byte. It ends an OSC sequence and a control string.
+const CAN: u8 = 0x18;
+
+/// The substitute byte. It ends an OSC sequence and a control string.
+const SUB: u8 = 0x1A;
+
 /// The segment of the visible text.
 const VISIBLE: usize = 0;
 
 /// Cut the joined string into runs of text. Escape sequences are not text.
-/// The payload of an OSC sequence is a run of its own segment.
-fn runs(joined: &str) -> Vec<Run> {
+/// The payload of an OSC sequence is a run of its own segment. `event_type` is
+/// the type of the stream: in the input stream, a string introducer is a key.
+fn runs(joined: &str, event_type: &EventType) -> Vec<Run> {
     let bytes = joined.as_bytes();
     let mut runs = Vec::new();
     let mut at = 0;
@@ -127,7 +135,7 @@ fn runs(joined: &str) -> Vec<Run> {
             at = end;
             continue;
         }
-        let (payload, end) = escape_sequence(bytes, at);
+        let (payload, end) = escape_sequence(bytes, at, event_type);
         if let Some(range) = payload.filter(|range| !range.is_empty()) {
             runs.push(Run {
                 segment: segments,
@@ -143,7 +151,15 @@ fn runs(joined: &str) -> Vec<Run> {
 /// Read the escape sequence that starts at `at`, where `bytes[at]` is ESC.
 /// The answer is the range of the payload when the sequence is an OSC
 /// sequence, and the end of the sequence. The end is always above `at`.
-fn escape_sequence(bytes: &[u8], at: usize) -> (Option<Range<usize>>, usize) {
+///
+/// An OSC sequence or a control string ends where a terminal ends it, see
+/// [`string_end`]. In the input stream, `ESC ]`, `ESC P`, `ESC X`, `ESC ^`,
+/// and `ESC _` are one key press of two bytes, and not an introducer.
+fn escape_sequence(
+    bytes: &[u8],
+    at: usize,
+    event_type: &EventType,
+) -> (Option<Range<usize>>, usize) {
     let length = bytes.len();
     match bytes.get(at + 1) {
         Some(b'[') => {
@@ -157,28 +173,13 @@ fn escape_sequence(bytes: &[u8], at: usize) -> (Option<Range<usize>>, usize) {
             }
             (None, end)
         }
+        Some(b']' | b'P' | b'X' | b'^' | b'_') if *event_type == EventType::Input => (None, at + 2),
         Some(b']') => {
             let start = at + 2;
-            let mut end = start;
-            while end < length {
-                match (bytes.get(end), bytes.get(end + 1)) {
-                    (Some(&BEL), _) => return (Some(start..end), end + 1),
-                    (Some(&ESC), Some(b'\\')) => return (Some(start..end), end + 2),
-                    _ => end += 1,
-                }
-            }
-            (Some(start..length), length)
+            let (payload_end, end) = string_end(bytes, start, true);
+            (Some(start..payload_end), end)
         }
-        Some(b'P' | b'X' | b'^' | b'_') => {
-            let mut end = at + 2;
-            while end < length {
-                if bytes.get(end) == Some(&ESC) && bytes.get(end + 1) == Some(&b'\\') {
-                    return (None, end + 2);
-                }
-                end += 1;
-            }
-            (None, length)
-        }
+        Some(b'P' | b'X' | b'^' | b'_') => (None, string_end(bytes, at + 2, false).1),
         Some(_) => {
             let mut end = skip_while(bytes, at + 1, |byte| (0x20..=0x2F).contains(&byte));
             if bytes
@@ -191,6 +192,27 @@ fn escape_sequence(bytes: &[u8], at: usize) -> (Option<Range<usize>>, usize) {
         }
         None => (None, length),
     }
+}
+
+/// Find the end of an OSC payload or a control string that starts at `start`.
+/// The answer is the end of the content and the end of the sequence. The
+/// string ends at the first ESC, CAN, or SUB, and an OSC payload also ends at
+/// BEL. `ESC \`, CAN, SUB, and BEL belong to the sequence. Another ESC does
+/// not, because it starts the next sequence. The end of the stream ends the
+/// string too.
+fn string_end(bytes: &[u8], start: usize, bel_ends: bool) -> (usize, usize) {
+    let length = bytes.len();
+    let mut end = start;
+    while end < length {
+        match bytes.get(end) {
+            Some(&ESC) if bytes.get(end + 1) == Some(&b'\\') => return (end, end + 2),
+            Some(&ESC) => return (end, end),
+            Some(&CAN | &SUB) => return (end, end + 1),
+            Some(&BEL) if bel_ends => return (end, end + 1),
+            _ => end += 1,
+        }
+    }
+    (length, length)
 }
 
 /// The first index from `from` where `bytes` has no byte that `test` accepts.
