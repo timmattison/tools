@@ -131,7 +131,11 @@ pub(super) fn PreviewPane(
     let shown = {
         let at = playhead();
         let held = if at > end { end } else { at };
-        format!("{} / {}", format_duration(held.get()), format_duration(end.get()))
+        format!(
+            "{} / {}",
+            format_duration(held.get()),
+            format_duration(end.get())
+        )
     };
     rsx! {
         div { class: "preview-pane",
