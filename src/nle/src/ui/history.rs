@@ -25,6 +25,33 @@ pub(super) enum HistoryStep {
     Redo,
 }
 
+/// The modifier key that holds the shortcuts of a platform.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ShortcutModifier {
+    /// The Command key of macOS.
+    Command,
+    /// The Control key of each other platform.
+    Control,
+}
+
+impl ShortcutModifier {
+    /// The text of the keys of `step`, for the tooltip of its button.
+    pub(super) fn keys(self, _step: HistoryStep) -> &'static str {
+        ""
+    }
+}
+
+/// The step that a key press asks for, or `None` for a key that is no
+/// shortcut on `platform`.
+pub(super) fn shortcut_of(
+    _key: &Key,
+    _code: Code,
+    _modifiers: Modifiers,
+    _platform: ShortcutModifier,
+) -> Option<HistoryStep> {
+    None
+}
+
 /// Makes `step` on the editor of the open document.
 ///
 /// The answer is `Ok(true)` when the project changed, and `Ok(false)` when
@@ -80,3 +107,6 @@ pub(super) fn HistoryButtons(
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

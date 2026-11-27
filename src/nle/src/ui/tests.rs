@@ -427,6 +427,27 @@ impl Window {
         self.render();
     }
 
+    /// Sends a key down of `press` to the element, as if the user pressed the
+    /// key while the element had the focus, and renders. The answer is true
+    /// when a handler prevented the default action of the key.
+    fn press(&mut self, id: ElementId, press: &Press) -> bool {
+        let data = SerializedKeyboardData::new(
+            Key::Character(press.text.to_owned()),
+            press.code,
+            Location::Standard,
+            false,
+            press.modifiers,
+            false,
+        );
+        let data = Rc::new(PlatformEventData::new(Box::new(data)));
+        let event = dioxus::prelude::Event::new(data as Rc<dyn Any>, true);
+        self.dom
+            .runtime()
+            .handle_event("keydown", event.clone(), id);
+        self.render();
+        !event.default_action_enabled()
+    }
+
     /// Sends the value to the select element, as if the user chose it, and renders.
     fn choose(&mut self, id: ElementId, value: &str) {
         let form = dioxus::html::SerializedFormData::new(value.to_string(), Vec::new());
@@ -1700,13 +1721,28 @@ async fn undo_and_redo_are_enabled_only_when_the_editor_has_a_step() {
     assert_eq!(window.history_disabled(), [true, true], "{}", window.html());
 
     window.apply_speed("10", "20", "2");
-    assert_eq!(window.history_disabled(), [false, true], "{}", window.html());
+    assert_eq!(
+        window.history_disabled(),
+        [false, true],
+        "{}",
+        window.html()
+    );
 
     window.click(window.undo_button());
-    assert_eq!(window.history_disabled(), [true, false], "{}", window.html());
+    assert_eq!(
+        window.history_disabled(),
+        [true, false],
+        "{}",
+        window.html()
+    );
 
     window.click(window.redo_button());
-    assert_eq!(window.history_disabled(), [false, true], "{}", window.html());
+    assert_eq!(
+        window.history_disabled(),
+        [false, true],
+        "{}",
+        window.html()
+    );
 }
 
 #[tokio::test]
@@ -1753,7 +1789,12 @@ async fn undo_and_redo_of_a_removed_row_put_it_back_and_take_it_away() {
 
     window.click(window.undo_button());
     assert_sped_up(&window);
-    assert_eq!(window.history_disabled(), [false, false], "{}", window.html());
+    assert_eq!(
+        window.history_disabled(),
+        [false, false],
+        "{}",
+        window.html()
+    );
 
     window.click(window.redo_button());
     assert_original_speed(&window);
@@ -1777,4 +1818,175 @@ async fn an_undo_removes_the_banner_of_a_failed_edit() {
         window.html()
     );
     assert_original_speed(&window);
+}
+
+// The keys of Undo and Redo, and the tooltips that name them.
+
+/// One key press: the value of the key, its place on the keyboard, and the
+/// modifiers that are down.
+struct Press {
+    text: &'static str,
+    code: Code,
+    modifiers: Modifiers,
+}
+
+/// The modifier of the shortcuts on the platform of the test.
+const HOST_MODIFIER: Modifiers = if cfg!(target_os = "macos") {
+    Modifiers::META
+} else {
+    Modifiers::CONTROL
+};
+
+/// The modifier of the shortcuts on the other platforms.
+const OTHER_MODIFIER: Modifiers = if cfg!(target_os = "macos") {
+    Modifiers::CONTROL
+} else {
+    Modifiers::META
+};
+
+/// The tooltip of the Undo button on the platform of the test.
+const UNDO_TOOLTIP: &str = if cfg!(target_os = "macos") {
+    "Undo (\u{2318}Z)"
+} else {
+    "Undo (Ctrl+Z)"
+};
+
+/// The tooltip of the Redo button on the platform of the test.
+const REDO_TOOLTIP: &str = if cfg!(target_os = "macos") {
+    "Redo (\u{21e7}\u{2318}Z)"
+} else {
+    "Redo (Ctrl+Shift+Z)"
+};
+
+/// Cmd+Z on macOS, and Ctrl+Z on the other platforms.
+const UNDO_KEYS: Press = Press {
+    text: "z",
+    code: Code::KeyZ,
+    modifiers: HOST_MODIFIER,
+};
+
+/// Cmd+Shift+Z on macOS, and Ctrl+Shift+Z on the other platforms.
+const REDO_KEYS: Press = Press {
+    text: "Z",
+    code: Code::KeyZ,
+    modifiers: HOST_MODIFIER.union(Modifiers::SHIFT),
+};
+
+impl Window {
+    /// The Start, End, and Speed fields of the speed panel, and the Pattern and
+    /// Replacement text fields of the redaction panel.
+    fn text_fields(&self) -> [ElementId; 5] {
+        let [start, end, speed] = self.speed_fields();
+        let [_, pattern, _, replacement, _] = self.redaction_fields();
+        [start, end, speed, pattern, replacement]
+    }
+
+    /// Elements that have the focus in turn and are not text fields: the
+    /// Apply Speed button, the Find menu, the playhead control, and the theme
+    /// menu.
+    fn other_controls(&self) -> [ElementId; 4] {
+        let [find, ..] = self.redaction_fields();
+        [
+            self.apply_button(),
+            find,
+            self.playhead_control(),
+            self.theme_menu(),
+        ]
+    }
+}
+
+#[tokio::test]
+async fn the_keys_undo_and_redo_when_a_control_that_is_no_text_field_has_the_focus() {
+    let mut window = open_with_a_speed_change().await;
+    for control in window.other_controls() {
+        assert!(window.press(control, &UNDO_KEYS), "{control:?}");
+        assert_original_speed(&window);
+        assert_eq!(window.history_disabled(), [true, false]);
+
+        assert!(window.press(control, &REDO_KEYS), "{control:?}");
+        assert_sped_up(&window);
+        assert_eq!(window.history_disabled(), [false, true]);
+    }
+}
+
+#[tokio::test]
+async fn the_keys_keep_their_text_field_behavior_in_each_text_field() {
+    let mut window = open_with_a_speed_change().await;
+    for field in window.text_fields() {
+        assert!(!window.press(field, &UNDO_KEYS), "{field:?}");
+        assert_sped_up(&window);
+    }
+
+    window.click(window.undo_button());
+    for field in window.text_fields() {
+        assert!(!window.press(field, &REDO_KEYS), "{field:?}");
+        assert_original_speed(&window);
+    }
+}
+
+#[tokio::test]
+async fn a_key_with_no_step_changes_nothing() {
+    let mut window = open_with_a_speed_change().await;
+    let control = window.apply_button();
+    assert!(window.press(control, &REDO_KEYS));
+    assert_sped_up(&window);
+
+    assert!(window.press(control, &UNDO_KEYS));
+    assert!(window.press(control, &UNDO_KEYS));
+    assert_original_speed(&window);
+    assert!(!window.html().contains("role=\"alert\""));
+
+    let mut empty = Window::open(&Fakes::new());
+    for keys in [&UNDO_KEYS, &REDO_KEYS] {
+        assert!(empty.press(empty.open_button(), keys));
+    }
+    assert_eq!(empty.html(), render_empty_app());
+}
+
+#[tokio::test]
+async fn other_keys_change_nothing_and_keep_their_default_action() {
+    let mut window = open_with_a_speed_change().await;
+    let control = window.apply_button();
+    let presses = [
+        Press {
+            text: "z",
+            code: Code::KeyZ,
+            modifiers: Modifiers::empty(),
+        },
+        Press {
+            text: "Z",
+            code: Code::KeyZ,
+            modifiers: Modifiers::SHIFT,
+        },
+        Press {
+            text: "z",
+            code: Code::KeyZ,
+            modifiers: OTHER_MODIFIER,
+        },
+        Press {
+            text: "z",
+            code: Code::KeyZ,
+            modifiers: HOST_MODIFIER.union(Modifiers::ALT),
+        },
+        Press {
+            text: "y",
+            code: Code::KeyY,
+            modifiers: HOST_MODIFIER,
+        },
+    ];
+    for press in &presses {
+        assert!(!window.press(control, press), "{}", press.text);
+        assert_sped_up(&window);
+    }
+}
+
+#[test]
+fn the_tooltip_of_each_button_names_its_keys() {
+    let page = render_empty_app();
+    for tooltip in [UNDO_TOOLTIP, REDO_TOOLTIP] {
+        assert!(
+            page.contains(&format!("title=\"{tooltip}\"")),
+            "{tooltip} missing in {page}"
+        );
+    }
 }
