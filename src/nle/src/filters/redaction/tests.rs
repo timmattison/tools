@@ -919,3 +919,72 @@ fn the_key_of_a_preset_is_its_serde_name_and_finds_the_preset_again() {
     assert_eq!(Preset::from_key("nope"), None);
     assert_eq!(Preset::from_key(""), None);
 }
+
+#[test]
+fn a_mark_of_an_earlier_filter_keeps_its_time_through_a_redaction() {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use crate::filters::idle_compression::{self, IdleCompression};
+    use crate::types::{EditProject, Recording};
+
+    // Each output writes a character, so each event is activity. Idle
+    // compression shortens each gap of 3 s or more to 0.5 s, and marks its
+    // start.
+    let recording = Recording {
+        version: 2,
+        width: 80,
+        height: 24,
+        timestamp: 0.0,
+        duration: 10.5,
+        command: String::new(),
+        title: String::new(),
+        env: BTreeMap::new(),
+        events: vec![
+            out(0.5, "$ "),
+            out(3.5, "echo hunter2"),
+            out(7.0, "\r\nhunter2\r\n"),
+        ],
+    };
+    let mut project = EditProject::from_recording(Arc::new(recording)).unwrap();
+    project.filters = vec![idle_compression::applied(
+        FilterRegion::All,
+        IdleCompression::new(1.0, 0.5, 80, 24).unwrap(),
+    )];
+    let compressed = filters::registry().render_with_marks(&project).unwrap();
+    assert!(
+        compressed.marks.len() > 1,
+        "the idle compression must mark more than one stretch: {:?}",
+        compressed.marks
+    );
+    project
+        .filters
+        .push(applied(FilterRegion::All, &text("hunter2", "[REDACTED]")));
+
+    let redacted = filters::registry()
+        .render_with_marks(&project)
+        .expect("the render must not fail");
+
+    // The redaction changes the text and no time, so each mark of the idle
+    // compression keeps its time and its label.
+    assert_eq!(
+        datas(&redacted.recording.events),
+        vec!["$ ", "echo [REDACTED]", "\r\n[REDACTED]\r\n"]
+    );
+    assert_eq!(redacted.marks, compressed.marks);
+    assert_eq!(
+        redacted
+            .recording
+            .events
+            .iter()
+            .map(|event| event.time)
+            .collect::<Vec<_>>(),
+        compressed
+            .recording
+            .events
+            .iter()
+            .map(|event| event.time)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(redacted.recording.duration, compressed.recording.duration);
+}
