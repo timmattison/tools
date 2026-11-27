@@ -6,6 +6,17 @@
 
 use unicode_width::UnicodeWidthChar;
 
+/// The CSS property of the text color.
+const CSS_COLOR: &str = "color";
+/// The CSS property of the color behind the text.
+const CSS_BACKGROUND_COLOR: &str = "background-color";
+/// The CSS declaration of bold text.
+const CSS_BOLD: &str = "font-weight:bold";
+/// The CSS declaration of italic text.
+const CSS_ITALIC: &str = "font-style:italic";
+/// The CSS declaration of underlined text.
+const CSS_UNDERLINE: &str = "text-decoration:underline";
+
 /// A color as red, green, and blue.
 pub type Rgb = (u8, u8, u8);
 
@@ -27,7 +38,25 @@ pub struct Style {
 impl Style {
     /// The CSS declarations of this style.
     pub fn css(&self) -> String {
-        String::new()
+        let mut css = format!(
+            "{CSS_COLOR}:{};{CSS_BACKGROUND_COLOR}:{}",
+            hex(self.foreground),
+            hex(self.background)
+        );
+        let flags = [
+            (self.bold, CSS_BOLD),
+            (self.italic, CSS_ITALIC),
+            (self.underline, CSS_UNDERLINE),
+        ];
+        for declaration in flags
+            .iter()
+            .filter(|(is_set, _)| *is_set)
+            .map(|(_, declaration)| declaration)
+        {
+            css.push(';');
+            css.push_str(declaration);
+        }
+        css
     }
 }
 
@@ -148,8 +177,8 @@ fn runs_of(
 }
 
 /// The CSS hex form of a color: `#rrggbb`, lowercase.
-pub fn hex(_color: Rgb) -> String {
-    String::new()
+pub fn hex((red, green, blue): Rgb) -> String {
+    format!("#{red:02x}{green:02x}{blue:02x}")
 }
 
 #[cfg(test)]

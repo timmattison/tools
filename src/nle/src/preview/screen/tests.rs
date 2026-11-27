@@ -8,7 +8,7 @@ const RED: Rgb = (255, 85, 85);
 
 fn terminal(columns: usize, rows: usize, output: &str) -> TerminalState {
     let mut state = TerminalState::new(columns, rows, TerminalTheme::auto());
-    state.process_output(output);
+    state.process_output(output).expect("the output parses");
     state
 }
 
@@ -100,7 +100,10 @@ fn a_wide_character_is_a_run_of_its_own() {
     let row = &screen.rows[0];
     assert_eq!(texts(row), ["日", "本", "ab  "]);
     assert_eq!(
-        row.runs.iter().map(|run| run.single_cell).collect::<Vec<_>>(),
+        row.runs
+            .iter()
+            .map(|run| run.single_cell)
+            .collect::<Vec<_>>(),
         [true, true, false]
     );
 }
