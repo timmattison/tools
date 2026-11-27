@@ -782,6 +782,33 @@ fn an_edit_that_renders_gives_its_duration_and_its_marks_in_one_render() {
 }
 
 #[test]
+fn the_recording_for_the_preview_after_an_edit_that_renders_makes_no_second_render() {
+    let (filters, renders) = marking_registry();
+    let mut editor = Editor::new(project(), filters).unwrap();
+
+    editor.apply_renderable(add_mark()).unwrap();
+    let recording = editor.render().unwrap();
+
+    assert_eq!(render_count(&renders), 1);
+    assert_eq!(recording.duration, editor.rendered_duration().unwrap());
+}
+
+#[test]
+fn after_an_undo_one_render_gives_the_duration_and_the_recording_for_the_preview() {
+    let (filters, renders) = marking_registry();
+    let mut editor = Editor::new(project(), filters).unwrap();
+    editor.apply_renderable(add_mark()).unwrap();
+    editor.apply(Edit::AddTrack { id: TrackId(3) }).unwrap();
+    assert!(editor.undo());
+
+    editor.rendered_duration().unwrap();
+    editor.render().unwrap();
+    editor.render().unwrap();
+
+    assert_eq!(render_count(&renders), 2);
+}
+
+#[test]
 fn after_an_edit_with_no_render_one_render_gives_the_duration_and_the_marks() {
     let (filters, renders) = marking_registry();
     let mut editor = Editor::new(project(), filters).unwrap();
