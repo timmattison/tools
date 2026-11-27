@@ -6525,9 +6525,17 @@ The limits:
 - At a prompt that echoes nothing, more than one typed key leaves the screen as
   a Ctrl+W or a Ctrl+U leaves it. The filter cannot tell how many keys the
   erase removed, so it keeps them all.
-- At a prompt that echoes nothing, a typed key and a Backspace with no output
-  go together. Type-ahead over a slow link can give the same order of events,
-  and then their echoes stay.
+- Type-ahead over a slow link can put the echo of a key after the next key.
+  The filter then removes a key and keeps its echo. The screen at the end is
+  correct, but the viewer sees one moment that the typist did not type. Two
+  cases are known:
+  - At a prompt that echoes nothing, a typed key and a Backspace with no output
+    go together. Double type-ahead gives the same order of events, and then
+    their echoes stay: the typo shows with no key.
+  - Under single type-ahead, the output after a Backspace can be unrelated
+    output that changes nothing on the screen, for example a bell. The
+    Backspace then goes with that output, and its late echo stays. Thus an
+    earlier typed character goes with no Backspace.
 - The filter keeps a copy of the screen for each typed key of a line: at most
   256 copies, and at most 4,194,304 cells for all copies. A line of more typed
   keys keeps its oldest keys. A terminal of more than 1,048,576 cells fails the

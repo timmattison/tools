@@ -77,9 +77,17 @@
 //!   A typo near such output thus usually stays.
 //! - A prompt that echoes nothing keeps a Ctrl+W or a Ctrl+U, because many
 //!   entries match.
-//! - A typed key and a Backspace with no output in their units go together,
-//!   as at a prompt that echoes nothing. Type-ahead can give the same order,
-//!   and then their echoes stay.
+//! - Type-ahead during a slow echo can put the echo of a key after the next
+//!   key. The filter then removes a key and keeps its echo. The screen at the
+//!   end is correct, but the viewer sees one moment that the typist did not
+//!   type. Two cases are known:
+//!   - A typed key and a Backspace with no output in their units go together,
+//!     as at a prompt that echoes nothing. Under double type-ahead, their
+//!     echoes stay, and the typo shows with no key.
+//!   - Under single type-ahead, the unit of a Backspace can hold an unrelated
+//!     output that changes nothing on the screen, for example a bell. The
+//!     Backspace then goes with that output, and its late echo stays. Thus an
+//!     earlier typed character goes with no Backspace.
 //! - The stack holds `SNAPSHOT_BUDGET / cells` keys, at least 1 and at most
 //!   `MAX_DEPTH`. A line of more typed keys than that depth keeps its oldest
 //!   keys.
