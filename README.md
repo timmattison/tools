@@ -6296,7 +6296,8 @@ The editing engine of the crate has four parts:
     events that is longer than `threshold` becomes `max_pause` long.
   - `pause-insertion` (`at`, `duration`, issue #154): each event at or after
     `at` moves later by `duration`, and so do the events after a range and the
-    end of the timeline. An `at` past the end of the region is an error.
+    end of the timeline. An `at` past the end of the region by more than a
+    microsecond is an error.
   - `auto-trim` (`leading`, `trailing`, both on when not set, issue #154):
     removes the time before the first input event and the time after the last
     output event.

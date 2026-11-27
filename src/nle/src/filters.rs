@@ -34,8 +34,17 @@ pub const PAUSE_REMOVAL: &str = "pause-removal";
 /// `at` must not be past the end of the region: the end of a range, or the end
 /// of the timeline when it comes first. The events after the region and the
 /// end of the timeline are before such a point, but they move, so the render
-/// refuses the point.
+/// refuses the point. A point past the end by `END_TOLERANCE` or less is not
+/// refused, because the length of a range is the difference of its bounds:
+/// 1.3 - 1.1 is 0.19999999999999996, not 0.2.
 pub const PAUSE_INSERTION: &str = "pause-insertion";
+
+/// How far past the end of its region, in seconds, the point of a pause
+/// insertion can be before the render refuses it.
+///
+/// A microsecond is much larger than the rounding error of a time in a
+/// recording, and much smaller than a pause that a person can see.
+const END_TOLERANCE: f64 = 1e-6;
 
 /// The kind of the filter that cuts the silence at the start and at the end.
 ///
@@ -179,11 +188,12 @@ struct PauseInsertion {
 /// length of the region gets longer by the duration. Thus the pipeline moves
 /// each event after the region and the end of the timeline later by the
 /// duration, also when no event of the region moves. A point past the length
-/// of the region is an error, because that shift also moves the events after
-/// the region and the end of the timeline, which are before the point.
+/// of the region by more than `END_TOLERANCE` is an error, because that shift
+/// also moves the events after the region and the end of the timeline, which
+/// are before the point.
 fn insert_pause(span: Span, options: &PauseInsertion) -> Result<Span, String> {
     let (at, duration) = (options.at.get(), options.duration.get());
-    if at > span.length {
+    if at > span.length + END_TOLERANCE {
         return Err(format!(
             "at {at} s is past the end of the region, which is {} s long",
             span.length
