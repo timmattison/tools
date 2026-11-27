@@ -354,8 +354,9 @@ pub(crate) struct Painter {
     /// The screen as the viewer sees it.
     shown: TerminalState,
     /// The restore count of `clean` at the last paint that found the two
-    /// replays the same with both parsers settled, or `None`. While no restore
-    /// runs, the two replays stay the same until the next box.
+    /// replays the same, or `None`. A paint writes only while both parsers are
+    /// settled. While no restore runs, the two replays stay the same until the
+    /// next box.
     synced: Option<u64>,
     /// The number of times that `paint` scanned the grid.
     #[cfg(test)]
@@ -389,8 +390,7 @@ impl Painter {
     /// `overlay` on top, or `None` when the viewer sees that already. The
     /// painter feeds this output to its own copy of the screen of the viewer.
     /// A paint with no box writes nothing and scans nothing while the replays
-    /// agree: no restore of a save slot has run since they last agreed, and
-    /// both parsers hold no unfinished sequence.
+    /// agree: no restore of a save slot has run since they last agreed.
     ///
     /// A paint writes nothing while a replay holds an unfinished sequence of
     /// the program. The first `ESC` of the paint would end that sequence in the
@@ -482,12 +482,8 @@ impl Painter {
         }
         let (shown_pen, clean_pen) = (Pen::of(&self.shown), Pen::of(&self.clean));
         let repair = (shown_pen != clean_pen).then(|| clean_pen.restore(&shown_pen));
-        self.synced = (overlay.is_none()
-            && !any_cell
-            && repair.is_none()
-            && self.clean.is_settled()
-            && self.shown.is_settled())
-        .then(|| self.clean.restore_count());
+        self.synced = (overlay.is_none() && !any_cell && repair.is_none())
+            .then(|| self.clean.restore_count());
         let mut output = String::new();
         if any_cell {
             output.push_str("\x1b7\x0f\x1b(B\x1b[?6l");
