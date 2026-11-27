@@ -345,3 +345,90 @@ fn unfinished_sequence_is_empty_when_settled() {
     assert_eq!(feed_new("\x1b[?25").unfinished_sequence(), "\x1b[?25");
     assert_eq!(feed_new("\x1b[\r\n1").unfinished_sequence(), "\x1b[1");
 }
+
+#[test]
+fn a_sequence_that_can_or_sub_ends_leaves_the_parser_settled() {
+    let starts = [
+        "\x1b",
+        "\x1b[1",
+        "\x1b[1;?",
+        "\x1b(",
+        "\x1b]0;ti",
+        "\x1bP1$q",
+        "\x1b_Ga",
+    ];
+    for end in ["\x18", "\x1a"] {
+        for start in starts {
+            let state = feed_new(&format!("ab{start}{end}"));
+            assert!(state.is_settled(), "{start:?} {end:?}");
+            assert_eq!(state.unfinished_sequence(), "", "{start:?} {end:?}");
+        }
+    }
+}
+
+#[test]
+fn a_csi_sequence_that_vte_ignores_leaves_the_parser_settled_at_its_final_byte() {
+    for sequence in ["\x1b[1;?h", "\x1b[1;?\r\nh", "\x1b[ 1m", "\x1b[1;?h\r\n"] {
+        assert!(feed_new(&format!("ab{sequence}")).is_settled(), "{sequence:?}");
+    }
+    assert!(!feed_new("ab\x1b[1;?").is_settled());
+}
+
+/// A performer that records whether the parser printed a character.
+#[derive(Default)]
+struct Printed(bool);
+
+impl vte::Perform for Printed {
+    fn print(&mut self, _: char) {
+        self.0 = true;
+    }
+}
+
+/// Tells if a new parser of vte is in the ground state after it reads `text`,
+/// one byte at a time. Only the ground state prints the next `x`.
+fn vte_is_in_ground(text: &str) -> bool {
+    let mut parser = vte::Parser::new();
+    for byte in text.as_bytes() {
+        parser.advance(&mut Printed::default(), &[*byte]);
+    }
+    let mut probe = Printed::default();
+    parser.advance(&mut probe, b"x");
+    probe.0
+}
+
+/// The characters of the walks of
+/// `is_settled_agrees_with_vte_after_each_character`. Each one moves the parser
+/// in a different way. `ESC` and `[` are in the list twice, so that more
+/// sequences start.
+const WALK: [char; 22] = [
+    '\x1b', '\x1b', '[', '[', ']', 'P', '_', '?', '1', ';', ' ', 'h', 'q', '\\', '\x18',
+    '\x1a', '\x07', '\r', '\x7f', 'é', '\u{9c}', 'x',
+];
+
+#[test]
+fn is_settled_agrees_with_vte_after_each_character() {
+    let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+    let count = u64::try_from(WALK.len()).unwrap();
+    for cloned in [false, true] {
+        for _ in 0..400 {
+            let mut state = TerminalState::new(20, 12, TerminalTheme::auto());
+            let mut text = String::new();
+            for _ in 0..40 {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let ch = WALK[usize::try_from(seed % count).unwrap()];
+                text.push(ch);
+                if cloned {
+                    state = state.clone();
+                }
+                state.process_output(ch.encode_utf8(&mut [0; 4])).unwrap();
+                assert_eq!(
+                    state.is_settled(),
+                    vte_is_in_ground(&text),
+                    "{text:?}, cloned {cloned}"
+                );
+            }
+        }
+    }
+}

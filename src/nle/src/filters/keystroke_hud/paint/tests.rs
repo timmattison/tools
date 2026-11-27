@@ -514,3 +514,17 @@ fn a_finish_inside_an_unfinished_sequence_of_the_program_opens_it_again() {
     rig.feed("l");
     rig.assert_viewer_is_reference();
 }
+
+#[test]
+fn a_paint_after_a_canceled_or_ignored_sequence_takes_the_box_away() {
+    let screen = size(20, 8);
+    for sequence in ["\x1b[1\x18", "\x1b]0;ti\x1a", "\x1b[1;?h"] {
+        let mut rig = Rig::new(screen, &TerminalTheme::auto());
+        let overlay = box_of(screen, Position::TopRight, "ls");
+        rig.feed("ab");
+        assert!(rig.paint(Some(&overlay)).is_some());
+        rig.feed(sequence);
+        assert!(rig.paint(None).is_some(), "{sequence:?}");
+        rig.assert_viewer_is_reference();
+    }
+}
