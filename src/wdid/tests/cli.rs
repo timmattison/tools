@@ -892,6 +892,12 @@ fn the_help_texts_name_defs_and_the_flags_of_defs() {
         text.contains("each finding"),
         "the help of --all says that it shows each finding: {text}"
     );
+    let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        words.contains("one or more of my definitions or one of my places"),
+        "the help of --all gives the rule of Finding::mine: a place of mine \
+         also makes a finding mine: {text}"
+    );
     assert!(
         text.contains("ZSH_CUSTOM"),
         "the help of --all names each place that Places::is_mine calls mine: {text}"
