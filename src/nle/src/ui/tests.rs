@@ -969,13 +969,13 @@ fn edited_row(text: &str) -> String {
     metadata_row("Edited duration", text, None)
 }
 
-/// Opens the fixture recording through the fakes, and notes the five click
+/// Opens the fixture recording through the fakes, and notes the click
 /// listeners that the open render creates (`Window::note_open_buttons`).
 async fn open_recording() -> Window {
     open_loaded(fixture()).await
 }
 
-/// Opens `loaded` through the fakes, and notes the five click listeners as
+/// Opens `loaded` through the fakes, and notes the click listeners as
 /// `open_recording` does.
 async fn open_loaded(loaded: LoadedRecording) -> Window {
     let fakes = Fakes::new().pick(picked()).load(Answer::Ready(Ok(loaded)));
