@@ -122,6 +122,10 @@ const MAX_SETTLE_ROUNDS: usize = 50;
 const SETTLE_ROUND_TIMEOUT: Duration = Duration::from_millis(100);
 /// The text of the Open Recording button.
 const OPEN_LABEL: &str = "Open Recording";
+/// The markup before the label of the first transport button.
+const TRANSPORT_START: &str = "class=\"transport\">";
+/// The markup before the text of the time readout.
+const READOUT_START: &str = "class=\"preview-time\">";
 /// The path that the fake dialog picks.
 const PICKED_PATH: &str = "/tmp/demo.json";
 
@@ -220,6 +224,17 @@ impl Fakes {
     }
 }
 
+/// The text of `page` after the first `start` and before the next `end`.
+fn text_between(page: &str, start: &str, end: &str) -> String {
+    let (_, after) = page
+        .split_once(start)
+        .unwrap_or_else(|| panic!("no {start} in {page}"));
+    let (text, _) = after
+        .split_once(end)
+        .unwrap_or_else(|| panic!("no {end} after {start} in {page}"));
+    text.to_owned()
+}
+
 /// A window of the app that a test drives: it renders, it clicks, and it
 /// reads the page as text.
 struct Window {
@@ -234,6 +249,10 @@ struct Window {
     inputs: Vec<ElementId>,
     /// The Apply Speed button, when a test noted it.
     apply: Option<ElementId>,
+    /// The Play and Pause button, when a test noted it.
+    play: Option<ElementId>,
+    /// The Stop button, when a test noted it.
+    stop: Option<ElementId>,
 }
 
 impl Window {
@@ -252,6 +271,8 @@ impl Window {
             first_render: Vec::new(),
             inputs: Vec::new(),
             apply: None,
+            play: None,
+            stop: None,
         };
         window.note_listeners(&edits);
         window.first_render = window.clicks.clone();
@@ -344,6 +365,26 @@ impl Window {
     /// The Apply Speed button. `open_recording` noted it.
     fn apply_button(&self) -> ElementId {
         self.apply.expect("a window with an open recording")
+    }
+
+    /// The Play and Pause button. `open_recording` noted it.
+    fn play_button(&self) -> ElementId {
+        self.play.expect("a window with an open recording")
+    }
+
+    /// The Stop button. `open_recording` noted it.
+    fn stop_button(&self) -> ElementId {
+        self.stop.expect("a window with an open recording")
+    }
+
+    /// The label of the Play and Pause button, read from the page.
+    fn play_label(&self) -> String {
+        text_between(&self.html(), TRANSPORT_START, "</button>")
+    }
+
+    /// The time readout of the preview toolbar, read from the page.
+    fn readout(&self) -> String {
+        text_between(&self.html(), READOUT_START, "</span>")
     }
 
     /// The Remove button of the row that the newest render added.
@@ -1015,4 +1056,26 @@ async fn a_playhead_past_the_end_stops_at_the_end() {
     assert!(page.contains(&x_run(42)), "{page}");
     window.type_into(control, "-1");
     assert!(window.html().contains("value=\"65.3\""));
+}
+
+/// The readout of the fixture at time zero.
+const READOUT_AT_ZERO: &str = "0m 0.0s / 1m 5.3s";
+
+#[tokio::test]
+async fn the_toolbar_shows_the_time_and_stop_returns_to_the_start() {
+    let mut window = open_recording().await;
+    let page = window.html();
+    assert!(page.contains(">Play</button>"), "{page}");
+    assert!(page.contains(">Stop</button>"), "{page}");
+    assert_eq!(window.readout(), READOUT_AT_ZERO);
+
+    let control = window.playhead_control();
+    window.type_into(control, "1.0");
+    assert_eq!(window.readout(), "0m 1.0s / 1m 5.3s");
+
+    window.click(window.stop_button());
+    assert_eq!(window.readout(), READOUT_AT_ZERO);
+    let page = window.html();
+    assert!(page.contains(&x_run(1)), "{page}");
+    assert!(!page.contains(&x_run(2)), "{page}");
 }
