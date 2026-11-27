@@ -73,6 +73,11 @@ const ALIAS_PLACE_LABEL: &str = "ALIAS_PLACE";
 /// defined a suffix alias. The suffix follows this text.
 const SUFFIX_PLACE_LABEL: &str = "SUFFIX_PLACE";
 
+/// The text that follows the marker on the line that starts the program of a
+/// name. The name follows this text, and the path of the program is the next
+/// line.
+const PROGRAM_LABEL: &str = "PROGRAM";
+
 /// The text that follows the marker on the line that gives the origin of the
 /// alias or the function that the line before it names. The origin follows
 /// this text: `file:line` for an alias, the file for a function, or nothing
@@ -154,6 +159,14 @@ pub(crate) const ALIAS_PLACES_ARRAY: &str = "__wdid_alias_places";
 /// `file:line` of each definition of a suffix alias, as pairs, in the order of
 /// the definitions.
 pub(crate) const SUFFIX_PLACES_ARRAY: &str = "__wdid_suffix_places";
+
+/// The loop variable of the loops of the scripts that print the programs of
+/// the names.
+const PROGRAM_VARIABLE: &str = "__wdid_program";
+
+/// The variable of the bash script that holds the names of the builtins, one
+/// on each line, with a newline at each end.
+const BASH_BUILTINS_VARIABLE: &str = "__wdid_builtins";
 
 /// The first loop variable of the loops of the zsh script that print the
 /// places of the aliases: the name or the suffix.
@@ -317,6 +330,13 @@ impl Marker {
 /// recorded, each place that defined each alias (a name that two files define
 /// has two places), and the oh-my-zsh directories. Bash keeps no origin and no
 /// place for an alias.
+///
+/// Each script ends with the program of each name of an alias and of a
+/// function: the file on the search path of the shell (`commands` in zsh,
+/// `type -P` in bash). A name that is a builtin gets no program, because the
+/// builtin already hides it. zsh runs `hash -f` first, so its command table is
+/// full also when `HASH_LIST_ALL` is off. bash 3.2 has no associative array,
+/// thus the bash script searches a list of the builtins.
 /// Each script also gives the code that the shell runs without a typed name.
 /// The zsh script gives its hooks, its trap functions, its handler of a
 /// command that it does not find, its widgets and their keys, and the widgets
@@ -352,6 +372,13 @@ pub fn script(kind: ShellKind, marker: &Marker) -> String {
              \x20 print -r -- \"{marker} {ORIGIN_LABEL} ${{functions_source[${LOOP_VARIABLE}]-}}\"\n\
              \x20 print -r -- \"${{functions[${LOOP_VARIABLE}]}}\"\n\
              done\n\
+             hash -f 2>/dev/null || :\n\
+             for {PROGRAM_VARIABLE} in \"${{(@k)aliases}}\" \"${{(@k)galiases}}\" \"${{(@k)functions}}\"; do\n\
+             \x20 if (( ${{+commands[${PROGRAM_VARIABLE}]}} && ! ${{+builtins[${PROGRAM_VARIABLE}]}} )); then\n\
+             \x20   print -r -- \"{marker} {PROGRAM_LABEL} ${PROGRAM_VARIABLE}\"\n\
+             \x20   print -r -- \"${{commands[${PROGRAM_VARIABLE}]}}\"\n\
+             \x20 fi\n\
+             done\n\
              print -r -- '{marker} {END_LABEL}'\n",
             alias_origins = zsh_origin_loop(marker, ALIAS_ORIGINS_TABLE, ALIAS_ORIGIN_LABEL),
             suffix_origins = zsh_origin_loop(marker, SUFFIX_ORIGINS_TABLE, SUFFIX_ORIGIN_LABEL),
@@ -379,6 +406,12 @@ pub fn script(kind: ShellKind, marker: &Marker) -> String {
              \x20 {BASH_ORIGIN_VARIABLE}=${{{BASH_ORIGIN_VARIABLE}#\"${LOOP_VARIABLE}\" }}\n\
              \x20 printf '%s\\n' \"{marker} {ORIGIN_LABEL} ${{{BASH_ORIGIN_VARIABLE}#* }}\"\n\
              \x20 declare -f -- \"${LOOP_VARIABLE}\" | tail -n +2\n\
+             done\n\
+             {BASH_BUILTINS_VARIABLE}=$'\\n'\"$(compgen -b)\"$'\\n'\n\
+             for {PROGRAM_VARIABLE} in $(compgen -a) $(compgen -A function); do\n\
+             \x20 case ${BASH_BUILTINS_VARIABLE} in *$'\\n'\"${PROGRAM_VARIABLE}\"$'\\n'*) continue ;; esac\n\
+             \x20 printf '%s\\n' \"{marker} {PROGRAM_LABEL} ${PROGRAM_VARIABLE}\"\n\
+             \x20 type -P -- \"${PROGRAM_VARIABLE}\" 2>/dev/null || :\n\
              done\n\
              printf '%s\\n' '{marker} {END_LABEL}'\n"
         ),
@@ -592,6 +625,9 @@ enum Record<'a> {
     AliasPlace(&'a str),
     /// The start of one place that defined a suffix alias, with its suffix.
     SuffixPlace(&'a str),
+    /// The start of the program of a name, with the name. The line after it
+    /// is the path.
+    Program(&'a str),
     /// The origin of the definition that the record before it started.
     Origin(&'a str),
     /// The home directory.
@@ -648,6 +684,7 @@ fn record<'a>(line: &'a str, marker: &str) -> Option<Record<'a>> {
         SUFFIX_ORIGIN_LABEL => Some(Record::SuffixOrigin(value)),
         ALIAS_PLACE_LABEL => Some(Record::AliasPlace(value)),
         SUFFIX_PLACE_LABEL => Some(Record::SuffixPlace(value)),
+        PROGRAM_LABEL => Some(Record::Program(value)),
         ORIGIN_LABEL => Some(Record::Origin(value)),
         HOME_LABEL => Some(Record::Home(value)),
         ZSH_LABEL => Some(Record::Zsh(value)),
@@ -661,6 +698,14 @@ fn record<'a>(line: &'a str, marker: &str) -> Option<Record<'a>> {
 enum Section<'a> {
     /// The alias listing, before the first start record.
     Aliases,
+    /// The program of a name, and its path line when the shell gave one. Only
+    /// the first line after the record counts.
+    Program {
+        /// The name that the program hides.
+        name: &'a str,
+        /// The first line after the record, once it came.
+        path: Option<&'a str>,
+    },
     /// One place that defined an alias. `suffix` is true for a suffix alias.
     AliasPlace {
         /// The name of a regular or a global alias, or the suffix of a suffix
@@ -715,6 +760,9 @@ impl<'a> Section<'a> {
         match self {
             Self::Aliases => read_alias_line(line, definitions),
             Self::AliasOrigin { .. } | Self::AliasPlace { .. } => {}
+            Self::Program { path, .. } => {
+                path.get_or_insert(line);
+            }
             Self::Widgets => definitions.starts.read_widget_line(line),
             Self::Keys => definitions.starts.read_key_line(line),
             Self::KeyCommands => definitions.starts.read_key_command_line(line),
@@ -728,6 +776,7 @@ impl<'a> Section<'a> {
     fn set_origin(&self, text: &str, definitions: &mut Definitions) {
         match self {
             Self::Aliases
+            | Self::Program { .. }
             | Self::Widgets
             | Self::Keys
             | Self::Traps { .. }
@@ -773,7 +822,16 @@ impl<'a> Section<'a> {
             Self::PromptCommand { lines } => definitions
                 .starts
                 .add_code(Trigger::PromptCommand, &lines.join("\n")),
+            Self::Program {
+                name,
+                path: Some(path),
+            } => {
+                if let Some(path) = place(path) {
+                    definitions.programs.insert(name.to_owned(), path);
+                }
+            }
             Self::Aliases
+            | Self::Program { path: None, .. }
             | Self::AliasOrigin { .. }
             | Self::AliasPlace { .. }
             | Self::Widgets
@@ -862,6 +920,7 @@ pub fn parse_output(stdout: &str, marker: &Marker) -> Result<Definitions, ShellE
                 }
                 continue;
             }
+            Record::Program(name) => Section::Program { name, path: None },
             Record::Widgets => Section::Widgets,
             Record::Keymap => Section::Keys,
             Record::Traps => Section::Traps { lines: Vec::new() },
