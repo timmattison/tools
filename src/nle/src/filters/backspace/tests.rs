@@ -173,6 +173,8 @@ fn a_backspace_that_does_not_restore_the_screen_stays_with_its_typed_key() {
 
 #[test]
 fn a_key_between_the_typo_and_the_backspace_keeps_both() {
+    // The echo of the right arrow is `CSI 1 C`. The emulator reads a `CSI C`
+    // with no number as a move of zero columns.
     let events = vec![
         out(0.0, "$ "),
         input(1.0, "a"),
@@ -180,7 +182,7 @@ fn a_key_between_the_typo_and_the_backspace_keeps_both() {
         input(1.25, "\x1b[D"),
         out(1.25, "\x08"),
         input(1.5, "\x1b[C"),
-        out(1.5, "\x1b[C"),
+        out(1.5, "\x1b[1C"),
         input(1.75, "\x7f"),
         out(1.75, "\x08 \x08"),
     ];
