@@ -228,7 +228,9 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
       `-p/--port`. Binds `127.0.0.1` by default — use `--bind 0.0.0.0` to expose it on the LAN. Answers HTTP
       byte-range requests, so a served `<video>`/`<audio>` file seeks instead of re-downloading from the start.
     - `sirn` does not try `<path>.html` when `<path>` does not exist, thus a static Next.js export (the `out`
-      directory of `output: 'export'`) needs a server that does, for example `pnpm dlx serve out`.
+      directory of `output: 'export'`) needs a server that does, for example
+      `pnpm dlx serve out --listen tcp://127.0.0.1:3000`. Without `--listen`, `serve` binds every interface and puts
+      the export on the LAN.
     - To install: `cargo install --git https://github.com/timmattison/tools sirn`
 - uuidplz
     - Generates UUIDs. With no input it prints a random v4 UUID. Given a string or a file it seeds a name-based
