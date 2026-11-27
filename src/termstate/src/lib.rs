@@ -1509,7 +1509,8 @@ impl TerminalState {
         }
 
         // Each cursor move and each edit ends a pending wrap. SGR, save
-        // cursor, scroll, and the device attributes request do not.
+        // cursor, scroll, and the device attributes request do not. DECSTBM
+        // ends it only when it moves the cursor home, in its own arm.
         if matches!(
             action,
             'H' | 'f'
@@ -1529,7 +1530,6 @@ impl TerminalState {
                 | '@'
                 | 'L'
                 | 'M'
-                | 'r'
                 | 'u'
         ) {
             self.wrap_pending = false;
@@ -1690,9 +1690,11 @@ impl TerminalState {
                     self.scroll_top = top - 1; // Convert to 0-based
                     self.scroll_bottom = bottom - 1;
 
-                    // DECSTBM also moves cursor to home position
+                    // DECSTBM also moves cursor to home position, thus it ends
+                    // a pending wrap. An ignored DECSTBM keeps it, as in xterm.
                     self.cursor_x = 0;
                     self.cursor_y = 0;
+                    self.wrap_pending = false;
                 }
             }
             'c' => {
