@@ -30,7 +30,7 @@ pub(super) fn find(definitions: &Definitions, names: &Names<'_>) -> Found {
     }
     for (widget, function) in &starts.widgets {
         let triggers = widget_triggers(starts, widget);
-        if triggers.is_empty() {
+        if triggers.is_empty() && names.functions.contains(function.as_str()) {
             finder.add(function, Kind::Function, Reason::WidgetWithoutKey);
         }
         for trigger in &triggers {
