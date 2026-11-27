@@ -107,9 +107,10 @@ fn panels_root() -> Element {
     let playhead = use_signal(|| Seconds::ZERO);
     let playing = use_signal(|| false);
     let rendered = use_memo(move || preview::render_of(&loaded.read()));
+    let view = use_signal(View::default);
     rsx! {
         PreviewPane { rendered, playhead, playing }
-        Timeline { loaded, rendered, playhead }
+        Timeline { loaded, rendered, playhead, view }
         PropertiesPanel { loaded, on_result: |_| {} }
     }
 }
@@ -175,6 +176,10 @@ const MAX_SETTLE_ROUNDS: usize = 50;
 const SETTLE_ROUND_TIMEOUT: Duration = Duration::from_millis(100);
 /// The text of the Open Recording button.
 const OPEN_LABEL: &str = "Open Recording";
+/// The text of the Undo button.
+const UNDO_TEXT: &str = "Undo";
+/// The text of the Redo button.
+const REDO_TEXT: &str = "Redo";
 /// The markup before the label of the first transport button.
 const TRANSPORT_START: &str = "class=\"transport\">";
 /// The markup before the text of the time readout.
@@ -310,6 +315,8 @@ struct Window {
     play: Option<ElementId>,
     /// The Stop button, when a test noted it.
     stop: Option<ElementId>,
+    /// The Zoom in button of the timeline, when a test noted it.
+    zoom_in: Option<ElementId>,
 }
 
 impl Window {
@@ -332,6 +339,7 @@ impl Window {
             redact: None,
             play: None,
             stop: None,
+            zoom_in: None,
         };
         window.note_listeners(&edits);
         window.first_render = window.clicks.clone();
@@ -369,10 +377,29 @@ impl Window {
         self.note_listeners(&edits);
     }
 
-    /// The Open Recording button. It is the one click listener of the first render.
+    /// The button of the menu bar at `position`. The first render creates the
+    /// click listeners of the menu bar in this order: Open Recording, Undo,
+    /// Redo.
+    fn menu_button(&self, position: usize, name: &str) -> ElementId {
+        self.first_render
+            .get(position)
+            .copied()
+            .unwrap_or_else(|| panic!("no {name} button in {:?}", self.first_render))
+    }
+
+    /// The Open Recording button. It is the first click listener of the first render.
     fn open_button(&self) -> ElementId {
-        assert_eq!(self.first_render.len(), 1, "{:?}", self.first_render);
-        self.first_render[0]
+        self.menu_button(0, OPEN_LABEL)
+    }
+
+    /// The Undo button. It is the second click listener of the first render.
+    fn undo_button(&self) -> ElementId {
+        self.menu_button(1, UNDO_TEXT)
+    }
+
+    /// The Redo button. It is the third click listener of the first render.
+    fn redo_button(&self) -> ElementId {
+        self.menu_button(2, REDO_TEXT)
     }
 
     /// The Dismiss button. It is the one click listener of the render that showed the banner.
@@ -402,6 +429,27 @@ impl Window {
         let event = dioxus::prelude::Event::new(data as Rc<dyn Any>, true);
         self.dom.runtime().handle_event("input", event, id);
         self.render();
+    }
+
+    /// Sends a key down of `press` to the element, as if the user pressed the
+    /// key while the element had the focus, and renders. The answer is true
+    /// when a handler prevented the default action of the key.
+    fn press(&mut self, id: ElementId, press: &Press) -> bool {
+        let data = SerializedKeyboardData::new(
+            Key::Character(press.text.to_owned()),
+            press.code,
+            Location::Standard,
+            false,
+            press.modifiers,
+            false,
+        );
+        let data = Rc::new(PlatformEventData::new(Box::new(data)));
+        let event = dioxus::prelude::Event::new(data as Rc<dyn Any>, true);
+        self.dom
+            .runtime()
+            .handle_event("keydown", event.clone(), id);
+        self.render();
+        !event.default_action_enabled()
     }
 
     /// Sends the value to the select element, as if the user chose it, and renders.
@@ -476,18 +524,19 @@ impl Window {
         self.click(self.redact_button());
     }
 
-    /// Notes the four click listeners that the render of an open recording
+    /// Notes the seven click listeners that the render of an open recording
     /// created. The render creates them in this order: Apply Speed, Apply
-    /// Redaction, Play, Stop. The properties panel mounts before the preview
-    /// toolbar, as it does for the input listeners, the speed panel comes
-    /// before the redaction panel, and the Play button comes before the Stop
-    /// button.
+    /// Redaction, the Zoom out, Zoom in, and Fit buttons of the timeline,
+    /// Play, Stop. The properties panel mounts before the timeline, and the
+    /// timeline before the preview toolbar. The speed panel comes before the
+    /// redaction panel, and the Play button comes before the Stop button.
     fn note_open_buttons(&mut self) {
-        let [apply, redact, play, stop] = self.newest[..] else {
+        let [apply, redact, _, zoom_in, _, play, stop] = self.newest[..] else {
             panic!("the open render made {:?}", self.newest)
         };
         self.apply = Some(apply);
         self.redact = Some(redact);
+        self.zoom_in = Some(zoom_in);
         self.play = Some(play);
         self.stop = Some(stop);
     }
@@ -505,6 +554,17 @@ impl Window {
     /// The Stop button. `open_recording` noted it.
     fn stop_button(&self) -> ElementId {
         self.stop.expect("a window with an open recording")
+    }
+
+    /// The Zoom in button of the timeline. `open_recording` noted it.
+    fn zoom_in_button(&self) -> ElementId {
+        self.zoom_in.expect("a window with an open recording")
+    }
+
+    /// The style of the first clip block of the timeline: its place and its
+    /// width, which show the zoom and the scroll.
+    fn clip_style(&self) -> String {
+        text_between(&self.html(), "class=\"timeline-clip\" style=\"", "\"")
     }
 
     /// The label of the Play and Pause button, read from the page.
@@ -553,12 +613,22 @@ impl Window {
 
     /// Whether the start tag of the Open Recording button holds `disabled`.
     fn open_is_disabled(&self) -> bool {
+        self.button_is_disabled(OPEN_LABEL)
+    }
+
+    /// Whether the start tag of the button with the text `label` holds `disabled`.
+    fn button_is_disabled(&self, label: &str) -> bool {
         let page = self.html();
         let (before, _) = page
-            .split_once(&format!(">{OPEN_LABEL}</button>"))
-            .unwrap_or_else(|| panic!("no Open Recording button in {page}"));
+            .split_once(&format!(">{label}</button>"))
+            .unwrap_or_else(|| panic!("no {label} button in {page}"));
         let (_, tag) = before.rsplit_once("<button").expect("a button start tag");
         tag.split([' ', '>', '=']).any(|word| word == "disabled")
+    }
+
+    /// Whether the Undo button and the Redo button are disabled, in this order.
+    fn history_disabled(&self) -> [bool; 2] {
+        [UNDO_TEXT, REDO_TEXT].map(|label| self.button_is_disabled(label))
     }
 
     /// Whether the start tag of the input after the text `label` holds `disabled`.
@@ -648,7 +718,8 @@ fn properties_show_the_file_name_of_a_windows_path() {
 fn timeline_shows_the_event_count_and_the_duration() {
     let page = render_panels(fixture());
     assert!(page.contains("42 events"), "{page}");
-    assert!(page.contains("Timeline editor"), "{page}");
+    assert!(page.contains("class=\"timeline-clip\""), "{page}");
+    assert!(!page.contains("coming in #150"), "{page}");
 }
 
 #[test]
@@ -700,7 +771,8 @@ async fn app_with_no_recording_has_an_enabled_open_button_and_no_dialog() {
     let fakes = Fakes::new();
     let window = Window::open(&fakes);
     assert!(!window.open_is_disabled(), "{}", window.html());
-    assert_eq!(window.first_render.len(), 1);
+    // Open Recording, Undo, and Redo.
+    assert_eq!(window.first_render.len(), 3);
     assert_eq!((fakes.picks(), fakes.loads().len()), (0, 0));
 }
 
@@ -1382,6 +1454,26 @@ async fn a_new_recording_starts_at_time_zero() {
 }
 
 #[tokio::test]
+async fn a_new_recording_opens_with_the_whole_timeline() {
+    let fakes = Fakes::new()
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())))
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())));
+    let mut window = Window::open(&fakes);
+    window.click(window.open_button());
+    window.settle().await;
+    window.note_open_buttons();
+    let whole = window.clip_style();
+    window.click(window.zoom_in_button());
+    assert_ne!(window.clip_style(), whole);
+
+    window.click(window.open_button());
+    window.settle().await;
+    assert_eq!(window.clip_style(), whole);
+}
+
+#[tokio::test]
 async fn a_playhead_past_the_end_stops_at_the_end() {
     let mut window = open_recording().await;
     let control = window.playhead_control();
@@ -1592,6 +1684,134 @@ fn rule_body(selector: &str) -> String {
     text_between(STYLE, &format!("{selector} {{"), "}")
 }
 
+/// The selectors of the rules of the style sheet, in source order.
+fn style_selectors() -> Vec<&'static str> {
+    STYLE
+        .split('}')
+        .filter_map(|rule| rule.split_once('{'))
+        .map(|(selector, _)| selector.trim())
+        .collect()
+}
+
+/// The specificity of a CSS selector (Selectors Level 4, section 17). The
+/// fields are in the order of the comparison: a field counts only when each
+/// field before it is equal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct Specificity {
+    /// The id selectors.
+    ids: u32,
+    /// The class selectors and the pseudo-classes.
+    classes: u32,
+    /// The type selectors.
+    types: u32,
+}
+
+impl Specificity {
+    /// The specificity of `selector`. `:where()` adds nothing, and `:not()`
+    /// and `:is()` add the specificity of their argument. A form that this
+    /// function does not know fails the test, so that no count is wrong in
+    /// silence.
+    fn of(selector: &str) -> Self {
+        /// The name at the start of `text`, and the text after it.
+        fn split_name(text: &str) -> (&str, &str) {
+            let end = text
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+                .unwrap_or(text.len());
+            text.split_at(end)
+        }
+
+        /// The argument at the start of `text`, which starts after a `(`, and
+        /// the text after the `)` that closes it.
+        fn split_argument(text: &str) -> Option<(&str, &str)> {
+            let mut depth = 0_u32;
+            for (index, character) in text.char_indices() {
+                match character {
+                    '(' => depth += 1,
+                    ')' if depth == 0 => {
+                        let (argument, closed) = text.split_at(index);
+                        return Some((argument, closed.strip_prefix(')')?));
+                    }
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+            }
+            None
+        }
+
+        let mut counts = Self::default();
+        let mut rest = selector.trim();
+        while let Some(next) = rest.chars().next() {
+            rest = if let Some(after) = rest.strip_prefix('#') {
+                counts.ids += 1;
+                split_name(after).1
+            } else if let Some(after) = rest.strip_prefix('.') {
+                counts.classes += 1;
+                split_name(after).1
+            } else if let Some(after) = rest.strip_prefix(':') {
+                let (name, after) = split_name(after);
+                match after.strip_prefix('(') {
+                    None => {
+                        counts.classes += 1;
+                        after
+                    }
+                    Some(inner) => {
+                        let (argument, after) = split_argument(inner)
+                            .unwrap_or_else(|| panic!("no ) after :{name}( in {selector}"));
+                        let added = match name {
+                            "where" => Self::default(),
+                            "not" | "is" => Self::of(argument),
+                            _ => panic!("no rule for :{name}() in {selector}"),
+                        };
+                        counts.ids += added.ids;
+                        counts.classes += added.classes;
+                        counts.types += added.types;
+                        after
+                    }
+                }
+            } else if let Some(after) = rest.strip_prefix([' ', '>', '+', '~', '*']) {
+                after
+            } else if next.is_ascii_alphabetic() {
+                counts.types += 1;
+                split_name(rest).1
+            } else {
+                panic!("no rule for {rest:?} in {selector:?}")
+            };
+        }
+        counts
+    }
+}
+
+/// The hover rule of every button must lose to the hover rule of the Dismiss
+/// button of the error banner. Else the dark text of that button stands on the
+/// dark hover color of the other buttons, on a pink banner.
+#[test]
+fn the_dismiss_button_keeps_its_own_hover_color() {
+    let selectors = style_selectors();
+    // The cascade takes the rule of the higher specificity, and of two equal
+    // specificities, the rule that comes later.
+    let rank = |selector: &str| {
+        let position = selectors
+            .iter()
+            .position(|candidate| *candidate == selector)
+            .unwrap_or_else(|| panic!("no rule {selector} in {STYLE}"));
+        (Specificity::of(selector), position)
+    };
+    let dismiss = rank(".error-dismiss:hover");
+    let every_button: Vec<&str> = selectors
+        .iter()
+        .copied()
+        .filter(|selector| selector.starts_with("button:hover"))
+        .collect();
+    assert!(!every_button.is_empty(), "no button:hover rule in {STYLE}");
+    for selector in every_button {
+        assert!(
+            dismiss > rank(selector),
+            "{selector} {:?} beats .error-dismiss:hover {dismiss:?}",
+            rank(selector)
+        );
+    }
+}
+
 #[test]
 fn the_style_sheet_fits_the_grid_to_the_pane() {
     let pane = rule_body(".preview-screen");
@@ -1609,4 +1829,329 @@ fn the_style_sheet_fits_the_grid_to_the_pane() {
              calc(100cqh / (var(--rows) * {line_height})))"
         )
     );
+}
+
+// The Undo and Redo buttons of the menu bar.
+
+/// The page markup of a run of `count` asterisks: the run ends at the cursor.
+fn asterisk_run(count: usize) -> String {
+    format!(">{}</span>", "*".repeat(count))
+}
+
+/// The row of the speed change from 0 s to 10 s at twice the speed.
+fn first_ten_seconds_row() -> String {
+    speed_row("0 s to 10 s", "2")
+}
+
+/// Opens the fixture with the playhead at one second, and doubles the speed of
+/// the first ten seconds. The preview then shows 21 events, not 11.
+async fn open_with_a_speed_change() -> Window {
+    let mut window = open_recording().await;
+    window.type_into(window.playhead_control(), "1.0");
+    window.apply_speed("0", "10", "2");
+    window
+}
+
+/// Asserts that the window shows the project with the speed change of
+/// `open_with_a_speed_change`: its row, its preview, its edited duration, and
+/// the end of its timeline.
+fn assert_sped_up(window: &Window) {
+    let page = window.html();
+    assert!(page.contains(&first_ten_seconds_row()), "{page}");
+    assert!(page.contains(&x_run(21)), "{page}");
+    assert!(!page.contains(&x_run(22)), "{page}");
+    assert!(page.contains(&edited_row("1m 0.3s")), "{page}");
+    assert!(!page.contains("max=\"65.3\""), "{page}");
+}
+
+/// Asserts that the window shows the project with no speed change.
+fn assert_original_speed(window: &Window) {
+    let page = window.html();
+    assert!(!page.contains(&first_ten_seconds_row()), "{page}");
+    assert!(page.contains(&x_run(11)), "{page}");
+    assert!(!page.contains(&x_run(12)), "{page}");
+    assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
+    assert!(page.contains("max=\"65.3\""), "{page}");
+}
+
+#[test]
+fn undo_and_redo_are_disabled_with_no_recording() {
+    let window = Window::open(&Fakes::new());
+    assert_eq!(window.history_disabled(), [true, true], "{}", window.html());
+}
+
+#[tokio::test]
+async fn undo_and_redo_are_enabled_only_when_the_editor_has_a_step() {
+    let mut window = open_recording().await;
+    assert_eq!(window.history_disabled(), [true, true], "{}", window.html());
+
+    window.apply_speed("10", "20", "2");
+    assert_eq!(
+        window.history_disabled(),
+        [false, true],
+        "{}",
+        window.html()
+    );
+
+    window.click(window.undo_button());
+    assert_eq!(
+        window.history_disabled(),
+        [true, false],
+        "{}",
+        window.html()
+    );
+
+    window.click(window.redo_button());
+    assert_eq!(
+        window.history_disabled(),
+        [false, true],
+        "{}",
+        window.html()
+    );
+}
+
+#[tokio::test]
+async fn undo_and_redo_of_a_speed_change_update_the_preview_the_timeline_and_the_row() {
+    let mut window = open_with_a_speed_change().await;
+    assert_sped_up(&window);
+
+    window.click(window.undo_button());
+    assert_original_speed(&window);
+
+    window.click(window.redo_button());
+    assert_sped_up(&window);
+}
+
+#[tokio::test]
+async fn undo_and_redo_of_a_redaction_update_the_preview_and_the_row() {
+    let mut window = open_recording().await;
+    window.type_into(window.playhead_control(), "1.0");
+    window.apply_redaction("text", "x", "asterisks", "", "output");
+    let row = redaction_row("text \u{201c}x\u{201d} \u{2192} asterisks (output)");
+    let assert_redacted = |window: &Window| {
+        let page = window.html();
+        assert!(page.contains(&row), "{page}");
+        assert!(page.contains(&asterisk_run(11)), "{page}");
+        assert!(!page.contains(&x_run(11)), "{page}");
+    };
+    assert_redacted(&window);
+
+    window.click(window.undo_button());
+    let page = window.html();
+    assert!(!page.contains(&row), "{page}");
+    assert!(page.contains(&x_run(11)), "{page}");
+    assert!(!page.contains(&asterisk_run(11)), "{page}");
+
+    window.click(window.redo_button());
+    assert_redacted(&window);
+}
+
+#[tokio::test]
+async fn undo_and_redo_of_a_removed_row_put_it_back_and_take_it_away() {
+    let mut window = open_with_a_speed_change().await;
+    window.click(window.remove_button());
+    assert_original_speed(&window);
+
+    window.click(window.undo_button());
+    assert_sped_up(&window);
+    assert_eq!(
+        window.history_disabled(),
+        [false, false],
+        "{}",
+        window.html()
+    );
+
+    window.click(window.redo_button());
+    assert_original_speed(&window);
+}
+
+#[tokio::test]
+async fn an_undo_removes_the_banner_of_a_failed_edit() {
+    let mut window = open_with_a_speed_change().await;
+    window.apply_speed("10", "5", "2");
+    assert!(
+        window.html().contains("role=\"alert\""),
+        "{}",
+        window.html()
+    );
+
+    window.click(window.undo_button());
+
+    assert!(
+        !window.html().contains("role=\"alert\""),
+        "{}",
+        window.html()
+    );
+    assert_original_speed(&window);
+}
+
+// The keys of Undo and Redo, and the tooltips that name them.
+
+/// One key press: the value of the key, its place on the keyboard, and the
+/// modifiers that are down.
+struct Press {
+    text: &'static str,
+    code: Code,
+    modifiers: Modifiers,
+}
+
+/// The modifier of the shortcuts on the platform of the test.
+const HOST_MODIFIER: Modifiers = if cfg!(target_os = "macos") {
+    Modifiers::META
+} else {
+    Modifiers::CONTROL
+};
+
+/// The modifier of the shortcuts on the other platforms.
+const OTHER_MODIFIER: Modifiers = if cfg!(target_os = "macos") {
+    Modifiers::CONTROL
+} else {
+    Modifiers::META
+};
+
+/// The tooltip of the Undo button on the platform of the test.
+const UNDO_TOOLTIP: &str = if cfg!(target_os = "macos") {
+    "Undo (\u{2318}Z)"
+} else {
+    "Undo (Ctrl+Z)"
+};
+
+/// The tooltip of the Redo button on the platform of the test.
+const REDO_TOOLTIP: &str = if cfg!(target_os = "macos") {
+    "Redo (\u{21e7}\u{2318}Z)"
+} else {
+    "Redo (Ctrl+Shift+Z)"
+};
+
+/// Cmd+Z on macOS, and Ctrl+Z on the other platforms.
+const UNDO_KEYS: Press = Press {
+    text: "z",
+    code: Code::KeyZ,
+    modifiers: HOST_MODIFIER,
+};
+
+/// Cmd+Shift+Z on macOS, and Ctrl+Shift+Z on the other platforms.
+const REDO_KEYS: Press = Press {
+    text: "Z",
+    code: Code::KeyZ,
+    modifiers: HOST_MODIFIER.union(Modifiers::SHIFT),
+};
+
+impl Window {
+    /// The Start, End, and Speed fields of the speed panel, and the Pattern and
+    /// Replacement text fields of the redaction panel.
+    fn text_fields(&self) -> [ElementId; 5] {
+        let [start, end, speed] = self.speed_fields();
+        let [_, pattern, _, replacement, _] = self.redaction_fields();
+        [start, end, speed, pattern, replacement]
+    }
+
+    /// Elements that have the focus in turn and are not text fields: the
+    /// Apply Speed button, the Find menu, the playhead control, and the theme
+    /// menu.
+    fn other_controls(&self) -> [ElementId; 4] {
+        let [find, ..] = self.redaction_fields();
+        [
+            self.apply_button(),
+            find,
+            self.playhead_control(),
+            self.theme_menu(),
+        ]
+    }
+}
+
+#[tokio::test]
+async fn the_keys_undo_and_redo_when_a_control_that_is_no_text_field_has_the_focus() {
+    let mut window = open_with_a_speed_change().await;
+    for control in window.other_controls() {
+        assert!(window.press(control, &UNDO_KEYS), "{control:?}");
+        assert_original_speed(&window);
+        assert_eq!(window.history_disabled(), [true, false]);
+
+        assert!(window.press(control, &REDO_KEYS), "{control:?}");
+        assert_sped_up(&window);
+        assert_eq!(window.history_disabled(), [false, true]);
+    }
+}
+
+#[tokio::test]
+async fn the_keys_keep_their_text_field_behavior_in_each_text_field() {
+    let mut window = open_with_a_speed_change().await;
+    for field in window.text_fields() {
+        assert!(!window.press(field, &UNDO_KEYS), "{field:?}");
+        assert_sped_up(&window);
+    }
+
+    window.click(window.undo_button());
+    for field in window.text_fields() {
+        assert!(!window.press(field, &REDO_KEYS), "{field:?}");
+        assert_original_speed(&window);
+    }
+}
+
+#[tokio::test]
+async fn a_key_with_no_step_changes_nothing() {
+    let mut window = open_with_a_speed_change().await;
+    let control = window.apply_button();
+    assert!(window.press(control, &REDO_KEYS));
+    assert_sped_up(&window);
+
+    assert!(window.press(control, &UNDO_KEYS));
+    assert!(window.press(control, &UNDO_KEYS));
+    assert_original_speed(&window);
+    assert!(!window.html().contains("role=\"alert\""));
+
+    let mut empty = Window::open(&Fakes::new());
+    for keys in [&UNDO_KEYS, &REDO_KEYS] {
+        assert!(empty.press(empty.open_button(), keys));
+    }
+    assert_eq!(empty.html(), render_empty_app());
+}
+
+#[tokio::test]
+async fn other_keys_change_nothing_and_keep_their_default_action() {
+    let mut window = open_with_a_speed_change().await;
+    let control = window.apply_button();
+    let presses = [
+        Press {
+            text: "z",
+            code: Code::KeyZ,
+            modifiers: Modifiers::empty(),
+        },
+        Press {
+            text: "Z",
+            code: Code::KeyZ,
+            modifiers: Modifiers::SHIFT,
+        },
+        Press {
+            text: "z",
+            code: Code::KeyZ,
+            modifiers: OTHER_MODIFIER,
+        },
+        Press {
+            text: "z",
+            code: Code::KeyZ,
+            modifiers: HOST_MODIFIER.union(Modifiers::ALT),
+        },
+        Press {
+            text: "y",
+            code: Code::KeyY,
+            modifiers: HOST_MODIFIER,
+        },
+    ];
+    for press in &presses {
+        assert!(!window.press(control, press), "{}", press.text);
+        assert_sped_up(&window);
+    }
+}
+
+#[test]
+fn the_tooltip_of_each_button_names_its_keys() {
+    let page = render_empty_app();
+    for tooltip in [UNDO_TOOLTIP, REDO_TOOLTIP] {
+        assert!(
+            page.contains(&format!("title=\"{tooltip}\"")),
+            "{tooltip} missing in {page}"
+        );
+    }
 }

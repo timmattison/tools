@@ -6565,8 +6565,8 @@ cargo tauri build --no-bundle   # the binary is target/release/msgs
 
 A desktop application for the terminal recordings that `beta` writes. It opens
 a `.json` or `.json.gz` recording, makes an edit project of it, shows its
-metadata, and plays the edited recording in its preview pane. The timeline
-(issue #150) is a placeholder with a playhead control.
+metadata, shows its clips on a timeline, and plays the edited recording in its
+preview pane.
 
 The preview pane draws the terminal of the edited recording at the playhead.
 Drag the playhead control under **Timeline** to go to a time. **Play** plays
@@ -6578,6 +6578,25 @@ menu selects one of the palettes of `beta export --theme`: Auto, Dracula,
 Monokai, Solarized Dark, or Solarized Light. The terminal grows or shrinks to
 fit the pane, and each edit shows in the preview at once. A new recording opens
 stopped, at time zero.
+
+The timeline shows the clips of the project on their tracks, in project time:
+the times before the filters change them. Each clip is a block with the title
+of its recording, and the lines in the block show how many events each part of
+the clip holds. The ruler above the tracks shows the time, and its labels
+adapt to the zoom. A dashed line marks the start of a clip whose terminal size
+differs from the size of the clip before it, with the new size as its label.
+
+- Click **−** or **+** to zoom out or in, or click the tracks and press `-` or
+  `+`.
+- Hold Cmd or Ctrl and turn the wheel to zoom at the pointer.
+- Scroll horizontally, or hold Shift and turn the wheel, to move along the
+  timeline.
+- Click **Fit**, or press `0`, to show the whole project. A new recording opens
+  with the whole project in view.
+
+The playhead control above the tracks is in the time of the edited recording,
+after the filters. Thus a filter that changes the speed moves the playhead
+away from the time of the ruler.
 
 The speed panel under the metadata changes the speed of a region. Type the
 start and the end of the region in seconds and a speed, then click
@@ -6623,7 +6642,16 @@ sequences:
   own text. The AWS key preset uses it to keep the name of a key visible, and
   the token preset uses it to keep the word `Bearer`.
 
-The timeline (issue #150) does not show where the redactions are yet.
+The timeline does not show where the redactions are yet (issue #818).
+
+**Undo** and **Redo** in the menu bar take back the last edit of the project
+and apply it again, for example a speed change, a redaction, or the removal of
+a row. The keys are Cmd+Z and Cmd+Shift+Z on macOS, and Ctrl+Z and
+Ctrl+Shift+Z on Linux and Windows. The tooltip of each button names its keys.
+A button is disabled when the editor has nothing to undo or to redo. After each
+step, the preview, the timeline, and the panels show the project at once. While
+a text field has the focus, the keys undo and redo the typing in the field, and
+the project does not change. A new recording opens with an empty history.
 
 The application is one Rust crate on Dioxus 0.7, with the desktop (webview)
 renderer. Its components call the Rust code directly, and the open project is
@@ -6676,12 +6704,14 @@ The editing engine of the crate has five parts:
 
   The filters of issue #154 parse their options as a Rust type, so the render
   refuses a missing option, a value of the wrong type, and a key that the
-  filter does not know. The window cannot add them yet (issue #150). Issues
-  #157 to #167 add more filters.
+  filter does not know. The window cannot add them yet. Issue #804 adds the
+  click on the timeline that places a pause. Issues #157 to #167 add more
+  filters.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
-  undo and redo history.
+  undo and redo history. The Undo and Redo controls of the window step
+  through that history.
 - **Preview** (`preview::Preview`): replays the events of the rendered
   recording through the terminal emulator of `termstate`, which the video
   export of `beta` also uses. On the way it keeps snapshots of the terminal,
