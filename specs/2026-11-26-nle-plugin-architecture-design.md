@@ -434,21 +434,13 @@ Each of these failures stops the call, and the render fails with a
 - The component does not export the interface of its manifest `type`, or it
   exports a version that the host does not know.
 
-A full log is not a failure. The `log` lines, the standard output, and the
-standard error of the plugin go to one log buffer of 64 KiB for each call.
-When the buffer is full, the host drops each later byte, and the call
-continues. After the call, the host adds the buffer to the plugin log of the
-editor with `String::from_utf8_lossy`, thus a character that the limit cuts
-becomes U+FFFD. If the host dropped bytes, it adds one line that gives their
-count. Thus a long log does not fail the render.
-
-The plugin log of the editor is in memory only, and it holds at most 1 MiB for
-each loaded plugin. When a call makes the log of a plugin longer than 1 MiB,
-the host removes the oldest lines of that plugin until the log fits. The first
-line of the log then gives the count of the removed lines. A renderer gets one
-call for each frame, and a filter gets one call at each render of the preview.
-Thus a long export or a long edit keeps the log of each plugin at 1 MiB, and a
-plugin removes only its own lines.
+A write past the bound of the log is not a failure. In one call, the host
+keeps only the first 64 KiB of the bytes that the plugin writes through `log`,
+standard output, and standard error together. The host drops each byte after
+that bound. The write still returns at once with no error, and the call
+continues. Thus a plugin that writes past the bound gives the same answer as
+with no write. [Slice 2](#slice-2-the-wasm-filter-host) decides how the
+editor keeps the plugin log of the editor and shows it.
 
 ## The host
 
@@ -485,14 +477,14 @@ is off by default.
   clock functions again, with `Linker::allow_shadowing` on for those
   definitions only. Each new function returns at once: a pollable that it
   gives is ready at once, because the clock of a plugin does not move.
-  Standard input is closed. Standard output and standard error go to the log
-  buffer of [the failures](#failures), through one `StdoutStream` of the
-  host. The host does not use `MemoryOutputPipe`. When its buffer is full, its
-  `check_write` answers `StreamError::Closed`, and the `print!` of Rust std
-  panics on that error. Its `poll_write` for WASI 0.3 then writes no byte. The
-  stream of the host accepts each write and never waits. Its `check_write`
-  always gives a permit, its `write` never fails, and its `poll_write` for
-  WASI 0.3 always answers the full length.
+  Standard input is closed. Standard output and standard error go through one
+  `StdoutStream` of the host, under the bound of the log of
+  [the failures](#failures). The host does not use `MemoryOutputPipe`. When
+  its buffer is full, its `check_write` answers `StreamError::Closed`, and the
+  `print!` of Rust std panics on that error. Its `poll_write` for WASI 0.3 then
+  writes no byte. The stream of the host accepts each write and never waits.
+  Its `check_write` always gives a permit, its `write` never fails, and its
+  `poll_write` for WASI 0.3 always answers the full length.
 - **Limits.** A `StoreLimits` bounds the memory of each instance. Fuel bounds
   the work of each call. Fuel counts the WASM instructions of the call, and
   that count does not depend on the speed or the load of the machine. Thus a
@@ -652,7 +644,7 @@ editor writes there, and that flow loads the plugin that it installs.
 | A plugin reads or writes a file, or uses the network | The world imports no such interface, and the WASI context gives no directory and no socket. |
 | A plugin reads the environment, for example a token | The WASI context gives no environment variable. |
 | A plugin runs forever | The fuel limit stops the call. No host function waits, because each clock function of the WASI context returns at once. The epoch deadline stops a call that spends its time in host functions that return. |
-| A plugin takes all of the memory | `StoreLimits` stops the growth of an instance. The log of one call holds at most 64 KiB, and the plugin log of the editor holds at most 1 MiB for each plugin, whatever the count of calls. |
+| A plugin takes all of the memory | `StoreLimits` stops the growth of an instance. The host keeps at most 64 KiB of the log of one call. Slice 2 decides the bound of the plugin log of the editor across calls. |
 | A plugin escapes through a defect of the runtime | The host pins an LTS line of wasmtime, which gets security fixes for 24 months. A known advisory against wasmtime must stop the checks, thus slice 2 waits for issue #740, which puts `cargo audit` in the one list of `scripts/rust-checks.sh`, at pre-push and in CI. |
 | A renderer writes outside its frame | The frame resource is the only target, and each method clips to the frame. |
 | A plugin puts HTML or JavaScript into the webview | A plugin gets no access to the webview. The settings panel comes from the options schema. |
@@ -778,14 +770,22 @@ A new library crate, `src/nle-plugins`, with no WASM runtime yet.
     deadline.
   - A plugin that writes 1 MiB to standard output, to standard error, and
     through the `write` function of `log` gives the same answer as with no
-    log. Its log holds the first 64 KiB and the line that gives the count of
-    the dropped bytes.
-  - 100 calls of a plugin that writes 64 KiB in each call leave at most 1 MiB
-    in its log. The first line gives the count of the removed lines, and the
-    last lines come from the last call. The log of a second plugin keeps each
-    of its lines.
+    write. The host keeps only the first 64 KiB of that call.
 - An author guide tells a plugin author how to build, test, and install a
   filter plugin of each form in Rust.
+
+One question stays open, and this slice decides it: how the editor keeps the
+plugin log of the editor, and how a person reads it. The spec gives only the
+bound of 64 KiB for each call. The pull request of the slice records the
+answer, with these items:
+
+- Where the editor keeps the plugin log of the editor, and if each plugin has
+  a log of its own.
+- The bound of the plugin log of the editor across calls.
+- How the host copies the bytes of a call into the plugin log of the editor:
+  the level of each `log` line, a character that the bound cuts, and a note of
+  the bytes that the bound dropped.
+- Where a person reads the plugin log of the editor.
 
 The slice adds the `wasm32-wasip2` target to `rust-toolchain.toml`. The test
 builds the example plugin into a fixed directory under `target/`, and the lock
