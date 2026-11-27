@@ -38,6 +38,9 @@ const PASTE: &str = "Paste";
 const PASTE_END: [char; 6] = [ESC, '[', '2', '0', '1', '~'];
 /// The code of the CSI key that starts a bracketed paste.
 const PASTE_START_CODE: u32 = 200;
+/// The code of the CSI key of the xterm modifyOtherKeys form,
+/// `CSI 27 ; mod ; code ~`. Field 2 holds the code of the key.
+const MODIFY_OTHER_KEYS_CODE: u32 = 27;
 /// The event type of a key release in the kitty keyboard protocol.
 const EVENT_RELEASE: u32 = 3;
 /// The range of the private use code points. The kitty protocol puts lock
@@ -261,6 +264,12 @@ impl CsiParams {
         Mods::from_value(self.get(1, 0).unwrap_or(1))
     }
 
+    /// The code of the key in the xterm modifyOtherKeys form, when it is
+    /// present.
+    fn other_key_code(&self) -> Option<u32> {
+        self.get(2, 0)
+    }
+
     /// The event type. The default is 1, a key press.
     fn event_type(&self) -> u32 {
         self.get(1, 1).unwrap_or(1)
@@ -443,6 +452,11 @@ impl Parser {
         if params.code() == PASTE_START_CODE {
             self.skip_paste();
             self.push_special(PASTE.to_string());
+        } else if let Some(code) = params
+            .other_key_code()
+            .filter(|_| params.code() == MODIFY_OTHER_KEYS_CODE)
+        {
+            self.code_key(code, params.mods());
         } else if let Some(base) = csi_tilde_label(params.code()) {
             self.push_special(params.mods().label(base));
         }
@@ -462,8 +476,12 @@ impl Parser {
 
     /// Parse a key of the kitty keyboard protocol, with `u` as final character.
     fn csi_u(&mut self, params: &CsiParams) {
-        let mods = params.mods();
-        let code = params.code();
+        self.code_key(params.code(), params.mods());
+    }
+
+    /// Add the key with the Unicode code `code` and the modifiers `mods`, as
+    /// the kitty protocol and the xterm modifyOtherKeys form give it.
+    fn code_key(&mut self, code: u32, mods: Mods) {
         let named = match code {
             13 => Some(ENTER),
             9 => Some(TAB),
