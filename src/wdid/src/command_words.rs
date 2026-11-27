@@ -1614,8 +1614,8 @@ pub fn parse_line(line: &str, aliases: &Aliases) -> Option<Line> {
 pub enum Argument {
     /// A word with no expansion: its text after quote removal.
     Literal(String),
-    /// A word that holds an expansion, a tilde included: its raw text,
-    /// quotes included.
+    /// A word that holds an expansion, a tilde or an unquoted pattern
+    /// included: its raw text, quotes included.
     Expansion(String),
     /// An operator of the tokenizer, for example `|` or a newline.
     Operator(String),
@@ -1626,6 +1626,10 @@ pub enum Argument {
 /// expands `=ls` to the path of `ls`.
 const SAFE_WORD_CHARACTERS: &str = "_-./,:@%+=";
 
+/// The first character of a word that zsh expands to the path of a program,
+/// for example `=ls`.
+const EQUALS_EXPANSION: char = '=';
+
 impl Argument {
     /// Gives the word as the shell reads it. A literal that holds only safe
     /// characters stays bare, and each other literal gets single quotes. An
@@ -1635,7 +1639,7 @@ impl Argument {
         match self {
             Self::Literal(text) => {
                 let bare = !text.is_empty()
-                    && !text.starts_with('=')
+                    && !text.starts_with(EQUALS_EXPANSION)
                     && text
                         .chars()
                         .all(|c| c.is_alphanumeric() || SAFE_WORD_CHARACTERS.contains(c));
@@ -1686,14 +1690,35 @@ impl Argument {
     }
 }
 
+/// Says if the unquoted text `text` holds a pattern that the shell expands:
+/// `*`, `?`, or `[` before `]` (a glob), `{` before a `}` with `,` or `..`
+/// between them (a brace expansion), or, when `leading`, a first `=` (zsh
+/// gives the path of the program).
+fn is_pattern(text: &str, leading: bool) -> bool {
+    let bracket = text
+        .split_once('[')
+        .is_some_and(|(_, rest)| rest.contains(']'));
+    let brace = text
+        .split_once('{')
+        .and_then(|(_, rest)| rest.split_once('}'))
+        .is_some_and(|(inside, _)| inside.contains(',') || inside.contains(".."));
+    text.contains(['*', '?']) || bracket || brace || (leading && text.starts_with(EQUALS_EXPANSION))
+}
+
 /// Gives the [`Argument`] of a word with the raw text `raw` and the top-level
-/// `pieces`. A tilde expansion makes an [`Argument::Expansion`], so `~` is not
-/// the literal `'~'`. This is the one place of that rule.
+/// `pieces`. A tilde expansion or an unquoted pattern makes an
+/// [`Argument::Expansion`], so `~` is not the literal `'~'`, and `*.c` is not
+/// the literal `'*.c'`. This is the one place of that rule.
 fn argument_from(raw: &str, pieces: &[WordPieceWithSource]) -> Argument {
-    let has_tilde = pieces
+    let expands = pieces
         .iter()
-        .any(|piece| matches!(piece.piece, WordPiece::TildeExpansion(_)));
-    if has_tilde {
+        .enumerate()
+        .any(|(index, piece)| match &piece.piece {
+            WordPiece::TildeExpansion(_) => true,
+            WordPiece::Text(text) => is_pattern(text, index == 0),
+            _ => false,
+        });
+    if expands {
         return Argument::Expansion(raw.to_string());
     }
     match literal_of(pieces) {

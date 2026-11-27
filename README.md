@@ -5822,7 +5822,7 @@ The group `Duplicates and shadows` ends the report. See [Duplicates and shadows]
 
 Over time, a shell gets definitions that do the same thing as other definitions, and names that hide other names. Each entry of the group `Duplicates and shadows` is one finding. It gives each name of the finding with its kind, its origin, and its uses. `wdid` finds five kinds:
 
-1. **Same expansion.** Two or more aliases have the same value, after `wdid` splits each value into words as the shell does. Thus `git  status` and `'git' status` are the same value as `git status`. A quoted word is not the expansion with the same text. For example, `echo '$HOME'` is not the same value as `echo $HOME`. A regular alias and a global alias are never in one finding. A suffix alias is never in a finding of this kind, because each suffix names different files.
+1. **Same expansion.** Two or more aliases have the same value, after `wdid` splits each value into words as the shell does. Thus `git  status` and `'git' status` are the same value as `git status`. A quoted word is not the expansion with the same text. For example, `echo '$HOME'` is not the same value as `echo $HOME`, and `ls '*.c'` is not the same value as `ls *.c`. A regular alias and a global alias are never in one finding. A suffix alias is never in a finding of this kind, because each suffix names different files.
 
    ```text
    Same expansion (git status): gs (alias, ~/.zshrc:3, 3 uses), gst (alias, ~/.oh-my-zsh/plugins/git/git.plugin.zsh:1, 2 uses)
