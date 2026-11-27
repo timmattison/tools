@@ -6,7 +6,9 @@
 //! diff, and gives the oldest date for each name that an added line defines.
 //! Both functions are pure.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
 
@@ -50,6 +52,54 @@ impl Defined {
             name: name.into(),
         }
     }
+}
+
+/// The programs that [`read`] starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Programs {
+    /// The git program: a name that the PATH resolves, or a path.
+    pub git: OsString,
+    /// The yadm program: a name that the PATH resolves, or a path.
+    pub yadm: OsString,
+}
+
+impl Default for Programs {
+    fn default() -> Self {
+        Self {
+            git: OsString::from("git"),
+            yadm: OsString::from("yadm"),
+        }
+    }
+}
+
+/// The added dates of the names that each origin file defines.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AddedDates {
+    /// The dates of each file, by name.
+    files: BTreeMap<PathBuf, BTreeMap<Defined, NaiveDate>>,
+}
+
+impl AddedDates {
+    /// Gives the added date of `defined` in `file`, or `None` when it is
+    /// unknown.
+    #[must_use]
+    pub fn get(&self, file: &Path, defined: &Defined) -> Option<NaiveDate> {
+        self.files.get(file)?.get(defined).copied()
+    }
+
+    /// Records `date` as the added date of `defined` in `file`.
+    pub fn insert(&mut self, file: impl Into<PathBuf>, defined: Defined, date: NaiveDate) {
+        self.files
+            .entry(file.into())
+            .or_default()
+            .insert(defined, date);
+    }
+}
+
+/// Reads the added date of each name that each file of `files` defines.
+#[must_use]
+pub fn read(_files: &BTreeSet<PathBuf>, _home: Option<&Path>, _programs: &Programs) -> AddedDates {
+    AddedDates::default()
 }
 
 /// The word that starts an alias line.
