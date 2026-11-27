@@ -348,6 +348,17 @@ fn a_csi_split_over_two_events_is_one_key() {
 }
 
 #[test]
+fn an_x10_mouse_report_split_over_two_events_gives_no_key() {
+    // The report is `ESC [ M` and the three characters ` `, `a` and `b`. The
+    // `c` after it is typed text.
+    assert_eq!(
+        read(&[(1.0, "\x1b[M a"), (1.001, "bc")]),
+        vec![(1.001, text("c"))]
+    );
+    assert_eq!(read(&[(1.0, "\x1b[M"), (1.001, " ab")]), vec![]);
+}
+
+#[test]
 fn an_osc_reply_split_over_two_events_gives_no_key() {
     assert_eq!(
         read(&[(1.0, "\x1b]11;rgb:0000/00"), (1.001, "00/0000\x07")]),
