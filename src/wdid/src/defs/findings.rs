@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use super::{Kind, Usage};
-use crate::command_words::{split_words, AliasDefinition};
+use crate::command_words::{simple_command, split_words, AliasDefinition, AliasKind};
 use crate::origin::Origin;
 use crate::shell::Definitions;
 
@@ -89,8 +89,13 @@ impl Member {
     }
 }
 
+/// The last word of the body of a function that passes on its arguments.
+const ALL_ARGUMENTS: &str = "\"$@\"";
+
 /// The entries of the report, with the aliases that have an entry.
 struct Entries<'a> {
+    /// Each function entry, sorted by name.
+    functions: Vec<&'a Usage>,
     /// Each alias of the table that has an entry, with its entry, sorted by
     /// name, then by kind.
     aliases: Vec<(AliasDefinition, &'a Usage)>,
@@ -112,7 +117,12 @@ impl<'a> Entries<'a> {
                 Some((alias, usage))
             })
             .collect();
-        Self { aliases }
+        let mut functions: Vec<&Usage> = usages
+            .iter()
+            .filter(|usage| usage.kind == Kind::Function)
+            .collect();
+        functions.sort_by(|left, right| left.name.cmp(&right.name));
+        Self { functions, aliases }
     }
 }
 
@@ -147,6 +157,54 @@ fn same_expansion(entries: &Entries<'_>) -> Vec<Finding> {
         .collect()
 }
 
+/// Gives the words that the body of a function runs before it passes on its
+/// arguments, or `None` when the body does something else. The body must be
+/// one simple command that ends with `"$@"` and has a word before it.
+fn passed_on_words(body: &str) -> Option<Vec<String>> {
+    let mut words = simple_command(body)?;
+    if words.pop().as_deref() != Some(ALL_ARGUMENTS) || words.is_empty() {
+        return None;
+    }
+    Some(words)
+}
+
+/// Finds each function that runs the words of one or more aliases and passes
+/// on its arguments. A suffix alias takes no part.
+fn alias_and_function(definitions: &Definitions, entries: &Entries<'_>) -> Vec<Finding> {
+    let mut found = Vec::new();
+    for function in &entries.functions {
+        let Some(shared) = definitions
+            .function_bodies
+            .get(&function.name)
+            .and_then(|body| passed_on_words(body))
+        else {
+            continue;
+        };
+        let mut matching: Vec<&Usage> = entries
+            .aliases
+            .iter()
+            .filter(|(alias, _)| {
+                alias.kind != AliasKind::Suffix
+                    && split_words(&alias.value).as_deref() == Some(shared.as_slice())
+            })
+            .map(|(_, usage)| *usage)
+            .collect();
+        if matching.is_empty() {
+            continue;
+        }
+        matching.sort_by(|left, right| left.name.cmp(&right.name));
+        matching.push(function);
+        found.push(Finding {
+            kind: FindingKind::AliasAndFunction,
+            definitions: matching.into_iter().map(Member::of).collect(),
+            words: shared,
+            places: Vec::new(),
+            program: None,
+        });
+    }
+    found
+}
+
 /// Gives the findings among `usages`, sorted by kind, then by the name and the
 /// kind of the first definition. Pure.
 ///
@@ -155,6 +213,7 @@ fn same_expansion(entries: &Entries<'_>) -> Vec<Finding> {
 pub(super) fn find(definitions: &Definitions, usages: &[Usage]) -> Vec<Finding> {
     let entries = Entries::new(definitions, usages);
     let mut found = same_expansion(&entries);
+    found.extend(alias_and_function(definitions, &entries));
     found.sort_by(|left, right| sort_key(left).cmp(&sort_key(right)));
     found
 }
