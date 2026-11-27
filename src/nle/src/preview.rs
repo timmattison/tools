@@ -153,8 +153,6 @@ pub struct Preview {
     current: TerminalState,
     /// The count of events that `current` has applied.
     applied: usize,
-    /// The time of the last event that `current` has applied, or 0.0.
-    last_time: f64,
     /// The time in seconds between two snapshots, at the least.
     interval: f64,
     /// The count of events between two snapshots, at the least.
@@ -190,7 +188,6 @@ impl Preview {
             }],
             current: blank,
             applied: 0,
-            last_time: 0.0,
             interval,
             event_interval,
             #[cfg(test)]
@@ -228,12 +225,11 @@ impl Preview {
                 self.current.process_output(&event.data).ok();
             }
             self.applied += 1;
-            self.last_time = event.time;
             #[cfg(test)]
             {
                 self.replayed += 1;
             }
-            self.take_snapshot_if_due();
+            self.take_snapshot_if_due(event.time);
         }
         &self.current
     }
@@ -256,26 +252,26 @@ impl Preview {
         if self.applied > target || snapshot.applied > self.applied {
             self.current = snapshot.state.clone();
             self.applied = snapshot.applied;
-            self.last_time = snapshot.time;
         }
     }
 
     /// Pushes a snapshot of `current` when it is past the last snapshot by the
-    /// time interval or by the event interval. The snapshots stay sorted,
-    /// because a snapshot is taken only past the furthest point replayed.
-    fn take_snapshot_if_due(&mut self) {
+    /// time interval or by the event interval. `time` is the time of the event
+    /// that `current` applied last. The snapshots stay sorted, because a
+    /// snapshot is taken only past the furthest point replayed.
+    fn take_snapshot_if_due(&mut self, time: f64) {
         let Some(last) = self.snapshots.last() else {
             return;
         };
         if self.applied <= last.applied {
             return;
         }
-        let due = self.last_time - last.time >= self.interval
+        let due = time - last.time >= self.interval
             || self.applied - last.applied >= self.event_interval;
         if due {
             self.snapshots.push(Snapshot {
                 applied: self.applied,
-                time: self.last_time,
+                time,
                 state: self.current.clone(),
             });
         }
