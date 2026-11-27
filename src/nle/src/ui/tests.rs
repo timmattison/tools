@@ -3,12 +3,14 @@
 
 use super::*;
 use std::any::Any;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
 use crate::format::format_recorded;
+use crate::preview::PreviewTheme;
 use crate::types::{Event, EventType, Recording, RecordingMetadata};
 use dioxus_core::{ElementId, Mutation};
 use std::collections::BTreeMap;
@@ -103,11 +105,64 @@ fn panels_root() -> Element {
         }
         Some(document)
     });
+    let playhead = use_signal(|| Seconds::ZERO);
+    let playing = use_signal(|| false);
+    let rendered = use_memo(move || preview::render_of(&loaded.read()));
     rsx! {
-        PreviewPane { loaded }
-        Timeline { loaded }
+        PreviewPane { rendered, playhead, playing }
+        Timeline { loaded, rendered, playhead }
         PropertiesPanel { loaded, on_result: |_| {} }
     }
+}
+
+/// What `preview_root` takes from the test, and gives back to it.
+#[derive(Clone)]
+struct PreviewInput {
+    /// The recording for the first render. The root takes it out, so the
+    /// context holds no strong count.
+    recording: Rc<RefCell<Option<Arc<Recording>>>>,
+    /// The signal of the root. The root puts it here, so the test can write it.
+    signal: Rc<Cell<Option<Signal<RenderedState>>>>,
+}
+
+/// A test root that shows the preview pane of the recording in the context.
+fn preview_root() -> Element {
+    let input = use_context::<PreviewInput>();
+    let rendered = use_signal(|| {
+        input
+            .recording
+            .borrow_mut()
+            .take()
+            .map(|recording| Ok(preview::Rendered(recording)))
+    });
+    input.signal.set(Some(rendered));
+    let playhead = use_signal(|| Seconds::ZERO);
+    let playing = use_signal(|| false);
+    rsx! {
+        PreviewPane { rendered, playhead, playing }
+    }
+}
+
+#[test]
+fn a_failed_render_frees_the_old_preview() {
+    let recording = Arc::new(fixture().recording);
+    let weak = Arc::downgrade(&recording);
+    let input = PreviewInput {
+        recording: Rc::new(RefCell::new(Some(recording))),
+        signal: Rc::new(Cell::new(None)),
+    };
+    let mut dom = VirtualDom::new(preview_root).with_root_context(input.clone());
+    dom.rebuild_in_place();
+    assert!(weak.upgrade().is_some(), "the engine holds the recording");
+    let mut signal = input.signal.take().expect("the root stored its signal");
+    dom.in_runtime(|| signal.set(Some(Err("boom".to_owned()))));
+    dom.render_immediate_to_vec();
+    assert_eq!(
+        weak.strong_count(),
+        0,
+        "the pane cannot show the old preview, so it must drop it"
+    );
+    assert!(dioxus_ssr::render(&dom).contains(preview::PREVIEW_FAILED_PREFIX));
 }
 
 /// Renders the `App` with no recording. The fakes are never called.
@@ -121,6 +176,10 @@ const MAX_SETTLE_ROUNDS: usize = 50;
 const SETTLE_ROUND_TIMEOUT: Duration = Duration::from_millis(100);
 /// The text of the Open Recording button.
 const OPEN_LABEL: &str = "Open Recording";
+/// The markup before the label of the first transport button.
+const TRANSPORT_START: &str = "class=\"transport\">";
+/// The markup before the text of the time readout.
+const READOUT_START: &str = "class=\"preview-time\">";
 /// The path that the fake dialog picks.
 const PICKED_PATH: &str = "/tmp/demo.json";
 
@@ -219,6 +278,17 @@ impl Fakes {
     }
 }
 
+/// The text of `page` after the first `start` and before the next `end`.
+fn text_between(page: &str, start: &str, end: &str) -> String {
+    let (_, after) = page
+        .split_once(start)
+        .unwrap_or_else(|| panic!("no {start} in {page}"));
+    let (text, _) = after
+        .split_once(end)
+        .unwrap_or_else(|| panic!("no {end} after {start} in {page}"));
+    text.to_owned()
+}
+
 /// A window of the app that a test drives: it renders, it clicks, and it
 /// reads the page as text.
 struct Window {
@@ -231,10 +301,16 @@ struct Window {
     first_render: Vec<ElementId>,
     /// The id of each element that got an input listener, in creation order.
     inputs: Vec<ElementId>,
+    /// The id of each element that got a change listener, in creation order.
+    changes: Vec<ElementId>,
     /// The Apply Speed button, when a test noted it.
     apply: Option<ElementId>,
     /// The Skip to End, Accelerate, and Summarize buttons, when a test noted them.
     fast_forward_buttons: Option<[ElementId; 3]>,
+    /// The Play and Pause button, when a test noted it.
+    play: Option<ElementId>,
+    /// The Stop button, when a test noted it.
+    stop: Option<ElementId>,
 }
 
 impl Window {
@@ -252,8 +328,11 @@ impl Window {
             newest: Vec::new(),
             first_render: Vec::new(),
             inputs: Vec::new(),
+            changes: Vec::new(),
             apply: None,
             fast_forward_buttons: None,
+            play: None,
+            stop: None,
         };
         window.note_listeners(&edits);
         window.first_render = window.clicks.clone();
@@ -276,6 +355,11 @@ impl Window {
         self.inputs
             .extend(edits.iter().filter_map(|edit| match edit {
                 Mutation::NewEventListener { name, id } if name == "input" => Some(*id),
+                _ => None,
+            }));
+        self.changes
+            .extend(edits.iter().filter_map(|edit| match edit {
+                Mutation::NewEventListener { name, id } if name == "change" => Some(*id),
                 _ => None,
             }));
     }
@@ -321,36 +405,51 @@ impl Window {
         self.render();
     }
 
-    /// The number of input fields of the page with an open recording: the
-    /// three of the speed panel, then the five of the fast-forward panel.
-    const FIELD_COUNT: usize = 8;
+    /// Sends the value to the select element, as if the user chose it, and renders.
+    fn choose(&mut self, id: ElementId, value: &str) {
+        let form = dioxus::html::SerializedFormData::new(value.to_string(), Vec::new());
+        let data = Rc::new(PlatformEventData::new(Box::new(form)));
+        let event = dioxus::prelude::Event::new(data as Rc<dyn Any>, true);
+        self.dom.runtime().handle_event("change", event, id);
+        self.render();
+    }
 
-    /// The input listeners of the page, after a check of their number.
-    fn fields(&self) -> &[ElementId] {
-        assert_eq!(
-            self.inputs.len(),
-            Self::FIELD_COUNT,
-            "the page has the inputs {:?}",
-            self.inputs
-        );
-        &self.inputs
+    /// The theme menu of the preview toolbar. It is the one change listener of
+    /// the open render.
+    fn theme_menu(&self) -> ElementId {
+        assert_eq!(self.changes.len(), 1, "{:?}", self.changes);
+        self.changes[0]
+    }
+
+    /// The input listeners that the open render created, in creation order:
+    /// the three fields of the speed panel, the five fields of the
+    /// fast-forward panel, then the playhead control of the timeline. The
+    /// properties panel mounts before the timeline, so the playhead is the
+    /// last one.
+    fn open_inputs(&self) -> [ElementId; 9] {
+        self.inputs
+            .clone()
+            .try_into()
+            .unwrap_or_else(|ids: Vec<ElementId>| panic!("the page has the inputs {ids:?}"))
     }
 
     /// The Start, End, and Speed fields of the speed panel, in this order.
     fn speed_fields(&self) -> [ElementId; 3] {
-        self.fields()
-            .get(..3)
-            .and_then(|ids| ids.try_into().ok())
-            .expect("three speed fields")
+        let [start, end, speed, ..] = self.open_inputs();
+        [start, end, speed]
     }
 
     /// The Start, End, Speed, First lines, and Last lines fields of the
     /// fast-forward panel, in this order.
     fn fast_forward_fields(&self) -> [ElementId; 5] {
-        self.fields()
-            .get(3..)
-            .and_then(|ids| ids.try_into().ok())
-            .expect("five fast-forward fields")
+        let [_, _, _, start, end, speed, first, last, _] = self.open_inputs();
+        [start, end, speed, first, last]
+    }
+
+    /// The playhead control of the timeline.
+    fn playhead_control(&self) -> ElementId {
+        let [.., playhead] = self.open_inputs();
+        playhead
     }
 
     /// The Apply Speed button. `open_recording` noted it.
@@ -368,6 +467,26 @@ impl Window {
             FastForwardButton::Accelerate => accelerate,
             FastForwardButton::Summarize => summarize,
         }
+    }
+
+    /// The Play and Pause button. `open_recording` noted it.
+    fn play_button(&self) -> ElementId {
+        self.play.expect("a window with an open recording")
+    }
+
+    /// The Stop button. `open_recording` noted it.
+    fn stop_button(&self) -> ElementId {
+        self.stop.expect("a window with an open recording")
+    }
+
+    /// The label of the Play and Pause button, read from the page.
+    fn play_label(&self) -> String {
+        text_between(&self.html(), TRANSPORT_START, "</button>")
+    }
+
+    /// The time readout of the preview toolbar, read from the page.
+    fn readout(&self) -> String {
+        text_between(&self.html(), READOUT_START, "</span>")
     }
 
     /// The Remove button of the row that the newest render added.
@@ -528,10 +647,12 @@ fn timeline_reads_the_project_of_the_editor() {
 }
 
 #[test]
-fn preview_shows_the_size_of_the_recording() {
+fn preview_draws_the_terminal_at_time_zero() {
     let page = render_panels(fixture());
-    assert!(page.contains("coming in #151"), "{page}");
-    assert!(page.contains("120x40"), "{page}");
+    assert!(page.contains("--columns:120;--rows:40"), "{page}");
+    assert!(page.contains(">x</span>"), "{page}");
+    assert!(page.contains("terminal-row"), "{page}");
+    assert!(!page.contains("coming in #151"), "{page}");
 }
 
 fn picked() -> Answer<Option<PathBuf>> {
@@ -708,25 +829,30 @@ fn edited_row(text: &str) -> String {
     metadata_row("Edited duration", text, None)
 }
 
-/// Opens the fixture recording through the fakes, and notes the Apply Speed
-/// button and the three fast-forward buttons.
+/// Opens the fixture recording through the fakes, and notes the click
+/// listeners as `open_loaded` does.
 async fn open_recording() -> Window {
     open_loaded(fixture()).await
 }
 
-/// Opens `recording` through the fakes, and notes the buttons of the panels.
-/// The open render makes four click listeners: Apply Speed, Skip to End,
-/// Accelerate, and Summarize, in this order.
-async fn open_loaded(recording: LoadedRecording) -> Window {
-    let fakes = Fakes::new()
-        .pick(picked())
-        .load(Answer::Ready(Ok(recording)));
+/// Opens `loaded` through the fakes, and notes the six click listeners that
+/// the open render creates. The render creates them in this order: Apply
+/// Speed, Skip to End, Accelerate, Summarize, Play, Stop. The properties panel
+/// mounts before the preview toolbar, as it does for the input listeners, the
+/// speed panel comes before the fast-forward panel, and the Play button comes
+/// before the Stop button.
+async fn open_loaded(loaded: LoadedRecording) -> Window {
+    let fakes = Fakes::new().pick(picked()).load(Answer::Ready(Ok(loaded)));
     let mut window = Window::open(&fakes);
     window.click(window.open_button());
     window.settle().await;
-    assert_eq!(window.newest.len(), 4, "{:?}", window.newest);
-    window.apply = Some(window.newest[0]);
-    window.fast_forward_buttons = Some([window.newest[1], window.newest[2], window.newest[3]]);
+    let [apply, skip, accelerate, summarize, play, stop] = window.newest[..] else {
+        panic!("the open render made {:?}", window.newest)
+    };
+    window.apply = Some(apply);
+    window.fast_forward_buttons = Some([skip, accelerate, summarize]);
+    window.play = Some(play);
+    window.stop = Some(stop);
     window
 }
 
@@ -1384,4 +1510,298 @@ async fn a_bad_fast_forward_shows_the_reason_and_adds_no_row() {
         assert!(!page.contains(": summary of"), "{page}");
         assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
     }
+}
+
+/// The page markup of a run of `count` letters x: the run ends at the cursor.
+fn x_run(count: usize) -> String {
+    format!(">{}</span>", "x".repeat(count))
+}
+
+#[tokio::test]
+async fn scrubbing_the_timeline_moves_the_preview() {
+    let mut window = open_recording().await;
+    let control = window.playhead_control();
+    let page = window.html();
+    assert!(page.contains("max=\"65.3\""), "{page}");
+    assert!(page.contains("aria-label=\"Playhead\""), "{page}");
+    assert!(page.contains(&x_run(1)), "{page}");
+
+    window.type_into(control, "1.0");
+    let page = window.html();
+    assert!(page.contains(&x_run(11)), "{page}");
+    assert!(!page.contains(&x_run(12)), "{page}");
+    assert!(page.contains("value=\"1\""), "{page}");
+
+    window.type_into(control, "0.5");
+    let page = window.html();
+    assert!(page.contains(&x_run(6)), "{page}");
+    assert!(!page.contains(&x_run(7)), "{page}");
+
+    window.type_into(control, "abc");
+    let page = window.html();
+    assert!(page.contains(&x_run(6)), "{page}");
+    assert!(page.contains("value=\"0.5\""), "{page}");
+}
+
+#[tokio::test]
+async fn an_edit_updates_the_preview_at_the_same_playhead() {
+    let mut window = open_recording().await;
+    let control = window.playhead_control();
+    window.type_into(control, "1.0");
+    assert!(window.html().contains(&x_run(11)));
+    window.apply_speed("0", "10", "2");
+    let page = window.html();
+    assert!(page.contains(&x_run(21)), "{page}");
+    assert!(!page.contains(&x_run(22)), "{page}");
+}
+
+#[tokio::test]
+async fn a_new_recording_starts_at_time_zero() {
+    let fakes = Fakes::new()
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())))
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())));
+    let mut window = Window::open(&fakes);
+    window.click(window.open_button());
+    window.settle().await;
+    let control = window.playhead_control();
+    window.type_into(control, "1.0");
+    assert!(window.html().contains(&x_run(11)));
+
+    window.click(window.open_button());
+    window.settle().await;
+    let page = window.html();
+    assert!(page.contains(&x_run(1)), "{page}");
+    assert!(!page.contains(&x_run(2)), "{page}");
+    assert!(page.contains("value=\"0\""), "{page}");
+}
+
+#[tokio::test]
+async fn a_playhead_past_the_end_stops_at_the_end() {
+    let mut window = open_recording().await;
+    let control = window.playhead_control();
+    window.type_into(control, "999");
+    let page = window.html();
+    assert!(page.contains("value=\"65.3\""), "{page}");
+    assert!(page.contains(&x_run(42)), "{page}");
+    window.type_into(control, "-1");
+    assert!(window.html().contains("value=\"65.3\""));
+}
+
+/// The readout of the fixture at time zero.
+const READOUT_AT_ZERO: &str = "0m 0.0s / 1m 5.3s";
+
+#[tokio::test]
+async fn the_toolbar_shows_the_time_and_stop_returns_to_the_start() {
+    let mut window = open_recording().await;
+    let page = window.html();
+    assert!(page.contains(">Play</button>"), "{page}");
+    assert!(page.contains(">Stop</button>"), "{page}");
+    assert_eq!(window.readout(), READOUT_AT_ZERO);
+
+    let control = window.playhead_control();
+    window.type_into(control, "1.0");
+    assert_eq!(window.readout(), "0m 1.0s / 1m 5.3s");
+
+    window.click(window.stop_button());
+    assert_eq!(window.readout(), READOUT_AT_ZERO);
+    let page = window.html();
+    assert!(page.contains(&x_run(1)), "{page}");
+    assert!(!page.contains(&x_run(2)), "{page}");
+}
+
+#[tokio::test]
+async fn play_moves_the_playhead_and_pause_holds_it() {
+    let mut window = open_recording().await;
+    window.click(window.play_button());
+    assert_eq!(window.play_label(), "Pause");
+
+    window.settle().await;
+    let readout = window.readout();
+    assert!(!readout.starts_with("0m 0.0s"), "{readout}");
+    let page = window.html();
+    assert!(!page.contains(&x_run(1)), "{page}");
+
+    window.click(window.play_button());
+    assert_eq!(window.play_label(), "Play");
+    let held = window.readout();
+    window.settle().await;
+    assert_eq!(window.readout(), held);
+}
+
+#[tokio::test]
+async fn playback_stops_at_the_end() {
+    let mut loaded = fixture();
+    loaded.recording.duration = 0.2;
+    let mut window = open_loaded(loaded).await;
+    window.click(window.play_button());
+    assert_eq!(window.play_label(), "Pause");
+
+    window.settle().await;
+
+    assert_eq!(window.play_label(), "Play");
+    assert_eq!(window.readout(), "0m 0.2s / 0m 0.2s");
+}
+
+#[tokio::test]
+async fn play_at_the_end_starts_again_from_the_beginning() {
+    let mut window = open_recording().await;
+    let control = window.playhead_control();
+    window.type_into(control, "65.3");
+    assert_eq!(window.readout(), "1m 5.3s / 1m 5.3s");
+
+    window.click(window.play_button());
+
+    assert_eq!(window.readout(), READOUT_AT_ZERO);
+    assert_eq!(window.play_label(), "Pause");
+    window.click(window.play_button());
+}
+
+#[tokio::test]
+async fn a_new_recording_opens_stopped() {
+    let fakes = Fakes::new()
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())))
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())));
+    let mut window = Window::open(&fakes);
+    window.click(window.open_button());
+    window.settle().await;
+    let [_, _, _, _, play, _] = window.newest[..] else {
+        panic!("the open render made {:?}", window.newest)
+    };
+    window.click(play);
+    assert_eq!(window.play_label(), "Pause");
+
+    window.click(window.open_button());
+    window.settle().await;
+
+    assert_eq!(window.play_label(), "Play");
+    assert_eq!(window.readout(), READOUT_AT_ZERO);
+}
+
+/// The page markup of the option of `choice`, selected or not.
+fn theme_option(choice: PreviewTheme, selected: bool) -> String {
+    let flag = if selected { " selected=true" } else { "" };
+    format!(
+        "<option value=\"{}\"{flag}>{}</option>",
+        choice.name(),
+        choice.label()
+    )
+}
+
+#[tokio::test]
+async fn the_theme_menu_lists_the_five_themes() {
+    let window = open_recording().await;
+    let page = window.html();
+    assert!(page.contains("Theme"), "{page}");
+    assert_eq!(page.matches("<select").count(), 1, "{page}");
+    assert_eq!(page.matches("<option").count(), 5, "{page}");
+    let menu = text_between(&page, "<select", "</select>");
+    let listed: String = PreviewTheme::ALL
+        .into_iter()
+        .map(|choice| theme_option(choice, choice == PreviewTheme::Auto))
+        .collect();
+    assert!(menu.ends_with(&listed), "{menu}");
+}
+
+#[tokio::test]
+async fn a_chosen_theme_recolors_the_preview() {
+    let mut window = open_recording().await;
+    let control = window.playhead_control();
+    window.type_into(control, "1.0");
+
+    window.choose(window.theme_menu(), "dracula");
+
+    let page = window.html();
+    assert!(
+        page.contains("class=\"preview-screen\" style=\"background-color:#282a36\""),
+        "{page}"
+    );
+    assert!(
+        page.contains("style=\"color:#f8f8f2;background-color:#282a36\""),
+        "{page}"
+    );
+    let terminal = text_between(&page, "class=\"terminal\"", "<div class=\"timeline\">");
+    assert!(!terminal.contains("background-color:#000000"), "{terminal}");
+    assert!(page.contains(&theme_option(PreviewTheme::Dracula, true)));
+    assert!(page.contains(&theme_option(PreviewTheme::Auto, false)));
+    assert!(page.contains(&x_run(11)), "{page}");
+    assert!(!page.contains(&x_run(12)), "{page}");
+}
+
+#[tokio::test]
+async fn an_unknown_theme_name_changes_nothing() {
+    let mut window = open_recording().await;
+    let menu = window.theme_menu();
+    // Leave the default first, so a reset to Auto shows as a change.
+    window.choose(menu, PreviewTheme::Dracula.name());
+
+    for name in ["black", "Dracula", ""] {
+        window.choose(menu, name);
+        let page = window.html();
+        assert!(
+            page.contains("class=\"preview-screen\" style=\"background-color:#282a36\""),
+            "{name}: {page}"
+        );
+        assert!(
+            page.contains("style=\"color:#f8f8f2;background-color:#282a36\""),
+            "{name}: {page}"
+        );
+        assert!(page.contains(&theme_option(PreviewTheme::Dracula, true)));
+        assert!(page.contains(&theme_option(PreviewTheme::Auto, false)));
+    }
+}
+
+#[tokio::test]
+async fn the_theme_stays_when_a_new_recording_opens() {
+    let fakes = Fakes::new()
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())))
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())));
+    let mut window = Window::open(&fakes);
+    window.click(window.open_button());
+    window.settle().await;
+    window.choose(window.theme_menu(), "monokai");
+    let page = window.html();
+    assert!(
+        page.contains("style=\"background-color:#272822\""),
+        "{page}"
+    );
+
+    window.click(window.open_button());
+    window.settle().await;
+
+    let page = window.html();
+    assert!(
+        page.contains("style=\"background-color:#272822\""),
+        "{page}"
+    );
+    assert!(page.contains(&theme_option(PreviewTheme::Monokai, true)));
+}
+
+/// The declarations of the rule that starts with `selector`, from the style sheet.
+fn rule_body(selector: &str) -> String {
+    text_between(STYLE, &format!("{selector} {{"), "}")
+}
+
+#[test]
+fn the_style_sheet_fits_the_grid_to_the_pane() {
+    let pane = rule_body(".preview-screen");
+    assert!(pane.contains("container-type: size"), "{pane}");
+    let terminal = rule_body(".terminal");
+    let size = text_between(&terminal, "font-size:", ";");
+    // A cell is 0.6 em wide and one line high, so the rows divide the height
+    // by the line height of the same rule.
+    let line_height = text_between(&terminal, "line-height:", ";");
+    let line_height = line_height.trim();
+    assert_eq!(
+        size.trim(),
+        format!(
+            "min(calc(100cqw / (var(--columns) * 0.6)), \
+             calc(100cqh / (var(--rows) * {line_height})))"
+        )
+    );
 }
