@@ -418,6 +418,8 @@ pub(super) fn ExportBar(
                     if busy() {
                         return;
                     }
+                    // Each click removes the old status, also a click that a bad setting stops.
+                    status.set(None);
                     let settings = settings();
                     // A bad setting is an error before any dialog.
                     if let Err(error) = settings.target() {
@@ -431,7 +433,6 @@ pub(super) fn ExportBar(
                     else {
                         return;
                     };
-                    status.set(None);
                     busy.set(true);
                     let services = services.clone();
                     spawn(async move {
