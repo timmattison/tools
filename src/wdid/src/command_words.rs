@@ -86,7 +86,8 @@ use std::ops::Range;
 
 use brush_parser::ast;
 use brush_parser::word::{
-    self, Parameter, ParameterExpr, SpecialParameter, TildeExpr, WordPiece, WordPieceWithSource,
+    self, BraceExpressionMember, BraceExpressionOrText, Parameter, ParameterExpr, SpecialParameter,
+    TildeExpr, WordPiece, WordPieceWithSource,
 };
 use brush_parser::{tokenize_str_with_options, Parser, ParserOptions, Token};
 
@@ -1653,6 +1654,41 @@ impl Argument {
         }
     }
 
+    /// Gives the names of the `name=value` words that the shell makes of this
+    /// word, in order, with no duplicate and no empty name.
+    ///
+    /// A literal word gives the text before its first `=`. An expansion word
+    /// gives one name for each word that its brace lists make, as `alias`
+    /// reads them: the shell expands the braces of the whole word, then
+    /// `alias` splits each result at its first `=`. Thus `{a1,a2}=y` gives
+    /// `a1` and `a2`, and `{b=1,c=2}` gives `b` and `c`. A result gives no
+    /// name when text that only the shell can expand comes before its first
+    /// `=`: a parameter, a substitution, an arithmetic expansion, a tilde, an
+    /// ANSI-C string, or a glob. A brace sequence such as `{1..3}` gives no
+    /// name, because the parser loses the zero padding that the shell keeps. A
+    /// word that grows past [`MAX_BRACE_WORDS`] words gives no name. An
+    /// operator gives no name.
+    #[must_use]
+    pub fn assignment_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        match self {
+            Self::Literal(text) => {
+                if let Some((name, _)) = text.split_once(ASSIGNMENT) {
+                    names.push(name.to_string());
+                }
+            }
+            Self::Expansion(raw) => {
+                for word in brace_words(raw).unwrap_or_default() {
+                    names.extend(name_of_raw_word(&word));
+                }
+            }
+            Self::Operator(_) => {}
+        }
+        let mut seen = std::collections::HashSet::new();
+        names.retain(|name| !name.is_empty() && seen.insert(name.clone()));
+        names
+    }
+
     /// Gives the text of the word, whatever its kind.
     #[must_use]
     pub fn text(&self) -> &str {
@@ -1714,6 +1750,122 @@ fn is_pattern(probe: &str) -> bool {
                 .is_some_and(|(inside, _)| inside.contains(',') || inside.contains(".."))
         });
     probe.contains(['*', '?']) || bracket || brace || probe.starts_with(EQUALS_EXPANSION)
+}
+
+/// The most words that the brace lists of one word may make. A dotfile line is
+/// input from outside the program, and `{a,b}` repeated n times makes 2^n
+/// words.
+const MAX_BRACE_WORDS: usize = 1024;
+
+/// Gives the raw words that the brace lists of `raw` make, in the order of the
+/// shell. A word with no brace list gives itself. Gives `None` when the word
+/// holds a brace sequence or grows past [`MAX_BRACE_WORDS`] words.
+fn brace_words(raw: &str) -> Option<Vec<String>> {
+    match word::parse_brace_expansions(raw, &ParserOptions::default()) {
+        Ok(Some(parts)) => expand_parts(&parts),
+        Ok(None) | Err(_) => Some(vec![raw.to_string()]),
+    }
+}
+
+/// Gives the product of `parts` in order: each result is the prefix, one word
+/// of each list, and the suffix. Gives `None` on a sequence or past the cap.
+fn expand_parts(parts: &[BraceExpressionOrText]) -> Option<Vec<String>> {
+    let mut words = vec![String::new()];
+    for part in parts {
+        let choices = match part {
+            BraceExpressionOrText::Text(text) => vec![text.clone()],
+            BraceExpressionOrText::Expr(members) => {
+                let mut union = Vec::new();
+                for member in members {
+                    match member {
+                        BraceExpressionMember::Child(children) => {
+                            union.extend(expand_parts(children)?);
+                        }
+                        _ => return None,
+                    }
+                    if union.len() > MAX_BRACE_WORDS {
+                        return None;
+                    }
+                }
+                union
+            }
+        };
+        if words.len().checked_mul(choices.len())? > MAX_BRACE_WORDS {
+            return None;
+        }
+        words = words
+            .iter()
+            .flat_map(|prefix| {
+                choices
+                    .iter()
+                    .map(move |choice| format!("{prefix}{choice}"))
+            })
+            .collect();
+    }
+    Some(words)
+}
+
+/// The literal text and the glob probe of the part of a word before its
+/// first `=`.
+#[derive(Default)]
+struct NameScan {
+    /// The text of the name after quote removal.
+    name: String,
+    /// The probe of the name, built as [`argument_from`] builds it.
+    probe: String,
+}
+
+impl NameScan {
+    /// Adds `text` and stops at its first `=`. Gives `Some(true)` when the
+    /// `=` was found. `quoted` makes the probe take a stand-in for the text.
+    fn add(&mut self, text: &str, quoted: bool) -> bool {
+        let (before, found) = match text.split_once(ASSIGNMENT) {
+            Some((before, _)) => (before, true),
+            None => (text, false),
+        };
+        self.name.push_str(before);
+        if quoted {
+            self.probe.push(PIECE_STAND_IN);
+        } else {
+            self.probe.push_str(before);
+        }
+        found
+    }
+
+    /// Reads `pieces` up to the first `=`. Gives `Some(true)` when the `=`
+    /// was found, `Some(false)` when the pieces end first, and `None` when a
+    /// piece before the `=` is not literal text.
+    fn scan(&mut self, pieces: &[WordPieceWithSource], quoted: bool) -> Option<bool> {
+        for WordPieceWithSource { piece, .. } in pieces {
+            let found = match piece {
+                WordPiece::Text(text) => self.add(text, quoted),
+                WordPiece::SingleQuotedText(text) => self.add(text, true),
+                WordPiece::EscapeSequence(escape) => self.add(unescape(escape), true),
+                WordPiece::DoubleQuotedSequence(inner) => {
+                    let found = self.scan(inner, true)?;
+                    self.probe.push(PIECE_STAND_IN);
+                    found
+                }
+                _ => return None,
+            };
+            if found {
+                return Some(true);
+            }
+        }
+        Some(false)
+    }
+}
+
+/// Gives the name of the `name=value` word with the raw text `raw`, or `None`
+/// when the word has no `=`, does not parse, or needs the shell to give its
+/// name. See [`Argument::assignment_names`].
+fn name_of_raw_word(raw: &str) -> Option<String> {
+    let pieces = word::parse(raw, &ParserOptions::default()).ok()?;
+    let mut scan = NameScan::default();
+    if !scan.scan(&pieces, false)? || is_pattern(&scan.probe) {
+        return None;
+    }
+    Some(scan.name)
 }
 
 /// Gives the [`Argument`] of a word with the raw text `raw` and the top-level

@@ -379,7 +379,8 @@ const SUFFIX_OPTION: char = 's';
 const ASSIGNMENT: char = '=';
 
 /// The characters that the shell removes from the name of an alias: the two
-/// quotes and the backslash.
+/// quotes and the backslash. Only the read of a line with an open quote uses
+/// them, because the splitter removes the quotes of each other line.
 const QUOTE_CHARACTERS: [char; 3] = ['\'', '"', '\\'];
 
 /// The characters that a function name of a definition line does not hold,
@@ -417,7 +418,10 @@ const ADDED_MARK: char = '+';
 /// more `name=value` words. Each such word defines a name, thus
 /// `alias gs='git status' gd='git diff'` defines `gs` and `gd`. A word with no
 /// `=` defines nothing. The words end at the first operator or comment, thus
-/// `alias s1=x; s2=y` defines only `s1`. The option `-s` makes each name a
+/// `alias s1=x; s2=y` defines only `s1`. The shell expands each unquoted brace
+/// list of a word before `alias` runs, thus `alias -s {md,txt}=glow` defines
+/// `*.md` and `*.txt`. A name that holds an expansion, a glob, or a brace
+/// sequence such as `{1..3}` defines nothing. The option `-s` makes each name a
 /// suffix alias, `*.` and the suffix. A word that starts with `-` and holds no
 /// `=` is an option word, and `--` ends the options. The quotes and the
 /// backslashes in a name do not count, thus `alias 'll=ls -l'` defines `ll`.
@@ -466,46 +470,49 @@ fn alias_names(rest: &str) -> Vec<Defined> {
         Some(arguments) => (
             arguments
                 .into_iter()
-                .map_while(|argument| match argument {
-                    Argument::Literal(text) | Argument::Expansion(text) => Some(text),
-                    Argument::Operator(_) => None,
-                })
-                .collect::<Vec<String>>(),
+                .take_while(|argument| !matches!(argument, Argument::Operator(_)))
+                .collect::<Vec<Argument>>(),
             false,
         ),
-        None => (rest.split_whitespace().map(str::to_owned).collect(), true),
+        None => (
+            rest.split_whitespace()
+                .map(|word| {
+                    Argument::Literal(
+                        word.chars()
+                            .filter(|character| !QUOTE_CHARACTERS.contains(character))
+                            .collect(),
+                    )
+                })
+                .collect(),
+            true,
+        ),
     };
     let mut suffix = false;
     let mut in_options = true;
     let mut names = Vec::new();
     for word in &words {
         if in_options {
-            if word == END_OF_OPTIONS {
+            let text = word.text();
+            if text == END_OF_OPTIONS {
                 in_options = false;
                 continue;
             }
-            if word.starts_with(OPTION_START) && !word.contains(ASSIGNMENT) {
-                suffix |= word.contains(SUFFIX_OPTION);
+            if text.starts_with(OPTION_START) && !text.contains(ASSIGNMENT) {
+                suffix |= text.contains(SUFFIX_OPTION);
                 continue;
             }
             in_options = false;
         }
-        let Some((name, _)) = word.split_once(ASSIGNMENT) else {
-            continue;
-        };
-        let name: String = name
-            .chars()
-            .filter(|character| !QUOTE_CHARACTERS.contains(character))
-            .collect();
-        if name.is_empty() {
-            continue;
-        }
-        names.push(if suffix {
-            Defined::alias(format!("{SUFFIX_MARKER}{name}"))
-        } else {
-            Defined::alias(name)
-        });
-        if first_only {
+        let defined = word.assignment_names();
+        let found = !defined.is_empty();
+        names.extend(defined.into_iter().map(|name| {
+            if suffix {
+                Defined::alias(format!("{SUFFIX_MARKER}{name}"))
+            } else {
+                Defined::alias(name)
+            }
+        }));
+        if first_only && found {
             break;
         }
     }
