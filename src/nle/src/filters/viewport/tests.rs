@@ -371,6 +371,13 @@ fn two_cells_next_to_each_other_give_one_cup() {
 }
 
 #[test]
+fn a_cha_moves_the_cursor_of_the_output_to_its_column() {
+    let rendered = render(vec![out(1.0, "abc\x1b[Gx")], json!({ "hide_rows": [23] }));
+
+    assert_eq!(pairs(&rendered.events), vec![(1.0, "xbc\x1b[1;2H")]);
+}
+
+#[test]
 fn a_cell_after_a_wide_character_gets_its_own_cup() {
     let rendered = render(vec![out(1.0, "日本")], json!({ "hide_rows": [23] }));
 

@@ -568,3 +568,63 @@ fn a_missing_or_zero_margin_of_the_scroll_region_is_the_edge_of_the_screen() {
         assert_eq!(state.get_cursor_position(), (0, 0), "{sequence:?}");
     }
 }
+
+/// Sends `sequence` to a terminal of 10 columns and 6 rows, with the cursor
+/// at column 5 and row 3, and gives the place of the cursor.
+fn cursor_after(sequence: &str) -> (usize, usize) {
+    let mut state = TerminalState::new(10, 6, TerminalTheme::auto());
+    state.process_output("\x1b[4;6H").unwrap();
+    assert_eq!(state.get_cursor_position(), (5, 3));
+    state.process_output(sequence).unwrap();
+    state.get_cursor_position()
+}
+
+#[test]
+fn cha_sets_the_column_and_keeps_the_row() {
+    assert_eq!(cursor_after("\x1b[G"), (0, 3));
+    assert_eq!(cursor_after("\x1b[0G"), (0, 3));
+    assert_eq!(cursor_after("\x1b[3G"), (2, 3));
+    assert_eq!(cursor_after("\x1b[99G"), (9, 3));
+}
+
+#[test]
+fn hpa_sets_the_column_and_keeps_the_row() {
+    assert_eq!(cursor_after("\x1b[`"), (0, 3));
+    assert_eq!(cursor_after("\x1b[0`"), (0, 3));
+    assert_eq!(cursor_after("\x1b[3`"), (2, 3));
+    assert_eq!(cursor_after("\x1b[99`"), (9, 3));
+}
+
+#[test]
+fn vpa_sets_the_row_and_keeps_the_column() {
+    assert_eq!(cursor_after("\x1b[d"), (5, 0));
+    assert_eq!(cursor_after("\x1b[0d"), (5, 0));
+    assert_eq!(cursor_after("\x1b[3d"), (5, 2));
+    assert_eq!(cursor_after("\x1b[99d"), (5, 5));
+}
+
+#[test]
+fn cnl_moves_down_and_sets_the_column_to_the_left_edge() {
+    assert_eq!(cursor_after("\x1b[E"), (0, 4));
+    assert_eq!(cursor_after("\x1b[0E"), (0, 4));
+    assert_eq!(cursor_after("\x1b[2E"), (0, 5));
+    assert_eq!(cursor_after("\x1b[99E"), (0, 5));
+}
+
+#[test]
+fn cpl_moves_up_and_sets_the_column_to_the_left_edge() {
+    assert_eq!(cursor_after("\x1b[F"), (0, 2));
+    assert_eq!(cursor_after("\x1b[0F"), (0, 2));
+    assert_eq!(cursor_after("\x1b[2F"), (0, 1));
+    assert_eq!(cursor_after("\x1b[99F"), (0, 0));
+}
+
+#[test]
+fn the_ink_form_of_an_erase_returns_to_the_first_column() {
+    let mut state = TerminalState::new(10, 6, TerminalTheme::auto());
+    state.process_output("abc\x1b[Gx").unwrap();
+
+    let row: String = state.get_grid()[0].iter().take(3).map(|c| c.ch).collect();
+    assert_eq!(row, "xbc");
+    assert_eq!(state.get_cursor_position(), (1, 0));
+}
