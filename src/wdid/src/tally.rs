@@ -145,7 +145,7 @@ impl Counts {
 }
 
 /// Gives the number of whole days from `date` to `today`.
-fn days_since(today: NaiveDate, date: NaiveDate) -> i64 {
+pub(crate) fn days_since(today: NaiveDate, date: NaiveDate) -> i64 {
     (today - date).num_days()
 }
 

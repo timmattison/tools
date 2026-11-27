@@ -27,6 +27,7 @@ serde_json.workspace = true
 shellquote.workspace = true
 termsize.workspace = true
 thiserror.workspace = true
+unicode-width.workspace = true
 url.workspace = true
 wait-timeout.workspace = true
 
