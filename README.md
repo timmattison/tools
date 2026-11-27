@@ -6723,7 +6723,9 @@ The time of a chapter is on the timeline before the filters. The render moves
 each chapter with the events around it. Thus a filter that changes the timing,
 for example a speed change, keeps the chapter on the same content. A speed
 change scales a chapter also in a region with no event, for example a silent
-build step. The cursor filter moves no chapter. A chapter after the end of the
+build step. The backspace removal filter moves a chapter earlier by the time of
+the typos before it, and a chapter inside a removed typo moves to the place of
+the typo. The cursor filter moves no chapter. A chapter after the end of the
 rendered recording is not in it.
 
 `beta export web` shows the chapters of a rendered recording as markers on the
