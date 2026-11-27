@@ -12,7 +12,7 @@ code.
 
 **A rule in this document is a decision.** If the code of a slice disagrees
 with a rule, the code or this document has an error. The slice corrects one of
-the two. The WIT of the two filter worlds is the contract of slice 2. The WIT
+the two. The WIT of the three filter worlds is the contract of slice 2. The WIT
 sketches of the analyzer world and the renderer world show the direction, and
 their slices make them final.
 
@@ -22,9 +22,10 @@ their slices make them final.
    host pins the newest LTS line of wasmtime. [The runtime](#the-runtime) gives
    the comparison.
 2. **The ABI is one WIT package, `nle:plugin`**, with one world for each plugin
-   type: `filter-plugin`, `span-filter-plugin`, `analyzer-plugin`, and
-   `renderer-plugin`. The two filter worlds match the two forms of a filter in
-   `src/nle`: the event form `FilterFn` and the span form `SpanFilterFn`. Each
+   type: `filter-plugin`, `in-place-filter-plugin`, `span-filter-plugin`,
+   `analyzer-plugin`, and `renderer-plugin`. The three filter worlds match the
+   three forms of a filter in `src/nle`: the event form `FilterFn`, the
+   in-place form `InPlaceFilterFn`, and the span form `SpanFilterFn`. Each
    world exports a versioned interface, thus the host reads the API version of
    a plugin from the plugin itself.
 3. **One plugin is one folder, one manifest, one component, and one function.**
@@ -35,10 +36,10 @@ their slices make them final.
 5. **The sandbox gives a plugin no file, no network, no environment, no real
    clock, and no real random source.** Limits bound its memory and its work. A
    wall-clock deadline is only a backstop.
-6. **The event form `FilterFn` returns a `Result`, like the span form.** A
-   plugin can fail, and the pipeline must report that failure. Both forms
-   carry the error as a `String`. This change comes before the first built-in
-   filter of the event form.
+6. **The event form `FilterFn` returns a `Result`, like the in-place form and
+   the span form.** A plugin can fail, and the pipeline must report that
+   failure. All three forms carry the error as a `String`. This change comes
+   before the first built-in filter of the event form.
 7. **The options are typed.** The manifest declares each option, the host makes
    sure of each value before the call, and typed values cross the boundary.
 8. **The filter kind of a plugin is `plugin:<name>`.** A built-in kind never
@@ -48,7 +49,7 @@ their slices make them final.
    from the network.
 10. **Hot reload applies only to development folders** that the user names
     with a flag.
-11. **The API version stays below 1.0.0** until each of the four worlds
+11. **The API version stays below 1.0.0** until each of the five worlds
     ships. Below 1.0.0, the version obeys the convention
     of cargo: an addition increments the patch number, and a break increments
     the minor number. The semver promise comes at
@@ -58,28 +59,38 @@ their slices make them final.
 
 ## The current state
 
-The design starts from the code on `main` at commit `9c12c0325`.
+The design starts from the code on `main` at commit `7dabb8b2d`.
 
-- `src/nle/src/pipeline.rs` defines two forms of a filter. The event form,
+- `src/nle/src/pipeline.rs` defines three forms of a filter. The event form,
   `FilterFn`, is `dyn Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync`.
-  The span form, `SpanFilterFn`, is
+  The in-place form, `InPlaceFilterFn`, is
+  `dyn Fn(&[Event], RegionView, &FilterOptions) -> Result<Vec<Event>, String> + Send + Sync`,
+  and `RegionView` holds the length of the region and `open`, which is true
+  when nothing of the timeline comes after the region. The span form,
+  `SpanFilterFn`, is
   `dyn Fn(Span, &FilterOptions) -> Result<Span, String> + Send + Sync`, and
   `Span` holds the events and the length of a region. `FilterRegistry` keeps
-  one filter of either form for each `FilterKind`, from `register` or
-  `register_span`. The doc comments state the steps of one filter call: the
-  region split, the relative times, the shift, and the sort.
-- A filter of the event form cannot report an error. A span filter answers
-  `Err` with a message, and the pipeline then fails with
+  one filter of one form for each `FilterKind`, from `register`,
+  `register_in_place`, or `register_span`. The doc comments state the steps of
+  one filter call: the region split, the relative times, the shift, and the
+  sort.
+- A filter of the event form cannot report an error. An in-place filter and a
+  span filter answer `Err` with a message, and the pipeline then fails with
   `NleError::RenderError`, whose text names the kind and holds the message.
-  For both forms, the pipeline refuses an answered time that is not finite or
-  is below zero.
+  For each form, the pipeline refuses an answered time that is not finite or
+  is below zero. An in-place filter must also answer each time inside its
+  region, and nothing after the region moves.
 - `App` in `src/nle/src/ui.rs` starts with `filters::registry()` of
-  `src/nle/src/filters.rs`. It registers one built-in filter: time dilation
-  (issue #153), a span filter. No built-in filter of the event form exists
-  yet. The other filters of issues #152 thru #168 are open.
+  `src/nle/src/filters.rs`. It registers three built-in filters. The cursor
+  filter (issue #168) has the in-place form. Time dilation (issue #153) and
+  typing speed (issue #155) have the span form. Typing speed has the span form
+  because the event form cannot refuse a bad option. No built-in filter of the
+  event form exists yet. The other filters of issues #152 thru #167 are open.
 - `FilterKind` is a string, and `FilterOptions` is a JSON object. The project
   file keeps both in `AppliedFilter`. The project file has no version field.
-- `src/nle` has no terminal state, no frame, and no analysis type.
+- `src/nle` has no `TerminalState`, no frame, and no analysis type. Its reader
+  of escape sequences, `src/nle/src/ansi.rs`, keeps the state of a sequence
+  from one event to the next, and the cursor filter uses it.
   `TerminalState` and `Cell` are in the library crate `termstate`
   (`src/termstate/src/lib.rs`), which issue #768 added. `beta` uses
   `termstate`, but `src/nle` does not depend on it yet. The video export of
@@ -163,11 +174,13 @@ All of the contract is one WIT package, `nle:plugin`. It holds these parts:
 | `types` | interface | The event, the options, and the shared records |
 | `log` | interface | One function that writes a line to the plugin log of the editor |
 | `filter` | interface | The `apply` function of a filter of the event form |
+| `in-place-filter` | interface | The `region-view` record, and the `apply` function of a filter of the in-place form |
 | `span-filter` | interface | The `span` record, and the `apply` function of a filter of the span form |
 | `analyzer` | interface | The `analyze` function of an analyzer |
 | `canvas` | interface | The `frame` resource that a renderer draws on |
 | `renderer` | interface | The `render` function of a renderer |
 | `filter-plugin` | world | Imports `log`, exports `filter` |
+| `in-place-filter-plugin` | world | Imports `log`, exports `in-place-filter` |
 | `span-filter-plugin` | world | Imports `log`, exports `span-filter` |
 | `analyzer-plugin` | world | Imports `log`, exports `analyzer` |
 | `renderer-plugin` | world | Imports `log` and `canvas`, exports `renderer` |
@@ -183,8 +196,9 @@ crate reads the same files. There is one copy.
 
 `wasm-tools` 1.263.0 parses all of the WIT blocks of this document as one
 package. A dummy component of each world, from `wasm-tools component embed
---dummy`, exports `nle:plugin/filter@0.1.0`, `nle:plugin/span-filter@0.1.0`,
-`nle:plugin/analyzer@0.1.0`, or `nle:plugin/renderer@0.1.0`.
+--dummy`, exports `nle:plugin/filter@0.1.0`, `nle:plugin/in-place-filter@0.1.0`,
+`nle:plugin/span-filter@0.1.0`, `nle:plugin/analyzer@0.1.0`, or
+`nle:plugin/renderer@0.1.0`.
 
 ### The shared types
 
@@ -231,7 +245,7 @@ the project sets no value. Thus a plugin never needs a default of its own.
 
 ### The filter worlds
 
-This WIT is the contract of slice 2. A filter has one of the two forms of
+This WIT is the contract of slice 2. A filter has one of the three forms of
 `src/nle/src/pipeline.rs`, and each form has its own world. The `type` of the
 manifest picks the form.
 
@@ -253,6 +267,42 @@ interface filter {
 world filter-plugin {
     import log;
     export filter;
+}
+```
+
+The in-place form is for a filter that changes what the events say and not
+when they occur, for example a filter that rewrites escape sequences: the
+cursor (issue #168), a redaction (issue #156), or a color scheme (issue
+#166). The view of the region tells its length, and whether anything of the
+timeline comes after it. Thus a filter that sets a state of the terminal can
+set it back at the end of a range, and leave it at the end of the recording.
+The event form gets no view of its region.
+
+```wit
+interface in-place-filter {
+    use types.{event, option-entry};
+
+    /// What an in-place filter knows about its region.
+    record region-view {
+        /// The length of the region in seconds. It is never below zero.
+        length: f64,
+        /// True when nothing of the timeline comes after the region.
+        open: bool,
+    }
+
+    /// The in-place filter. It obeys the steps on `InPlaceFilterFn` in
+    /// `src/nle/src/pipeline.rs`: it gets the events of its region with
+    /// times relative to the region start, and the view of the region. It
+    /// answers new events in the same relative time, each from 0 to the
+    /// length of the region. Nothing on the timeline moves.
+    ///
+    /// An `err` answer fails the render with the message.
+    apply: func(events: list<event>, region: region-view, options: list<option-entry>) -> result<list<event>, string>;
+}
+
+world in-place-filter-plugin {
+    import log;
+    export in-place-filter;
 }
 ```
 
@@ -290,10 +340,11 @@ world span-filter-plugin {
 
 The host wraps the component in a closure, and it registers that closure in
 `FilterRegistry` like a built-in filter: a `filter` plugin through
-`FilterRegistry::register`, and a `span-filter` plugin through
+`FilterRegistry::register`, an `in-place-filter` plugin through
+`FilterRegistry::register_in_place`, and a `span-filter` plugin through
 `FilterRegistry::register_span`. Thus the pipeline and the editor do not know
-that a filter is a plugin. The region split, the time checks, the shift, and
-the sort stay in the pipeline.
+that a filter is a plugin. The region split, the region view, the time
+checks, the shift, and the sort stay in the pipeline.
 
 ### The analyzer world
 
@@ -456,7 +507,8 @@ is off by default.
 - **One `InstancePre` for each plugin.** The host compiles and links a plugin
   once, when it loads. A call makes a new `Store` and a new instance from the
   `InstancePre`, and drops both when the call ends. The closure that wraps a
-  plugin is thus `Send + Sync`, which `FilterFn` and `SpanFilterFn` ask for.
+  plugin is thus `Send + Sync`, which `FilterFn`, `InPlaceFilterFn`, and
+  `SpanFilterFn` ask for.
 - **An empty WASI context.** Some guest toolchains import WASI even when the
   plugin uses none of it. The host links WASI 0.2 with a `WasiCtxBuilder`
   context of `wasmtime-wasi` that has no preopened directory, no environment,
@@ -535,7 +587,7 @@ Each plugin folder holds `plugin.json`. The example of the issue is valid:
 | --- | --- | --- |
 | `name` | yes | 1 to 64 characters of `a-z`, `0-9`, and `-`. It starts with a letter. It is unique among the loaded plugins. |
 | `version` | yes | A semver version of the plugin itself. The editor shows it, and the errors name it. |
-| `type` | yes | `filter`, `span-filter`, `analyzer`, or `renderer`. The component must export the interface of this type. |
+| `type` | yes | `filter`, `in-place-filter`, `span-filter`, `analyzer`, or `renderer`. The component must export the interface of this type. |
 | `description` | yes | One line of text for the plugin list. |
 | `entry` | yes | A relative path to the component, inside the plugin folder. An absolute path, a `..` part, and a symbolic link that leaves the folder are refused. |
 | `options` | no | The options. An absent field is no options. |
@@ -572,7 +624,7 @@ host makes the typed `list<option-entry>` from it:
 
 ### The filter kind in a project
 
-A filter plugin of either form registers under the kind `plugin:<name>`. A
+A filter plugin of each form registers under the kind `plugin:<name>`. A
 project that uses
 it keeps that kind in `AppliedFilter`. When the plugin is absent, the render
 fails with the existing error of `FilterRegistry`, which names the kind. The
@@ -655,13 +707,13 @@ editor writes there, and that flow loads the plugin that it installs.
 The issue closes with six open questions. Each one gets a recommendation.
 
 1. **Built-in filters as plugins: no.** The built-in filters stay native
-   closures of the event form or the span form. The editor thus builds and
-   runs with no WASM toolchain, a built-in filter costs no instantiation, and
-   a debugger steps through it. The API gets its exercise from the other
-   direction. The conformance test of slice 2 runs an example plugin of each
-   form. The example span filter implements time dilation, the first built-in
-   filter (issue #153). A test asserts that the plugin and the native filter
-   give equal answers on one fixture.
+   closures of the event form, the in-place form, or the span form. The
+   editor thus builds and runs with no WASM toolchain, a built-in filter costs
+   no instantiation, and a debugger steps through it. The API gets its
+   exercise from the other direction. The conformance test of slice 2 runs an
+   example plugin of each form. The example span filter implements time
+   dilation, the first built-in filter (issue #153). A test asserts that the
+   plugin and the native filter give equal answers on one fixture.
 2. **Versioning: the WIT package version is the API version.** The host reads
    it from the export names of the component, thus the manifest has no `api`
    field that can disagree with the component. Before 1.0.0, an addition
@@ -722,16 +774,17 @@ start at once.
 
 - `FilterFn` is `dyn Fn(&[Event], &FilterOptions) -> Result<Vec<Event>, String> + Send + Sync`,
   and `FilterRegistry::register` takes a closure of that signature. The error
-  type is the one of `SpanFilterFn`.
-- An `Err` fails `FilterRegistry::run` and `FilterRegistry::render` as step 3
-  of `SpanFilterFn` does: with `NleError::RenderError`, whose text names the
-  kind and holds the message.
+  type is the one of `InPlaceFilterFn` and `SpanFilterFn`.
+- An `Err` fails `FilterRegistry::run` and `FilterRegistry::render` as step 2
+  of `InPlaceFilterFn` and step 3 of `SpanFilterFn` do: with
+  `NleError::RenderError`, whose text names the kind and holds the message.
 - The steps on `FilterFn` state the error step.
 
 This slice is small, and it must land before the first built-in filter of the
 event form. Each event filter that lands after it uses the new signature, and
-no filter needs a second change. The time dilation filter is a span filter,
-and this slice does not change it.
+no filter needs a second change. The built-in filters of `main` have the
+in-place form (the cursor filter) and the span form (time dilation and typing
+speed), and this slice does not change them.
 
 ### Slice 1: The manifest and the options schema
 
@@ -748,16 +801,22 @@ A new library crate, `src/nle-plugins`, with no WASM runtime yet.
 ### Slice 2: The WASM filter host
 
 - The WIT package `nle:plugin@0.1.0` holds `types`, `log`, `filter`,
-  `filter-plugin`, `span-filter`, and `span-filter-plugin`.
+  `filter-plugin`, `in-place-filter`, `in-place-filter-plugin`, `span-filter`,
+  and `span-filter-plugin`.
 - The engine, the instances, the WASI context, the limits, and the cache obey
   [the host](#the-host).
-- A function loads one plugin folder, and it answers a `FilterFn`, a
-  `SpanFilterFn`, or a load error.
-- Two example plugins in Rust, built for `wasm32-wasip2`, run in a conformance
-  test: one of each form. The span filter implements time dilation. The test
+- A function loads one plugin folder, and it answers a `FilterFn`, an
+  `InPlaceFilterFn`, a `SpanFilterFn`, or a load error.
+- Three example plugins in Rust, built for `wasm32-wasip2`, run in a conformance
+  test: one of each form. The span filter implements time dilation. The
+  in-place filter adds one event at the length of its region when the region
+  is not open. The test
   asserts these results:
   - The span filter and the native time dilation filter give equal answers on
     one fixture.
+  - The in-place filter gets the view of the region from the pipeline. On a
+    range that events come after, its event lands at the end of the range. On
+    the region `All`, which is open, it adds no event.
   - Two calls with the same input give the same answer.
   - A file open and a socket connect fail.
   - The clock gives the fixed time.
@@ -788,7 +847,7 @@ answer, with these items:
 - Where a person reads the plugin log of the editor.
 
 The slice adds the `wasm32-wasip2` target to `rust-toolchain.toml`. The test
-builds the example plugin into a fixed directory under `target/`, and the lock
+builds the example plugins into a fixed directory under `target/`, and the lock
 of cargo keeps two test runs apart. The slice records in its pull request the
 build time that wasmtime adds to a clean build. The conformance test runs in
 the one list of `scripts/rust-checks.sh`, like each other test of the
@@ -805,7 +864,8 @@ each default feature of wasmtime that the host does not use.
 - The editor loads each folder of [the plugins directory](#the-plugins-directory)
   when it starts, except a folder whose name starts with `.`.
 - It registers each filter plugin under `plugin:<name>`, through
-  `FilterRegistry::register` or `FilterRegistry::register_span` by its `type`.
+  `FilterRegistry::register`, `FilterRegistry::register_in_place`, or
+  `FilterRegistry::register_span` by its `type`.
 - It shows each folder that failed to load, with the reason.
 - Two folders with the same `name` both fail, and the error names both.
 
@@ -872,7 +932,7 @@ it.
 ### The 1.0.0 gate
 
 The API goes to `1.0.0` when slices 2, 5, and 6 are on `main` and the example
-plugins exercise all four worlds. From then, the host links the current major
+plugins exercise all five worlds. From then, the host links the current major
 version and the major version before it. This gate is a decision for Tim, not a
 slice.
 
