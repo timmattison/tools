@@ -378,10 +378,11 @@ const SUFFIX_OPTION: char = 's';
 /// The character between the name and the value of an alias.
 const ASSIGNMENT: char = '=';
 
-/// The characters that the shell removes from the name of an alias: the two
-/// quotes and the backslash. Only the read of a line with an open quote uses
-/// them, because the splitter removes the quotes of each other line.
-const QUOTE_CHARACTERS: [char; 3] = ['\'', '"', '\\'];
+/// The texts that the read puts at the end of an alias line, in order:
+/// nothing, a closing single quote, and a closing double quote. A line that
+/// opens a quote and does not close it goes on to the next line, and the
+/// closing quote at the end of the line stands for that.
+const LINE_ENDINGS: [&str; 3] = ["", "'", "\""];
 
 /// The characters that a function name of a definition line does not hold,
 /// other than the blanks. Each one is a quote, an expansion, or an operator
@@ -425,9 +426,11 @@ const ADDED_MARK: char = '+';
 /// suffix alias, `*.` and the suffix. A word that starts with `-` and holds no
 /// `=` is an option word, and `--` ends the options. The quotes and the
 /// backslashes in a name do not count, thus `alias 'll=ls -l'` defines `ll`.
-/// When the line opens a quote that it does not close, the words of the line
-/// are the words between blanks, and only the first name counts. A word of
-/// the open value gives no false name that way.
+/// The value of a line that opens a quote and does not close it goes on to
+/// the next line. The read closes the quote at the end of the line, thus
+/// `alias a=1 b='x` defines `a` and `b`, and a word of the open value defines
+/// nothing. When a different construct stays open, for example `$(`, only the
+/// text up to the first `=` counts, thus `alias x="$(date` defines `x`.
 ///
 /// A function line is `name()`, `name ()`, or `function name`. A function
 /// name holds no blank, no quote, no `$`, and no operator of the shell. A
@@ -462,31 +465,25 @@ fn after_word<'a>(text: &'a str, word: &str) -> Option<&'a str> {
 /// Gives the aliases that the words after `alias` define.
 ///
 /// The shell splitter gives the words. A word after an operator belongs to
-/// another command, thus the read stops there. When the splitter refuses the
-/// text, the words are the words between blanks and only the first name
-/// counts.
+/// another command, thus the read stops there. The read has two steps:
+///
+/// 1. The splitter reads `rest` closed by the first of [`LINE_ENDINGS`] that
+///    it accepts.
+/// 2. If no ending works, the splitter reads the text of `rest` up to the
+///    first `=`, closed the same way. A different construct stays open, for
+///    example `$(`, and only that name counts.
+///
+/// If both steps fail, the line defines nothing.
 fn alias_names(rest: &str) -> Vec<Defined> {
-    let (words, first_only) = match split_words(rest) {
-        Some(arguments) => (
-            arguments
-                .into_iter()
-                .take_while(|argument| !matches!(argument, Argument::Operator(_)))
-                .collect::<Vec<Argument>>(),
-            false,
-        ),
-        None => (
-            rest.split_whitespace()
-                .map(|word| {
-                    Argument::Literal(
-                        word.chars()
-                            .filter(|character| !QUOTE_CHARACTERS.contains(character))
-                            .collect(),
-                    )
-                })
-                .collect(),
-            true,
-        ),
-    };
+    let words = closed_words(rest)
+        .or_else(|| {
+            let (name, _) = rest.split_once(ASSIGNMENT)?;
+            closed_words(&format!("{name}{ASSIGNMENT}"))
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .take_while(|argument| !matches!(argument, Argument::Operator(_)))
+        .collect::<Vec<Argument>>();
     let mut suffix = false;
     let mut in_options = true;
     let mut names = Vec::new();
@@ -503,20 +500,23 @@ fn alias_names(rest: &str) -> Vec<Defined> {
             }
             in_options = false;
         }
-        let defined = word.assignment_names();
-        let found = !defined.is_empty();
-        names.extend(defined.into_iter().map(|name| {
+        names.extend(word.assignment_names().into_iter().map(|name| {
             if suffix {
                 Defined::alias(format!("{SUFFIX_MARKER}{name}"))
             } else {
                 Defined::alias(name)
             }
         }));
-        if first_only && found {
-            break;
-        }
     }
     names
+}
+
+/// Gives the words of `text` closed by the first of [`LINE_ENDINGS`] that the
+/// splitter accepts, or `None` when no ending works.
+fn closed_words(text: &str) -> Option<Vec<Argument>> {
+    LINE_ENDINGS
+        .iter()
+        .find_map(|ending| split_words(&format!("{text}{ending}")))
 }
 
 /// Gives the function that the words after `function` define.
