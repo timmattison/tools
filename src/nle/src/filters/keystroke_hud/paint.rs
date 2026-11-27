@@ -323,18 +323,20 @@ impl Pen {
         }
     }
 
-    /// The sequences that put a screen in this state.
-    fn restore(&self) -> String {
+    /// The sequences that put a screen in the pen `from` into this state. The
+    /// character set is selected only when it differs from the one of `from`,
+    /// so that a repair of the cursor writes no set of the replay.
+    fn restore(&self, from: &Self) -> String {
         let cell = Cell {
             bold: self.bold,
             italic: self.italic,
             underline: self.underline,
             ..Cell::default()
         };
-        let charset = if self.use_acs {
-            SELECT_LINE_DRAWING
-        } else {
-            SELECT_ASCII
+        let charset = match (self.use_acs, from.use_acs) {
+            (true, false) => SELECT_LINE_DRAWING,
+            (false, true) => SELECT_ASCII,
+            _ => "",
         };
         format!(
             "{}{}{charset}",
@@ -431,8 +433,8 @@ impl Painter {
                 last = Some((row, column, style));
             }
         }
-        let repair =
-            (Pen::of(&self.shown) != Pen::of(&self.clean)).then(|| Pen::of(&self.clean).restore());
+        let (shown_pen, clean_pen) = (Pen::of(&self.shown), Pen::of(&self.clean));
+        let repair = (shown_pen != clean_pen).then(|| clean_pen.restore(&shown_pen));
         let mut output = String::new();
         if any_cell {
             output.push_str("\x1b7\x0f\x1b(B\x1b[?6l");
