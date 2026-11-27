@@ -41,8 +41,10 @@ pub enum ColorSource {
 - Each place that sets `current_fg` or `current_bg` also sets the source. SGR
   0 and RIS set `Default`. A cell that a clear, an erase, a scroll, an insert,
   or a delete makes gets `Default`. A printed cell copies the pen.
-- SGR 39 and 49 stay ignored, as before. Thus the filter writes the default
-  colors through the reset `SGR 0`, and never through 39 or 49.
+- SGR 39 and 49 set the source of the foreground or the background to
+  `Default`. The RGB value stays the same, because decision H-165-2 keeps the
+  RGB output of termstate for each existing caller. The filter writes the
+  default colors through the reset `SGR 0`, and never through 39 or 49.
 
 ## Part 2: the screen filter form of the pipeline
 
@@ -209,3 +211,6 @@ correctly.
 - `ESC 7` in a real terminal also saves the pen. The restore saves the pen of
   the emulator at the end of the range, and not the pen at the original
   `ESC 7`, because `termstate` saves only the position.
+- After SGR 39 or 49, `beta export video` and the preview of `nle` still draw
+  the color before it, because `termstate` keeps the RGB value (decision
+  H-165-2). The output of the filter writes the default color.

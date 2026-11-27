@@ -858,6 +858,16 @@ impl TerminalState {
                 22 => self.bold = false,
                 23 => self.italic = false,
                 24 => self.underline = false,
+                39 => {
+                    // Only the source changes. Decision H-165-2 keeps the RGB
+                    // value for each existing caller.
+                    self.current_fg_source = ColorSource::Default;
+                }
+                49 => {
+                    // Only the source changes. Decision H-165-2 keeps the RGB
+                    // value for each existing caller.
+                    self.current_bg_source = ColorSource::Default;
+                }
                 30..=37 => {
                     // Foreground colors
                     let color_index = sgr_palette_index(param - 30);
