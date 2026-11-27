@@ -51,8 +51,8 @@ site_manager_api_key = "your-site-manager-api-key"
 > all three. On Unix `ufa` restricts the file to mode `0600` (owner-only)
 > whenever it saves it, and on Windows the file takes the per-user ACL of
 > `%APPDATA%`. The key is still readable by anything that runs as you, and by
-> anyone who can read your backups. It is kept only for backward compatibility
-> with existing configs — prefer `sm_op_path`.
+> anyone who can read your backups. Setup writes it only for a key that you
+> paste — prefer `sm_op_path`.
 
 `sm_op_path` takes precedence over `site_manager_api_key`. If the reference is
 set but cannot be read, `ufa` reports that failure instead of silently falling

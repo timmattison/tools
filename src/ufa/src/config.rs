@@ -551,7 +551,7 @@ impl Config {
     }
 
     /// Read the API key from 1Password via op-cache, falling back to the
-    /// plaintext `api_key` field for backward compatibility.
+    /// plaintext `api_key` field, which setup writes for a pasted key.
     ///
     /// # Arguments
     ///
@@ -575,8 +575,8 @@ impl Config {
     }
 
     /// Read the Site Manager (cloud) API key from 1Password via op-cache,
-    /// falling back to the plaintext `site_manager_api_key` field for
-    /// backward compatibility.
+    /// falling back to the plaintext `site_manager_api_key` field, which
+    /// setup writes for a pasted key.
     ///
     /// # Arguments
     ///
