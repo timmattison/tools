@@ -416,6 +416,12 @@ impl Clone for TerminalState {
     }
 }
 
+impl PartialEq for TerminalState {
+    fn eq(&self, _other: &Self) -> bool {
+        false
+    }
+}
+
 impl Default for Cell {
     fn default() -> Self {
         Self {

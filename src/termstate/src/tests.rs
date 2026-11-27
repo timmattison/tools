@@ -187,3 +187,20 @@ fn the_replay_buffer_holds_only_an_unfinished_sequence() {
     state.process_output("1mX").unwrap();
     assert!(state.pending.is_empty());
 }
+
+/// A terminal of 10 columns and 3 rows that read `text`.
+fn fed(text: &str) -> TerminalState {
+    let mut state = TerminalState::new(10, 3, TerminalTheme::auto());
+    state.process_output(text).unwrap();
+    state
+}
+
+#[test]
+fn two_terminals_that_read_the_same_bytes_are_equal() {
+    assert!(fed("ab\x1b[31mc\r\n") == fed("ab\x1b[31mc\r\n"));
+}
+
+#[test]
+fn an_echo_and_its_erase_leave_a_terminal_equal_to_one_that_read_neither() {
+    assert!(fed("$ h") == fed("$ hr\x08 \x08"));
+}
