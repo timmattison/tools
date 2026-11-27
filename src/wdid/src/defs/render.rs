@@ -7,8 +7,8 @@
 //! origin and a field that says if it is mine.
 //!
 //! The text report ends with the group `Duplicates and shadows`. It lists each
-//! finding of the tally that holds a definition of mine, or each finding with
-//! `all`. The JSON document holds each finding.
+//! finding of the tally that holds a definition of mine or a place of mine, or
+//! each finding with `all`. The JSON document holds each finding.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -505,12 +505,13 @@ fn finding_entry(finding: &Finding, places: &Places) -> String {
 }
 
 /// Gives the group of the duplicates and the shadows: each finding of the
-/// tally with a definition of mine, or each finding when `all` is true.
+/// tally with a definition of mine or a place of mine, or each finding when
+/// `all` is true.
 fn findings_group(tally: &Tally, all: bool) -> String {
     let entries: Vec<String> = tally
         .findings
         .iter()
-        .filter(|finding| all || finding.mine())
+        .filter(|finding| all || finding.mine(&tally.places))
         .map(|finding| finding_entry(finding, &tally.places))
         .collect();
     group(HEADING_FINDINGS, &entries)
@@ -526,7 +527,7 @@ fn findings_group(tally: &Tally, all: bool) -> String {
 /// file that defined the others, with that file and a count as its heading.
 /// The three groups then hold each entry, else only mine. The last group
 /// holds each finding with `window.all`, else only the findings that hold one
-/// of my definitions. The definition in a table is one line. It is cut to the
+/// of my definitions or one of my places. The definition in a table is one line. It is cut to the
 /// room that the width leaves.
 #[must_use]
 pub fn text(tally: &Tally, window: &Window, shell: &str, width: Option<u16>) -> String {
@@ -641,11 +642,12 @@ struct Document<'a> {
     findings: Vec<FindingDocument<'a>>,
 }
 
-/// Gives the JSON form of one finding.
-fn finding_document(finding: &Finding) -> FindingDocument<'_> {
+/// Gives the JSON form of one finding. `directories` decides which places are
+/// mine.
+fn finding_document<'a>(finding: &'a Finding, directories: &Places) -> FindingDocument<'a> {
     FindingDocument {
         kind: finding.kind,
-        mine: finding.mine(),
+        mine: finding.mine(directories),
         definitions: finding
             .definitions
             .iter()
@@ -707,7 +709,8 @@ fn named<'a>(definitions: &[&'a Usage]) -> Vec<NamedDocument<'a>> {
 /// report.
 ///
 /// `findings` holds each finding of the tally in order, also a finding with no
-/// definition of mine. Each finding has the fields `kind`, `mine`,
+/// definition of mine. A finding is `mine` when one of its definitions or one
+/// of its places is mine. Each finding has the fields `kind`, `mine`,
 /// `definitions`, `words`, `places`, and `program`, always present. Each
 /// definition has `name`, `kind`, `origin`, `uses`, and `mine`. `words` and
 /// `places` are empty lists, and `program` is `null`, when the kind of the
@@ -745,7 +748,11 @@ pub fn json(tally: &Tally, window: &Window, shell: &str) -> String {
         never_used: named(&with(&every, Classification::NeverUsed)),
         idle: named(&idle_definitions(&every)),
         runs_without_typing: named(&with(&every, Classification::RunsWithoutTyping)),
-        findings: tally.findings.iter().map(finding_document).collect(),
+        findings: tally
+            .findings
+            .iter()
+            .map(|finding| finding_document(finding, &tally.places))
+            .collect(),
     };
     let mut text = serde_json::to_string_pretty(&document)
         .expect("a document of numbers, dates, and text always serializes");

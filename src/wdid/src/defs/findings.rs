@@ -15,7 +15,7 @@ use crate::command_words::{
     parse_line, simple_command, split_words, AliasDefinition, AliasKind, Aliases, WrapperRun,
     COMMAND,
 };
-use crate::origin::Origin;
+use crate::origin::{Origin, Places};
 use crate::shell::Definitions;
 
 /// The kind of a finding.
@@ -72,10 +72,21 @@ pub struct Finding {
 }
 
 impl Finding {
-    /// Says if one or more of its definitions is mine.
+    /// Says if the finding is mine. It is mine when one or more of its
+    /// definitions is mine, or when one or more of its places is mine.
+    ///
+    /// Only a finding of kind [`FindingKind::DefinedMoreThanOnce`] has places.
+    /// Its one definition is the one in effect, which is the last place. An
+    /// alias of my startup file that a plugin defines again later has the
+    /// plugin as its definition, but my file is one of its places. A place
+    /// that is unknown is mine, as [`Places::is_mine`] says.
     #[must_use]
-    pub fn mine(&self) -> bool {
+    pub fn mine(&self, directories: &Places) -> bool {
         self.definitions.iter().any(|member| member.mine)
+            || self
+                .places
+                .iter()
+                .any(|place| directories.is_mine(place.as_ref()))
     }
 }
 

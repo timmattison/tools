@@ -530,7 +530,12 @@ fn a_finding_is_mine_when_one_definition_is_mine() {
     assert_eq!(found.len(), 2);
     let mine: Vec<(&str, bool)> = found
         .iter()
-        .map(|finding| (finding.definitions[0].name.as_str(), finding.mine()))
+        .map(|finding| {
+            (
+                finding.definitions[0].name.as_str(),
+                finding.mine(&places()),
+            )
+        })
         .collect();
     assert_eq!(mine, [("ga", false), ("gs", true)]);
 }
