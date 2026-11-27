@@ -1257,3 +1257,31 @@ async fn an_unknown_theme_name_changes_nothing() {
         assert!(page.contains(&theme_option(PreviewTheme::Dracula, false)));
     }
 }
+
+#[tokio::test]
+async fn the_theme_stays_when_a_new_recording_opens() {
+    let fakes = Fakes::new()
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())))
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())));
+    let mut window = Window::open(&fakes);
+    window.click(window.open_button());
+    window.settle().await;
+    window.choose(window.theme_menu(), "monokai");
+    let page = window.html();
+    assert!(
+        page.contains("style=\"background-color:#272822\""),
+        "{page}"
+    );
+
+    window.click(window.open_button());
+    window.settle().await;
+
+    let page = window.html();
+    assert!(
+        page.contains("style=\"background-color:#272822\""),
+        "{page}"
+    );
+    assert!(page.contains(&theme_option(PreviewTheme::Monokai, true)));
+}
