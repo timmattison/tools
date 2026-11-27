@@ -42,6 +42,10 @@ const SEQUENCE_TIMEOUT: f64 = 0.05;
 /// that one event can hold.
 const PASTE_TAIL_LENGTH: usize = PASTE_END.len() - 1;
 
+/// The count of the characters that follow `ESC [ M` in an X10 mouse report:
+/// the button and the two coordinates.
+const X10_REPORT_LENGTH: usize = 3;
+
 /// Reads the input events of one region, in order. It keeps two kinds of state
 /// across the events: an open bracketed paste, and an escape sequence that the
 /// data of an event leaves unfinished.
@@ -643,8 +647,14 @@ impl Parser {
         };
         self.pos += 1;
         if final_char == 'M' && params.is_empty() && intermediates.is_empty() {
-            // An X10 mouse report: three more characters.
-            self.pos = self.chars.len().min(self.pos + 3);
+            // An X10 mouse report: three more characters. When the data ends
+            // before them and more data follows, the report waits for its rest.
+            if self.chars.len().saturating_sub(self.pos) < X10_REPORT_LENGTH
+                && self.defer(start, 0)
+            {
+                return;
+            }
+            self.pos = self.chars.len().min(self.pos + X10_REPORT_LENGTH);
             return;
         }
         if params.starts_with(['<', '=', '>', '?']) {
