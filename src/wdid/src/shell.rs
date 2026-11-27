@@ -785,8 +785,8 @@ fn first_line(body: &str) -> String {
         .to_owned()
 }
 
-/// Reads the body of one function into `definitions`. It keeps the first line
-/// of the body for each function, also for a body that does not parse.
+/// Reads the body of one function into `definitions`. It keeps the body and
+/// its first line for each function, also for a body that does not parse.
 ///
 /// The shell expanded the aliases of the body when it read the definition,
 /// the global and the suffix aliases included. Thus the parse of the body uses
@@ -795,6 +795,9 @@ fn read_function(name: &str, body: &str, definitions: &mut Definitions) {
     definitions
         .function_lines
         .insert(name.to_owned(), first_line(body));
+    definitions
+        .function_bodies
+        .insert(name.to_owned(), body.to_owned());
     match command_words(body, &Aliases::new()) {
         Parsed::Words(words) => {
             definitions.functions.insert(name.to_owned(), words);
