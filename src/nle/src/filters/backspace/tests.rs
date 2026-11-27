@@ -414,3 +414,25 @@ fn a_black_cell_is_not_a_blank_cell() {
     ];
     assert_eq!(run(events.clone()), events);
 }
+
+/// Run the filter on the region `All` of `events` with `options`.
+fn run_with(events: Vec<Event>, options: FilterOptions) -> Result<Vec<Event>, NleError> {
+    let mut registry = FilterRegistry::new();
+    register(&mut registry);
+    let applied = AppliedFilter {
+        options,
+        ..applied_to_all()
+    };
+    registry.run(events, &[applied])
+}
+
+#[test]
+fn an_option_fails_the_render_and_the_message_names_it() {
+    let options = FilterOptions::new().with("speed", 2);
+    let error = run_with(typo_then_backspace("\x7f"), options).unwrap_err();
+    let NleError::RenderError(message) = error else {
+        panic!("expected a render error, got {error:?}");
+    };
+    assert!(message.contains("speed"), "{message}");
+    assert!(message.contains("backspace-removal"), "{message}");
+}
