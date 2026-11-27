@@ -1690,35 +1690,49 @@ impl Argument {
     }
 }
 
-/// Says if the unquoted text `text` holds a pattern that the shell expands:
-/// `*`, `?`, or `[` before `]` (a glob), `{` before a `}` with `,` or `..`
-/// between them (a brace expansion), or, when `leading`, a first `=` (zsh
-/// gives the path of the program).
-fn is_pattern(text: &str, leading: bool) -> bool {
-    let bracket = text
+/// The character that stands for each piece of a word other than unquoted
+/// text in the probe of [`argument_from`]. It has no meaning in a glob or in a
+/// brace expansion, so a quoted `,` or `}` stays out of the probe, as the
+/// shell keeps it out.
+const PIECE_STAND_IN: char = 'x';
+
+/// Says if the probe text `probe` of a word holds a pattern that the shell
+/// expands: `*`, `?`, or `[` before `]` (a glob), a `{` and the first `}`
+/// after it with `,` or `..` between them (a brace expansion), or a first `=`
+/// (zsh gives the path of the program). Each `{` counts, so `{x}{a,b}` is a
+/// pattern.
+fn is_pattern(probe: &str) -> bool {
+    let bracket = probe
         .split_once('[')
         .is_some_and(|(_, rest)| rest.contains(']'));
-    let brace = text
-        .split_once('{')
-        .and_then(|(_, rest)| rest.split_once('}'))
-        .is_some_and(|(inside, _)| inside.contains(',') || inside.contains(".."));
-    text.contains(['*', '?']) || bracket || brace || (leading && text.starts_with(EQUALS_EXPANSION))
+    let brace = probe
+        .match_indices('{')
+        .filter_map(|(index, open)| probe.get(index + open.len()..))
+        .any(|rest| {
+            rest.split_once('}')
+                .is_some_and(|(inside, _)| inside.contains(',') || inside.contains(".."))
+        });
+    probe.contains(['*', '?']) || bracket || brace || probe.starts_with(EQUALS_EXPANSION)
 }
 
 /// Gives the [`Argument`] of a word with the raw text `raw` and the top-level
 /// `pieces`. A tilde expansion or an unquoted pattern makes an
 /// [`Argument::Expansion`], so `~` is not the literal `'~'`, and `*.c` is not
 /// the literal `'*.c'`. This is the one place of that rule.
+///
+/// The pattern rule reads one probe of the whole word: the text of each
+/// unquoted piece, and [`PIECE_STAND_IN`] for each other piece. Thus a quoted
+/// piece does not divide `{a,"b"}` into two texts that hold no pattern.
 fn argument_from(raw: &str, pieces: &[WordPieceWithSource]) -> Argument {
-    let expands = pieces
-        .iter()
-        .enumerate()
-        .any(|(index, piece)| match &piece.piece {
-            WordPiece::TildeExpansion(_) => true,
-            WordPiece::Text(text) => is_pattern(text, index == 0),
-            _ => false,
-        });
-    if expands {
+    let mut probe = String::new();
+    for WordPieceWithSource { piece, .. } in pieces {
+        match piece {
+            WordPiece::TildeExpansion(_) => return Argument::Expansion(raw.to_string()),
+            WordPiece::Text(text) => probe.push_str(text),
+            _ => probe.push(PIECE_STAND_IN),
+        }
+    }
+    if is_pattern(&probe) {
         return Argument::Expansion(raw.to_string());
     }
     match literal_of(pieces) {
