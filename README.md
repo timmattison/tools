@@ -176,18 +176,6 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
       moving lots of files is shitty. Much simpler than `find ... -exec mv`, especially for common tasks like moving
       all files of a certain type. Collision-safe by default and handles moves across volumes (where `rename` fails).
     - To install: `cargo install --git https://github.com/timmattison/tools bm`
-- localnext
-    - Runs statically compiled NextJS applications locally. You'll need to build your code and get the magic `out`
-      directory by adding `output: 'export'` to your `next.config.mjs` file. This was written to work with [the
-      templates I was testing at the time](https://github.com/timmattison/material-ui-react-templates). Run it from
-      the project directory or from inside `out`; either way it serves the same directory. Extensionless routes
-      resolve to their `.html` file, and anything it cannot find falls back to `index.html`. The listening port is
-      derived automatically (the same algorithm as `portplz`): inside a git repository from the repository name, the
-      branch, and the current user — the project directory plays no part there — or, outside one, from the directory
-      basename and the current user; either way it stays stable across runs. Two exports from the same repository on
-      the same branch derive the same port, so the second one needs `-p/--port`. Binds `127.0.0.1`. Answers HTTP
-      byte-range requests, so an exported `<video>`/`<audio>` element seeks instead of re-downloading the whole file.
-    - To install: `cargo install --git https://github.com/timmattison/tools localnext`
 - unescapeboard
     - Waits for text with `\\"` in it to be put on the clipboard and then unescapes one level of it.
     - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
@@ -239,6 +227,10 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
       so a given project always serves on a stable port and two users on one machine don't collide; override it with
       `-p/--port`. Binds `127.0.0.1` by default — use `--bind 0.0.0.0` to expose it on the LAN. Answers HTTP
       byte-range requests, so a served `<video>`/`<audio>` file seeks instead of re-downloading from the start.
+    - `sirn` does not try `<path>.html` when `<path>` does not exist, thus a static Next.js export (the `out`
+      directory of `output: 'export'`) needs a server that does, for example
+      `pnpm dlx serve out --listen tcp://127.0.0.1:3000`. Without `--listen`, `serve` binds every interface and puts
+      the export on the LAN.
     - To install: `cargo install --git https://github.com/timmattison/tools sirn`
 - uuidplz
     - Generates UUIDs. With no input it prints a random v4 UUID. Given a string or a file it seeds a name-based
@@ -5690,7 +5682,6 @@ Never used, old (added 90 or more days ago):
   sirn
 Never used, new (added less than 90 days ago):
   faulte (added 2026-09-18)
-  localnext (added 2026-09-04)
   occ (added 2026-08-14)
 Idle (no use in the last 180 days):
   update-aws-credentials (218 uses, last use 2025-11-13)
@@ -6365,9 +6356,20 @@ cargo tauri build --no-bundle   # the binary is target/release/msgs
 ## nle (non-linear editor)
 
 A desktop application for the terminal recordings that `beta` writes. It opens
-a `.json` or `.json.gz` recording, makes an edit project of it, and shows its
-metadata. The timeline (issue #150) and the preview pane (issue #151) are
-placeholders.
+a `.json` or `.json.gz` recording, makes an edit project of it, shows its
+metadata, and plays the edited recording in its preview pane. The timeline
+(issue #150) is a placeholder with a playhead control.
+
+The preview pane draws the terminal of the edited recording at the playhead.
+Drag the playhead control under **Timeline** to go to a time. **Play** plays
+the recording from the playhead, and the same button then says **Pause**.
+**Stop** stops playback and goes back to the start. Playback stops at the end,
+and **Play** at the end starts again from the beginning. The readout shows the
+time of the playhead and the duration of the edited recording. The **Theme**
+menu selects one of the palettes of `beta export --theme`: Auto, Dracula,
+Monokai, Solarized Dark, or Solarized Light. The terminal grows or shrinks to
+fit the pane, and each edit shows in the preview at once. A new recording opens
+stopped, at time zero.
 
 The speed panel under the metadata changes the speed of a region. Type the
 start and the end of the region in seconds and a speed, then click
@@ -6384,7 +6386,7 @@ The application is one Rust crate on Dioxus 0.7, with the desktop (webview)
 renderer. Its components call the Rust code directly, and the open project is
 Dioxus state, thus no IPC layer and no frontend package exist.
 
-The editing engine of the crate has four parts:
+The editing engine of the crate has five parts:
 
 - **Edit project** (`EditProject`): clips of source recordings, placed on the
   tracks of the timeline, and the filters that apply to the result. An edit
@@ -6405,13 +6407,31 @@ The editing engine of the crate has four parts:
   `FilterRegistry::run`.
   `filters::registry()` holds the filters that ship: the cursor filter
   (`cursor`, issue #168) is an in-place filter, and time dilation
-  (`time-dilation`, issue #153) and backspace removal (`backspace-removal`,
-  issue #152) are span filters. The other issues from #154 to #167 add the
-  rest.
+  (`time-dilation`, issue #153), typing speed (`typing-speed`, issue #155), and
+  backspace removal (`backspace-removal`, issue #152) are span filters. The
+  other issues from #154 to #167 add the rest.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
   undo and redo history.
+- **Preview** (`preview::Preview`): replays the events of the rendered
+  recording through the terminal emulator of `termstate`, which the video
+  export of `beta` also uses. On the way it keeps snapshots of the terminal,
+  about one for each second of the recording, so a seek replays only from the
+  nearest snapshot and not from time zero. The number of snapshots has a
+  limit that depends on the size of the grid.
+
+The typing speed filter plays each burst of typing at one rate. Its option
+`chars_per_second` sets the rate, and each input event counts as one
+character. A gap between two keys that is longer than `pause` (2 s when the
+option is missing) keeps its length, and so does the gap after a key that
+holds a line end. Thus each hesitation inside a command goes away, and each
+pause between two commands stays. An output keeps its delay after the key
+before it, so the echo of a key follows the key. When the gap to the next key
+becomes shorter, the delay becomes shorter by the same ratio. The option
+`jitter` (0 when missing, and below 1) changes each interval by up to that
+fraction, so the typing does not look mechanical. Each render gives the same
+times. The window cannot add the filter to a project yet.
 
 The crate also has functions that save the rendered recording
 (`Editor::save_recording`), list the recordings in a directory, and export a

@@ -3,6 +3,7 @@
 pub mod backspace;
 pub mod cursor;
 pub mod time_dilation;
+pub mod typing_speed;
 
 use crate::pipeline::FilterRegistry;
 
@@ -14,6 +15,7 @@ pub fn registry() -> FilterRegistry {
     backspace::register(&mut registry);
     cursor::register(&mut registry);
     time_dilation::register(&mut registry);
+    typing_speed::register(&mut registry);
     registry
 }
 

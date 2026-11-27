@@ -1,8 +1,7 @@
 //! Integration tests for `httpfile::serve_file`'s HTTP byte-range support.
 //!
 //! A raw HTTP/1.0 client over `std::net::TcpStream` exercises the server with no
-//! async runtime and no `reqwest`, mirroring the shape of
-//! `src/localnext/tests/common/mod.rs`. Every server binds `127.0.0.1:0` (an
+//! async runtime and no `reqwest`. Every server binds `127.0.0.1:0` (an
 //! OS-assigned ephemeral port) and every fixture is a fresh `tempfile::TempDir`,
 //! so a second concurrent `cargo test` cannot collide with this one (see
 //! `CLAUDE.md`'s parallel-safety rule).
