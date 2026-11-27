@@ -1025,3 +1025,38 @@ fn a_span_filter_on_a_range_gets_the_events_before_the_range_at_their_times() {
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].0, events(&[0.5, 1.5]));
 }
+
+#[test]
+fn run_gives_a_span_filter_the_size_of_a_vt100() {
+    let (registry, seen) = context_spy_registry();
+
+    registry.run(events(&[1.0]), &[all("look")]).unwrap();
+
+    assert_eq!(seen.lock().unwrap()[0].1, TerminalSize::VT100);
+}
+
+#[test]
+fn render_gives_a_span_filter_the_size_of_the_clip_that_starts_first() {
+    let (registry, seen) = context_spy_registry();
+    let mut project = two_clip_project();
+    // The clip "early" starts first. A size of "late" must not reach the filter.
+    let mut late = (*project.clips[0].source).clone();
+    late.width = 132;
+    late.height = 43;
+    project.clips[0].source = Arc::new(late);
+    let mut early = (*project.clips[1].source).clone();
+    early.width = 120;
+    early.height = 40;
+    project.clips[1].source = Arc::new(early);
+    project.filters.push(all("look"));
+
+    registry.render(&project).unwrap();
+
+    assert_eq!(
+        seen.lock().unwrap()[0].1,
+        TerminalSize {
+            width: 120,
+            height: 40
+        }
+    );
+}
