@@ -939,3 +939,68 @@ fn an_edit_after_a_speed_change_shows_the_duration_after_it() {
         format_duration(65.3 / 4.0)
     );
 }
+
+/// The page markup of a run of `count` letters x: the run ends at the cursor.
+fn x_run(count: usize) -> String {
+    format!(">{}</span>", "x".repeat(count))
+}
+
+#[tokio::test]
+async fn scrubbing_the_timeline_moves_the_preview() {
+    let mut window = open_recording().await;
+    let control = window.playhead_control();
+    let page = window.html();
+    assert!(page.contains("max=\"65.3\""), "{page}");
+    assert!(page.contains("aria-label=\"Playhead\""), "{page}");
+    assert!(page.contains(&x_run(1)), "{page}");
+
+    window.type_into(control, "1.0");
+    let page = window.html();
+    assert!(page.contains(&x_run(11)), "{page}");
+    assert!(!page.contains(&x_run(12)), "{page}");
+    assert!(page.contains("value=\"1\""), "{page}");
+
+    window.type_into(control, "0.5");
+    let page = window.html();
+    assert!(page.contains(&x_run(6)), "{page}");
+    assert!(!page.contains(&x_run(7)), "{page}");
+
+    window.type_into(control, "abc");
+    let page = window.html();
+    assert!(page.contains(&x_run(6)), "{page}");
+    assert!(page.contains("value=\"0.5\""), "{page}");
+}
+
+#[tokio::test]
+async fn an_edit_updates_the_preview_at_the_same_playhead() {
+    let mut window = open_recording().await;
+    let control = window.playhead_control();
+    window.type_into(control, "1.0");
+    assert!(window.html().contains(&x_run(11)));
+    window.apply_speed("0", "10", "2");
+    let page = window.html();
+    assert!(page.contains(&x_run(21)), "{page}");
+    assert!(!page.contains(&x_run(22)), "{page}");
+}
+
+#[tokio::test]
+async fn a_new_recording_starts_at_time_zero() {
+    let fakes = Fakes::new()
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())))
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())));
+    let mut window = Window::open(&fakes);
+    window.click(window.open_button());
+    window.settle().await;
+    let control = window.playhead_control();
+    window.type_into(control, "1.0");
+    assert!(window.html().contains(&x_run(11)));
+
+    window.click(window.open_button());
+    window.settle().await;
+    let page = window.html();
+    assert!(page.contains(&x_run(1)), "{page}");
+    assert!(!page.contains(&x_run(2)), "{page}");
+    assert!(page.contains("value=\"0\""), "{page}");
+}
