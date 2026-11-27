@@ -3,12 +3,13 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use dioxus::prelude::*;
 
 use super::Document;
 use crate::format::format_duration;
-use crate::preview::playback::play_from;
+use crate::preview::playback::{advance, play_from};
 use crate::preview::screen::{hex, Screen};
 use crate::preview::{Preview, PreviewTheme};
 use crate::types::{Recording, Seconds};
@@ -21,6 +22,9 @@ const PLAY_LABEL: &str = "Play";
 const PAUSE_LABEL: &str = "Pause";
 /// The label of the button that stops playback and returns to the start.
 const STOP_LABEL: &str = "Stop";
+/// The time between two moves of the playhead during playback. It gives about
+/// 30 frames each second.
+const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 /// The start of the message for a project that does not render.
 pub(super) const PREVIEW_FAILED_PREFIX: &str = "The project does not render";
 
@@ -61,6 +65,40 @@ pub(super) fn end_of(rendered: &RenderedState) -> Seconds {
     }
 }
 
+/// The ticker of the playback. It moves the playhead while `playing` is true.
+///
+/// The ticker reads `playing` first, so the resource subscribes to it. Each
+/// change of `playing` cancels the old task and starts a new one. Thus two
+/// tickers never run together. The loop reads the playhead and the render
+/// with `peek`. A read that subscribes would restart the resource at each
+/// write of the playhead, and the ticker would never reach its next step.
+/// When the playhead reaches the end, the ticker sets `playing` to false.
+fn use_ticker(
+    rendered: ReadSignal<RenderedState>,
+    mut playhead: Signal<Seconds>,
+    mut playing: Signal<bool>,
+) {
+    use_resource(move || async move {
+        if !playing() {
+            return;
+        }
+        let mut last = tokio::time::Instant::now();
+        loop {
+            tokio::time::sleep(FRAME_INTERVAL).await;
+            let now = tokio::time::Instant::now();
+            let elapsed = now.saturating_duration_since(last);
+            last = now;
+            let end = end_of(&rendered.peek());
+            let (next, reached_end) = advance(*playhead.peek(), elapsed, end);
+            playhead.set(next);
+            if reached_end {
+                playing.set(false);
+                return;
+            }
+        }
+    });
+}
+
 /// The preview of the open recording: the terminal at the playhead, and the
 /// transport toolbar. The pane keeps one `Preview` engine between renders. It
 /// replaces the engine when the rendered recording changes.
@@ -70,6 +108,7 @@ pub(super) fn PreviewPane(
     mut playhead: Signal<Seconds>,
     mut playing: Signal<bool>,
 ) -> Element {
+    use_ticker(rendered, playhead, playing);
     let end = end_of(&rendered.read());
     // The engine is not reactive. A write to it never starts a render.
     let engine = use_hook(|| Rc::new(RefCell::new(None::<Preview>)));
