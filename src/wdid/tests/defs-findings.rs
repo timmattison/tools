@@ -36,6 +36,7 @@ fn window(all: bool) -> Window {
     Window {
         today: NaiveDate::from_ymd_opt(2026, 10, 14).unwrap(),
         since: None,
+        new_days: 90,
         idle_days: 30,
         all,
     }

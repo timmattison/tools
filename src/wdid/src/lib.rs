@@ -7,6 +7,8 @@
 //! gives the same count for each alias and each function of the shell.
 //!
 //! # The modules
+//! - [`added`] gives the added date of each of my definitions: the date of
+//!   the oldest commit that adds a line that defines its name.
 //! - [`catalog`] reads the tools of the workspace: names, crate directories,
 //!   added dates, and install state.
 //! - [`command_words`] gives the command words of one command line.
@@ -26,6 +28,7 @@
 //! - [`workspace`] finds the workspace to report on, and the step that found
 //!   it.
 
+pub mod added;
 pub mod catalog;
 pub mod command_words;
 pub mod defs;
