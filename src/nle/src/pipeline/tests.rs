@@ -1202,6 +1202,22 @@ fn a_mark_inside_or_after_the_region_of_an_in_place_filter_keeps_its_time() {
     assert_eq!(mark_times(&marks), vec![3.0, 8.0]);
 }
 
+#[test]
+fn a_mark_inside_the_region_of_an_event_or_in_place_filter_keeps_its_exact_time() {
+    // In f64, (0.407 - 0.1) + 0.1 is 0.4069999999999999, so a mark that goes
+    // to the relative time and back moves by one step.
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("mark"), marker(0.407, "m"));
+    registry.register(kind("same"), mapper(|time| time));
+    registry.register_in_place(kind("same in place"), |events, _, _| Ok(events.to_vec()));
+
+    for name in ["same", "same in place"] {
+        let marks = rendered_marks(&registry, vec![all("mark"), range(name, 0.1, 5.0)]);
+
+        assert_eq!(mark_times(&marks), vec![0.407], "{name}");
+    }
+}
+
 /// Registers a span filter under "halve" that records the mark times that it
 /// gets, and halves its length and its event times. It answers its marks as
 /// it got them.

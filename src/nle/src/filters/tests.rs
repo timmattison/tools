@@ -652,6 +652,26 @@ fn auto_trim_moves_a_mark_after_the_last_output_event_back_to_it() {
     assert_eq!(marks, vec![1.0, 3.0]);
 }
 
+#[test]
+fn pause_insertion_moves_a_mark_at_the_start_of_its_range_after_an_in_place_filter() {
+    // The in-place filter on the range from 0.1 s keeps the mark at 0.407 s.
+    // The pause at the start of the range from 0.407 s then moves it by 1 s.
+    let mut registry = marking(&[0.407]);
+    registry.register_in_place(FilterKind::new("same"), |events, _, _| Ok(events.to_vec()));
+    let filters = vec![
+        all(MARKER, FilterOptions::new()),
+        range("same", 0.1, 2.0, FilterOptions::new()),
+        range(PAUSE_INSERTION, 0.407, 2.0, insertion(0.0, 1.0)),
+    ];
+
+    let rendered = registry
+        .render_with_marks(&project(outputs(&[0.0, 1.0]), 2.0, filters))
+        .expect("the render must not fail");
+
+    let marks: Vec<f64> = rendered.marks.iter().map(|mark| mark.time).collect();
+    assert_eq!(marks, vec![1.0 + 0.407]);
+}
+
 // Tests of the cursor filter in the app registry.
 
 #[test]
