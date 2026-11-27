@@ -1294,3 +1294,8 @@ fn split_words_gives_the_words_in_argument_form() {
 fn split_words_refuses_an_unterminated_quote() {
     assert_eq!(split_words("echo 'x"), None);
 }
+
+#[test]
+fn split_words_gives_a_newline_as_the_operator_that_the_tokenizer_gives() {
+    assert_eq!(split_words("a\nb"), split(["a", "\n", "b"]));
+}

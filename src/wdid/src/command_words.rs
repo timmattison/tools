@@ -1581,6 +1581,16 @@ pub fn parse_line(line: &str, aliases: &Aliases) -> Option<Line> {
 /// does not parse.
 #[must_use]
 pub fn split_words(text: &str) -> Option<Vec<String>> {
-    let _ = text;
-    None
+    let tokens =
+        tokenize_str_with_options(text, &ParserOptions::default().tokenizer_options()).ok()?;
+    tokens
+        .iter()
+        .map(|token| match token {
+            Token::Operator(operator, _) => Some(operator.clone()),
+            Token::Word(raw, _) => {
+                let pieces = word::parse(raw, &ParserOptions::default()).ok()?;
+                Some(literal_of(&pieces).unwrap_or_else(|| raw.clone()))
+            }
+        })
+        .collect()
 }
