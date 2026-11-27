@@ -689,21 +689,45 @@ fn has_definition(document: &Value, name: &str) -> bool {
         .any(|entry| entry["name"] == name)
 }
 
+/// Writes a stub `name` into the stubs of `setup` that records the arguments
+/// of each call in `log` and exits 1.
+fn failing_recorder(setup: &Setup, name: &str, log: &Path) {
+    let body = format!(
+        "printf '%s\\n' \"$*\" >> {}\nexit 1\n",
+        shellquote::shell_quote(&log.to_string_lossy())
+    );
+    write_script(setup.stubs.path(), name, &body);
+}
+
+/// Gives the lines of `log`, or none when the file does not exist.
+fn calls(log: &Path) -> Vec<String> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(String::from)
+        .collect()
+}
+
+/// Says if the recorded call `line` runs the git subcommand `subcommand`.
+fn runs_subcommand(line: &str, subcommand: &str) -> bool {
+    line.split(' ').any(|word| word == subcommand)
+}
+
+/// `wdid defs` needs no workspace, thus it starts no cargo. It starts one
+/// `git log` for the one origin file of my definitions. That git fails here,
+/// thus each added date is unknown.
 #[test]
-fn defs_outside_each_work_tree_prints_the_report_and_starts_no_cargo_and_no_git() {
+fn defs_outside_each_work_tree_prints_the_report_and_starts_no_cargo() {
     if !Path::new(ZSH).exists() {
         eprintln!("skipped: zsh is not installed");
         return;
     }
     let setup = Setup::new(&Atuin::Rows(&[row(1, "wtf x"), row(2, "myf")]));
     let log_dir = tempfile::tempdir().unwrap();
-    let log = log_dir.path().join("spawned.log");
-    let body = format!(
-        "printf '%s\\n' \"$*\" >> {}\nexit 1\n",
-        shellquote::shell_quote(&log.to_string_lossy())
-    );
-    write_script(setup.stubs.path(), "cargo", &body);
-    write_script(setup.stubs.path(), "git", &body);
+    let cargo_log = log_dir.path().join("cargo.log");
+    let git_log = log_dir.path().join("git.log");
+    failing_recorder(&setup, "cargo", &cargo_log);
+    failing_recorder(&setup, "git", &git_log);
     write_defs_zshrc(&setup);
     let cwd = gitscratch::testing::not_a_repository();
 
@@ -727,6 +751,7 @@ fn defs_outside_each_work_tree_prints_the_report_and_starts_no_cargo_and_no_git(
         })
         .unwrap_or_else(|| panic!("no row of wt in {text}"));
     assert!(wt.contains("wtf 1"), "{wt}");
+    assert!(wt.contains("unknown"), "{wt}");
     let lines: Vec<&str> = text.lines().collect();
     let heading = lines
         .iter()
@@ -737,11 +762,11 @@ fn defs_outside_each_work_tree_prints_the_report_and_starts_no_cargo_and_no_git(
         "{text}"
     );
     assert!(!text.contains("_private"), "{text}");
-    assert!(
-        !log.exists(),
-        "wdid defs started cargo or git: {}",
-        std::fs::read_to_string(&log).unwrap_or_default()
-    );
+    assert!(calls(&cargo_log).is_empty(), "{:?}", calls(&cargo_log));
+    let git = calls(&git_log);
+    assert_eq!(git.len(), 1, "{git:?}");
+    assert!(runs_subcommand(&git[0], "log"), "{git:?}");
+    assert!(git[0].ends_with(" -- .zshrc"), "{git:?}");
 }
 
 #[test]
@@ -876,13 +901,17 @@ fn the_help_texts_name_defs_and_the_flags_of_defs() {
     let defs = setup.command().args(["defs", "--help"]).output().unwrap();
     assert!(defs.status.success(), "{defs:?}");
     let text = stdout(&defs);
-    for flag in ["--since", "--json", "--idle-days", "--all"] {
+    for flag in ["--since", "--json", "--new-days", "--idle-days", "--all"] {
         assert!(text.contains(flag), "{text}");
     }
     assert!(!text.contains("--repo"), "{text}");
     assert!(
         text.contains("run without a typed name"),
         "the help of defs names each group of the report: {text}"
+    );
+    assert!(
+        text.contains("the date that a commit added it"),
+        "the help of defs names the added date: {text}"
     );
     assert!(
         text.contains("duplicates and shadows"),
@@ -1422,4 +1451,375 @@ fn defs_json_lists_each_kind_of_finding_and_marks_the_others() {
     let mut members = names(others);
     members.sort();
     assert_eq!(members, ["wdgcheck", "wdgco"]);
+}
+
+/// The format of a date in the `--date` of a fixture commit.
+const COMMIT_DATE_FORMAT: &str = "%Y-%m-%dT12:00:00Z";
+
+/// The date of the oldest commit of the added-date fixtures.
+const OLDEST_COMMIT: &str = "2019-03-04T12:00:00Z";
+
+/// The date of the rename of the template in the yadm fixture.
+const RENAME_COMMIT: &str = "2021-06-07T12:00:00Z";
+
+/// The date of the commit of the plain repository in the yadm home.
+const PLAIN_COMMIT: &str = "2022-02-03T12:00:00Z";
+
+/// The age in days of the newest commit of the added-date fixtures.
+const FRESH_DAYS: i64 = 10;
+
+/// Gives the commit date of a commit `days` days ago, and the date that the
+/// report gives for it.
+fn commit_days_ago(days: i64) -> (String, String) {
+    let time = Utc::now() - Duration::days(days);
+    (
+        time.format(COMMIT_DATE_FORMAT).to_string(),
+        time.format(DATE_FORMAT).to_string(),
+    )
+}
+
+/// Writes each pair of a name and contents below `dir`, and commits them in
+/// the git repository of `dir` on `date`.
+fn commit_in(dir: &Path, files: &[(&str, &str)], date: &str) {
+    for (name, contents) in files {
+        let path = dir.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+        git(dir, &["add", name], None);
+    }
+    git(dir, &["commit", "-q", "-m", "change"], Some(date));
+}
+
+/// The `.zshrc` of the plain-repository test: an alias in use, a function
+/// that never ran, both from the oldest commit.
+const PLAIN_ZSHRC_OLD: &str = "alias wt='echo wt'\nunused() { true }\n";
+
+/// The lines that the newest commit of the plain-repository test adds.
+const PLAIN_ZSHRC_NEW: &str = "alias fresh='echo fresh'\nfunction newfn {\n  true\n}\n";
+
+/// Makes the home of `setup` a plain git repository whose `.zshrc` has two
+/// commits: [`PLAIN_ZSHRC_OLD`] on [`OLDEST_COMMIT`], then
+/// [`PLAIN_ZSHRC_NEW`] [`FRESH_DAYS`] days ago. Gives the date of the second
+/// commit as the report gives it.
+fn plain_home(setup: &Setup) -> String {
+    let home = setup.home.path();
+    git(home, &["init", "-q", "-b", "main"], None);
+    commit_in(home, &[(".zshrc", PLAIN_ZSHRC_OLD)], OLDEST_COMMIT);
+    let (commit, shown) = commit_days_ago(FRESH_DAYS);
+    commit_in(
+        home,
+        &[(".zshrc", &format!("{PLAIN_ZSHRC_OLD}{PLAIN_ZSHRC_NEW}"))],
+        &commit,
+    );
+    shown
+}
+
+#[test]
+fn defs_gives_my_definitions_the_added_dates_of_a_plain_git_repository() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "wt")]));
+    let fresh_date = plain_home(&setup);
+    let cwd = gitscratch::testing::not_a_repository();
+
+    let output = defs_command(&setup)
+        .arg("--json")
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+
+    let document = json(&output);
+    assert_eq!(document["new_days"], 90, "{document}");
+    let rows = [
+        ("wt", "2019-03-04", "used"),
+        ("unused", "2019-03-04", "never_used_old"),
+        ("fresh", fresh_date.as_str(), "never_used_new"),
+        ("newfn", fresh_date.as_str(), "never_used_new"),
+    ];
+    for (name, added, classification) in rows {
+        let entry = definition(&document, name);
+        assert_eq!(entry["added"], added, "{name}: {document}");
+        assert_eq!(
+            entry["classification"], classification,
+            "{name}: {document}"
+        );
+    }
+    assert!(
+        listed_in(&document, "never_used_new", "fresh"),
+        "{document}"
+    );
+    assert!(
+        listed_in(&document, "never_used_old", "unused"),
+        "{document}"
+    );
+
+    let output = defs_command(&setup)
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = stdout(&output);
+    let new = group_of(&text, "Never used, new (added less than 90 days ago):");
+    assert_eq!(
+        new,
+        [
+            format!("  fresh (alias, added {fresh_date})"),
+            format!("  newfn (function, added {fresh_date})"),
+        ],
+        "{text}"
+    );
+    let wt = table_row(&text, "wt").unwrap_or_else(|| panic!("no row of wt in {text}"));
+    assert!(wt.contains("2019-03-04"), "{wt}");
+}
+
+#[test]
+fn defs_new_days_moves_a_definition_from_new_to_old() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "wt")]));
+    let fresh_date = plain_home(&setup);
+    let cwd = gitscratch::testing::not_a_repository();
+    let limit = (FRESH_DAYS - 1).to_string();
+
+    let output = defs_command(&setup)
+        .args(["--json", "--new-days", &limit])
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+
+    let document = json(&output);
+    assert_eq!(document["new_days"], FRESH_DAYS - 1, "{document}");
+    assert_eq!(
+        definition(&document, "fresh")["added"],
+        fresh_date,
+        "{document}"
+    );
+    for name in ["fresh", "newfn", "unused"] {
+        assert_eq!(
+            definition(&document, name)["classification"],
+            "never_used_old",
+            "{name}: {document}"
+        );
+    }
+    assert_eq!(
+        document["never_used_new"],
+        serde_json::json!([]),
+        "{document}"
+    );
+}
+
+/// A home whose dotfiles a yadm-style repository tracks: the git directory
+/// is in the home, and the home holds no `.git`. The template
+/// `.zshrc##template.default` is tracked, and its rendered `.zshrc` is not.
+/// The rendered `.zshrc` sources `~/plain/more.zsh` from a plain git
+/// repository that yadm does not track.
+struct YadmHome {
+    /// The yadm-style repository. Its work tree is the home.
+    repo: gitscratch::testing::DetachedGitDirRepo,
+    /// The date of the newest commit of the template, as the report gives it.
+    fresh_date: String,
+}
+
+impl YadmHome {
+    /// The lines of the oldest commit of the template.
+    const OLD: &'static str = "alias old='echo old'\noldfn() { true }\n";
+
+    /// Makes the home. The template starts as `.zshrc##template`, gets its
+    /// name `.zshrc##template.default` in a rename, and gets the alias `fresh`
+    /// [`FRESH_DAYS`] days ago.
+    fn new() -> Self {
+        let repo = gitscratch::testing::DetachedGitDirRepo::nested();
+        let home = repo.work_tree().to_path_buf();
+        Self::commit(&repo, ".zshrc##template", Self::OLD, OLDEST_COMMIT);
+        repo.git(&["mv", ".zshrc##template", ".zshrc##template.default"]);
+        repo.git(&["commit", "-q", "-m", "rename", "--date", RENAME_COMMIT]);
+        let (commit, fresh_date) = commit_days_ago(FRESH_DAYS);
+        let template = format!(
+            "{}alias fresh='echo fresh'\nsource $HOME/plain/more.zsh\n",
+            Self::OLD
+        );
+        Self::commit(&repo, ".zshrc##template.default", &template, &commit);
+        std::fs::write(
+            home.join(".zshrc"),
+            format!("# rendered by yadm\n{template}"),
+        )
+        .unwrap();
+        let plain = home.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        git(&plain, &["init", "-q", "-b", "main"], None);
+        commit_in(
+            &plain,
+            &[("more.zsh", "alias more='echo more'\n")],
+            PLAIN_COMMIT,
+        );
+        Self { repo, fresh_date }
+    }
+
+    /// Writes `contents` to `name` in the work tree and commits it on `date`.
+    fn commit(
+        repo: &gitscratch::testing::DetachedGitDirRepo,
+        name: &str,
+        contents: &str,
+        date: &str,
+    ) {
+        std::fs::write(repo.work_tree().join(name), contents).unwrap();
+        repo.git(&["add", name]);
+        repo.git(&["commit", "-q", "-m", "change", "--date", date]);
+    }
+
+    /// The home directory.
+    fn home(&self) -> &Path {
+        self.repo.work_tree()
+    }
+
+    /// Writes a stub `yadm` into the stubs of `setup` that prints the git
+    /// directory of the home.
+    fn write_yadm(&self, setup: &Setup) {
+        write_script(
+            setup.stubs.path(),
+            "yadm",
+            &format!(
+                "printf '%s\\n' {}\n",
+                shellquote::shell_quote(&self.repo.git_dir().to_string_lossy())
+            ),
+        );
+    }
+
+    /// The command `wdid defs --json` with this home as `HOME` and `ZDOTDIR`.
+    fn command(&self, setup: &Setup) -> Command {
+        let mut command = defs_command(setup);
+        command
+            .env("HOME", self.home())
+            .env("ZDOTDIR", self.home())
+            .arg("--json");
+        command
+    }
+
+    /// Checks the added date and the state of each definition of the home in
+    /// `document`.
+    fn assert_dates(&self, document: &Value) {
+        let rows = [
+            ("old", "2019-03-04", "used"),
+            ("oldfn", "2019-03-04", "never_used_old"),
+            ("fresh", self.fresh_date.as_str(), "never_used_new"),
+            ("more", "2022-02-03", "never_used_old"),
+        ];
+        for (name, added, classification) in rows {
+            let entry = definition(document, name);
+            assert_eq!(entry["added"], added, "{name}: {document}");
+            assert_eq!(
+                entry["classification"], classification,
+                "{name}: {document}"
+            );
+        }
+    }
+}
+
+#[test]
+fn defs_reads_the_dates_of_a_yadm_template_through_the_stub_yadm_on_the_path() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "old")]));
+    let home = YadmHome::new();
+    home.write_yadm(&setup);
+    let cwd = gitscratch::testing::not_a_repository();
+
+    let output = home
+        .command(&setup)
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+
+    home.assert_dates(&json(&output));
+}
+
+/// A git hook exports `GIT_DIR` and its companions into each command that it
+/// runs. `wdid defs` sheds them before each git process, thus the dates come
+/// from the yadm repository and the plain repository, and the decoy stays
+/// as it was.
+#[test]
+fn defs_sheds_the_git_environment_of_a_hook_before_it_reads_the_dates() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "old")]));
+    let home = YadmHome::new();
+    home.write_yadm(&setup);
+    let decoy = gitscratch::testing::DecoyRepository::of(gitscratch::testing::TestRepo::init());
+    let cwd = gitscratch::testing::not_a_repository();
+
+    let mut command = home.command(&setup);
+    decoy.aim(&mut command);
+    let output = command.current_dir(cwd.path()).output().unwrap();
+
+    home.assert_dates(&json(&output));
+    decoy.assert_untouched("wdid defs");
+}
+
+/// The `.zshrc` of the process-count test: five definitions, and a second
+/// file with two more.
+const COUNT_ZSHRC: &str = "alias a1=1\nalias a2=2\nalias a3=3\nfa() { true }\nfb() { true }\n\
+source $HOME/more.zsh\n";
+
+#[test]
+fn defs_starts_one_git_log_for_each_origin_file_and_not_for_each_definition() {
+    if !Path::new(ZSH).exists() {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let setup = Setup::new(&Atuin::Rows(&[row(1, "a1")]));
+    let home = setup.home.path();
+    git(home, &["init", "-q", "-b", "main"], None);
+    commit_in(
+        home,
+        &[
+            (".zshrc", COUNT_ZSHRC),
+            ("more.zsh", "alias b1=1\nalias b2=2\n"),
+        ],
+        OLDEST_COMMIT,
+    );
+    let log_dir = tempfile::tempdir().unwrap();
+    let git_log = log_dir.path().join("git.log");
+    write_script(
+        setup.stubs.path(),
+        "git",
+        &format!(
+            "printf '%s\\n' \"$*\" >> {}\nexec {} \"$@\"\n",
+            shellquote::shell_quote(&git_log.to_string_lossy()),
+            shellquote::shell_quote(&real_git().to_string_lossy())
+        ),
+    );
+    let cwd = gitscratch::testing::not_a_repository();
+
+    let output = defs_command(&setup)
+        .arg("--json")
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+
+    let document = json(&output);
+    for name in ["a1", "a3", "fb", "b2"] {
+        assert_eq!(
+            definition(&document, name)["added"],
+            "2019-03-04",
+            "{name}: {document}"
+        );
+    }
+    let git = calls(&git_log);
+    assert_eq!(
+        git.len(),
+        2,
+        "one git log for each of the two files: {git:#?}"
+    );
+    assert!(
+        git.iter().all(|line| runs_subcommand(line, "log")),
+        "{git:#?}"
+    );
 }
