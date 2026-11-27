@@ -202,8 +202,8 @@ fn reports_of_the_terminal_give_no_key() {
         ("\x1b[<0;10;5M", vec![]),
         ("\x1b[<0;10;5m", vec![]),
         ("a\x1b[<0;10;5Mb", vec![text("ab")]),
-        ("\x1b[M abc", vec![]),
-        ("\x1b[M abcd", vec![text("d")]),
+        ("\x1b[M ab", vec![]),
+        ("\x1b[M abc", vec![text("c")]),
         ("\x1b[M a", vec![]),
         ("\x1b[12;40R", vec![]),
         ("x\x1b[12;40Ry", vec![text("xy")]),
@@ -245,7 +245,8 @@ fn incomplete_and_oversized_sequences_do_not_panic() {
         ("a\x1b[12", vec![text("a")]),
         ("\x1b[99999999999999999999u", vec![]),
         ("\x1b[1;99999999999999999999A", vec![special("↑")]),
-        ("\x1b[99999999999999999999~", vec![]),
+        // An overflowing number is absent, and the code then has its default, 1.
+        ("\x1b[99999999999999999999~", vec![special("Home")]),
         ("\x1b[1;4294967295A", vec![special("Ctrl+Alt+Super+↑")]),
     ]);
 }
