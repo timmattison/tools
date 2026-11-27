@@ -956,6 +956,10 @@ fn an_edit_after_a_speed_change_shows_the_duration_after_it() {
 
 // The idle panel and the marks of the timeline.
 
+/// The start tag of the strip of the marks. The style sheet of the page names
+/// the class too, so a test looks for the attribute.
+const MARK_STRIP: &str = "class=\"mark-strip\"";
+
 /// The row text of an idle compression of the whole timeline.
 fn idle_row(text: &str) -> String {
     format!("<span>the whole timeline, {text}</span>")
@@ -983,7 +987,7 @@ async fn the_idle_panel_shows_its_fields_with_their_defaults() {
         .filter_map(|rest| rest.split('"').next())
         .collect();
     assert_eq!(values, vec!["3", "1", "0", "0"], "{page}");
-    assert!(!page.contains("mark-strip"), "{page}");
+    assert!(!page.contains(MARK_STRIP), "{page}");
 }
 
 #[tokio::test]
@@ -1011,13 +1015,13 @@ async fn compressing_idle_time_adds_a_row_shortens_the_recording_and_marks_the_t
 async fn removing_an_idle_row_restores_the_duration_and_removes_the_marks() {
     let mut window = open_recording().await;
     window.compress_idle("3", "1", "0", "0");
-    assert!(window.html().contains("mark-strip"), "{}", window.html());
+    assert!(window.html().contains(MARK_STRIP), "{}", window.html());
 
     window.click(window.remove_button());
 
     let page = window.html();
     assert!(!page.contains("idle of 3 s"), "{page}");
-    assert!(!page.contains("mark-strip"), "{page}");
+    assert!(!page.contains(MARK_STRIP), "{page}");
     assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
 }
 
@@ -1055,10 +1059,13 @@ async fn a_bad_idle_change_shows_the_reason_and_adds_no_row() {
             ("0", "0", "0", "0"),
             "Invalid idle compression: the threshold 0 s must be finite and above zero",
         ),
-        (("3", "5", "0", "0"), "the compressed length 5 s"),
+        (
+            ("3", "5", "0", "0"),
+            "Invalid idle compression: the compressed length 5 s",
+        ),
         (
             ("3", "1", "30", "20"),
-            "are more than the 40 rows of the screen",
+            "Invalid idle compression: the 30 top and 20 bottom rows to ignore are more than the 40 rows of the screen",
         ),
     ];
     for ((threshold, compress_to, top, bottom), reason) in cases {

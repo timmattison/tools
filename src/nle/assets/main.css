@@ -133,7 +133,8 @@ h3 {
   margin-bottom: 8px;
 }
 
-.speed-panel {
+.speed-panel,
+.idle-panel {
   margin-top: 16px;
 }
 
@@ -169,4 +170,30 @@ h3 {
   padding: 6px 0;
   border-bottom: 1px solid #313244;
   font-size: 13px;
+}
+
+/* The strip of the marks under the timeline: one bar for the edited
+   recording, and one tick for each mark, in its place on the bar. */
+.mark-strip {
+  position: relative;
+  height: 12px;
+  margin-top: 12px;
+  background: #313244;
+  border-radius: 4px;
+}
+
+.timeline-mark {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  margin-left: -1px;
+  background: #f9e2af;
+  border-radius: 1px;
+}
+
+.mark-count {
+  color: #6c7086;
+  font-size: 12px;
+  margin-top: 4px;
 }

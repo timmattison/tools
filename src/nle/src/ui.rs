@@ -16,8 +16,9 @@ use dioxus::prelude::*;
 
 use crate::editor::{Edit, Editor};
 use crate::error::NleError;
+use crate::filters::idle_compression::{self, IdleCompression};
 use crate::filters::time_dilation::{self, Speed};
-use crate::pipeline::FilterRegistry;
+use crate::pipeline::{FilterRegistry, Mark};
 use crate::types::{AppliedFilter, EditProject, FilterRegion, Seconds};
 
 use crate::format::{file_name, format_duration, format_recorded};
@@ -43,7 +44,8 @@ const OPEN_FAILED_PREFIX: &str = "Failed to open recording";
 /// The heading of the speed panel.
 const SPEED_HEADING: &str = "Speed";
 /// The hint of the speed panel.
-const SPEED_HINT: &str = "Times are in seconds, on the timeline after the speed changes above.";
+const SPEED_HINT: &str =
+    "Times are in seconds, on the timeline after each earlier speed change and idle compression.";
 /// The label of the field for the start of a region.
 const START_LABEL: &str = "Start (s)";
 /// The label of the field for the end of a region.
@@ -69,6 +71,44 @@ const END_NOT_A_NUMBER: &str = "the end is not a number";
 const SPEED_NOT_A_NUMBER: &str = "the speed is not a number";
 /// The reason for an end that is not above the start.
 const END_BEFORE_START: &str = "the end must come after the start";
+
+/// The heading of the idle panel.
+const IDLE_HEADING: &str = "Idle Time";
+/// The hint of the idle panel.
+const IDLE_HINT: &str = "Compresses each stretch of the whole timeline with no key and no change on the screen. A length of 0 removes it. Ignore the rows of a status bar that shows a clock.";
+/// The label of the field for the shortest idle stretch to compress.
+const THRESHOLD_LABEL: &str = "Idle after (s)";
+/// The label of the field for the length of a compressed stretch.
+const COMPRESS_TO_LABEL: &str = "Compress to (s)";
+/// The label of the field for the rows to ignore at the top of the screen.
+const IGNORE_TOP_LABEL: &str = "Ignore top rows";
+/// The label of the field for the rows to ignore at the bottom of the screen.
+const IGNORE_BOTTOM_LABEL: &str = "Ignore bottom rows";
+/// The text of the button that compresses the idle time.
+const APPLY_IDLE_LABEL: &str = "Compress Idle Time";
+/// The first value of the field for the shortest idle stretch.
+const DEFAULT_THRESHOLD: &str = "3";
+/// The first value of the field for the length of a compressed stretch.
+const DEFAULT_COMPRESS_TO: &str = "1";
+/// The first value of the two fields for the rows to ignore.
+const DEFAULT_IGNORED_ROWS: &str = "0";
+/// The start of the message for an idle compression that does not apply.
+const IDLE_FAILED_PREFIX: &str = "Failed to compress idle time";
+/// The reason for a threshold that is not a number.
+const THRESHOLD_NOT_A_NUMBER: &str = "the idle threshold is not a number";
+/// The reason for a compressed length that is not a number.
+const COMPRESS_TO_NOT_A_NUMBER: &str = "the compressed length is not a number";
+/// The reason for a count of top rows that is not a count.
+const TOP_ROWS_NOT_A_COUNT: &str = "the top rows are not a whole number from 0 to 65535";
+/// The reason for a count of bottom rows that is not a count.
+const BOTTOM_ROWS_NOT_A_COUNT: &str = "the bottom rows are not a whole number from 0 to 65535";
+
+/// The name of the strip of the marks, for a screen reader.
+const MARK_STRIP_LABEL: &str = "Marks on the edited recording";
+/// The count of the marks when there is one mark.
+const ONE_MARK: &str = "1 mark on the edited recording";
+/// The text after the count of the marks when there is more than one mark.
+const MARKS_SUFFIX: &str = "marks on the edited recording";
 
 /// The title of the application window.
 const WINDOW_TITLE: &str = "NLE - Terminal Recording Editor";
@@ -276,6 +316,7 @@ fn Timeline(loaded: ReadSignal<Option<Document>>) -> Element {
                     br {}
                     "{summary(open)}"
                 }
+                {mark_strip(open)}
             } else {
                 div { class: "placeholder", "No recording loaded" }
             }
@@ -293,8 +334,64 @@ fn summary(open: &Document) -> String {
     )
 }
 
-/// The metadata of the open recording, and the speed panel. `on_result` gets
-/// the outcome of each speed change: `Ok`, or the message of the banner.
+/// The strip of the marks of the render of the document: a bar for the edited
+/// recording, with a mark at the place of each mark of the filters, and the
+/// count of the marks. The text of a mark shows when the pointer is on it.
+/// There is no strip when the render has no mark or fails. The properties
+/// panel shows the error of a render that fails.
+fn mark_strip(open: &Document) -> Element {
+    let (Ok(duration), Ok(marks)) = (
+        open.editor.rendered_duration(),
+        open.editor.rendered_marks(),
+    ) else {
+        return rsx! {};
+    };
+    if marks.is_empty() {
+        return rsx! {};
+    }
+    let count = match marks.len() {
+        1 => ONE_MARK.to_owned(),
+        count => format!("{count} {MARKS_SUFFIX}"),
+    };
+    let rows: Vec<(String, String)> = marks
+        .iter()
+        .map(|mark| (mark_place(mark, duration), mark_text(mark)))
+        .collect();
+    rsx! {
+        div { class: "mark-strip", aria_label: MARK_STRIP_LABEL,
+            for (index, (place, text)) in rows.into_iter().enumerate() {
+                span {
+                    key: "{index}",
+                    class: "timeline-mark",
+                    style: "{place}",
+                    title: "{text}",
+                    aria_label: "{text}",
+                }
+            }
+        }
+        p { class: "mark-count", "{count}" }
+    }
+}
+
+/// The style that puts `mark` on a strip for a recording of `duration`
+/// seconds: its time as a percentage of the duration, from 0 to 100.
+fn mark_place(mark: &Mark, duration: f64) -> String {
+    let percent = if duration > 0.0 {
+        (mark.time / duration * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    format!("left: {percent:.2}%")
+}
+
+/// The text of `mark`: its label and its time.
+fn mark_text(mark: &Mark) -> String {
+    format!("{} at {}", mark.label, format_duration(mark.time))
+}
+
+/// The metadata of the open recording, the speed panel, and the idle panel.
+/// `on_result` gets the outcome of each speed change and each idle
+/// compression: `Ok`, or the message of the banner.
 #[component]
 fn PropertiesPanel(
     loaded: Signal<Option<Document>>,
@@ -307,6 +404,7 @@ fn PropertiesPanel(
             if let Some(metadata) = metadata {
                 {metadata_rows(&metadata)}
                 SpeedPanel { loaded, on_result }
+                IdlePanel { loaded, on_result }
             } else {
                 div { class: "placeholder", "No recording loaded" }
             }
@@ -364,13 +462,8 @@ fn SpeedPanel(
             button {
                 onclick: move |_| {
                     let change = speed_change(&start.read(), &end.read(), &speed.read());
-                    let outcome = change.and_then(|filter| {
-                        edit_document(loaded, |project| Edit::AddFilter {
-                            index: project.filters.len(),
-                            filter,
-                        })
-                    });
-                    report(on_result, outcome);
+                    let outcome = change.and_then(|filter| append_filter(loaded, filter));
+                    report(on_result, SPEED_FAILED_PREFIX, outcome);
                 },
                 {APPLY_SPEED_LABEL}
             }
@@ -380,7 +473,7 @@ fn SpeedPanel(
                     button {
                         onclick: move |_| {
                             let outcome = edit_document(loaded, |_| Edit::RemoveFilter { index });
-                            report(on_result, outcome);
+                            report(on_result, SPEED_FAILED_PREFIX, outcome);
                         },
                         {REMOVE_LABEL}
                     }
@@ -392,6 +485,110 @@ fn SpeedPanel(
             }
         }
     }
+}
+
+/// The idle panel: four fields for the settings of an idle compression of the
+/// whole timeline, the button that applies them, and the idle compressions of
+/// the project. The screen size of the settings is the size of the open
+/// recording. `on_result` gets the outcome of each Compress Idle Time and each
+/// Remove.
+#[component]
+fn IdlePanel(
+    loaded: Signal<Option<Document>>,
+    on_result: EventHandler<Result<(), String>>,
+) -> Element {
+    let mut threshold = use_signal(|| DEFAULT_THRESHOLD.to_owned());
+    let mut compress_to = use_signal(|| DEFAULT_COMPRESS_TO.to_owned());
+    let mut top = use_signal(|| DEFAULT_IGNORED_ROWS.to_owned());
+    let mut bottom = use_signal(|| DEFAULT_IGNORED_ROWS.to_owned());
+    let rows = idle_rows(&loaded.read());
+    rsx! {
+        div { class: "idle-panel",
+            h3 { {IDLE_HEADING} }
+            p { class: "speed-hint", {IDLE_HINT} }
+            label { class: "speed-field",
+                {THRESHOLD_LABEL}
+                input {
+                    r#type: "number",
+                    step: "any",
+                    min: "0",
+                    value: "{threshold}",
+                    oninput: move |event| threshold.set(event.value()),
+                }
+            }
+            label { class: "speed-field",
+                {COMPRESS_TO_LABEL}
+                input {
+                    r#type: "number",
+                    step: "any",
+                    min: "0",
+                    value: "{compress_to}",
+                    oninput: move |event| compress_to.set(event.value()),
+                }
+            }
+            label { class: "speed-field",
+                {IGNORE_TOP_LABEL}
+                input {
+                    r#type: "number",
+                    step: "1",
+                    min: "0",
+                    value: "{top}",
+                    oninput: move |event| top.set(event.value()),
+                }
+            }
+            label { class: "speed-field",
+                {IGNORE_BOTTOM_LABEL}
+                input {
+                    r#type: "number",
+                    step: "1",
+                    min: "0",
+                    value: "{bottom}",
+                    oninput: move |event| bottom.set(event.value()),
+                }
+            }
+            button {
+                onclick: move |_| {
+                    // The read ends here, before the edit borrows the document.
+                    let screen = loaded
+                        .read()
+                        .as_ref()
+                        .map(|open| (open.metadata.width, open.metadata.height));
+                    let Some((width, height)) = screen else {
+                        return;
+                    };
+                    let change = idle_change(
+                        [&threshold.read(), &compress_to.read(), &top.read(), &bottom.read()],
+                        width,
+                        height,
+                    );
+                    let outcome = change.and_then(|filter| append_filter(loaded, filter));
+                    report(on_result, IDLE_FAILED_PREFIX, outcome);
+                },
+                {APPLY_IDLE_LABEL}
+            }
+            for (index, text) in rows {
+                div { class: "speed-row", key: "{index}",
+                    span { "{text}" }
+                    button {
+                        onclick: move |_| {
+                            let outcome = edit_document(loaded, |_| Edit::RemoveFilter { index });
+                            report(on_result, IDLE_FAILED_PREFIX, outcome);
+                        },
+                        {REMOVE_LABEL}
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Adds `filter` at the end of the filters of the open document, by the rules
+/// of `edit_document`.
+fn append_filter(loaded: Signal<Option<Document>>, filter: AppliedFilter) -> Result<(), String> {
+    edit_document(loaded, |project| Edit::AddFilter {
+        index: project.filters.len(),
+        filter,
+    })
 }
 
 /// Applies the edit that `make` builds from the project to the editor of the
@@ -413,10 +610,20 @@ fn edit_document(
     })
 }
 
-/// Sends the outcome of a speed change to `on_result`: `Ok` for a change that
-/// applied, or the message of the banner for a change that did not.
-fn report(on_result: EventHandler<Result<(), String>>, outcome: Result<(), String>) {
-    on_result.call(outcome.map_err(|reason| format!("{SPEED_FAILED_PREFIX}: {reason}")));
+/// Sends the outcome of a change to `on_result`: `Ok` for a change that
+/// applied, or the message of the banner, which starts with `prefix`, for a
+/// change that did not.
+fn report(on_result: EventHandler<Result<(), String>>, prefix: &str, outcome: Result<(), String>) {
+    on_result.call(outcome.map_err(|reason| format!("{prefix}: {reason}")));
+}
+
+/// The text of the region of a filter in its row.
+fn region_text(region: &FilterRegion) -> String {
+    match region {
+        FilterRegion::All => WHOLE_TIMELINE.to_owned(),
+        // The seconds as the fields take them, so no two regions share a row text.
+        FilterRegion::Range { start, end } => format!("{} s to {} s", start.get(), end.get()),
+    }
 }
 
 /// One row for each time dilation filter of the project: the index of the
@@ -433,16 +640,62 @@ fn speed_rows(document: &Option<Document>) -> Vec<(usize, String)> {
         .enumerate()
         .filter_map(|(index, filter)| {
             let speed = time_dilation::speed_of(filter)?;
-            let region = match filter.region {
-                FilterRegion::All => WHOLE_TIMELINE.to_owned(),
-                // The seconds as the fields take them, so no two regions share a row text.
-                FilterRegion::Range { start, end } => {
-                    format!("{} s to {} s", start.get(), end.get())
-                }
-            };
+            let region = region_text(&filter.region);
             Some((index, format!("{region} at {}\u{d7}", speed.get())))
         })
         .collect()
+}
+
+/// One row for each idle compression of the project: the index of the filter
+/// in the project, and the text of its row. Filters of other kinds have no
+/// row, but they keep their place in the index.
+fn idle_rows(document: &Option<Document>) -> Vec<(usize, String)> {
+    let Some(open) = document else {
+        return Vec::new();
+    };
+    open.editor
+        .project()
+        .filters
+        .iter()
+        .enumerate()
+        .filter_map(|(index, filter)| {
+            let settings = idle_compression::settings_of(filter)?;
+            let mut text = format!(
+                "{}, idle of {} s or more to {} s",
+                region_text(&filter.region),
+                settings.threshold(),
+                settings.compress_to()
+            );
+            let (top, bottom) = (settings.ignore_top_rows(), settings.ignore_bottom_rows());
+            if top > 0 || bottom > 0 {
+                text.push_str(&format!(", ignores {top} top and {bottom} bottom rows"));
+            }
+            Some((index, text))
+        })
+        .collect()
+}
+
+/// Reads the four fields of the idle panel: the threshold and the compressed
+/// length in seconds, and the rows to ignore at the top and at the bottom.
+/// The screen has `width` columns and `height` rows. The answer is the idle
+/// compression of the whole timeline to add, or the reason why the fields do
+/// not make one.
+fn idle_change(fields: [&str; 4], width: u16, height: u16) -> Result<AppliedFilter, String> {
+    let [threshold, compress_to, top, bottom] = fields;
+    let threshold: f64 = threshold
+        .trim()
+        .parse()
+        .map_err(|_| THRESHOLD_NOT_A_NUMBER)?;
+    let compress_to: f64 = compress_to
+        .trim()
+        .parse()
+        .map_err(|_| COMPRESS_TO_NOT_A_NUMBER)?;
+    let top: u16 = top.trim().parse().map_err(|_| TOP_ROWS_NOT_A_COUNT)?;
+    let bottom: u16 = bottom.trim().parse().map_err(|_| BOTTOM_ROWS_NOT_A_COUNT)?;
+    let settings = IdleCompression::new(threshold, compress_to, width, height)
+        .and_then(|settings| settings.ignoring_rows(top, bottom))
+        .map_err(|error| error.to_string())?;
+    Ok(idle_compression::applied(FilterRegion::All, settings))
 }
 
 /// Reads the three fields of the speed panel: the start and the end of a
