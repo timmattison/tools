@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{ErrorKind, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::thread;
@@ -488,6 +488,11 @@ pub struct Definitions {
     /// `*.md`), in the order of the definitions. `None` is as for
     /// [`Definitions::alias_places`].
     pub suffix_places: BTreeMap<String, Vec<Option<Origin>>>,
+    /// The program on the search path of the shell for each name of an alias
+    /// and of a function, by name. A name that is a builtin of the shell has no
+    /// entry, because the builtin already hides a program of that name. A name
+    /// with no program on the path has no entry either.
+    pub programs: BTreeMap<String, PathBuf>,
     /// The directories that the shell gave after its start.
     pub places: Places,
     /// The code that the shell runs without a typed name.

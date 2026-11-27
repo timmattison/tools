@@ -1154,6 +1154,116 @@ fn a_real_zsh_gives_each_place_of_an_alias() {
 }
 
 #[test]
+fn the_program_of_a_name_is_the_line_after_its_record() {
+    let definitions = parsed(&records(&[
+        "M PROGRAM ls",
+        "/bin/ls",
+        "M PROGRAM x",
+        "M PROGRAM y",
+        "relative/y",
+        "M PROGRAM z",
+        "/usr/bin/z",
+        "ignored second line",
+    ]));
+    assert_eq!(
+        definitions.programs.get("ls"),
+        Some(&PathBuf::from("/bin/ls"))
+    );
+    assert_eq!(
+        definitions.programs.get("z"),
+        Some(&PathBuf::from("/usr/bin/z"))
+    );
+    assert!(!definitions.programs.contains_key("x"));
+    assert!(!definitions.programs.contains_key("y"));
+    assert_eq!(definitions.programs.len(), 2);
+    assert!(definitions.unparsed_aliases.is_empty());
+}
+
+#[test]
+fn a_program_record_at_the_end_of_the_output_adds_nothing() {
+    let definitions = parsed(&records(&["M PROGRAM last"]));
+    assert!(definitions.programs.is_empty());
+}
+
+/// Makes the executable files `names` in the directory `bin` of `home`.
+fn make_programs(home: &Path, names: &[&str]) {
+    use std::os::unix::fs::PermissionsExt;
+    for name in names {
+        write_file(home, &format!("bin/{name}"), "#!/bin/sh\n");
+        let path = home.join("bin").join(name);
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+/// Checks the programs of a fixture home: `hidden` and `shadowfn` hide the
+/// files of the directory `bin`, and `noprog` and the builtin `cd` have none.
+fn assert_programs(home: &Path, definitions: &Definitions) {
+    let bin = home.join("bin");
+    assert_eq!(
+        definitions.programs.get("hidden"),
+        Some(&bin.join("hidden"))
+    );
+    assert_eq!(
+        definitions.programs.get("shadowfn"),
+        Some(&bin.join("shadowfn"))
+    );
+    assert!(!definitions.programs.contains_key("noprog"));
+    assert!(!definitions.programs.contains_key("cd"));
+}
+
+#[test]
+fn a_real_zsh_gives_the_program_that_a_name_hides() {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    make_programs(home.path(), &["hidden", "shadowfn", "cd"]);
+    write_file(
+        home.path(),
+        ".zshrc",
+        "path=($HOME/bin $path)\n\
+         alias hidden='echo'\n\
+         alias noprog='true'\n\
+         shadowfn() { true; }\n\
+         cd() { builtin cd \"$@\"; }\n",
+    );
+    let definitions = read(
+        real_shell(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert_programs(home.path(), &definitions);
+}
+
+#[test]
+fn a_real_bash_gives_the_program_that_a_name_hides() {
+    let Some(bash) = find_shell("bash") else {
+        eprintln!("skipped: bash is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    make_programs(home.path(), &["hidden", "shadowfn", "cd"]);
+    write_file(
+        home.path(),
+        ".bashrc",
+        "PATH=$HOME/bin:$PATH\n\
+         alias hidden='echo'\n\
+         alias noprog='true'\n\
+         shadowfn() { true; }\n\
+         cd() { builtin cd \"$@\"; }\n",
+    );
+    let definitions = read(
+        real_shell(&bash, home.path()),
+        ShellKind::Bash,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert_programs(home.path(), &definitions);
+}
+
+#[test]
 fn an_alias_without_a_known_origin_has_no_origin() {
     let definitions = parsed(&records(&[
         "alias a=b",
