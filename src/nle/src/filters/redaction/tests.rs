@@ -216,7 +216,7 @@ fn an_osc_number_split_across_events_is_one_number() {
 }
 
 #[test]
-fn the_data_of_osc_52_and_osc_1337_is_not_searched() {
+fn the_base64_data_of_osc_52_and_osc_1337_is_not_searched() {
     for data in [
         "\x1b]52;c;aHVudGVyMg1=\x07",
         "\x1b]1337;File=inline=1:aGVsbG8x\x07",
