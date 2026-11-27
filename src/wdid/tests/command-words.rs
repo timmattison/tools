@@ -1304,6 +1304,32 @@ fn split_words_gives_the_words_in_argument_form() {
     }
 }
 
+/// An unquoted glob, brace expansion, or leading `=` is an expansion. The
+/// same text in quotes, and a bracket or a brace that expands nothing, is a
+/// literal.
+#[test]
+fn split_words_gives_an_unquoted_pattern_as_an_expansion() {
+    let rows = [
+        ("ls *.c", vec![lit("ls"), exp("*.c")]),
+        ("ls '*.c'", vec![lit("ls"), lit("*.c")]),
+        ("ls \"*\".c", vec![lit("ls"), lit("*.c")]),
+        ("ls file?.c", vec![lit("ls"), exp("file?.c")]),
+        ("ls [ab].c", vec![lit("ls"), exp("[ab].c")]),
+        ("[ -f x ]", vec![lit("["), lit("-f"), lit("x"), lit("]")]),
+        ("echo {a,b}", vec![lit("echo"), exp("{a,b}")]),
+        ("echo {1..3}", vec![lit("echo"), exp("{1..3}")]),
+        ("echo '{a,b}'", vec![lit("echo"), lit("{a,b}")]),
+        ("rm {}", vec![lit("rm"), lit("{}")]),
+        ("echo {x},y", vec![lit("echo"), lit("{x},y")]),
+        ("echo =ls", vec![lit("echo"), exp("=ls")]),
+        ("echo \\=ls", vec![lit("echo"), lit("=ls")]),
+        ("echo a=b", vec![lit("echo"), lit("a=b")]),
+    ];
+    for (text, expected) in rows {
+        assert_eq!(split_words(text), Some(expected), "text: {text:?}");
+    }
+}
+
 #[test]
 fn split_words_refuses_an_unterminated_quote() {
     assert_eq!(split_words("echo 'x"), None);

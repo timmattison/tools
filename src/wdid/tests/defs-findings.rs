@@ -650,12 +650,37 @@ fn a_quoted_literal_and_an_expansion_are_different_words() {
         ("echo $HOME", "echo '$HOME'"),
         ("ls ~", "ls '~'"),
         ("ls | less", "ls '|' less"),
+        ("ls *.c", "ls '*.c'"),
+        ("echo {a,b}", "echo '{a,b}'"),
+        ("echo =ls", "echo '=ls'"),
     ] {
         let mut defs = empty();
         alias(&mut defs, "a", a, ZSHRC, 1);
         alias(&mut defs, "b", b, ZSHRC, 2);
         assert_eq!(findings(&[], &defs), Vec::new(), "values {a:?} and {b:?}");
     }
+}
+
+/// A function that runs the quoted text of a glob does not do the same thing
+/// as an alias that runs the glob.
+#[test]
+fn a_function_that_quotes_the_glob_of_the_alias_is_not_a_finding() {
+    let mut defs = empty();
+    alias(&mut defs, "ro", "rm *.orig", ZSHRC, 2);
+    function(&mut defs, "rmo", "\trm '*.orig' \"$@\"", ZSHRC);
+    assert_eq!(kinds(&findings(&[], &defs)), Vec::new());
+}
+
+/// The shared words of a finding show a glob as the shell reads it: bare, and
+/// not in the quotes of the literal name.
+#[test]
+fn a_glob_in_the_shared_words_shows_without_quotes() {
+    let mut defs = empty();
+    alias(&mut defs, "a", "rm *.orig", ZSHRC, 1);
+    alias(&mut defs, "b", "rm  *.orig", ZSHRC, 2);
+    let found = findings(&[], &defs);
+    let shared = only(&found, FindingKind::SameExpansion).expect("a same-expansion finding");
+    assert_eq!(shared.words, ["rm", "*.orig"]);
 }
 
 /// A function whose last word is the quoted text "$@" passes on no
