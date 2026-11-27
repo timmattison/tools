@@ -500,6 +500,22 @@ fn a_finish_inside_an_unfinished_sequence_of_the_program_opens_it_again() {
 }
 
 #[test]
+fn a_finish_inside_a_dcs_of_the_program_opens_it_again_with_its_controls() {
+    let screen = size(20, 8);
+    let mut rig = Rig::new(screen, &TerminalTheme::auto());
+    let overlay = box_of(screen, Position::TopRight, "ls");
+    rig.feed("ab");
+    rig.paint(Some(&overlay));
+    // The `\x01` and the `\n` are payload of the DCS, not controls that run.
+    let start = "\x1bPq#0\x01\n-";
+    rig.feed(start);
+    let output = rig.finish().expect("the box is on the screen");
+    assert!(output.ends_with(start), "{output:?}");
+    rig.feed("\x1b\\");
+    rig.assert_viewer_is_reference();
+}
+
+#[test]
 fn a_paint_after_a_canceled_or_ignored_sequence_takes_the_box_away() {
     let screen = size(20, 8);
     for sequence in ["\x1b[1\x18", "\x1b]0;ti\x1a", "\x1b[1;?h"] {

@@ -347,6 +347,23 @@ fn unfinished_sequence_is_empty_when_settled() {
 }
 
 #[test]
+fn unfinished_sequence_keeps_the_c0_bytes_after_a_dcs_introducer() {
+    // vte 0.15 runs none of these controls in a DCS. In the payload, it gives
+    // them to `put`. CAN and SUB end the DCS, and ESC starts a new sequence.
+    let controls: String = (0x00..=0x1f_u8)
+        .filter(|byte| !matches!(byte, 0x18 | 0x1a | 0x1b))
+        .map(char::from)
+        .collect();
+    let start = format!("\x1bP{controls}q#0{controls}~-");
+    assert_eq!(feed_new(&format!("ab{start}")).unfinished_sequence(), start);
+    // Before the `P`, the parser is in the escape state, and a control runs.
+    assert_eq!(
+        feed_new("ab\x1b\r\x07P1$q\x01m").unfinished_sequence(),
+        "\x1bP1$q\x01m"
+    );
+}
+
+#[test]
 fn a_sequence_that_can_or_sub_ends_leaves_the_parser_settled() {
     let starts = [
         "\x1b",
