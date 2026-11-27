@@ -146,3 +146,69 @@ fn a_huge_recording_size_is_clamped() {
     assert_eq!(grid.len(), 500);
     assert_eq!(grid[0].len(), 500);
 }
+
+#[test]
+fn the_theme_list_has_the_five_themes_in_order() {
+    assert_eq!(
+        PreviewTheme::ALL,
+        [
+            PreviewTheme::Auto,
+            PreviewTheme::Dracula,
+            PreviewTheme::Monokai,
+            PreviewTheme::SolarizedDark,
+            PreviewTheme::SolarizedLight,
+        ]
+    );
+    assert_eq!(PreviewTheme::default(), PreviewTheme::Auto);
+}
+
+#[test]
+fn a_theme_name_round_trips_and_a_wrong_name_is_refused() {
+    for theme in PreviewTheme::ALL {
+        assert_eq!(PreviewTheme::from_name(theme.name()), Some(theme));
+    }
+    assert_eq!(PreviewTheme::from_name("Dracula"), None);
+    assert_eq!(PreviewTheme::from_name("black"), None);
+    assert_eq!(PreviewTheme::from_name(""), None);
+}
+
+#[test]
+fn the_names_and_labels_are_the_beta_values() {
+    let names: Vec<_> = PreviewTheme::ALL.iter().map(|t| t.name()).collect();
+    assert_eq!(
+        names,
+        ["auto", "dracula", "monokai", "solarized-dark", "solarized-light"]
+    );
+    let labels: Vec<_> = PreviewTheme::ALL.iter().map(|t| t.label()).collect();
+    assert_eq!(
+        labels,
+        ["Auto", "Dracula", "Monokai", "Solarized Dark", "Solarized Light"]
+    );
+}
+
+#[test]
+fn the_palette_matches_the_constructor_of_the_theme() {
+    let want = [
+        TerminalTheme::auto(),
+        TerminalTheme::dracula(),
+        TerminalTheme::monokai(),
+        TerminalTheme::solarized_dark(),
+        TerminalTheme::solarized_light(),
+    ];
+    for (theme, want) in PreviewTheme::ALL.into_iter().zip(want) {
+        assert_eq!(theme.palette().background, want.background);
+        assert_eq!(theme.palette().foreground, want.foreground);
+    }
+    assert_ne!(
+        PreviewTheme::Dracula.palette().background,
+        PreviewTheme::Auto.palette().background
+    );
+}
+
+#[test]
+fn a_preview_draws_blank_cells_with_the_background_of_its_theme() {
+    let mut preview = Preview::new(recording(80, 24, Vec::new()), PreviewTheme::Dracula);
+    assert_eq!(preview.theme(), PreviewTheme::Dracula);
+    let state = preview.seek(secs(0.0));
+    assert_eq!(state.get_grid()[0][0].bg_color, (40, 42, 54));
+}
