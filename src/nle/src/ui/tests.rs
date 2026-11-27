@@ -108,9 +108,10 @@ fn panels_root() -> Element {
     let playhead = use_signal(|| Seconds::ZERO);
     let playing = use_signal(|| false);
     let rendered = use_memo(move || preview::render_of(&loaded.read()));
+    let view = use_signal(View::default);
     rsx! {
         PreviewPane { rendered, playhead, playing }
-        Timeline { loaded, rendered, playhead }
+        Timeline { loaded, rendered, playhead, view }
         PropertiesPanel { loaded, on_result: |_| {} }
     }
 }
@@ -313,6 +314,8 @@ struct Window {
     play: Option<ElementId>,
     /// The Stop button, when a test noted it.
     stop: Option<ElementId>,
+    /// The Zoom in button of the timeline, when a test noted it.
+    zoom_in: Option<ElementId>,
 }
 
 impl Window {
@@ -336,6 +339,7 @@ impl Window {
             redact: None,
             play: None,
             stop: None,
+            zoom_in: None,
         };
         window.note_listeners(&edits);
         window.first_render = window.clicks.clone();
@@ -487,20 +491,24 @@ impl Window {
         self.click(self.redact_button());
     }
 
-    /// Notes the seven click listeners that the render of an open recording
+    /// Notes the ten click listeners that the render of an open recording
     /// created. The render creates them in this order: Apply Speed, Skip to
-    /// End, Accelerate, Summarize, Apply Redaction, Play, Stop. The properties
-    /// panel mounts before the preview toolbar, as it does for the input
-    /// listeners, the speed panel comes before the fast-forward panel, the
-    /// fast-forward panel comes before the redaction panel, and the Play
-    /// button comes before the Stop button.
+    /// End, Accelerate, Summarize, Apply Redaction, the Zoom out, Zoom in, and
+    /// Fit buttons of the timeline, Play, Stop. The properties panel mounts
+    /// before the timeline, and the timeline before the preview toolbar. The
+    /// speed panel comes before the fast-forward panel, the fast-forward panel
+    /// comes before the redaction panel, and the Play button comes before the
+    /// Stop button.
     fn note_open_buttons(&mut self) {
-        let [apply, skip, accelerate, summarize, redact, play, stop] = self.newest[..] else {
+        let [apply, skip, accelerate, summarize, redact, _, zoom_in, _, play, stop] =
+            self.newest[..]
+        else {
             panic!("the open render made {:?}", self.newest)
         };
         self.apply = Some(apply);
         self.fast_forward_buttons = Some([skip, accelerate, summarize]);
         self.redact = Some(redact);
+        self.zoom_in = Some(zoom_in);
         self.play = Some(play);
         self.stop = Some(stop);
     }
@@ -530,6 +538,17 @@ impl Window {
     /// The Stop button. `open_recording` noted it.
     fn stop_button(&self) -> ElementId {
         self.stop.expect("a window with an open recording")
+    }
+
+    /// The Zoom in button of the timeline. `open_recording` noted it.
+    fn zoom_in_button(&self) -> ElementId {
+        self.zoom_in.expect("a window with an open recording")
+    }
+
+    /// The style of the first clip block of the timeline: its place and its
+    /// width, which show the zoom and the scroll.
+    fn clip_style(&self) -> String {
+        text_between(&self.html(), "class=\"timeline-clip\" style=\"", "\"")
     }
 
     /// The label of the Play and Pause button, read from the page.
@@ -682,7 +701,8 @@ fn properties_show_the_file_name_of_a_windows_path() {
 fn timeline_shows_the_event_count_and_the_duration() {
     let page = render_panels(fixture());
     assert!(page.contains("42 events"), "{page}");
-    assert!(page.contains("Timeline editor"), "{page}");
+    assert!(page.contains("class=\"timeline-clip\""), "{page}");
+    assert!(!page.contains("coming in #150"), "{page}");
 }
 
 #[test]
@@ -892,13 +912,13 @@ fn edited_row(text: &str) -> String {
     metadata_row("Edited duration", text, None)
 }
 
-/// Opens the fixture recording through the fakes, and notes the seven click
+/// Opens the fixture recording through the fakes, and notes the ten click
 /// listeners that the open render creates (`Window::note_open_buttons`).
 async fn open_recording() -> Window {
     open_loaded(fixture()).await
 }
 
-/// Opens `loaded` through the fakes, and notes the seven click listeners as
+/// Opens `loaded` through the fakes, and notes the ten click listeners as
 /// `open_recording` does.
 async fn open_loaded(loaded: LoadedRecording) -> Window {
     let fakes = Fakes::new().pick(picked()).load(Answer::Ready(Ok(loaded)));
@@ -1820,6 +1840,26 @@ async fn a_new_recording_starts_at_time_zero() {
     assert!(page.contains(&x_run(1)), "{page}");
     assert!(!page.contains(&x_run(2)), "{page}");
     assert!(page.contains("value=\"0\""), "{page}");
+}
+
+#[tokio::test]
+async fn a_new_recording_opens_with_the_whole_timeline() {
+    let fakes = Fakes::new()
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())))
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())));
+    let mut window = Window::open(&fakes);
+    window.click(window.open_button());
+    window.settle().await;
+    window.note_open_buttons();
+    let whole = window.clip_style();
+    window.click(window.zoom_in_button());
+    assert_ne!(window.clip_style(), whole);
+
+    window.click(window.open_button());
+    window.settle().await;
+    assert_eq!(window.clip_style(), whole);
 }
 
 #[tokio::test]

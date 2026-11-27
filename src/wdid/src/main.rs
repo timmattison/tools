@@ -10,6 +10,7 @@ use std::process::ExitCode;
 use buildinfo::version_string;
 use chrono::NaiveDate;
 use clap::{Args, Parser, Subcommand};
+use wdid::added;
 use wdid::catalog::{self, CatalogError, Programs};
 use wdid::defs;
 use wdid::history::{self, HistoryError};
@@ -104,9 +105,9 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Report on each alias and each function of the interactive shell: the
-    /// file that defined it, the uses, the definitions that gave the other
-    /// uses, and the definitions never used, idle, or run without a typed
-    /// name. Last come the duplicates and shadows: aliases with the same
+    /// file that defined it, the date that a commit added it, the uses, the
+    /// definitions that gave the other uses, and the definitions never used
+    /// (old or new), idle, or run without a typed name. Last come the duplicates and shadows: aliases with the same
     /// expansion, an alias and a function that do the same thing, an alias
     /// defined more than one time, an alias that hides a function, and a
     /// definition that hides a program. Needs no cargo workspace.
@@ -124,6 +125,11 @@ struct DefsArgs {
     /// Print the report as one JSON document.
     #[arg(long)]
     json: bool,
+
+    /// A definition that never ran is new when its added date is younger
+    /// than this many days.
+    #[arg(long, value_name = "DAYS", default_value = DEFAULT_NEW_DAYS)]
+    new_days: u32,
 
     /// A definition is idle when its last use is older than this many days.
     #[arg(long, value_name = "DAYS", default_value = DEFAULT_IDLE_DAYS)]
@@ -234,8 +240,11 @@ fn run(cli: &Cli) -> Result<String, Error> {
 
 /// Runs the report of `wdid defs` and gives the text for standard output.
 ///
-/// The report reads only the atuin history and the interactive shell. It
-/// starts no cargo process and no git process, and it needs no workspace.
+/// The report reads the atuin history and the interactive shell. Then it
+/// reads the added date of each of my definitions: one `git log` for each
+/// file that defined one of them, and, for a file under `HOME`, yadm and one
+/// `git ls-files` (see [`added::read`]). It starts no cargo process, and it
+/// needs no workspace.
 fn run_defs(args: &DefsArgs) -> Result<String, Error> {
     let today = chrono::Utc::now().date_naive();
     let entries = history::read(OsStr::new(history::ATUIN))?;
@@ -248,10 +257,18 @@ fn run_defs(args: &DefsArgs) -> Result<String, Error> {
     let window = defs::Window {
         today,
         since: args.since,
+        new_days: args.new_days,
         idle_days: args.idle_days,
         all: args.all,
     };
-    let tally = defs::tally(&entries, &definitions, &window);
+    let mut tally = defs::tally(&entries, &definitions, &window);
+    let home = std::env::var_os(HOME_VARIABLE).map(PathBuf::from);
+    let dates = added::read(
+        &tally.my_origin_files(),
+        home.as_deref(),
+        &added::Programs::default(),
+    );
+    tally.apply_added_dates(&dates, &window);
     Ok(if args.json {
         defs::render::json(&tally, &window, &shell_text)
     } else {
