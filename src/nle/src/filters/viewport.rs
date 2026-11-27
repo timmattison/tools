@@ -326,17 +326,10 @@ impl Replay {
                 reader.read(c);
             }
         }
-        let pen = Look {
-            fg: terminal.current_fg_source,
-            bg: terminal.current_bg_source,
-            bold: terminal.bold,
-            italic: terminal.italic,
-            underline: terminal.underline,
-        };
         let writer = Writer::from_screen(
             usize::from(size.width),
             full_target(&terminal),
-            pen,
+            pen_of(&terminal),
             terminal.is_cursor_visible(),
         );
         Ok(Self {
@@ -433,13 +426,7 @@ impl Replay {
             top.saturating_add(1),
             bottom.saturating_add(1)
         ));
-        let pen = Look {
-            fg: self.terminal.current_fg_source,
-            bg: self.terminal.current_bg_source,
-            bold: self.terminal.bold,
-            italic: self.terminal.italic,
-            underline: self.terminal.underline,
-        };
+        let pen = pen_of(&self.terminal);
         data.push_str(&writer::sgr(&pen));
         self.writer.set_pen(pen);
         let (saved_x, saved_y) = self.terminal.saved_cursor_position();
@@ -575,6 +562,17 @@ fn full_target(terminal: &TerminalState) -> Vec<Glyph> {
         .iter()
         .flat_map(|cells| cells.iter().map(glyph_of))
         .collect()
+}
+
+/// The look that the pen of `terminal` gives the next printed character.
+fn pen_of(terminal: &TerminalState) -> Look {
+    Look {
+        fg: terminal.current_fg_source,
+        bg: terminal.current_bg_source,
+        bold: terminal.bold,
+        italic: terminal.italic,
+        underline: terminal.underline,
+    }
 }
 
 /// The glyph that an emulator cell shows.
