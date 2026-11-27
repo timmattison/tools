@@ -2198,6 +2198,83 @@ mod tests {
         );
     }
 
+    /// A key that setup wrote into the config file, in the tests of a file
+    /// that cannot be parsed.
+    const PASTED_KEY: &str = "sekrit-pasted-api-key";
+
+    /// A config file whose key line has no closing quote, and the position of
+    /// its error.
+    fn config_with_an_open_quote() -> (String, &'static str) {
+        (
+            format!("url = \"https://192.168.1.1\"\napi_key = \"{PASTED_KEY}\n"),
+            "line 2, column 33",
+        )
+    }
+
+    /// A config file with a key in its boolean field, and the position of its
+    /// error. The reason that serde gives for this error quotes the string.
+    fn config_with_a_key_in_a_boolean() -> (String, &'static str) {
+        (
+            format!("url = \"https://192.168.1.1\"\ninsecure = \"{PASTED_KEY}\"\n"),
+            "line 2, column 12",
+        )
+    }
+
+    /// Make sure that the report of `error` names `position` and holds no
+    /// text of the key.
+    ///
+    /// Both forms are read, because `main` prints the chain of the error.
+    fn assert_report_hides_the_key(error: &anyhow::Error, position: &str, contents: &str) {
+        for report in [format!("{error:#}"), format!("{error:?}")] {
+            assert!(
+                !report.contains(PASTED_KEY),
+                "the failure must not show the key in {contents:?}, got {report}"
+            );
+            assert!(
+                report.contains(position),
+                "the failure must name the position {position}, got {report}"
+            );
+        }
+    }
+
+    /// The parse error of `toml` writes the line of the error, and `main`
+    /// prints the error. Setup writes a pasted key into this file, so a key
+    /// line with no closing quote must not reach the report. The report names
+    /// the file and the position, so a person can find the line.
+    #[test]
+    fn a_config_file_that_cannot_be_parsed_does_not_show_its_key() {
+        for (contents, position) in [
+            config_with_a_key_in_a_boolean(),
+            config_with_an_open_quote(),
+        ] {
+            let temp = TempConfigDir::new("config-unparsable");
+            create_directory(&temp.dir);
+            write_file(&temp.config_file(), &contents);
+
+            let error = Config::load_from(&temp.config_file())
+                .expect_err("a config file that cannot be parsed is a fault");
+
+            assert_report_hides_the_key(&error, position, &contents);
+            assert!(
+                format!("{error:#}").contains("config.toml"),
+                "the failure must name the file it could not parse, got {error:#}"
+            );
+        }
+    }
+
+    /// A save parses the file that is there with `toml_edit`, whose parse
+    /// error writes the line of the error too.
+    #[test]
+    fn a_save_over_a_config_file_that_cannot_be_parsed_does_not_show_its_key() {
+        let (contents, position) = config_with_an_open_quote();
+
+        let error = Config::default()
+            .written_over(&contents)
+            .expect_err("a config file that cannot be parsed is a fault");
+
+        assert_report_hides_the_key(&error, position, &contents);
+    }
+
     /// A config file that a person wrote, with comments as in the sample of
     /// the README, and with a key that this version of `ufa` does not know.
     const HAND_WRITTEN_CONFIG: &str = "\
