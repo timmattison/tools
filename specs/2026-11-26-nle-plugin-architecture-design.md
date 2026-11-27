@@ -810,8 +810,7 @@ A new library crate, `src/nle-plugins`, with no WASM runtime yet.
 - Three example plugins in Rust, built for `wasm32-wasip2`, run in a conformance
   test: one of each form. The span filter implements time dilation. The
   in-place filter adds one event at the length of its region when the region
-  is not open. The test
-  asserts these results:
+  is not open. The test asserts these results:
   - The span filter and the native time dilation filter give equal answers on
     one fixture.
   - The in-place filter gets the view of the region from the pipeline. On a
