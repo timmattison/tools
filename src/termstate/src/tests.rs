@@ -461,3 +461,110 @@ fn line_drawing_is_on_after_the_designation_of_the_special_set() {
     state.process_output("\x1b(B").unwrap();
     assert!(!state.uses_line_drawing());
 }
+
+/// The text of row `y`, with the trailing blanks cut off.
+fn row_text(state: &TerminalState, y: usize) -> String {
+    let text: String = state.get_grid()[y].iter().map(|cell| cell.ch).collect();
+    text.trim_end().to_string()
+}
+
+#[test]
+fn a_missing_or_zero_count_of_a_cursor_move_is_one() {
+    // The cursor starts at column 5, row 3, counted from zero.
+    // A real terminal reads no count and a count of 0 as 1.
+    let cases = [
+        ("\x1b[A", (5, 2)),
+        ("\x1b[0A", (5, 2)),
+        ("\x1b[B", (5, 4)),
+        ("\x1b[0B", (5, 4)),
+        ("\x1b[C", (6, 3)),
+        ("\x1b[0C", (6, 3)),
+        ("\x1b[D", (4, 3)),
+        ("\x1b[0D", (4, 3)),
+        ("\x1b[2A", (5, 1)),
+        ("\x1b[2D", (3, 3)),
+    ];
+    for (sequence, expected) in cases {
+        let mut state = TerminalState::new(10, 6, TerminalTheme::auto());
+        state.process_output("\x1b[4;6H").unwrap();
+        state.process_output(sequence).unwrap();
+        assert_eq!(state.get_cursor_position(), expected, "{sequence:?}");
+    }
+}
+
+#[test]
+fn a_missing_or_zero_count_of_a_character_edit_is_one() {
+    // The cursor goes to column 1, counted from zero, on the row "abcdef".
+    let cases = [
+        ("\x1b[P", "acdef"),
+        ("\x1b[0P", "acdef"),
+        ("\x1b[@", "a bcdef"),
+        ("\x1b[0@", "a bcdef"),
+        ("\x1b[X", "a cdef"),
+        ("\x1b[0X", "a cdef"),
+        ("\x1b[2P", "adef"),
+    ];
+    for (sequence, expected) in cases {
+        let mut state = TerminalState::new(10, 6, TerminalTheme::auto());
+        state.process_output("abcdef\x1b[1;2H").unwrap();
+        state.process_output(sequence).unwrap();
+        assert_eq!(row_text(&state, 0), expected, "{sequence:?}");
+    }
+}
+
+#[test]
+fn a_missing_or_zero_count_of_a_line_edit_is_one() {
+    // The three rows hold "1", "2" and "3". The cursor goes to row 0.
+    let cases = [
+        ("\x1b[L", ["", "1", "2", "3"]),
+        ("\x1b[0L", ["", "1", "2", "3"]),
+        ("\x1b[M", ["2", "3", "", ""]),
+        ("\x1b[0M", ["2", "3", "", ""]),
+        ("\x1b[S", ["2", "3", "", ""]),
+        ("\x1b[0S", ["2", "3", "", ""]),
+        ("\x1b[T", ["", "1", "2", "3"]),
+        ("\x1b[0T", ["", "1", "2", "3"]),
+    ];
+    for (sequence, expected) in cases {
+        let mut state = TerminalState::new(10, 6, TerminalTheme::auto());
+        state.process_output("1\r\n2\r\n3\x1b[1;1H").unwrap();
+        state.process_output(sequence).unwrap();
+        let rows: Vec<String> = (0..4).map(|y| row_text(&state, y)).collect();
+        assert_eq!(rows, expected, "{sequence:?}");
+    }
+}
+
+#[test]
+fn a_missing_or_zero_count_of_a_position_is_one() {
+    for sequence in ["\x1b[H", "\x1b[0;0H", "\x1b[;H", "\x1b[f", "\x1b[0;0f"] {
+        let mut state = TerminalState::new(10, 6, TerminalTheme::auto());
+        state.process_output("\x1b[4;6H").unwrap();
+        state.process_output(sequence).unwrap();
+        assert_eq!(state.get_cursor_position(), (0, 0), "{sequence:?}");
+    }
+    let mut state = TerminalState::new(10, 6, TerminalTheme::auto());
+    state.process_output("\x1b[4;0H").unwrap();
+    assert_eq!(state.get_cursor_position(), (0, 3));
+    state.process_output("\x1b[0;4H").unwrap();
+    assert_eq!(state.get_cursor_position(), (3, 0));
+}
+
+#[test]
+fn a_missing_or_zero_margin_of_the_scroll_region_is_the_edge_of_the_screen() {
+    let cases = [
+        ("\x1b[r", (0, 5)),
+        ("\x1b[0;0r", (0, 5)),
+        ("\x1b[;4r", (0, 3)),
+        ("\x1b[0;4r", (0, 3)),
+        ("\x1b[3r", (2, 5)),
+        ("\x1b[3;0r", (2, 5)),
+        ("\x1b[2;4r", (1, 3)),
+    ];
+    for (sequence, expected) in cases {
+        let mut state = TerminalState::new(10, 6, TerminalTheme::auto());
+        state.process_output("\x1b[2;3r\x1b[4;6H").unwrap();
+        state.process_output(sequence).unwrap();
+        assert_eq!(state.scroll_region(), expected, "{sequence:?}");
+        assert_eq!(state.get_cursor_position(), (0, 0), "{sequence:?}");
+    }
+}
