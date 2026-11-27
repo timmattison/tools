@@ -348,6 +348,42 @@ fn a_csi_split_over_two_events_is_one_key() {
 }
 
 #[test]
+fn an_osc_reply_split_over_two_events_gives_no_key() {
+    assert_eq!(
+        read(&[(1.0, "\x1b]11;rgb:0000/00"), (1.001, "00/0000\x07")]),
+        vec![]
+    );
+}
+
+#[test]
+fn a_string_and_its_terminator_split_over_events_give_no_key() {
+    assert_eq!(
+        read(&[(1.0, "a\x1bP1$r"), (1.001, "x\x1b"), (1.002, "\\b")]),
+        vec![(1.0, text("a")), (1.002, text("b"))]
+    );
+    assert_eq!(
+        read(&[(1.0, "x\x1b]"), (1.001, "0;title\x1b\\y")]),
+        vec![(1.0, text("x")), (1.001, text("y"))]
+    );
+    assert_eq!(
+        read(&[(1.0, "\x1b_Gda"), (1.001, "ta\x1b\\z")]),
+        vec![(1.001, text("z"))]
+    );
+}
+
+#[test]
+fn a_string_start_whose_rest_comes_after_the_timeout_is_an_alt_key() {
+    assert_eq!(
+        read(&[(1.0, "\x1b]ab"), (1.5, "c")]),
+        vec![
+            (1.0, special("Alt+]")),
+            (1.0, text("ab")),
+            (1.5, text("c"))
+        ]
+    );
+}
+
+#[test]
 fn a_lone_esc_and_a_later_key_after_the_timeout_are_two_keys() {
     assert_eq!(
         read(&[(1.0, "\x1b"), (1.5, "[")]),
