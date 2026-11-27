@@ -70,6 +70,8 @@ fn a_function_line_defines_its_name() {
         ("\tfunction myf", "myf"),
         ("function git-up\r", "git-up"),
         ("alias() { builtin alias \"$@\" }", "alias"),
+        ("alias () { builtin alias \"$@\" }", "alias"),
+        ("alias ( ) {", "alias"),
         ("日本() { echo 🎉 }", "日本"),
     ];
     for (line, name) in cases {
