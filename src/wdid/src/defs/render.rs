@@ -459,23 +459,19 @@ fn members_text(finding: &Finding, places: &Places, with_origin: bool) -> String
         .join(MEMBER_SEPARATOR)
 }
 
-/// Joins `words` with one space. Each control character shows as an escape,
-/// so that the entry stays on one line. A backslash stays as it is, because
-/// the words are shell text.
+/// Joins `words` with one space. Each control character shows as the escape
+/// of [`char::escape_default`] (`\n`, `\t`, `\u{1b}`), so that the entry stays
+/// on one line. A backslash stays as it is, because the words are shell text.
 fn words_text(words: &[String]) -> String {
-    words
-        .join(" ")
-        .chars()
-        .flat_map(|c| -> Vec<char> {
-            match c {
-                '\n' => vec!['\\', 'n'],
-                '\r' => vec!['\\', 'r'],
-                '\t' => vec!['\\', 't'],
-                c if c.is_control() => c.escape_default().collect(),
-                c => vec![c],
-            }
-        })
-        .collect()
+    let mut text = String::new();
+    for character in words.join(" ").chars() {
+        if character.is_control() {
+            text.extend(character.escape_default());
+        } else {
+            text.push(character);
+        }
+    }
+    text
 }
 
 /// Gives the entry of `finding` in the group of the duplicates and the
