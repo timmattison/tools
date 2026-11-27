@@ -1362,3 +1362,35 @@ fn the_style_sheet_fits_the_grid_to_the_pane() {
         )
     );
 }
+
+#[tokio::test]
+async fn the_color_scheme_panel_shows_its_fields_and_menus() {
+    let window = open_recording().await;
+    let page = window.html();
+    for text in [
+        "Color Scheme",
+        "Times are in seconds, on the timeline after the filters above. Leave both times empty for the whole timeline.",
+        "Start (s)",
+        "End (s)",
+        "Target theme",
+        "Default colors",
+        "Color cube (16-231)",
+        "Grayscale (232-255)",
+        "Truecolor",
+        "Auto",
+        "Dracula",
+        "Monokai",
+        "Solarized Dark",
+        "Solarized Light",
+        "As in the theme",
+        "Swapped",
+        "Keep",
+        "Nearest theme color",
+        "Invert",
+        "Invert lightness",
+        "Apply Color Scheme",
+    ] {
+        assert!(page.contains(text), "{text} missing in {page}");
+    }
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
