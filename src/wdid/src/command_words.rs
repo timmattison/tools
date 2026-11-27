@@ -72,6 +72,11 @@
 //! the substitution. The walk keeps the origin of each part of the new text as
 //! a range of character indexes, because the parser counts characters.
 //!
+//! [`parse_line`] also gives each alias expansion of the walk, with the name
+//! of the alias and the alias that the person typed. A person types `wtf` with
+//! `wtf='wt -f'` and `wt=cwt`. That is a use of `wtf`, and a use of `wt`
+//! through `wtf`.
+//!
 //! This module owns the parser. No type of the parser is part of a public
 //! signature, and no other module sees one.
 
@@ -103,6 +108,28 @@ struct Alias {
     value: String,
     /// True for a global alias, false for a regular alias.
     global: bool,
+}
+
+/// The kind of an alias.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AliasKind {
+    /// An alias that expands at command position only.
+    Regular,
+    /// A zsh alias that expands in every word position (`alias -g`).
+    Global,
+    /// A zsh alias that expands a command word with its suffix (`alias -s`).
+    Suffix,
+}
+
+/// One alias of the table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasDefinition {
+    /// The name. A suffix alias has its marker, `*.` and the suffix (`*.md`).
+    pub name: String,
+    /// The kind.
+    pub kind: AliasKind,
+    /// The value, after quote removal.
+    pub value: String,
 }
 
 /// The character that comes before the suffix of a word.
@@ -197,6 +224,28 @@ impl Aliases {
             .any(|(name, alias)| alias.global && text.contains(name.as_str()))
     }
 
+    /// Gives each alias of the table, sorted by name, then by kind.
+    #[must_use]
+    pub fn definitions(&self) -> Vec<AliasDefinition> {
+        let regular_and_global = self.values.iter().map(|(name, alias)| AliasDefinition {
+            name: name.clone(),
+            kind: if alias.global {
+                AliasKind::Global
+            } else {
+                AliasKind::Regular
+            },
+            value: alias.value.clone(),
+        });
+        let suffix = self.suffixes.iter().map(|(suffix, value)| AliasDefinition {
+            name: format!("{SUFFIX_MARKER}{suffix}"),
+            kind: AliasKind::Suffix,
+            value: value.clone(),
+        });
+        let mut all: Vec<AliasDefinition> = regular_and_global.chain(suffix).collect();
+        all.sort_by(|a, b| a.name.cmp(&b.name).then(a.kind.cmp(&b.kind)));
+        all
+    }
+
     /// Gives the number of aliases of all three kinds.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -269,6 +318,27 @@ pub enum Parsed {
     Words(Vec<CommandWord>),
     /// The parser refused the line, or a part of it. No word is known.
     Unparsed,
+}
+
+/// One expansion of an alias in a command line.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AliasUse {
+    /// The name of the alias. A suffix alias has its marker, `*.` and the
+    /// suffix (`*.md`).
+    pub name: String,
+    /// The alias that the person typed, when this expansion came from the
+    /// value of another alias. `None` when the person typed the name.
+    pub through: Option<String>,
+}
+
+/// The command words of one line, and the aliases that expanded in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Line {
+    /// The command words, in source order. These are the words that
+    /// [`command_words`] gives.
+    pub words: Vec<CommandWord>,
+    /// Each alias expansion of the walk, in walk order.
+    pub aliases: Vec<AliasUse>,
 }
 
 /// The most levels of nesting that the walk reads. A substitution inside a
@@ -892,6 +962,8 @@ struct Walker<'a> {
     options: ParserOptions,
     /// The command words found so far, in source order.
     words: Vec<CommandWord>,
+    /// The alias expansions found so far, in walk order.
+    uses: Vec<AliasUse>,
 }
 
 impl<'a> Walker<'a> {
@@ -901,7 +973,17 @@ impl<'a> Walker<'a> {
             aliases,
             options: ParserOptions::default(),
             words: Vec::new(),
+            uses: Vec::new(),
         }
+    }
+
+    /// Records one expansion of the alias `name`. `through` is the alias that
+    /// the person typed, when the expansion came from the value of an alias.
+    fn record(&mut self, name: &str, through: Option<String>) {
+        self.uses.push(AliasUse {
+            name: name.to_owned(),
+            through,
+        });
     }
 
     /// Parses the text of `context` as a program and walks it. The global
@@ -921,16 +1003,21 @@ impl<'a> Walker<'a> {
     /// of its word, as the lexer of zsh does. A global alias in the chain is
     /// not expanded. The text of a value has the origin of the word that it
     /// replaced. Gives `None` when no word of the text is a global alias.
-    fn expand_globals(&self, context: &TextContext<'_>) -> Result<Option<ExpandedText>, Refused> {
+    fn expand_globals(
+        &mut self,
+        context: &TextContext<'_>,
+    ) -> Result<Option<ExpandedText>, Refused> {
         let found = self.global_words(context.text, |name| !context.in_chain(name));
         if found.is_empty() {
             return Ok(None);
         }
         let mut replacements = Vec::with_capacity(found.len());
         for GlobalWord { range, name, value } in found {
+            let origin = context.replaced_origin(name, Some(range.start));
+            self.record(name, context.origin_at(Some(range.start)));
             replacements.push(Replacement {
-                text: self.global_value(value, &mut vec![name], context)?,
-                origin: context.replaced_origin(name, Some(range.start)),
+                text: self.global_value(value, &mut vec![name], context, &origin)?,
+                origin,
                 range,
             });
         }
@@ -941,12 +1028,15 @@ impl<'a> Walker<'a> {
     /// it expanded. `path` holds the names of the global aliases that hold the
     /// value. They are not expanded again, thus a cycle ends. Each name on the
     /// path counts as one level of nesting.
+    /// Each global alias in the value is a use through `through`, the origin
+    /// of the outermost word that the expansion replaced.
     /// Gives `Refused` when the nesting is too deep.
     fn global_value(
-        &self,
+        &mut self,
         value: &'a str,
         path: &mut Vec<&'a str>,
         context: &TextContext<'_>,
+        through: &Option<String>,
     ) -> Result<String, Refused> {
         if context.depth + path.len() > MAX_DEPTH {
             return Err(Refused);
@@ -959,8 +1049,9 @@ impl<'a> Walker<'a> {
         }
         let mut replacements = Vec::with_capacity(found.len());
         for GlobalWord { range, name, value } in found {
+            self.record(name, through.clone());
             path.push(name);
-            let text = self.global_value(value, path, context);
+            let text = self.global_value(value, path, context, through);
             path.pop();
             replacements.push(Replacement {
                 range,
@@ -1163,10 +1254,12 @@ impl<'a> Walker<'a> {
         }
         if let Some(command) = &command {
             if let Some(value) = self.alias_value(&command.raw, context, &[]) {
+                self.record(&command.raw, context.origin_at(command.start));
                 let leading = [(value, context.replaced_origin(&command.raw, command.start))];
                 return self.walk_alias(&leading, vec![command.raw.clone()], &suffix, context);
             }
             if let Some((marker, value)) = self.suffix_alias(command, context) {
+                self.record(&marker, context.origin_at(command.start));
                 let leading = [
                     (value, context.replaced_origin(&marker, command.start)),
                     (command.raw.as_str(), context.origin_at(command.start)),
@@ -1257,6 +1350,7 @@ impl<'a> Walker<'a> {
             let Some(next_value) = self.alias_value(&next.raw, context, &names) else {
                 break;
             };
+            self.record(&next.raw, context.origin_at(next.start));
             expanded.push(next_value, context.replaced_origin(&next.raw, next.start));
             names.push(next.raw.clone());
             last = next_value;
@@ -1448,9 +1542,21 @@ impl<'a> Walker<'a> {
 /// the rules of the expansion and of the origin of each word.
 #[must_use]
 pub fn command_words(line: &str, aliases: &Aliases) -> Parsed {
+    parse_line(line, aliases).map_or(Parsed::Unparsed, |line| Parsed::Words(line.words))
+}
+
+/// Gives the command words and the alias expansions of one line, or `None`
+/// when the parser refuses the line. Pure.
+///
+/// The words are the words that [`command_words`] gives.
+#[must_use]
+pub fn parse_line(line: &str, aliases: &Aliases) -> Option<Line> {
     let mut walker = Walker::new(aliases);
     match walker.walk_text(&TextContext::line(line)) {
-        Ok(()) => Parsed::Words(walker.words),
-        Err(Refused) => Parsed::Unparsed,
+        Ok(()) => Some(Line {
+            words: walker.words,
+            aliases: walker.uses,
+        }),
+        Err(Refused) => None,
     }
 }

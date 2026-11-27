@@ -31,6 +31,12 @@ pub enum NleError {
     #[error("Invalid redaction: {0}")]
     InvalidRedaction(String),
 
+    #[error("Invalid typing rate: {0} (a typing rate must be finite and above zero)")]
+    InvalidTypingRate(f64),
+
+    #[error("Invalid jitter: {0} (a jitter must be from 0 up to, and not including, 1)")]
+    InvalidJitter(f64),
+
     #[error("Invalid project: {0}")]
     InvalidProject(String),
 
