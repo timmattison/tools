@@ -6,6 +6,7 @@ use termstate::{TerminalState, TerminalTheme};
 
 use crate::types::{EventType, Recording, Seconds};
 
+pub mod playback;
 pub mod screen;
 
 /// The `--theme` value of `beta` for `PreviewTheme::Auto`.
