@@ -167,7 +167,6 @@ fn an_unknown_key_of_a_crop_is_refused_and_named() {
 fn a_value_of_the_wrong_type_is_refused() {
     for value in [
         json!({ "rows": "all" }),
-        json!({ "rows": { "start": -1, "end": 2 } }),
         json!({ "rows": { "start": 0 } }),
         json!({ "hide_rows": 3 }),
         json!({ "hide_columns": ["a"] }),
@@ -255,6 +254,38 @@ fn a_hidden_index_that_is_not_on_the_screen_is_refused() {
         refusal(80, 24, json!({ "hide_columns": [80] })),
         "hide_columns: the column 80 is not on the screen (80 columns)"
     );
+}
+
+#[test]
+fn an_index_above_the_range_of_u16_is_refused_and_named() {
+    for (value, option, number) in [
+        (json!({ "hide_rows": [70000] }), "hide_rows", "70000"),
+        (json!({ "hide_columns": [70000] }), "hide_columns", "70000"),
+        (json!({ "rows": { "start": 0, "end": 70000 } }), "rows", "70000"),
+        (
+            json!({ "columns": { "start": 70000, "end": 70001 } }),
+            "columns",
+            "70001",
+        ),
+    ] {
+        let message = refusal(80, 24, value.clone());
+
+        assert!(message.contains(option), "{value}: {message}");
+        assert!(message.contains(number), "{value}: {message}");
+    }
+}
+
+#[test]
+fn a_negative_index_is_refused_and_named() {
+    for (value, option) in [
+        (json!({ "hide_rows": [-1] }), "hide_rows"),
+        (json!({ "rows": { "start": -1, "end": 2 } }), "rows"),
+    ] {
+        let message = refusal(80, 24, value.clone());
+
+        assert!(message.contains(option), "{value}: {message}");
+        assert!(message.contains("-1"), "{value}: {message}");
+    }
 }
 
 #[test]
