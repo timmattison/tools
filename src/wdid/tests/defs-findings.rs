@@ -461,8 +461,8 @@ fn a_global_alias_that_hides_a_program_is_a_finding() {
     assert_eq!(finding.definitions[0].kind, Kind::GlobalAlias);
 }
 
-/// An alias that starts with its own name, and a function that runs the
-/// program through `command`, are wrappers and not findings.
+/// An alias that starts with its own name, and an alias or a function that
+/// runs the program through `command`, are wrappers and not findings.
 #[test]
 fn a_wrapper_of_a_program_is_not_a_finding() {
     let mut defs = empty();
@@ -475,7 +475,22 @@ fn a_wrapper_of_a_program_is_not_a_finding() {
         ZSHRC,
     );
     program(&mut defs, "grep", "/usr/bin/grep");
+    alias(&mut defs, "rg", "command rg --smart-case", ZSHRC, 2);
+    program(&mut defs, "rg", "/usr/bin/rg");
     assert_eq!(findings(&[], &defs), Vec::new());
+}
+
+/// An alias that runs its own name through `command` skips a function of
+/// that name, thus it still hides the function.
+#[test]
+fn an_alias_that_runs_its_name_through_command_hides_the_function() {
+    let mut defs = empty();
+    alias(&mut defs, "wdz", "command wdz", ZSHRC, 1);
+    function(&mut defs, "wdz", "\techo z", ZSHRC);
+    assert_eq!(
+        kinds(&findings(&[], &defs)),
+        [FindingKind::AliasHidesFunction]
+    );
 }
 
 /// A function that runs a different program through `command` still hides
