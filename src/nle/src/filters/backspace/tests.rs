@@ -119,3 +119,42 @@ fn a_typed_key_and_output_backspaces_with_no_erase_key_stay() {
     ];
     assert_eq!(run(events.clone()), events);
 }
+
+#[test]
+fn consecutive_backspaces_erase_a_word() {
+    let mut events = vec![out(0.0, "$ ")];
+    let keys = [
+        ("c", 1.0),
+        ("d", 1.25),
+        (" ", 1.5),
+        ("f", 1.75),
+        ("o", 2.0),
+        ("o", 2.25),
+    ];
+    for (key, time) in keys {
+        events.push(input(time, key));
+        events.push(out(time, key));
+    }
+    for time in [2.5, 2.75, 3.0] {
+        events.push(input(time, "\x7f"));
+        events.push(out(time, "\x08 \x08"));
+    }
+    for (key, time) in [("b", 3.25), ("a", 3.5), ("r", 3.75)] {
+        events.push(input(time, key));
+        events.push(out(time, key));
+    }
+
+    let mut expected = vec![out(0.0, "$ ")];
+    for (key, time) in [
+        ("c", 1.0),
+        ("d", 1.25),
+        (" ", 1.5),
+        ("b", 1.75),
+        ("a", 2.0),
+        ("r", 2.25),
+    ] {
+        expected.push(input(time, key));
+        expected.push(out(time, key));
+    }
+    assert_eq!(run(events), expected);
+}
