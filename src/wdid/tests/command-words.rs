@@ -1328,7 +1328,7 @@ fn split_words_gives_an_unquoted_pattern_as_an_expansion() {
         ("ls [ab\"c\"]", vec![lit("ls"), exp("[ab\"c\"]")]),
         ("echo {a\",\"b}", vec![lit("echo"), lit("{a,b}")]),
         ("echo {1.\\\n.3}", vec![lit("echo"), exp("{1..3}")]),
-        ("echo \\\n=ls", vec![lit("echo"), exp("\\\n=ls")]),
+        ("echo \\\n=ls", vec![lit("echo"), exp("=ls")]),
         ("echo =ls", vec![lit("echo"), exp("=ls")]),
         ("echo \\=ls", vec![lit("echo"), lit("=ls")]),
         ("echo a=b", vec![lit("echo"), lit("a=b")]),
