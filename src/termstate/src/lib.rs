@@ -912,6 +912,32 @@ impl TerminalState {
         }
     }
 
+    /// Moves the cursor down `count` rows, for CUD and CNL. As CursorDown in
+    /// xterm's cursor.c, the move stops on the bottom margin of the
+    /// scrolling region when the cursor starts on it or above it. From below
+    /// the region, it stops on the last row of the screen. Nothing scrolls.
+    fn cursor_down(&mut self, count: usize) {
+        let limit = if self.cursor_y <= self.scroll_bottom {
+            self.scroll_bottom
+        } else {
+            self.height - 1
+        };
+        self.cursor_y = self.cursor_y.saturating_add(count).min(limit);
+    }
+
+    /// Moves the cursor up `count` rows, for CUU and CPL. As CursorUp in
+    /// xterm's cursor.c, the move stops on the top margin of the scrolling
+    /// region when the cursor starts on it or below it. From above the
+    /// region, it stops on the first row of the screen. Nothing scrolls.
+    fn cursor_up(&mut self, count: usize) {
+        let limit = if self.cursor_y >= self.scroll_top {
+            self.scroll_top
+        } else {
+            0
+        };
+        self.cursor_y = self.cursor_y.saturating_sub(count).max(limit);
+    }
+
     /// Marks one row as changed. A row outside the screen is ignored.
     fn mark_row(&mut self, row: usize) {
         if let Some(flag) = self.changed_rows.get_mut(row) {
@@ -1546,13 +1572,11 @@ impl TerminalState {
             }
             'A' => {
                 // Cursor up
-                let count = count_param(params, 0);
-                self.cursor_y = self.cursor_y.saturating_sub(count);
+                self.cursor_up(count_param(params, 0));
             }
             'B' => {
                 // Cursor down
-                let count = count_param(params, 0);
-                self.cursor_y = (self.cursor_y + count).min(self.height - 1);
+                self.cursor_down(count_param(params, 0));
             }
             'G' | '`' => {
                 // CHA and HPA: cursor to a column
@@ -1566,14 +1590,12 @@ impl TerminalState {
             }
             'E' => {
                 // CNL: cursor down, to the first column
-                let count = count_param(params, 0);
-                self.cursor_y = (self.cursor_y + count).min(self.height - 1);
+                self.cursor_down(count_param(params, 0));
                 self.cursor_x = 0;
             }
             'F' => {
                 // CPL: cursor up, to the first column
-                let count = count_param(params, 0);
-                self.cursor_y = self.cursor_y.saturating_sub(count);
+                self.cursor_up(count_param(params, 0));
                 self.cursor_x = 0;
             }
             'C' => {
