@@ -1516,3 +1516,43 @@ fn render_gives_a_span_filter_the_size_of_the_clip_that_starts_first() {
         }
     );
 }
+
+// Tests of the cut form.
+
+#[test]
+fn a_cut_filter_that_marks_another_count_of_events_fails_the_render() {
+    for count in [2_usize, 4] {
+        let mut registry = FilterRegistry::new();
+        registry.register_cut(kind("short"), move |_, _, _| Ok(vec![false; count]));
+
+        let result = registry.run(events(&[1.0, 2.0, 3.0]), &[all("short")]);
+
+        match result {
+            Err(NleError::RenderError(message)) => {
+                let expected = format!(
+                    "filter \"short\" answered {count} marks for the 3 events of its region"
+                );
+                assert!(message.contains(&expected), "count {count}: {message}");
+            }
+            other => panic!("count {count}: expected a RenderError, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_cut_filter_that_answers_an_error_fails_the_render_with_its_message() {
+    let mut registry = FilterRegistry::new();
+    registry.register_cut(kind("cut"), |_, _, _| Err("no screen".to_string()));
+
+    let result = registry.run(events(&[1.0]), &[all("cut")]);
+
+    match result {
+        Err(NleError::RenderError(message)) => {
+            assert!(
+                message.contains("filter \"cut\" failed: no screen"),
+                "{message}"
+            );
+        }
+        other => panic!("expected a RenderError, got {other:?}"),
+    }
+}
