@@ -163,7 +163,8 @@ It looks for a controller in this order:
    `192.168.0.1`, `unifi` and `unifi.local`, each on ports 443 and 8443 — whether or not mDNS finds
    a controller. Each candidate is probed for the Integration API's `info` endpoint. A host is only
    offered if it actually answers that endpoint, so a device that merely mentions UniFi on a web
-   page is not mistaken for a controller.
+   page is not mistaken for a controller. A refusal that asks for credentials (HTTP 401 to 403) counts
+   as an answer, thus a router or a proxy that refuses each unknown path with a 403 is offered too.
 3. **A URL you type**, validated the same way. The probe goes to the `info` endpoint under any path
    prefix in the URL, as for a controller behind a reverse proxy, and setup saves the URL exactly as
    you typed it. A name stays a name, so a certificate that is valid for that name stays valid. A

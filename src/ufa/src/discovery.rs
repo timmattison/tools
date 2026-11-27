@@ -435,11 +435,13 @@ pub enum ProbeVerdict {
 ///
 /// # Returns
 ///
-/// [`ProbeVerdict::Controller`] only when the answer could not have come from
-/// something else.
+/// [`ProbeVerdict::Controller`] for a refusal that asks for credentials, and for
+/// a success that carries the shape that the API documents. The refusal is a
+/// heuristic, as `NEEDS_CREDENTIALS` says.
 fn judge_probe(status: u16, body: &str) -> ProbeVerdict {
-    /// The endpoint is there but wants a key. Nothing else serves a
-    /// challenge at this path, so the challenge is the evidence.
+    /// The endpoint is there but wants a key. This status is a heuristic: a
+    /// router, a reverse proxy, or a web server that refuses each unknown
+    /// path with a 403 also passes as a controller.
     const NEEDS_CREDENTIALS: std::ops::RangeInclusive<u16> = 401..=403;
     /// Answers the request outright.
     const SUCCEEDED: std::ops::RangeInclusive<u16> = 200..=299;
