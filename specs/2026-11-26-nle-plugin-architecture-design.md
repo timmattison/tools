@@ -251,9 +251,9 @@ the project sets no value. Thus a plugin never needs a default of its own.
 
 ### The filter worlds
 
-This WIT is the contract of slice 2. A filter has one of the three forms of
-`src/nle/src/pipeline.rs` that have a world, and each of them has its own world. The `type` of the
-manifest picks the form.
+This WIT is the contract of slice 2. A filter plugin has one of the three
+forms of `src/nle/src/pipeline.rs` that have a world, and each of those forms
+has its own world. The `type` of the manifest picks the form.
 
 The event form is for a filter that changes the events of its region:
 

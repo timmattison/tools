@@ -55,10 +55,10 @@
 //! The filter marks the removed runs. The pipeline removes their time by the
 //! steps of `CutFilterFn`, so the recording looks as if the typist made no
 //! error. The rule that the pipeline obeys: the cut of a run is the time from
-//! its first event to the next kept event, or to the end of the span. Each
-//! kept event moves earlier by the cuts before it. The length of the span
-//! becomes the old length less all cuts, but never below the last kept
-//! event.
+//! its first event to the next kept event, or to the end of the region.
+//! Each kept event moves earlier by the cuts before it. The length of the
+//! region becomes the old length less all cuts, but never below the last
+//! kept event.
 //!
 //! The screen starts empty. The filter feeds the output events before the
 //! region into it, so a filter on a range sees the screen that the viewer

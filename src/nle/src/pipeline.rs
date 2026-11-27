@@ -114,7 +114,8 @@ impl TerminalSize {
     };
 }
 
-/// What a span filter or a cut filter knows about the timeline outside its region.
+/// What a span filter or a cut filter knows about the timeline outside its
+/// region.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SpanContext<'a> {
     /// The events before the region, at their times on the timeline, in the
@@ -307,19 +308,21 @@ struct StepTimes {
 /// A time before the region start does not move. A time at or after the region
 /// end moves by the shift, like the events after the region.
 ///
-/// Inside the region, the answer matters. If the step has one answered time for
-/// each seen time, the chapter keeps its place between the events around it. It keeps
-/// its fraction of the gap between the event before and the event after.
-/// Before the first event, it scales from the region start. After the last
-/// event, it keeps its gap to that event. For a span filter, the end of the
-/// region is the last pair of `seen` and `answered`. For a cut filter, the pairs
-/// are the kept events and the first event of each removed run, thus a chapter
-/// moves earlier by the cuts before it, and a chapter inside a cut moves to the
-/// place of the cut.
+/// Inside the region, the answer matters. If the step has one answered time
+/// for each seen time, the chapter keeps its place between the events around
+/// it. It keeps its fraction of the gap between the event before and the event
+/// after. Before the first event, it scales from the region start. After the
+/// last event, it keeps its gap to that event. For a span filter, the end of
+/// the region is the last pair of `seen` and `answered`. For a cut filter, the
+/// pairs are the kept events and the first event of each removed run, thus a
+/// chapter moves earlier by the cuts before it, and a chapter inside a cut
+/// moves to the place of the cut.
 ///
-/// If the filter added or removed events, or the region holds none, a chapter
-/// up to the last seen event moves in proportion to the last time of the
-/// answer over the last time seen. A chapter after that moves by the shift.
+/// If the counts of seen and answered times differ, or the step has no seen
+/// time, a chapter up to the last seen time moves in proportion to the last
+/// answered time over the last seen time. A chapter after that moves by the
+/// shift. An event filter or a span filter that adds or removes events gets
+/// this rule. A cut filter never gets it.
 fn move_chapter(time: f64, step: &StepTimes) -> f64 {
     if time < step.start {
         return time.max(0.0);
@@ -440,9 +443,9 @@ impl FilterRegistry {
     }
 
     /// One filter step: the steps on `FilterFn`, on `InPlaceFilterFn`, on
-    /// `SpanFilterFn`, or on `CutFilterFn`. `chapters` holds the chapter times. Each one moves by
-    /// `move_chapter`, but an in-place filter moves none. The events draw on a
-    /// terminal of `size`.
+    /// `SpanFilterFn`, or on `CutFilterFn`. `chapters` holds the chapter
+    /// times. Each one moves by `move_chapter`, but an in-place filter moves
+    /// none. The events draw on a terminal of `size`.
     fn apply(
         &self,
         events: Vec<Event>,
@@ -477,12 +480,13 @@ impl FilterRegistry {
         // its times first.
         let mut seen: Vec<f64> = inside.iter().map(|event| event.time).collect();
         let kind = applied.kind.as_str();
-        // The answered times of a cut filter, which it knows before the answer.
+        // The answered times of a cut filter. The cut gives them in pairs with
+        // `seen`, thus the chapter step does not sort them.
         let mut known_answered: Option<Vec<f64>> = None;
         // The answer, the view of an in-place filter, the latest time on the
         // timeline that the answer can get, how far the events after the
-        // region move, and, for a span or cut filter, the length of the region and
-        // the answered length.
+        // region move, and, for a span or cut filter, the length of the region
+        // and the answered length.
         let (answer, view, ceiling, shift, span_end) = match filter {
             Registered::Events(filter) => {
                 let answer = filter(&inside, &applied.options);
@@ -630,8 +634,8 @@ impl FilterRegistry {
     /// Run `filters` in order over `events`, by the steps of their form. The
     /// end of the timeline starts at the time of the last event.
     ///
-    /// The events have no recording, so a span filter and a cut filter get the size of a
-    /// VT100 (`TerminalSize::VT100`). `render` gives the size of the
+    /// The events have no recording, so a span filter and a cut filter get the
+    /// size of a VT100 (`TerminalSize::VT100`). `render` gives the size of the
     /// recording.
     ///
     /// # Errors
@@ -639,9 +643,9 @@ impl FilterRegistry {
     /// when a filter answers a time that is not finite or is below zero on
     /// the timeline, when an in-place filter fails or answers a time after
     /// its region, when a span filter answers an error or a bad length, when
-    /// a cut filter answers an error or marks a count of events that is not the
-    /// count of its region, or when an event time or the end of the timeline that the filters give is
-    /// not finite.
+    /// a cut filter answers an error or marks a count of events that is not
+    /// the count of its region, or when an event time or the end of the
+    /// timeline that the filters give is not finite.
     pub fn run(
         &self,
         events: Vec<Event>,
@@ -661,8 +665,8 @@ impl FilterRegistry {
     /// # Errors
     /// Returns `NleError::RenderError` when a filter fails, when a span
     /// filter answers an error or a bad length, when a cut filter answers an
-    /// error, or when an event time or the
-    /// final end is not finite.
+    /// error or another count of marks than of events, or when an event time
+    /// or the final end is not finite.
     fn run_with_end(
         &self,
         events: Vec<Event>,
