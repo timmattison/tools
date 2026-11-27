@@ -795,3 +795,56 @@ fn update_chapter_with_a_blank_label_is_refused_and_changes_nothing() {
 
     assert_eq!(editor.project(), &before);
 }
+
+// Tests of `Editor::apply_renderable`.
+
+fn dilation(end: f64, speed: f64) -> Edit {
+    use crate::filters::time_dilation::{applied, Speed};
+    Edit::AddFilter {
+        index: 0,
+        filter: applied(
+            FilterRegion::Range {
+                start: secs(0.0),
+                end: secs(end),
+            },
+            Speed::new(speed).unwrap(),
+        ),
+    }
+}
+
+fn dilation_editor() -> Editor {
+    Editor::new(project(), Arc::new(crate::filters::registry())).unwrap()
+}
+
+#[test]
+fn apply_renderable_refuses_a_filter_that_does_not_render_and_keeps_the_history() {
+    let mut editor = dilation_editor();
+    editor.apply(Edit::AddTrack { id: TrackId(3) }).unwrap();
+    assert!(editor.undo());
+    let before = editor.project().clone();
+    let could_undo = editor.can_undo();
+
+    let result = editor.apply_renderable(dilation(10.0, 1e-320));
+
+    assert!(
+        matches!(result, Err(NleError::RenderError(_))),
+        "{result:?}"
+    );
+    assert_eq!(editor.project(), &before);
+    assert_eq!(editor.can_undo(), could_undo);
+    assert!(editor.can_redo());
+}
+
+#[test]
+fn apply_renderable_applies_a_filter_that_renders_and_clears_the_redo_history() {
+    let mut editor = dilation_editor();
+    editor.apply(Edit::AddTrack { id: TrackId(3) }).unwrap();
+    assert!(editor.undo());
+    assert!(editor.can_redo());
+
+    editor.apply_renderable(dilation(10.0, 2.0)).unwrap();
+
+    assert_eq!(editor.project().filters.len(), 1);
+    assert!(editor.can_undo());
+    assert!(!editor.can_redo());
+}

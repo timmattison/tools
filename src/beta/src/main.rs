@@ -78,6 +78,12 @@ pub enum ExportFormat {
 
         #[arg(long, help = "Optimize for web delivery")]
         optimize_web: bool,
+
+        #[arg(
+            long,
+            help = "Font file (TTF or OTF) to render with, in place of the system fonts"
+        )]
+        font: Option<PathBuf>,
     },
 }
 

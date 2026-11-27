@@ -1,7 +1,7 @@
 use crate::ExportFormat;
 use anyhow::Result;
 
-pub mod terminal_renderer;
+pub mod tmux;
 pub mod video;
 pub mod web;
 
@@ -20,6 +20,7 @@ pub async fn handle_export(format: ExportFormat) -> Result<()> {
             resolution,
             theme,
             optimize_web,
-        } => video::export_video(input, output, fps, resolution, theme, optimize_web).await,
+            font,
+        } => video::export_video(input, output, fps, resolution, theme, optimize_web, font).await,
     }
 }

@@ -9,6 +9,7 @@ use serde::Serialize;
 use crate::catalog::PathState;
 use crate::tally::{Classification, Summary, Tally, ToolUsage, Window};
 use crate::tool::ToolName;
+use crate::workspace::{FoundBy, Workspace};
 
 /// The name of each column of the table, in order.
 const COLUMNS: [&str; 9] = [
@@ -41,13 +42,13 @@ const WHOLE_COLUMNS: [usize; 7] = [0, 1, 2, 4, 5, 6, 7];
 const TEXT_COLUMNS: [(usize, u16); 2] = [(3, 22), (8, 16)];
 
 /// The text in place of a date that the tally does not know.
-const NO_DATE: &str = "-";
+pub(crate) const NO_DATE: &str = "-";
 
 /// The format of a date in the report.
-const DATE_FORMAT: &str = "%Y-%m-%d";
+pub(crate) const DATE_FORMAT: &str = "%Y-%m-%d";
 
 /// What holds the parts of the `Through` cell apart.
-const THROUGH_SEPARATOR: &str = ", ";
+pub(crate) const THROUGH_SEPARATOR: &str = ", ";
 
 /// The note of a tool that `cargo install --list` does not name.
 const NOTE_NOT_INSTALLED: &str = "not installed";
@@ -59,12 +60,12 @@ const NOTE_NOT_ON_PATH: &str = "not on PATH";
 const NOTE_RUNS_FIRST: &str = "runs first";
 
 /// Gives `count` with a comma between each group of three digits.
-fn number(count: u64) -> String {
+pub(crate) fn number(count: u64) -> String {
     count.to_formatted_string(&Locale::en)
 }
 
 /// Gives `count`, a `usize`, with a comma between each group of three digits.
-fn number_of(count: usize) -> String {
+pub(crate) fn number_of(count: usize) -> String {
     count.to_formatted_string(&Locale::en)
 }
 
@@ -72,7 +73,7 @@ fn number_of(count: usize) -> String {
 /// three digits, one space, and `singular` when the count is 1 or `plural`
 /// for every other count. English plurals are irregular, so the caller gives
 /// both forms.
-fn counted<T>(count: T, singular: &str, plural: &str) -> String
+pub(crate) fn counted<T>(count: T, singular: &str, plural: &str) -> String
 where
     T: ToFormattedString + PartialEq + From<u8>,
 {
@@ -85,7 +86,7 @@ where
 }
 
 /// Gives `date` as `YYYY-MM-DD`, or `-` when the date is not known.
-fn date_cell(date: Option<NaiveDate>) -> String {
+pub(crate) fn date_cell(date: Option<NaiveDate>) -> String {
     date.map_or_else(
         || NO_DATE.to_string(),
         |date| date.format(DATE_FORMAT).to_string(),
@@ -161,13 +162,13 @@ fn table(tally: &Tally, width: Option<u16>) -> String {
 }
 
 /// The word `none`, for a group with no entry.
-const NONE: &str = "none";
+pub(crate) const NONE: &str = "none";
 
 /// What holds the entries of a group apart.
 const ENTRY_SEPARATOR: &str = ", ";
 
 /// What holds the blocks of the text report apart: one blank line.
-const BETWEEN_BLOCKS: &str = "\n\n";
+pub(crate) const BETWEEN_BLOCKS: &str = "\n\n";
 
 /// Gives the tools that have `classification`, sorted by name.
 fn tools_with(tally: &Tally, classification: Classification) -> Vec<&ToolUsage> {
@@ -190,14 +191,14 @@ fn idle_tools(tally: &Tally) -> Vec<&ToolUsage> {
 
 /// What starts each entry of a group: two spaces, so that the entries stand
 /// under their heading.
-const ENTRY_INDENT: &str = "  ";
+pub(crate) const ENTRY_INDENT: &str = "  ";
 
 /// Gives one group: the heading and a colon, then one indented line for each
 /// entry. A group with no entry is one line that ends with `none`.
 ///
 /// One line for each entry keeps a long group readable. On a real history the
 /// idle group held 21 tools, which on one line took 870 characters.
-fn group(heading: &str, entries: &[String]) -> String {
+pub(crate) fn group(heading: &str, entries: &[String]) -> String {
     if entries.is_empty() {
         return format!("{heading}: {NONE}");
     }
@@ -298,13 +299,46 @@ fn summary_lines(summary: &Summary, window: &Window) -> String {
     format!("{history}\n{shell}")
 }
 
-/// Gives the text report. `width` is the table width. `None` sets no limit.
+/// The text of step 1 in the workspace line, in the parentheses after the
+/// root.
+const FOUND_BY_REPO_FLAG: &str = "--repo";
+
+/// The text of step 2 in the workspace line.
+const FOUND_BY_WORK_TREE: &str = "the git work tree of the current directory";
+
+/// What starts the text of step 3 in the workspace line.
+const FOUND_BY_INSTALLED: &str = "the source of the installed wdid";
+
+/// Gives the line that names the workspace and the step that found it.
+fn workspace_line(workspace: &Workspace) -> String {
+    let found_by = match &workspace.found_by {
+        FoundBy::RepoFlag => FOUND_BY_REPO_FLAG.to_string(),
+        FoundBy::WorkTree => FOUND_BY_WORK_TREE.to_string(),
+        FoundBy::InstalledGit { commit, .. } => {
+            format!("{FOUND_BY_INSTALLED}, commit {}", commit.short())
+        }
+        FoundBy::InstalledPath { crate_dir } => {
+            format!(
+                "{FOUND_BY_INSTALLED}, cargo install --path {}",
+                shellquote::shell_quote(&crate_dir.to_string_lossy())
+            )
+        }
+    };
+    format!("Workspace: {} ({found_by})", workspace.root.display())
+}
+
+/// Gives the text report. `workspace` is the workspace of the report. `width`
+/// is the table width. `None` sets no limit.
 #[must_use]
-pub fn text(tally: &Tally, window: &Window, width: Option<u16>) -> String {
+pub fn text(tally: &Tally, window: &Window, workspace: &Workspace, width: Option<u16>) -> String {
     [
         table(tally, width),
         group_lines(tally, window),
-        summary_lines(&tally.summary, window),
+        format!(
+            "{}\n{}",
+            summary_lines(&tally.summary, window),
+            workspace_line(workspace)
+        ),
     ]
     .join(BETWEEN_BLOCKS)
         + "\n"
@@ -369,6 +403,44 @@ struct ToolDocument<'a> {
     classification: Classification,
 }
 
+/// The step that found the workspace, in the JSON document, with the facts of
+/// the record for step 3.
+#[derive(Serialize)]
+#[serde(tag = "found_by", rename_all = "snake_case")]
+enum FoundByDocument<'a> {
+    RepoFlag,
+    WorkTree,
+    InstalledGit { url: &'a str, commit: &'a str },
+    InstalledPath { crate_dir: String },
+}
+
+/// The `workspace` block of the JSON document.
+#[derive(Serialize)]
+struct WorkspaceDocument<'a> {
+    root: String,
+    #[serde(flatten)]
+    found_by: FoundByDocument<'a>,
+}
+
+/// Gives the JSON form of the workspace.
+fn workspace_document(workspace: &Workspace) -> WorkspaceDocument<'_> {
+    let found_by = match &workspace.found_by {
+        FoundBy::RepoFlag => FoundByDocument::RepoFlag,
+        FoundBy::WorkTree => FoundByDocument::WorkTree,
+        FoundBy::InstalledGit { url, commit } => FoundByDocument::InstalledGit {
+            url,
+            commit: commit.as_str(),
+        },
+        FoundBy::InstalledPath { crate_dir } => FoundByDocument::InstalledPath {
+            crate_dir: crate_dir.to_string_lossy().into_owned(),
+        },
+    };
+    WorkspaceDocument {
+        root: workspace.root.to_string_lossy().into_owned(),
+        found_by,
+    }
+}
+
 /// The whole JSON document.
 #[derive(Serialize)]
 struct Document<'a> {
@@ -382,6 +454,7 @@ struct Document<'a> {
     never_used_old: Vec<&'a ToolName>,
     never_used_new: Vec<&'a ToolName>,
     idle: Vec<&'a ToolName>,
+    workspace: WorkspaceDocument<'a>,
 }
 
 /// Gives the JSON form of the state of the PATH.
@@ -423,16 +496,18 @@ fn names_of<'a>(tools: &[&'a ToolUsage]) -> Vec<&'a ToolName> {
 }
 
 /// Gives the JSON document, pretty-printed, with a final newline.
+/// `workspace` is the workspace of the report.
 ///
-/// The crate directory is a text with `/` separators. The three lists at the
-/// end follow the order of the text report.
+/// The crate directory is a text with `/` separators. The three lists after
+/// the tools follow the order of the text report. The `workspace` block at the
+/// end names the root of the workspace and the step that found it.
 ///
 /// # Panics
 ///
 /// Never in practice. The document holds only numbers, dates, and text, and
 /// `serde_json` serializes each of them without an error.
 #[must_use]
-pub fn json(tally: &Tally, window: &Window) -> String {
+pub fn json(tally: &Tally, window: &Window, workspace: &Workspace) -> String {
     let summary = &tally.summary;
     let document = Document {
         today: window.today,
@@ -463,6 +538,7 @@ pub fn json(tally: &Tally, window: &Window) -> String {
         never_used_old: names_of(&tools_with(tally, Classification::NeverUsedOld)),
         never_used_new: names_of(&tools_with(tally, Classification::NeverUsedNew)),
         idle: names_of(&idle_tools(tally)),
+        workspace: workspace_document(workspace),
     };
     let mut text = serde_json::to_string_pretty(&document)
         .expect("a document of numbers, dates, and text always serializes");

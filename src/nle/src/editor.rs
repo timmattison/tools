@@ -290,6 +290,12 @@ fn track_position(project: &EditProject, id: TrackId) -> Result<usize, NleError>
         .ok_or_else(|| missing_track(id))
 }
 
+/// The check of `Editor::apply` and `Editor::redo`: the rules of
+/// `EditProject::validate`, with no render, so no duration to keep.
+fn validate_without_render(next: &EditProject) -> Result<Option<f64>, NleError> {
+    next.validate().map(|()| None)
+}
+
 /// An edit that was applied, and the project as it was before.
 #[derive(Debug)]
 struct Applied {
@@ -302,6 +308,9 @@ struct Applied {
 #[derive(Debug)]
 pub struct Editor {
     project: EditProject,
+    /// The duration of the render of `project`, when the check of the last
+    /// edit rendered it. Each change of `project` sets it again.
+    kept_duration: Option<f64>,
     undo: Vec<Applied>,
     redo: Vec<Edit>,
     filters: Arc<FilterRegistry>,
@@ -316,6 +325,7 @@ impl Editor {
         project.validate()?;
         Ok(Self {
             project,
+            kept_duration: None,
             undo: Vec::new(),
             redo: Vec::new(),
             filters,
@@ -337,19 +347,49 @@ impl Editor {
     /// the result breaks a rule of `EditProject::validate`. A refused edit
     /// changes nothing.
     pub fn apply(&mut self, edit: Edit) -> Result<(), NleError> {
-        self.commit(edit)?;
+        self.commit(edit, validate_without_render)?;
         self.redo.clear();
         Ok(())
     }
 
-    /// Apply `edit` to a copy of the project, check the copy, and only then
-    /// make it the project and put the edit on the undo history. It leaves
-    /// the redo history alone.
-    fn commit(&mut self, edit: Edit) -> Result<(), NleError> {
+    /// Apply `edit` like `apply`, and also refuse it when the project after
+    /// the edit does not render. A project with no clip does not render, so
+    /// use `apply` for an edit that can leave the project empty.
+    ///
+    /// A refused edit changes nothing: the project, the undo history, and the
+    /// redo history stay as they were.
+    ///
+    /// # Errors
+    /// Returns the errors of `apply`, and the errors of
+    /// `FilterRegistry::render` for the project after the edit, for example
+    /// `NleError::RenderError` when a filter answers a length that is not
+    /// finite.
+    pub fn apply_renderable(&mut self, edit: Edit) -> Result<(), NleError> {
+        let filters = Arc::clone(&self.filters);
+        self.commit(edit, move |next| {
+            filters
+                .render(next)
+                .map(|recording| Some(recording.duration))
+        })?;
+        self.redo.clear();
+        Ok(())
+    }
+
+    /// Apply `edit` to a copy of the project, run `check` on the copy, and
+    /// only then make it the project and put the edit on the undo history.
+    /// `check` answers the duration of the render of the copy when it
+    /// rendered the copy. A failure of the edit or of `check` changes
+    /// nothing. It leaves the redo history alone.
+    fn commit(
+        &mut self,
+        edit: Edit,
+        check: impl FnOnce(&EditProject) -> Result<Option<f64>, NleError>,
+    ) -> Result<(), NleError> {
         let mut next = self.project.clone();
         edit.apply_to(&mut next)?;
-        next.validate()?;
+        let kept_duration = check(&next)?;
         let before = std::mem::replace(&mut self.project, next);
+        self.kept_duration = kept_duration;
         self.undo.push(Applied { edit, before });
         Ok(())
     }
@@ -360,6 +400,7 @@ impl Editor {
             return false;
         };
         self.project = applied.before;
+        self.kept_duration = None;
         self.redo.push(applied.edit);
         true
     }
@@ -374,7 +415,7 @@ impl Editor {
             return Ok(false);
         };
         // A refused edit stays on the redo history, and nothing changes.
-        self.commit(edit)?;
+        self.commit(edit, validate_without_render)?;
         self.redo.pop();
         Ok(true)
     }
@@ -397,6 +438,16 @@ impl Editor {
     /// Returns the errors of `FilterRegistry::render`.
     pub fn render(&self) -> Result<Recording, NleError> {
         self.filters.render(&self.project)
+    }
+
+    /// The duration of the render of the project in its present state. It
+    /// renders the project only when the check of the last edit did not.
+    ///
+    /// # Errors
+    /// Returns the errors of `FilterRegistry::render`.
+    pub fn rendered_duration(&self) -> Result<f64, NleError> {
+        self.kept_duration
+            .map_or_else(|| self.render().map(|recording| recording.duration), Ok)
     }
 
     /// Write the rendered recording of this state to `path`.

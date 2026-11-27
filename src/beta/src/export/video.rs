@@ -1,4 +1,7 @@
-use super::terminal_renderer::{TerminalState, TerminalTheme};
+use super::tmux::{
+    adjust_coordinates_for_tmux, debug_status_bar, detect_tmux_layout, is_status_bar_row,
+    is_valid_cursor_position, protect_status_bar_area,
+};
 use crate::{Chapter, EventType, Recording};
 use ab_glyph::{Font, FontVec, PxScale};
 use anyhow::{Context, Result};
@@ -10,6 +13,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use termstate::{TerminalState, TerminalTheme};
 
 // Helper functions for color analysis
 fn color_similarity(color1: (u8, u8, u8), color2: (u8, u8, u8)) -> u32 {
@@ -31,15 +35,29 @@ struct FontManager {
 }
 
 impl FontManager {
-    fn new() -> Result<Self> {
+    /// Loads the fonts for the frames. With `Some(path)`, it loads only that
+    /// file and no system font. With `None`, it loads the system fonts.
+    fn new(font: Option<&Path>) -> Result<Self> {
         let mut fonts = Vec::new();
-        let font_paths = get_font_paths();
 
-        for font_path in &font_paths {
-            if let Ok(font) = load_font_from_path(font_path) {
-                fonts.push(font);
-                if fonts.len() >= 5 {
-                    break;
+        if let Some(path) = font {
+            let font_data = std::fs::read(path)
+                .with_context(|| format!("Failed to load font {}", path.display()))?;
+            fonts.push(FontVec::try_from_vec(font_data).map_err(|_| {
+                anyhow::anyhow!(
+                    "Failed to load font {}: not a TTF or OTF file",
+                    path.display()
+                )
+            })?);
+        } else {
+            let font_paths = get_font_paths();
+
+            for font_path in &font_paths {
+                if let Ok(font) = load_font_from_path(font_path) {
+                    fonts.push(font);
+                    if fonts.len() >= 5 {
+                        break;
+                    }
                 }
             }
         }
@@ -139,6 +157,7 @@ pub async fn export_video(
     resolution: Option<String>,
     theme: String,
     optimize_web: bool,
+    font: Option<PathBuf>,
 ) -> Result<()> {
     let recording = Recording::load(&input)?;
 
@@ -192,11 +211,11 @@ pub async fn export_video(
     let total_frames = generate_and_encode_video(
         &recording,
         &output_path,
-        width,
-        height,
+        (width, height),
         fps,
         terminal_theme,
         optimize_web,
+        font.as_deref(),
         chapters_file.as_ref().map(|file| file.path()),
     )?;
 
@@ -242,13 +261,14 @@ fn parse_resolution(resolution: &Option<String>, recording: &Recording) -> Resul
 fn generate_and_encode_video(
     recording: &Recording,
     output_path: &Path,
-    width: u32,
-    height: u32,
+    size: (u32, u32),
     fps: u32,
     theme: TerminalTheme,
     optimize_web: bool,
+    font: Option<&Path>,
     chapters_file: Option<&Path>,
 ) -> Result<usize> {
+    let (width, height) = size;
     let frame_duration = 1.0 / f64::from(fps);
     #[expect(
         clippy::cast_possible_truncation,
@@ -257,20 +277,20 @@ fn generate_and_encode_video(
     )]
     let total_frames = (recording.duration * f64::from(fps)).ceil() as usize;
 
-    // Start FFmpeg process first
+    // Load the fonts before FFmpeg starts: a font error then leaves no FFmpeg
+    // child, and `-y` does not truncate the file at the output path.
+    let mut font_manager = FontManager::new(font)?;
+    println!(
+        "Loaded {} fonts for better Unicode coverage",
+        font_manager.fonts.len()
+    );
+
     let mut ffmpeg_process =
         spawn_ffmpeg(output_path, width, height, fps, optimize_web, chapters_file)?;
     let mut stdin = ffmpeg_process
         .stdin
         .take()
         .context("Failed to get FFmpeg stdin")?;
-
-    // Load font manager once for all frames
-    let mut font_manager = FontManager::new()?;
-    println!(
-        "Loaded {} fonts for better Unicode coverage",
-        font_manager.fonts.len()
-    );
 
     let mut terminal_state =
         TerminalState::new(recording.width as usize, recording.height as usize, theme);
@@ -295,11 +315,11 @@ fn generate_and_encode_video(
         }
 
         // Protect status bar from overlap before rendering
-        terminal_state.protect_status_bar_area();
+        protect_status_bar_area(&mut terminal_state);
 
         // Debug status bar content (only for first frame)
         if frame_num == 0 && std::env::var("BETA_DEBUG").is_ok() {
-            terminal_state.debug_status_bar();
+            debug_status_bar(&terminal_state);
         }
 
         // Render frame
@@ -417,7 +437,7 @@ fn render_terminal_to_image(
     let grid = terminal_state.get_grid();
 
     // Detect tmux layout for color correction and cursor validation
-    let tmux_layout = terminal_state.detect_tmux_layout();
+    let tmux_layout = detect_tmux_layout(terminal_state);
 
     // Pass 1: Render all cell backgrounds first (including status bar)
     for (y, row) in grid.iter().enumerate() {
@@ -456,7 +476,7 @@ fn render_terminal_to_image(
                 let (mut fg_color, bg_color) = terminal_state.resolve_cell_colors(cell);
 
                 // Special handling for status bar rows to ensure text visibility
-                if terminal_state.is_status_bar_row(y) {
+                if is_status_bar_row(terminal_state, y) {
                     // Force visible text color if fg and bg are too similar
                     if fg_color == bg_color || color_similarity(fg_color, bg_color) < 100 {
                         fg_color = if is_light_color(bg_color) {
@@ -515,13 +535,10 @@ fn render_terminal_to_image(
         let (cursor_x, cursor_y) = terminal_state.get_cursor_position();
 
         // Check if cursor is in valid position for tmux layout
-        if terminal_state.is_valid_cursor_position(tmux_layout.as_ref()) {
+        if is_valid_cursor_position(terminal_state, tmux_layout.as_ref()) {
             // Adjust cursor coordinates for tmux layout
-            let (adj_cursor_x, adj_cursor_y) = terminal_state.adjust_coordinates_for_tmux(
-                cursor_x,
-                cursor_y,
-                tmux_layout.as_ref(),
-            );
+            let (adj_cursor_x, adj_cursor_y) =
+                adjust_coordinates_for_tmux(cursor_x, cursor_y, tmux_layout.as_ref());
 
             // Calculate cursor pixel position - align with text rendering
             let cursor_pixel_x = cell_offset(adj_cursor_x, char_width, padding_x);

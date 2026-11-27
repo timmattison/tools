@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use wdid::command_words::{command_words, Aliases, CommandWord, Parsed};
+use wdid::command_words::{command_words, AliasKind, Aliases, CommandWord, Parsed};
 use wdid::shell::{
     parse_output, read, script, Definitions, Marker, Resolver, ShellError, ShellKind,
 };
@@ -447,9 +447,11 @@ fn the_shell_gets_the_interactive_flag_and_the_script_with_stdin_closed() {
     assert!(first.starts_with("print -r -- '__WDID_"), "{first}");
 }
 
+/// A shell error names no flag, because `wdid` and `wdid defs` both give it,
+/// and only the tools report has `--no-shell`. The tools report adds the flag
+/// itself.
 #[test]
-fn every_error_message_ends_with_the_no_shell_hint() {
-    const HINT: &str = " (wdid --no-shell skips the aliases and functions)";
+fn no_error_message_names_a_flag_of_one_report() {
     let errors = [
         ShellError::NotSet,
         ShellError::NotSupported {
@@ -466,34 +468,17 @@ fn every_error_message_ends_with_the_no_shell_hint() {
         },
         ShellError::NoMarkers,
     ];
-    for error in &errors {
-        assert!(error.to_string().ends_with(HINT), "{error}");
-    }
+    let texts: Vec<String> = errors.iter().map(ToString::to_string).collect();
     assert_eq!(
-        errors[0].to_string(),
-        format!("SHELL is not set, so wdid cannot read the aliases and functions{HINT}")
-    );
-    assert_eq!(
-        errors[1].to_string(),
-        format!(
-            "wdid reads aliases and functions from zsh and bash only, and SHELL is /bin/fish{HINT}"
-        )
-    );
-    assert_eq!(
-        errors[3].to_string(),
-        format!("the shell did not stop in 30 seconds{HINT}")
-    );
-    assert_eq!(
-        errors[4].to_string(),
-        format!("the shell failed (exit status: 3): boom{HINT}")
-    );
-    assert_eq!(
-        errors[5].to_string(),
-        format!("the shell output does not hold the start and end markers of wdid{HINT}")
-    );
-    assert_eq!(
-        errors[2].to_string(),
-        format!("cannot start zsh: entity not found{HINT}")
+        texts,
+        [
+            "SHELL is not set, so wdid cannot read the aliases and functions",
+            "wdid reads aliases and functions from zsh and bash only, and SHELL is /bin/fish",
+            "cannot start zsh: entity not found",
+            "the shell did not stop in 30 seconds",
+            "the shell failed (exit status: 3): boom",
+            "the shell output does not hold the start and end markers of wdid",
+        ]
     );
 }
 
@@ -590,6 +575,93 @@ fn a_real_zsh_gives_its_aliases_and_functions() {
         "{:?}",
         definitions.unparsed_aliases
     );
+}
+
+/// Gives the first line of the function `name` in a parse of one function.
+fn first_line_of(body: &str) -> String {
+    let definitions = parsed(&with_functions("", &[("f", body)]));
+    assert_eq!(definitions.function_lines.len(), 1);
+    definitions.function_lines["f"].clone()
+}
+
+#[test]
+fn the_first_line_of_a_zsh_body_loses_its_tab() {
+    assert_eq!(first_line_of("\tcwt \"$@\""), "cwt \"$@\"");
+}
+
+#[test]
+fn the_first_line_of_a_body_of_many_lines_is_its_first_line() {
+    assert_eq!(
+        first_line_of("\tif [[ -n $1 ]]; then\n\t\tcwt \"$1\"\n\tfi"),
+        "if [[ -n $1 ]]; then"
+    );
+}
+
+#[test]
+fn the_first_line_of_a_bash_body_skips_the_opening_brace() {
+    assert_eq!(first_line_of("{ \n    echo hi\n}"), "echo hi");
+}
+
+#[test]
+fn the_first_line_skips_blank_lines() {
+    assert_eq!(first_line_of("\n\t\n\tprcp x"), "prcp x");
+}
+
+#[test]
+fn an_empty_body_has_an_empty_first_line_and_an_entry() {
+    let definitions = parsed(&with_functions("", &[("f", "")]));
+    assert_eq!(definitions.function_lines.get("f"), Some(&String::new()));
+}
+
+#[test]
+fn the_first_line_of_a_body_that_did_not_parse_is_kept() {
+    let definitions = parsed(&with_functions("", &[("f", "\techo $(")]));
+    assert_eq!(definitions.unparsed_functions, vec!["f".to_owned()]);
+    assert_eq!(definitions.function_lines["f"], "echo $(");
+}
+
+#[test]
+fn the_first_line_keeps_multibyte_text() {
+    assert_eq!(
+        first_line_of("\tprcp 日本語.txt 🎉/"),
+        "prcp 日本語.txt 🎉/"
+    );
+}
+
+/// A real zsh gives the first line of each function and the kind of each
+/// alias. It can define more aliases than the test does.
+#[test]
+fn a_real_zsh_gives_the_first_lines_and_the_kinds() {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join(".zshrc"),
+        "wt() { cwt \"$@\" }\nalias -g PH='| prhash'\nalias -s md=glow\nalias wtm='wt --main'\n",
+    )
+    .unwrap();
+    let definitions = read(
+        real_shell(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert_eq!(definitions.function_lines["wt"], "cwt \"$@\"");
+    let listed = definitions.aliases.definitions();
+    for (name, kind, value) in [
+        ("PH", AliasKind::Global, "| prhash"),
+        ("*.md", AliasKind::Suffix, "glow"),
+        ("wtm", AliasKind::Regular, "wt --main"),
+    ] {
+        assert!(
+            listed
+                .iter()
+                .any(|a| a.name == name && a.kind == kind && a.value == value),
+            "{name}: {listed:?}"
+        );
+    }
 }
 
 /// A real zsh gives its global aliases through `alias -L` and its suffix

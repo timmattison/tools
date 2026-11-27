@@ -49,7 +49,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `localnext` | Serves a statically exported Next.js app from its `out` directory, on a port derived from the project and the git branch. |
 | `msgs` | A macOS desktop app to browse, search, and export iMessage conversations. It reads `chat.db` read-only. |
 | `ng` | Navel-Gaze — watches JS/TS files and re-runs `pnpm lint` (or `--typecheck`) on change. |
-| `nle` | Non-Linear Editor — a Dioxus desktop editor for `beta` terminal recordings. It opens a recording into an edit project of clips, tracks, filters, and chapter markers, with undo and redo, and shows its metadata and a searchable chapter list. Run it with `src/nle/scripts/dev.ts` (`dx serve`), and build it with `dx bundle --desktop`. |
+| `nle` | Non-Linear Editor — a Dioxus desktop editor for `beta` terminal recordings. It opens a recording into an edit project of clips, tracks, filters, and chapter markers, with undo and redo, shows its metadata and a searchable chapter list, and changes the speed of regions with its speed panel. Its `cursor` filter sets the visibility, the shape, the blink, and the color of the cursor. Run it with `src/nle/scripts/dev.ts` (`dx serve`), and build it with `dx bundle --desktop`. |
 | `nodenuke` | Removes `node_modules` directories and lock files throughout a repo. |
 | `nodeup` | Updates npm/pnpm/yarn packages across all `package.json` directories. |
 | `nwt` | New Worktree — creates a git worktree with a random Docker-style name, links the child repositories of a container into it, and can leave a heavy tracked directory out of it. |
@@ -87,7 +87,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `update-aws-credentials` | Writes AWS SSO clipboard credentials into your AWS config file. |
 | `uuidplz` | Prints a random v4 UUID, or a repeatable v5 UUID seeded from a string, a file's contents, or stdin. |
 | `vpn-tunnel` | Generates Docker-based gluetun + ProtonVPN + WireGuard tunnels with helper scripts. |
-| `wdid` | What do I do — counts which tools of this workspace the atuin history uses, through aliases, functions, pipes and wrappers, and lists the tools never used and the tools idle for a long time. |
+| `wdid` | What do I do — counts which tools of this workspace the atuin history uses, through aliases, functions, pipes and wrappers, and lists the tools never used and the tools idle for a long time. It reports on `--repo`, else the cargo workspace of the current git work tree, else the checkout that the installed `wdid` came from, so it runs in any directory. `wdid defs` reports on each alias and each function of the shell: its uses, the definitions that gave them, and the definitions never used or idle. It needs no workspace. |
 | `whyslow` | Why slow — one 1 s sample names the likely cause when a Mac is slow: which resource is short, and the groups of processes (Claude Code, compilers by worktree, Spotlight, each other name) that use it. macOS only. |
 | `wifiqr` | Generates WiFi QR codes (with optional logo) for automatic device connection. |
 | `wl` | Shows which process is listening on a given port, and says so when it cannot see the owner. |

@@ -5,6 +5,7 @@ use minijinja::{context, Environment};
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
+use termstate::TerminalTheme;
 
 const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
 <html lang="en">
@@ -410,13 +411,7 @@ const TEMPLATE_NAME: &str = "main.html";
 /// or when the template cannot be rendered.
 fn render_page(recording: &Recording, theme: &str, compress: bool) -> Result<String> {
     // Get theme colors
-    let theme_colors = match theme {
-        "dracula" => Theme::dracula(),
-        "monokai" => Theme::monokai(),
-        "solarized-dark" => Theme::solarized_dark(),
-        "solarized-light" => Theme::solarized_light(),
-        _ => Theme::auto(),
-    };
+    let theme_colors = WebTheme::named(theme);
 
     // Prepare recording data
     let recording_data = if compress {
@@ -494,8 +489,13 @@ pub async fn export_web(
     Ok(())
 }
 
+/// The colors of one theme, as the CSS hex strings (`#rrggbb`) that the HTML
+/// template and xterm.js read.
+///
+/// The values come from the palettes of [`TerminalTheme`], so the web export and
+/// the video export use one copy of each palette.
 #[derive(Debug, serde::Serialize)]
-struct Theme {
+struct WebTheme {
     background: String,
     foreground: String,
     black: String,
@@ -516,125 +516,52 @@ struct Theme {
     bright_white: String,
 }
 
-impl Theme {
-    fn auto() -> Self {
-        Self::black()
+impl WebTheme {
+    /// Gives the palette that `name` selects, as CSS hex strings.
+    ///
+    /// The web export matches a name exactly, and an unknown name gives the
+    /// `auto` palette. [`TerminalTheme::from_name`] is not used, because it
+    /// ignores case: `Dracula` gives the black palette here and the Dracula
+    /// palette in the video export. Issue #768 keeps the HTML unchanged.
+    fn named(name: &str) -> Self {
+        let palette = match name {
+            "dracula" => TerminalTheme::dracula(),
+            "monokai" => TerminalTheme::monokai(),
+            "solarized-dark" => TerminalTheme::solarized_dark(),
+            "solarized-light" => TerminalTheme::solarized_light(),
+            _ => TerminalTheme::auto(),
+        };
+        Self::from_palette(&palette)
     }
 
-    fn black() -> Self {
+    /// Writes each color of `palette` as a CSS hex string.
+    fn from_palette(palette: &TerminalTheme) -> Self {
         Self {
-            background: String::from("#000000"),
-            foreground: String::from("#ffffff"),
-            black: String::from("#000000"),
-            red: String::from("#ff5555"),
-            green: String::from("#55ff55"),
-            yellow: String::from("#ffff55"),
-            blue: String::from("#5555ff"),
-            magenta: String::from("#ff55ff"),
-            cyan: String::from("#55ffff"),
-            white: String::from("#ffffff"),
-            bright_black: String::from("#555555"),
-            bright_red: String::from("#ff5555"),
-            bright_green: String::from("#55ff55"),
-            bright_yellow: String::from("#ffff55"),
-            bright_blue: String::from("#5555ff"),
-            bright_magenta: String::from("#ff55ff"),
-            bright_cyan: String::from("#55ffff"),
-            bright_white: String::from("#ffffff"),
+            background: css_hex(palette.background),
+            foreground: css_hex(palette.foreground),
+            black: css_hex(palette.black),
+            red: css_hex(palette.red),
+            green: css_hex(palette.green),
+            yellow: css_hex(palette.yellow),
+            blue: css_hex(palette.blue),
+            magenta: css_hex(palette.magenta),
+            cyan: css_hex(palette.cyan),
+            white: css_hex(palette.white),
+            bright_black: css_hex(palette.bright_black),
+            bright_red: css_hex(palette.bright_red),
+            bright_green: css_hex(palette.bright_green),
+            bright_yellow: css_hex(palette.bright_yellow),
+            bright_blue: css_hex(palette.bright_blue),
+            bright_magenta: css_hex(palette.bright_magenta),
+            bright_cyan: css_hex(palette.bright_cyan),
+            bright_white: css_hex(palette.bright_white),
         }
     }
+}
 
-    fn dracula() -> Self {
-        Self {
-            background: String::from("#282a36"),
-            foreground: String::from("#f8f8f2"),
-            black: String::from("#282a36"),
-            red: String::from("#ff5555"),
-            green: String::from("#50fa7b"),
-            yellow: String::from("#f1fa8c"),
-            blue: String::from("#6272a4"),
-            magenta: String::from("#ff79c6"),
-            cyan: String::from("#8be9fd"),
-            white: String::from("#f8f8f2"),
-            bright_black: String::from("#6272a4"),
-            bright_red: String::from("#ff5555"),
-            bright_green: String::from("#50fa7b"),
-            bright_yellow: String::from("#f1fa8c"),
-            bright_blue: String::from("#6272a4"),
-            bright_magenta: String::from("#ff79c6"),
-            bright_cyan: String::from("#8be9fd"),
-            bright_white: String::from("#ffffff"),
-        }
-    }
-
-    fn monokai() -> Self {
-        Self {
-            background: String::from("#272822"),
-            foreground: String::from("#f8f8f2"),
-            black: String::from("#272822"),
-            red: String::from("#f92672"),
-            green: String::from("#a6e22e"),
-            yellow: String::from("#f4bf75"),
-            blue: String::from("#66d9ef"),
-            magenta: String::from("#ae81ff"),
-            cyan: String::from("#a1efe4"),
-            white: String::from("#f8f8f2"),
-            bright_black: String::from("#75715e"),
-            bright_red: String::from("#f92672"),
-            bright_green: String::from("#a6e22e"),
-            bright_yellow: String::from("#f4bf75"),
-            bright_blue: String::from("#66d9ef"),
-            bright_magenta: String::from("#ae81ff"),
-            bright_cyan: String::from("#a1efe4"),
-            bright_white: String::from("#f8f8f2"),
-        }
-    }
-
-    fn solarized_dark() -> Self {
-        Self {
-            background: String::from("#002b36"),
-            foreground: String::from("#839496"),
-            black: String::from("#073642"),
-            red: String::from("#dc322f"),
-            green: String::from("#859900"),
-            yellow: String::from("#b58900"),
-            blue: String::from("#268bd2"),
-            magenta: String::from("#d33682"),
-            cyan: String::from("#2aa198"),
-            white: String::from("#eee8d5"),
-            bright_black: String::from("#002b36"),
-            bright_red: String::from("#cb4b16"),
-            bright_green: String::from("#586e75"),
-            bright_yellow: String::from("#657b83"),
-            bright_blue: String::from("#839496"),
-            bright_magenta: String::from("#6c71c4"),
-            bright_cyan: String::from("#93a1a1"),
-            bright_white: String::from("#fdf6e3"),
-        }
-    }
-
-    fn solarized_light() -> Self {
-        Self {
-            background: String::from("#fdf6e3"),
-            foreground: String::from("#657b83"),
-            black: String::from("#073642"),
-            red: String::from("#dc322f"),
-            green: String::from("#859900"),
-            yellow: String::from("#b58900"),
-            blue: String::from("#268bd2"),
-            magenta: String::from("#d33682"),
-            cyan: String::from("#2aa198"),
-            white: String::from("#eee8d5"),
-            bright_black: String::from("#002b36"),
-            bright_red: String::from("#cb4b16"),
-            bright_green: String::from("#586e75"),
-            bright_yellow: String::from("#657b83"),
-            bright_blue: String::from("#839496"),
-            bright_magenta: String::from("#6c71c4"),
-            bright_cyan: String::from("#93a1a1"),
-            bright_white: String::from("#fdf6e3"),
-        }
-    }
+/// Writes an RGB color as a lowercase CSS hex string, for example `#ff5555`.
+fn css_hex((red, green, blue): (u8, u8, u8)) -> String {
+    format!("#{red:02x}{green:02x}{blue:02x}")
 }
 
 #[cfg(test)]

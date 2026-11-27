@@ -89,7 +89,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Print the mode-appropriate banner and, in files mode only, spawn the
     // background availability monitor (it stats the served files).
-    let monitor = match &mode {
+    // The binding keeps the monitor alive until `main` returns. Its `Drop`
+    // stops and joins the thread on every path, including an early `?`.
+    let _monitor = match &mode {
         sirn::ServeMode::Files(routes) => {
             println!(
                 "{}",
@@ -101,11 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     routes
                 )
             );
-            let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
-            Some((
-                shutdown_tx,
-                sirn::spawn_monitor(Arc::clone(routes), shutdown_rx),
-            ))
+            Some(sirn::spawn_monitor(Arc::clone(routes)))
         }
         sirn::ServeMode::Directory(root) => {
             println!(
@@ -122,16 +120,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let handles = sirn::serve(server, mode, WORKER_THREADS);
-    for h in handles {
-        let _ = h.join();
-    }
-
-    // Workers exit only when the server is unblocked; on a clean exit, stop the
-    // monitor too (files mode) and join it so teardown is orderly.
-    if let Some((shutdown_tx, monitor)) = monitor {
-        drop(shutdown_tx);
-        let _ = monitor.join();
-    }
+    // A deliberate shutdown ends the pool with `Ok`. A dead accept thread, or
+    // workers that all panicked, end it with `Err`. `_monitor` drops on both
+    // paths when `main` returns.
+    sirn::wait_until_stopped(sirn::serve(server, mode, WORKER_THREADS), &bind, port)?;
     Ok(())
 }

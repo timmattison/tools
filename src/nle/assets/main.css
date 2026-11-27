@@ -186,3 +186,41 @@ h3 {
   color: #f9e2af;
   font-size: 12px;
 }
+
+.speed-panel {
+  margin-top: 16px;
+}
+
+.speed-hint {
+  color: #6c7086;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.speed-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 8px;
+  color: #a6adc8;
+  font-size: 12px;
+}
+
+.speed-field input {
+  width: 100%;
+  background: #1e1e2e;
+  color: #cdd6f4;
+  border: 1px solid #585b70;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 13px;
+}
+
+.speed-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid #313244;
+  font-size: 13px;
+}
