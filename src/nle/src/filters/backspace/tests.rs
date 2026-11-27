@@ -170,3 +170,19 @@ fn a_backspace_that_does_not_restore_the_screen_stays_with_its_typed_key() {
     ];
     assert_eq!(run(events.clone()), events);
 }
+
+#[test]
+fn a_key_between_the_typo_and_the_backspace_keeps_both() {
+    let events = vec![
+        out(0.0, "$ "),
+        input(1.0, "a"),
+        out(1.0, "a"),
+        input(1.25, "\x1b[D"),
+        out(1.25, "\x08"),
+        input(1.5, "\x1b[C"),
+        out(1.5, "\x1b[C"),
+        input(1.75, "\x7f"),
+        out(1.75, "\x08 \x08"),
+    ];
+    assert_eq!(run(events.clone()), events);
+}
