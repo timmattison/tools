@@ -44,3 +44,29 @@ fn plain_text_is_one_run_in_each_row() {
         );
     }
 }
+
+#[test]
+fn a_change_of_style_splits_the_run() {
+    let screen = Screen::of(&terminal(5, 1, "\x1b[?25la\x1b[31;1mb\x1b[0mc"));
+    let row = &screen.rows[0];
+    assert_eq!(texts(row), ["a", "b", "c  "]);
+    assert_eq!(row.runs[0].style, plain());
+    assert_eq!(
+        row.runs[1].style,
+        Style {
+            foreground: RED,
+            bold: true,
+            ..plain()
+        }
+    );
+    assert_eq!(row.runs[2].style, plain());
+}
+
+#[test]
+fn underline_and_italic_show_in_the_style() {
+    let screen = Screen::of(&terminal(3, 1, "\x1b[?25l\x1b[4mu\x1b[0m\x1b[3mi"));
+    let row = &screen.rows[0];
+    assert_eq!(texts(row), ["u", "i", " "]);
+    assert!(row.runs[0].style.underline && !row.runs[0].style.italic);
+    assert!(row.runs[1].style.italic && !row.runs[1].style.underline);
+}
