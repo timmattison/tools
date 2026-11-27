@@ -1139,6 +1139,35 @@ fn a_screen_filter_may_answer_exactly_the_length_of_its_region() {
 }
 
 #[test]
+fn a_screen_mark_at_the_region_end_lands_on_the_end_when_the_sum_rounds_up() {
+    // The length is 5.79 - 1.73, and that length plus 1.73 is
+    // 5.790000000000001 in f64, one step after the end of the region.
+    let (start, end) = std::hint::black_box((1.73, 5.79));
+    let length = end - start;
+    assert!(length + start > end);
+    let registry = screen_drawer(length);
+    let mark = format!("e{length}");
+
+    let out = registry
+        .run_on(
+            events(&[0.0, start, end]),
+            &[range("draw", start, end)],
+            SIZE_100_30,
+        )
+        .unwrap();
+
+    assert_eq!(
+        with_data(&out),
+        vec![
+            (0.0, "e0"),
+            (1.73, "e1.73"),
+            (5.79, mark.as_str()),
+            (5.79, "e5.79")
+        ]
+    );
+}
+
+#[test]
 fn a_screen_filter_that_answers_an_error_fails_with_the_kind_and_the_message() {
     let mut registry = FilterRegistry::new();
     registry.register_screen(kind("bad"), |_, _, _| Err("no room".to_string()));
