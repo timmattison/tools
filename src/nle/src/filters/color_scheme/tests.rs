@@ -622,6 +622,17 @@ fn text_other_sequences_and_input_events_stay() {
 }
 
 #[test]
+fn a_csi_m_with_a_private_marker_or_an_intermediate_stays_as_written() {
+    assert_eq!(filtered("\x1b[>4;31m"), "\x1b[>4;31m");
+    assert_eq!(filtered("\x1b[31 m"), "\x1b[31 m");
+}
+
+#[test]
+fn a_control_inside_an_sgr_stays_in_the_answer() {
+    assert_eq!(filtered("\x1b[3\x081mx"), format!("\x08{LIGHT_RED}x"));
+}
+
+#[test]
 fn an_sgr_split_over_two_events_gives_its_replacement_in_the_second() {
     let answer = light(
         vec![out(1.0, "ab\x1b[3"), out(2.0, "1mx")],
