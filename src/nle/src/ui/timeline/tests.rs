@@ -552,3 +552,26 @@ fn the_clip_shows_its_range_when_the_pointer_is_on_it() {
         "{page}"
     );
 }
+
+/// The start of the tag of the label of a clip whose label is `left` pixels
+/// from the start of the block.
+fn label_tag(left: f64) -> String {
+    format!("class=\"timeline-clip-label\" style=\"left: {left}px;\"")
+}
+
+#[test]
+fn the_view_takes_the_focus_and_the_label_of_a_clip_stays_in_the_window() {
+    let mut page = Page::open(Vec::new());
+    let html = page.html();
+    assert!(html.contains("class=\"timeline-view\" tabindex=\"0\""), "{html}");
+    assert!(html.contains(&label_tag(0.0)), "{html}");
+
+    let extent = start_extent();
+    page.key("+", Modifiers::empty());
+    page.wheel(100.0, 0.0, 300.0, Modifiers::empty());
+    let view = View::default().zoom(extent, ZOOM_STEP, START_WIDTH / 2.0);
+    let start = view.pan(extent, 100.0).frame(extent).x_of(0.0);
+    assert!(start < 0.0, "the clip starts left of the window: {start}");
+    let html = page.html();
+    assert!(html.contains(&label_tag(-start)), "{html}");
+}
