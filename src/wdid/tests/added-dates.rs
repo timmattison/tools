@@ -91,12 +91,41 @@ fn an_alias_name_that_the_shell_must_expand_defines_nothing() {
     }
 }
 
+/// A line that opens a quote and does not close it goes on to the next line.
+/// The read gives the rest of the line to the value, thus the names come from
+/// the words of the line as the shell reads them.
 #[test]
-fn an_alias_line_with_an_open_quote_defines_only_its_first_name() {
-    assert_eq!(
-        defined_names("alias q1='open q2=z"),
-        vec![Defined::alias("q1")]
-    );
+fn an_alias_line_with_an_open_quote_reads_the_rest_of_the_line_as_its_value() {
+    let cases: [(&str, &[&str]); 9] = [
+        ("alias q1='open q2=z", &["q1"]),
+        ("alias -s {jpg,png}='open", &["*.jpg", "*.png"]),
+        ("alias a=1 b='open", &["a", "b"]),
+        ("alias 'll=ls -l", &["ll"]),
+        ("alias x=\"it's", &["x"]),
+        ("alias x=\"$(date", &["x"]),
+        ("alias {a,b}=`date`", &["a", "b"]),
+        ("alias gs='git status' \\", &["gs"]),
+        ("alias foo=\"cmd1 && \\", &["foo"]),
+    ];
+    for (line, names) in cases {
+        let expected: Vec<Defined> = names.iter().map(|name| Defined::alias(*name)).collect();
+        assert_eq!(defined_names(line), expected, "{line}");
+    }
+}
+
+/// A word of an open value is not a name. A name that holds an expansion is
+/// not a name either.
+#[test]
+fn an_alias_line_with_an_open_quote_gives_no_false_name() {
+    let lines = [
+        "alias $x='y",
+        "alias $x='y z=w",
+        "alias \"$x=y",
+        "alias x; y=\"$(date",
+    ];
+    for line in lines {
+        assert_eq!(defined_names(line), Vec::<Defined>::new(), "{line}");
+    }
 }
 
 #[test]
