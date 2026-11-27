@@ -187,8 +187,8 @@ pub type SpanFilterFn =
 ///    order of the events, true for an event to remove. Or it answers `Err`
 ///    with a message.
 /// 3. An `Err` fails the pipeline with a render error. Its text names the kind
-///    and holds the message. An event with no mark stays, and a mark with no
-///    event does nothing.
+///    and holds the message. A count of marks that is not the count of events
+///    also fails it, with a render error that names the kind and both counts.
 /// 4. The cut of a run of removed events is the time from its first event to
 ///    the next kept event, or to the end of the region. Each kept event moves
 ///    earlier by the cuts before it. The length of the region becomes the old
@@ -245,16 +245,16 @@ struct Cut {
 }
 
 /// Drop the events that `marks` marks, and take their time from the rest, by
-/// step 4 of `CutFilterFn`. `length` is the length of the region. An event
-/// with no mark stays.
+/// step 4 of `CutFilterFn`. `length` is the length of the region. `marks` has
+/// one entry for each event.
 fn cut_events(events: Vec<Event>, marks: &[bool], length: f64) -> Cut {
     let mut kept = Vec::new();
     let mut seen = Vec::new();
     let mut answered = Vec::new();
     let mut cut = 0.0;
     let mut run_start: Option<f64> = None;
-    for (index, event) in events.into_iter().enumerate() {
-        if marks.get(index).copied().unwrap_or(false) {
+    for (event, gone) in events.into_iter().zip(marks.iter().copied()) {
+        if gone {
             run_start.get_or_insert(event.time);
             continue;
         }
@@ -538,6 +538,13 @@ impl FilterRegistry {
                 let marks = filter(&inside, context, &applied.options).map_err(|message| {
                     NleError::RenderError(format!("filter \"{kind}\" failed: {message}"))
                 })?;
+                if marks.len() != inside.len() {
+                    return Err(NleError::RenderError(format!(
+                        "filter \"{kind}\" answered {} marks for the {} events of its region",
+                        marks.len(),
+                        inside.len()
+                    )));
+                }
                 let cut = cut_events(inside, &marks, length);
                 let shift = cut.length - length;
                 seen = cut.seen;
@@ -632,7 +639,8 @@ impl FilterRegistry {
     /// when a filter answers a time that is not finite or is below zero on
     /// the timeline, when an in-place filter fails or answers a time after
     /// its region, when a span filter answers an error or a bad length, when
-    /// a cut filter answers an error, or when an event time or the end of the timeline that the filters give is
+    /// a cut filter answers an error or marks a count of events that is not the
+    /// count of its region, or when an event time or the end of the timeline that the filters give is
     /// not finite.
     pub fn run(
         &self,
