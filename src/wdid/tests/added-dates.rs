@@ -155,6 +155,37 @@ fn an_alias_and_a_function_of_one_name_have_their_own_dates() {
     assert_eq!(dates.get(&Defined::function("x")), Some(&date(2024, 1, 1)));
 }
 
+/// `%as` gives the author date, and a rebase or a cherry-pick can put a commit
+/// with an older author date above a commit with a newer one. Thus the oldest
+/// date must win in each order, not the first or the last date of the read.
+#[test]
+fn the_oldest_date_wins_in_each_order_of_the_records() {
+    let older = "\u{0}2020-01-02\n\ndiff --git a/f b/f\n@@ -0,0 +1 @@\n+alias x=y\n";
+    let newer = "\u{0}2024-05-06\n\ndiff --git a/f b/f\n@@ -0,0 +1 @@\n+alias x=y\n";
+    for log in [format!("{older}{newer}"), format!("{newer}{older}")] {
+        assert_eq!(
+            added_dates(&log).get(&Defined::alias("x")),
+            Some(&date(2020, 1, 2)),
+            "{log:?}"
+        );
+    }
+    let file = Path::new("/home/me/.zshrc");
+    for order in [
+        [date(2020, 1, 2), date(2024, 5, 6)],
+        [date(2024, 5, 6), date(2020, 1, 2)],
+    ] {
+        let mut dates = AddedDates::default();
+        for day in order {
+            dates.record(file, Defined::alias("x"), day);
+        }
+        assert_eq!(
+            dates.get(file, &Defined::alias("x")),
+            Some(date(2020, 1, 2)),
+            "{order:?}"
+        );
+    }
+}
+
 #[test]
 fn a_record_without_a_date_and_a_rename_add_nothing() {
     let log = "\u{0}not a date\n\ndiff --git a/f b/f\n@@ -0,0 +1 @@\n+alias x=y\n\
