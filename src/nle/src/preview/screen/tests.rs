@@ -112,3 +112,41 @@ fn a_control_character_shows_as_a_space() {
     let screen = Screen::of(&state);
     assert_eq!(screen.row_texts(), [" b "]);
 }
+
+#[test]
+fn hex_is_lowercase_with_two_digits_each() {
+    assert_eq!(hex((40, 42, 54)), "#282a36");
+    assert_eq!(hex((0, 0, 0)), "#000000");
+    assert_eq!(hex((255, 171, 1)), "#ffab01");
+}
+
+#[test]
+fn css_of_a_plain_style_gives_the_colors() {
+    assert_eq!(plain().css(), "color:#ffffff;background-color:#000000");
+}
+
+#[test]
+fn css_adds_a_declaration_for_each_flag() {
+    let style = Style {
+        bold: true,
+        italic: true,
+        underline: true,
+        ..plain()
+    };
+    assert_eq!(
+        style.css(),
+        "color:#ffffff;background-color:#000000;font-weight:bold;font-style:italic;text-decoration:underline"
+    );
+}
+
+#[test]
+fn the_background_of_the_screen_follows_the_theme() {
+    let state = TerminalState::new(2, 1, TerminalTheme::dracula());
+    assert_eq!(Screen::of(&state).background, (40, 42, 54));
+}
+
+#[test]
+fn the_background_of_the_screen_follows_an_osc_11_change() {
+    let state = terminal(2, 1, "\x1b]11;rgb:10/20/30\x07");
+    assert_eq!(Screen::of(&state).background, (0x10, 0x20, 0x30));
+}
