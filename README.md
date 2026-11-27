@@ -5855,7 +5855,7 @@ Over time, a shell gets definitions that do the same thing as other definitions,
    Hides a program (/bin/cat): cat (function, ~/.zshrc, 12 uses)
    ```
 
-By default, the group shows only a finding that holds one or more of your definitions. A finding of the kind "Defined more than one time" is also yours when one of its places is in your files. An example is an alias of your `~/.zshrc` that a plugin defines again later. For example, two aliases with the same value in an oh-my-zsh plugin show only with `--all`. A function whose name starts with `_` takes part only with `--all`, as in the table. The `--json` document holds each finding in `findings`, also with no `--all`.
+By default, the group shows only a finding that holds one or more of your definitions. For example, two aliases with the same value in an oh-my-zsh plugin show only with `--all`. A finding of the kind "Defined more than one time" is also yours when one of its places is in your files. An example is an alias of your `~/.zshrc` that a plugin defines again later. A function whose name starts with `_` takes part only with `--all`, as in the table. The `--json` document holds each finding in `findings`, also with no `--all`.
 
 #### Options of wdid defs
 
