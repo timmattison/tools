@@ -281,6 +281,28 @@ fn a_filter_with_only_a_rate_has_a_pause_of_two_seconds_and_no_jitter() {
 }
 
 #[test]
+fn the_pause_threshold_sets_where_a_burst_ends() {
+    // At the default threshold of 2 s, the gap of 1.5 s is typing and the gap
+    // of 2.5 s is a pause, which gives [0.0, 0.25, 2.75].
+    let input = || vec![key(0.0, "a"), key(1.5, "b"), key(4.0, "c")];
+    for (pause, expected) in [(1.0, vec![0.0, 1.5, 4.0]), (3.0, vec![0.0, 0.25, 0.5])] {
+        let normalization = Normalization {
+            pause: Seconds::new(pause).unwrap(),
+            ..typing(4.0)
+        };
+        let options = FilterOptions::new()
+            .with(RATE_OPTION, 4.0)
+            .with(PAUSE_OPTION, pause);
+
+        let through_applied = run(input(), &[applied(FilterRegion::All, normalization)]);
+        let through_options = run(input(), &[with_options(options)]);
+
+        assert_eq!(times(&through_applied), expected, "applied at {pause}");
+        assert_eq!(times(&through_options), expected, "options at {pause}");
+    }
+}
+
+#[test]
 fn a_bad_option_fails_the_render_with_a_message_that_names_it() {
     let rate = || FilterOptions::new().with(RATE_OPTION, 4.0);
     let cases = [
