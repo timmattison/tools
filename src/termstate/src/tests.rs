@@ -1410,8 +1410,23 @@ fn a_change_of_one_field_makes_the_terminals_unequal() {
     // color and its source, because `ColorSource::Rgb` holds the RGB value.
     // Thus each case changes one field of a copy.
     let cases: &[FieldChange] = &[
+        ("cursor_x", |t| t.cursor_x += 1),
+        ("cursor_y", |t| t.cursor_y += 1),
+        ("width", |t| t.width += 1),
+        ("height", |t| t.height += 1),
         ("current_fg", |t| t.current_fg = (1, 2, 3)),
         ("current_bg", |t| t.current_bg = (1, 2, 3)),
+        ("saved_cursor_y", |t| t.saved_cursor_y += 1),
+        ("scroll_top", |t| t.scroll_top += 1),
+        ("scroll_bottom", |t| t.scroll_bottom -= 1),
+        ("use_acs", |t| t.use_acs = !t.use_acs),
+        ("cursor_visible", |t| t.cursor_visible = !t.cursor_visible),
+        ("selection_fg", |t| t.selection_fg = None),
+        ("selection_bg", |t| t.selection_bg = None),
+        ("override_fg", |t| t.override_fg = Some((1, 2, 3))),
+        ("override_bg", |t| t.override_bg = Some((1, 2, 3))),
+        ("dynamic_palette", |t| t.dynamic_palette[0] = (1, 2, 3)),
+        ("grid", |t| t.grid[0][0].ch = 'x'),
     ];
     let base = feed_text("ab");
     for (field, change) in cases {
