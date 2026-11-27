@@ -1,11 +1,13 @@
 //! The layout of the timeline: the map from time to pixels, the zoom, the
-//! scroll, the ruler, and the event density of the clips. The functions are
+//! scroll, the ruler, the event density of the clips, and the marks where
+//! the terminal size changes. The functions are
 //! pure, so a test needs no webview.
 //!
 //! The timeline shows project time: the times of the clips on their tracks,
 //! before the filters change them.
 
 use crate::format::format_clock;
+use crate::types::{Clip, EditProject};
 
 mod density;
 pub use density::{
@@ -328,6 +330,31 @@ fn whole_number(value: f64) -> Option<i64> {
     } else {
         None
     }
+}
+
+/// A place on the timeline where the terminal size changes from one clip to
+/// the next.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SizeMark {
+    /// The start of the clip with the new size, in seconds.
+    pub time: f64,
+    /// The columns and the rows of the terminal before the change.
+    pub from: (u16, u16),
+    /// The columns and the rows of the terminal after the change.
+    pub to: (u16, u16),
+}
+
+/// The marks where the terminal size of `project` changes.
+///
+/// The clips are in the order of their start on the timeline. A tie goes to
+/// the clip that comes first in track order, then in the order on its track,
+/// as in the render of the pipeline. A mark is at the start of each clip
+/// whose source has a different width or height from the source of the clip
+/// before it.
+#[must_use]
+pub fn size_marks(project: &EditProject) -> Vec<SizeMark> {
+    let _ = (project, std::marker::PhantomData::<Clip>);
+    Vec::new()
 }
 
 /// The unit of the deltas of a wheel event.

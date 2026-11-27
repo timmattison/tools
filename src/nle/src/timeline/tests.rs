@@ -1,6 +1,10 @@
 //! Tests of the layout of the timeline.
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
 use super::*;
+use crate::types::{ClipId, Recording, Seconds, TimelineTrack, TrackId};
 
 /// The largest difference between two floats that the tests accept.
 const TOLERANCE: f64 = 1e-9;
@@ -433,4 +437,119 @@ fn a_ruler_at_the_smallest_zoom_has_no_tick_at_a_bad_place() {
     let frame = View::default().frame(Extent::new(1e307, 1.0));
     assert!(frame.end().is_finite());
     assert!(ruler_ticks(frame).iter().all(|tick| tick.x.is_finite()));
+}
+
+/// A recording of 10 seconds with no event, of `width` columns and `height`
+/// rows.
+fn sized(width: u16, height: u16) -> Arc<Recording> {
+    Arc::new(Recording {
+        version: 2,
+        width,
+        height,
+        timestamp: 0.0,
+        duration: 10.0,
+        command: String::new(),
+        title: String::new(),
+        env: BTreeMap::new(),
+        events: Vec::new(),
+    })
+}
+
+/// A clip with the id `id` of the whole of `source`, at `offset` seconds.
+fn placed(id: u64, source: &Arc<Recording>, offset: f64) -> Clip {
+    Clip {
+        id: ClipId(id),
+        source: Arc::clone(source),
+        in_point: Seconds::ZERO,
+        out_point: Seconds::new(10.0).expect("a time"),
+        timeline_offset: Seconds::new(offset).expect("a time"),
+    }
+}
+
+/// A project with one track for each list of clips, in order.
+fn arranged(tracks: Vec<Vec<Clip>>) -> EditProject {
+    let mut project = EditProject::default();
+    for (index, clips) in (1..).zip(tracks) {
+        project.timeline.push(TimelineTrack {
+            id: TrackId(index),
+            clips: clips.iter().map(|clip| clip.id).collect(),
+        });
+        project.clips.extend(clips);
+    }
+    project
+}
+
+#[test]
+fn clips_of_one_size_have_no_size_mark() {
+    let small = sized(80, 24);
+    assert!(size_marks(&arranged(vec![vec![placed(1, &small, 0.0)]])).is_empty());
+    let project = arranged(vec![vec![placed(1, &small, 0.0), placed(2, &small, 10.0)]]);
+    assert!(size_marks(&project).is_empty());
+    assert!(size_marks(&EditProject::default()).is_empty());
+}
+
+#[test]
+fn a_clip_of_a_new_size_has_a_mark_at_its_start() {
+    let project = arranged(vec![vec![
+        placed(1, &sized(80, 24), 0.0),
+        placed(2, &sized(120, 40), 10.0),
+    ]]);
+    assert_eq!(
+        size_marks(&project),
+        [SizeMark {
+            time: 10.0,
+            from: (80, 24),
+            to: (120, 40),
+        }]
+    );
+}
+
+#[test]
+fn the_marks_follow_the_starts_and_not_the_tracks() {
+    let small = sized(80, 24);
+    let wide = sized(100, 30);
+    let project = arranged(vec![
+        vec![placed(1, &wide, 12.0), placed(2, &small, 20.0)],
+        vec![placed(3, &small, 0.0), placed(4, &small, 5.0)],
+    ]);
+    assert_eq!(
+        size_marks(&project),
+        [
+            SizeMark {
+                time: 12.0,
+                from: (80, 24),
+                to: (100, 30),
+            },
+            SizeMark {
+                time: 20.0,
+                from: (100, 30),
+                to: (80, 24),
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_tie_goes_to_the_clip_of_the_first_track() {
+    let project = arranged(vec![
+        vec![placed(1, &sized(80, 24), 0.0)],
+        vec![placed(2, &sized(100, 30), 0.0)],
+    ]);
+    assert_eq!(
+        size_marks(&project),
+        [SizeMark {
+            time: 0.0,
+            from: (80, 24),
+            to: (100, 30),
+        }]
+    );
+}
+
+#[test]
+fn a_change_of_only_the_rows_has_a_mark() {
+    let project = arranged(vec![vec![
+        placed(1, &sized(80, 24), 0.0),
+        placed(2, &sized(80, 50), 10.0),
+    ]]);
+    assert_eq!(size_marks(&project).len(), 1);
 }
