@@ -6,6 +6,8 @@ use termstate::{TerminalState, TerminalTheme};
 
 use crate::types::{EventType, Recording, Seconds};
 
+pub mod screen;
+
 /// The `--theme` value of `beta` for `PreviewTheme::Auto`.
 const THEME_NAME_AUTO: &str = "auto";
 /// The `--theme` value of `beta` for `PreviewTheme::Dracula`.
