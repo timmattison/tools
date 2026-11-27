@@ -86,12 +86,12 @@ pub struct RegionView {
 ///    error. It must also be inside the region: from 0 to the length of the
 ///    region, both included. Else the pipeline fails with a render error that
 ///    names the kind.
-/// 4. Nothing moves: the events after the region keep their times, and the
-///    end of the timeline stays. An answered time goes back onto the timeline
-///    as the relative time plus the region start, but never after the end of
-///    the region, because that sum can round up. Thus an answered event at
-///    the length lands on the end of the region, and it comes before an
-///    event after the region at the same time.
+/// 4. Nothing moves: the events after the region keep their times, the end
+///    of the timeline stays, and no chapter moves. An answered time goes back
+///    onto the timeline as the relative time plus the region start, but never
+///    after the end of the region, because that sum can round up. Thus an
+///    answered event at the length lands on the end of the region, and it
+///    comes before an event after the region at the same time.
 pub type InPlaceFilterFn =
     dyn Fn(&[Event], RegionView, &FilterOptions) -> Result<Vec<Event>, String> + Send + Sync;
 
@@ -129,6 +129,11 @@ pub struct Span {
 /// 6. The shift is the answered length minus the length. The events after the
 ///    region move by the shift, also when the region holds no event. The end
 ///    of the timeline moves by the shift as in step 8 of `FilterFn`.
+/// 7. A chapter time moves as in step 9 of `FilterFn`, with the end of the
+///    region as one more event: at the length before the filter, and at the
+///    answered length after it. Thus a chapter in a region with no event
+///    scales from the start of the region, and a chapter after the last event
+///    of the region keeps its place between that event and the end.
 pub type SpanFilterFn = dyn Fn(Span, &FilterOptions) -> Result<Span, String> + Send + Sync;
 
 /// A filter in one of its three forms.
@@ -164,11 +169,13 @@ struct StepTimes {
     start: f64,
     /// The end of the region, or infinity for `FilterRegion::All`.
     region_end: f64,
-    /// The times of the events that the filter saw, relative to `start`, in time order.
+    /// The times of the events that the filter saw, relative to `start`, in time
+    /// order. For a span filter, the last entry is the length of the region.
     seen: Vec<f64>,
-    /// The times of the answer, relative to `start`, in ascending order.
+    /// The times of the answer, relative to `start`, in ascending order. For a
+    /// span filter, the last entry is the answered length.
     answered: Vec<f64>,
-    /// The last time of the answer minus the last time of the events that the filter saw.
+    /// How far the events after the region move.
     shift: f64,
 }
 
@@ -181,7 +188,8 @@ struct StepTimes {
 /// events, the chapter keeps its place between the events around it. It keeps
 /// its fraction of the gap between the event before and the event after.
 /// Before the first event, it scales from the region start. After the last
-/// event, it keeps its gap to that event.
+/// event, it keeps its gap to that event. For a span filter, the end of the
+/// region is the last pair of `seen` and `answered`.
 ///
 /// If the filter added or removed events, or the region holds none, a chapter
 /// up to the last seen event moves in proportion to the last time of the
@@ -290,8 +298,8 @@ impl FilterRegistry {
     }
 
     /// One filter step: the steps on `FilterFn`, on `InPlaceFilterFn`, or on
-    /// `SpanFilterFn`. `chapters` holds the chapter times, and each one moves
-    /// by `move_chapter`.
+    /// `SpanFilterFn`. `chapters` holds the chapter times. Each one moves by
+    /// `move_chapter`, but an in-place filter moves none.
     fn apply(
         &self,
         events: Vec<Event>,
@@ -322,16 +330,17 @@ impl FilterRegistry {
         }
 
         // A span filter takes `inside`, so the chapter step keeps its times first.
-        let seen: Vec<f64> = inside.iter().map(|event| event.time).collect();
+        let mut seen: Vec<f64> = inside.iter().map(|event| event.time).collect();
         let kind = applied.kind.as_str();
         // The answer, the view of an in-place filter, the latest time on the
-        // timeline that the answer can get, and how far the events after the
-        // region move.
-        let (answer, view, ceiling, shift) = match filter {
+        // timeline that the answer can get, how far the events after the
+        // region move, and, for a span filter, the length of the region and
+        // the answered length.
+        let (answer, view, ceiling, shift, span_end) = match filter {
             Registered::Events(filter) => {
                 let answer = filter(&inside, &applied.options);
                 let shift = last_time(&answer) - last_time(&inside);
-                (answer, None, f64::INFINITY, shift)
+                (answer, None, f64::INFINITY, shift, None)
             }
             Registered::InPlace(filter) => {
                 // The end of the region on the timeline.
@@ -344,7 +353,7 @@ impl FilterRegistry {
                     NleError::RenderError(format!("filter \"{kind}\" failed: {message}"))
                 })?;
                 // An in-place filter moves nothing.
-                (answer, Some(view), top, 0.0)
+                (answer, Some(view), top, 0.0, None)
             }
             Registered::Span(filter) => {
                 let length = (region_end.min(*end) - start).max(0.0);
@@ -364,7 +373,8 @@ impl FilterRegistry {
                     )));
                 }
                 let shift = answer.length - length;
-                (answer.events, None, f64::INFINITY, shift)
+                let span_end = Some((length, answer.length));
+                (answer.events, None, f64::INFINITY, shift, span_end)
             }
         };
         for event in &answer {
@@ -389,17 +399,27 @@ impl FilterRegistry {
             }
         }
 
-        let mut answered: Vec<f64> = answer.iter().map(|event| event.time).collect();
-        answered.sort_by(f64::total_cmp);
-        let step = StepTimes {
-            start,
-            region_end,
-            seen,
-            answered,
-            shift,
-        };
-        for chapter in chapters.iter_mut() {
-            *chapter = move_chapter(*chapter, &step);
+        // An in-place filter moves nothing, thus it moves no chapter.
+        if view.is_none() {
+            let mut answered: Vec<f64> = answer.iter().map(|event| event.time).collect();
+            answered.sort_by(f64::total_cmp);
+            // The end of a span region is one more pair of times. No seen time
+            // is after the length, and no answered time is after the answered
+            // length, so both lists stay in order.
+            if let Some((length, answered_length)) = span_end {
+                seen.push(length);
+                answered.push(answered_length);
+            }
+            let step = StepTimes {
+                start,
+                region_end,
+                seen,
+                answered,
+                shift,
+            };
+            for chapter in chapters.iter_mut() {
+                *chapter = move_chapter(*chapter, &step);
+            }
         }
 
         let mut result = before;

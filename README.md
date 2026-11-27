@@ -6434,8 +6434,10 @@ gives the number of the chapter in the recording.
 
 The time of a chapter is on the timeline before the filters. The render moves
 each chapter with the events around it. Thus a filter that changes the timing,
-for example a speed change, keeps the chapter on the same content. A chapter
-after the end of the rendered recording is not in it.
+for example a speed change, keeps the chapter on the same content. A speed
+change scales a chapter also in a region with no event, for example a silent
+build step. The cursor filter moves no chapter. A chapter after the end of the
+rendered recording is not in it.
 
 `beta export web` shows the chapters of a rendered recording as markers on the
 progress bar. A click on a marker moves the player to that chapter.
