@@ -1440,3 +1440,58 @@ async fn the_color_scheme_panel_shows_its_fields_and_menus() {
     }
     assert!(!page.contains("role=\"alert\""), "{page}");
 }
+
+/// The page markup of the row of a color scheme filter.
+fn color_row(text: &str) -> String {
+    format!("<span>{text}</span>")
+}
+
+/// The menu values of a color scheme with every option at its default.
+const DEFAULT_MENUS_WITH_LIGHT: [&str; 5] = ["solarized-light", "theme", "keep", "keep", "keep"];
+
+#[tokio::test]
+async fn applying_a_color_scheme_adds_a_row_and_recolors_the_preview() {
+    let mut window = open_recording().await;
+    let control = window.playhead_control();
+    window.type_into(control, "1.0");
+
+    window.apply_color_scheme("", "", DEFAULT_MENUS_WITH_LIGHT);
+
+    let page = window.html();
+    assert!(
+        page.contains(&color_row("the whole timeline: Solarized Light")),
+        "{page}"
+    );
+    assert!(!page.contains("role=\"alert\""), "{page}");
+    assert!(
+        page.contains("class=\"preview-screen\" style=\"background-color:#fdf6e3\""),
+        "{page}"
+    );
+}
+
+#[tokio::test]
+async fn a_row_names_each_option_that_is_not_the_default() {
+    let mut window = open_recording().await;
+
+    window.apply_color_scheme(
+        "10",
+        "20",
+        [
+            "dracula",
+            "swapped",
+            "nearest",
+            "invert",
+            "invert-lightness",
+        ],
+    );
+
+    let page = window.html();
+    assert!(
+        page.contains(&color_row(
+            "10 s to 20 s: Dracula, swapped colors, nearest cube colors, \
+             inverted grayscale, inverted truecolor lightness"
+        )),
+        "{page}"
+    );
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
