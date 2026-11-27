@@ -215,7 +215,10 @@ fn xterm_modify_other_keys_gives_the_key_of_its_code() {
         ("\x1b[27;5;105~", vec![special("Ctrl+I")]),
         ("\x1b[27;2;65~", vec![special("Shift+A")]),
         ("\x1b[27;3;46~", vec![special("Alt+.")]),
-        ("a\x1b[27;5;9~b", vec![text("a"), special("Ctrl+Tab"), text("b")]),
+        (
+            "a\x1b[27;5;9~b",
+            vec![text("a"), special("Ctrl+Tab"), text("b")],
+        ),
         ("\x1b[27~", vec![]),
     ]);
 }
@@ -236,12 +239,34 @@ fn reports_of_the_terminal_give_no_key() {
         ("\x1b]11;rgb:0000/0000/0000\x07", vec![]),
         ("a\x1b]11;rgb:0000/0000/0000\x07b", vec![text("ab")]),
         ("a\x1b]0;title\x1b\\b", vec![text("ab")]),
-        ("a\x1b]0;title", vec![text("a")]),
         ("a\x1bP1$r\x1b\\b", vec![text("ab")]),
         ("a\x1b_Gdata\x1b\\b", vec![text("ab")]),
-        ("a\x1bPdata", vec![text("a")]),
         ("\x1b[?1;2c", vec![]),
         ("\x1b[?1;2cx", vec![text("x")]),
+    ]);
+}
+
+#[test]
+fn a_string_start_with_no_terminator_is_an_alt_key() {
+    check(&[
+        ("\x1bPab", vec![special("Alt+Shift+P"), text("ab")]),
+        ("\x1b]ab", vec![special("Alt+]"), text("ab")]),
+        ("\x1b_ab", vec![special("Alt+_"), text("ab")]),
+        (
+            "a\x1b]0;title",
+            vec![text("a"), special("Alt+]"), text("0;title")],
+        ),
+        ("\x1bP\x1b[A", vec![special("Alt+Shift+P"), special("↑")]),
+        ("\x1b]x\x07", vec![]),
+        (
+            "\x1bPx\x07y",
+            vec![
+                special("Alt+Shift+P"),
+                text("x"),
+                special("Ctrl+G"),
+                text("y"),
+            ],
+        ),
     ]);
 }
 
