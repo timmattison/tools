@@ -248,6 +248,33 @@ fn the_request_holds_the_path_with_the_ending_of_the_kind() {
     assert!(bad.request(PathBuf::from("/tmp/out")).is_err());
 }
 
+/// The save dialog of Linux can give a name that is not valid UTF-8. APFS
+/// refuses such a name, thus this test runs only on Linux.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_request_refuses_a_path_that_is_not_utf8() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let pickeds: [&[u8]; 3] = [b"/tmp/x\xff.mp4", b"/tmp/x\xff", b"/tmp/\xff/out"];
+    let kinds = [
+        ExportKind::Recording,
+        ExportKind::CompressedRecording,
+        ExportKind::Web,
+        ExportKind::Mp4,
+        ExportKind::Gif,
+    ];
+    for picked in pickeds {
+        for kind in kinds {
+            let result = settings(kind).request(PathBuf::from(OsStr::from_bytes(picked)));
+            let Err(NleError::ExportError(text)) = result else {
+                panic!("{kind:?} for {picked:?}: expected an ExportError, got {result:?}");
+            };
+            assert!(text.contains("not valid UTF-8"), "{text}");
+        }
+    }
+}
+
 #[test]
 fn the_progress_text_names_the_stage() {
     let cases = [

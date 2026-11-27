@@ -248,6 +248,62 @@ fn a_recording_export_keeps_the_save_error_of_a_refused_name() {
     assert!(matches!(result, Err(NleError::SaveError(_))), "{result:?}");
 }
 
+/// An output path that is not valid UTF-8 is refused before the export
+/// starts: no stage, no file, and no run of `beta`. APFS refuses such a name,
+/// thus this test runs only on Linux.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_output_path_that_is_not_utf8_is_refused_before_the_export() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let home = home_with_beta_script(COPYING_BETA);
+    let video = ExportTarget::Video {
+        theme: Theme::Auto,
+        fps: None,
+        resolution: None,
+        optimize_web: false,
+    };
+    let cases: [(&[u8], ExportTarget); 4] = [
+        (b"x\xff.json", ExportTarget::Recording { compress: None }),
+        (
+            b"x\xff.html",
+            ExportTarget::Web {
+                theme: Theme::Auto,
+                compress: false,
+            },
+        ),
+        (b"x\xff.mp4", video.clone()),
+        (b"x\xff.gif", video),
+    ];
+    for (name, target) in cases {
+        let out = tempfile::tempdir().unwrap();
+        let request = ExportRequest {
+            output_path: out.path().join(OsStr::from_bytes(name)),
+            target,
+        };
+        let reported = Reported::default();
+
+        let result = block_on(export_recording_with(
+            recording(),
+            request,
+            collector(&reported),
+            finder_vars(&home),
+        ));
+
+        let Err(NleError::ExportError(text)) = result else {
+            panic!("{name:?}: expected an ExportError, got {result:?}");
+        };
+        assert!(text.contains("not valid UTF-8"), "{text}");
+        assert!(reported.lock().unwrap().is_empty(), "{name:?}");
+        let written: Vec<_> = std::fs::read_dir(out.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(written.is_empty(), "{name:?} wrote {written:?}");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn a_failed_beta_gives_an_export_error_and_removes_the_work_file() {
