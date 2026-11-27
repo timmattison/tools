@@ -365,9 +365,9 @@ impl ActionSender for GhActionSender {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
 
+    use gitscratch::testing::executable::write_executable;
     use tempfile::TempDir;
 
     use super::*;
@@ -390,8 +390,7 @@ mod tests {
     /// sender that uses it.
     fn sender(dir: &TempDir, body: &str) -> GhActionSender {
         let path = dir.path().join("gh");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         GhActionSender::new(GhSource::with_program(path, GENEROUS_LIMIT))
     }
 

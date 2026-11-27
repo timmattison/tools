@@ -467,7 +467,7 @@ fn a_mark_at_the_time_of_a_key_moves_with_that_key() {
     let mut registry = filters::registry();
     registry.register_span(
         FilterKind::new("mark"),
-        |mut span: Span, _: &FilterOptions| {
+        |mut span: Span, _, _: &FilterOptions| {
             span.marks.push(Mark {
                 time: 0.125,
                 label: "m".to_string(),

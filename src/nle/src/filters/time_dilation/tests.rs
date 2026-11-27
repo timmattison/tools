@@ -216,7 +216,7 @@ fn a_mark_inside_the_region_moves_with_the_speed() {
     let mut registry = filters::registry();
     registry.register_span(
         FilterKind::new("mark"),
-        |mut span: Span, _: &FilterOptions| {
+        |mut span: Span, _, _: &FilterOptions| {
             span.marks.push(Mark {
                 time: 6.0,
                 label: "m".to_string(),

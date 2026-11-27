@@ -5,6 +5,10 @@
 //! Then it shows mine first, and the others in one table for each file of
 //! origin. The JSON document always holds each entry of the tally, with its
 //! origin and a field that says if it is mine.
+//!
+//! The text report ends with the group `Duplicates and shadows`. It lists each
+//! finding of the tally that holds a definition of mine or a place of mine, or
+//! each finding with `all`. The JSON document holds each finding.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -14,7 +18,7 @@ use comfy_table::{presets, CellAlignment, ColumnConstraint, ContentArrangement, 
 use serde::Serialize;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::{Classification, Kind, Summary, Tally, Usage, Window};
+use super::{Classification, Finding, FindingKind, Kind, Member, Summary, Tally, Usage, Window};
 use crate::origin::{Origin, Places};
 use crate::render::{
     counted, date_cell, group, number, number_of, BETWEEN_BLOCKS, THROUGH_SEPARATOR,
@@ -95,6 +99,37 @@ const DEFINITIONS_LABEL: &str = "Definitions";
 /// does not show the others.
 const ALL_HINT: &str = " (--all shows the others)";
 
+/// The heading of the group of the duplicates and the shadows.
+const HEADING_FINDINGS: &str = "Duplicates and shadows";
+
+/// What starts the entry of a finding of the kind
+/// [`FindingKind::SameExpansion`].
+const LABEL_SAME_EXPANSION: &str = "Same expansion";
+
+/// What starts the entry of a finding of the kind
+/// [`FindingKind::AliasAndFunction`].
+const LABEL_ALIAS_AND_FUNCTION: &str = "Alias and function";
+
+/// What starts the entry of a finding of the kind
+/// [`FindingKind::AliasHidesFunction`].
+const LABEL_ALIAS_HIDES_FUNCTION: &str = "Alias hides function";
+
+/// What starts the entry of a finding of the kind
+/// [`FindingKind::HidesProgram`].
+const LABEL_HIDES_PROGRAM: &str = "Hides a program";
+
+/// The text that divides the members of a finding, and the places of a
+/// finding.
+const MEMBER_SEPARATOR: &str = ", ";
+
+/// The text between the members of a finding of the kind
+/// [`FindingKind::DefinedMoreThanOnce`] and its places.
+const AT: &str = " at ";
+
+/// The note after the last place of a finding of the kind
+/// [`FindingKind::DefinedMoreThanOnce`].
+const IN_EFFECT: &str = " (in effect)";
+
 /// Gives the `Through` cell: each name with its count, most used first.
 fn through_cell(usage: &Usage) -> String {
     usage
@@ -127,13 +162,16 @@ fn cut(definition: &str, available: usize) -> String {
     kept
 }
 
+/// Gives the text of `origin` with `~` for the home directory, or
+/// [`UNKNOWN_ORIGIN`].
+fn shown_origin(origin: Option<&Origin>, places: &Places) -> String {
+    origin.map_or_else(|| UNKNOWN_ORIGIN.to_string(), |origin| places.show(origin))
+}
+
 /// Gives the `Origin` cell: the origin with `~` for the home directory, or
 /// [`UNKNOWN_ORIGIN`].
 fn origin_cell(usage: &Usage, places: &Places) -> String {
-    usage
-        .origin
-        .as_ref()
-        .map_or_else(|| UNKNOWN_ORIGIN.to_string(), |origin| places.show(origin))
+    shown_origin(usage.origin.as_ref(), places)
 }
 
 /// Gives the cells of `usage` for the columns other than the definition, in
@@ -395,15 +433,117 @@ fn file_heading(file: Option<&Path>, places: &Places) -> String {
     )
 }
 
+/// Gives the text of `member`: its name, then its kind, its origin, and its
+/// uses in parentheses. With `with_origin` false, the origin is left out.
+fn member_text(member: &Member, places: &Places, with_origin: bool) -> String {
+    let uses = counted(member.uses, "use", "uses");
+    if with_origin {
+        let origin = shown_origin(member.origin.as_ref(), places);
+        format!(
+            "{} ({}, {origin}, {uses})",
+            member.name,
+            member.kind.label()
+        )
+    } else {
+        format!("{} ({}, {uses})", member.name, member.kind.label())
+    }
+}
+
+/// Gives the members of `finding`, divided by [`MEMBER_SEPARATOR`].
+fn members_text(finding: &Finding, places: &Places, with_origin: bool) -> String {
+    finding
+        .definitions
+        .iter()
+        .map(|member| member_text(member, places, with_origin))
+        .collect::<Vec<_>>()
+        .join(MEMBER_SEPARATOR)
+}
+
+/// Joins `words` with one space. Each control character shows as the escape
+/// of [`char::escape_default`] (`\n`, `\t`, `\u{1b}`), so that the entry stays
+/// on one line. A backslash stays as it is, because the words are shell text.
+fn words_text(words: &[String]) -> String {
+    let mut text = String::new();
+    for character in words.join(" ").chars() {
+        if character.is_control() {
+            text.extend(character.escape_default());
+        } else {
+            text.push(character);
+        }
+    }
+    text
+}
+
+/// Gives the entry of `finding` in the group of the duplicates and the
+/// shadows. The text of each kind has its own shape.
+fn finding_entry(finding: &Finding, places: &Places) -> String {
+    match finding.kind {
+        FindingKind::SameExpansion => format!(
+            "{LABEL_SAME_EXPANSION} ({}): {}",
+            words_text(&finding.words),
+            members_text(finding, places, true),
+        ),
+        FindingKind::AliasAndFunction => format!(
+            "{LABEL_ALIAS_AND_FUNCTION} ({}): {}",
+            words_text(&finding.words),
+            members_text(finding, places, true),
+        ),
+        FindingKind::DefinedMoreThanOnce => {
+            let spots = finding
+                .places
+                .iter()
+                .map(|origin| shown_origin(origin.as_ref(), places))
+                .collect::<Vec<_>>()
+                .join(MEMBER_SEPARATOR);
+            format!(
+                "Defined {}: {}{AT}{spots}{IN_EFFECT}",
+                counted(finding.places.len(), "time", "times"),
+                members_text(finding, places, false),
+            )
+        }
+        FindingKind::AliasHidesFunction => format!(
+            "{LABEL_ALIAS_HIDES_FUNCTION}: {}",
+            members_text(finding, places, true),
+        ),
+        FindingKind::HidesProgram => {
+            let program = finding.program.as_ref().map(|file| Origin {
+                file: file.clone(),
+                line: None,
+            });
+            format!(
+                "{LABEL_HIDES_PROGRAM} ({}): {}",
+                shown_origin(program.as_ref(), places),
+                members_text(finding, places, true),
+            )
+        }
+    }
+}
+
+/// Gives the group of the duplicates and the shadows: each finding of the
+/// tally with a definition of mine or a place of mine, or each finding when
+/// `all` is true.
+fn findings_group(tally: &Tally, all: bool) -> String {
+    let entries: Vec<String> = tally
+        .findings
+        .iter()
+        .filter(|finding| all || finding.mine(&tally.places))
+        .map(|finding| finding_entry(finding, &tally.places))
+        .collect();
+    group(HEADING_FINDINGS, &entries)
+}
+
 /// Gives the text report. `shell` is the path of the shell that gave the
 /// definitions. `width` is the table width. `None` sets no limit.
 ///
-/// The report starts with the header and ends with the three groups. Between
-/// them, it has the table of my definitions. With `window.all`, that table
-/// has the heading `Mine` and a count, and one more table follows for each
+/// The report starts with the header. Then come the three groups, and last the
+/// group `Duplicates and shadows`. Between the header and the groups, the
+/// report has the table of my definitions. With `window.all`, that table has
+/// the heading `Mine` and a count, and one more table follows for each
 /// file that defined the others, with that file and a count as its heading.
-/// The three groups then hold each entry, else only mine. The definition in a
-/// table is one line. It is cut to the room that the width leaves.
+/// The three groups then hold each entry, else only mine. The last group
+/// holds each finding with `window.all`, else only the findings that hold one
+/// of my definitions or one of my places. The definition in a table is one line. It is cut to the
+/// room that the width leaves.
 #[must_use]
 pub fn text(tally: &Tally, window: &Window, shell: &str, width: Option<u16>) -> String {
     let places = &tally.places;
@@ -425,6 +565,7 @@ pub fn text(tally: &Tally, window: &Window, shell: &str, width: Option<u16>) -> 
         mine
     };
     blocks.push(group_lines(&shown, window));
+    blocks.push(findings_group(tally, window.all));
     blocks.join(BETWEEN_BLOCKS) + "\n"
 }
 
@@ -480,6 +621,27 @@ struct NamedDocument<'a> {
     kind: Kind,
 }
 
+/// One definition of a finding, in the JSON document.
+#[derive(Serialize)]
+struct MemberDocument<'a> {
+    name: &'a str,
+    kind: Kind,
+    origin: Option<&'a Origin>,
+    uses: u64,
+    mine: bool,
+}
+
+/// One duplicate or one shadow, in the JSON document.
+#[derive(Serialize)]
+struct FindingDocument<'a> {
+    kind: FindingKind,
+    mine: bool,
+    definitions: Vec<MemberDocument<'a>>,
+    words: &'a [String],
+    places: Vec<Option<&'a Origin>>,
+    program: Option<&'a Path>,
+}
+
 /// The whole JSON document.
 #[derive(Serialize)]
 struct Document<'a> {
@@ -492,6 +654,30 @@ struct Document<'a> {
     never_used: Vec<NamedDocument<'a>>,
     idle: Vec<NamedDocument<'a>>,
     runs_without_typing: Vec<NamedDocument<'a>>,
+    findings: Vec<FindingDocument<'a>>,
+}
+
+/// Gives the JSON form of one finding. `directories` decides which places are
+/// mine.
+fn finding_document<'a>(finding: &'a Finding, directories: &Places) -> FindingDocument<'a> {
+    FindingDocument {
+        kind: finding.kind,
+        mine: finding.mine(directories),
+        definitions: finding
+            .definitions
+            .iter()
+            .map(|member| MemberDocument {
+                name: &member.name,
+                kind: member.kind,
+                origin: member.origin.as_ref(),
+                uses: member.uses,
+                mine: member.mine,
+            })
+            .collect(),
+        words: &finding.words,
+        places: finding.places.iter().map(Option::as_ref).collect(),
+        program: finding.program.as_deref(),
+    }
 }
 
 /// Gives the JSON form of one definition.
@@ -537,6 +723,14 @@ fn named<'a>(definitions: &[&'a Usage]) -> Vec<NamedDocument<'a>> {
 /// `runs_without_typing` hold every entry too, in the order of the text
 /// report.
 ///
+/// `findings` holds each finding of the tally in order, also a finding with no
+/// definition of mine. A finding is `mine` when one of its definitions or one
+/// of its places is mine. Each finding has the fields `kind`, `mine`,
+/// `definitions`, `words`, `places`, and `program`, always present. Each
+/// definition has `name`, `kind`, `origin`, `uses`, and `mine`. `words` and
+/// `places` are empty lists, and `program` is `null`, when the kind of the
+/// finding does not use them. A place is an origin or `null`.
+///
 /// # Panics
 ///
 /// Never in practice. The document holds only numbers, dates, and text, and
@@ -569,6 +763,11 @@ pub fn json(tally: &Tally, window: &Window, shell: &str) -> String {
         never_used: named(&with(&every, Classification::NeverUsed)),
         idle: named(&idle_definitions(&every)),
         runs_without_typing: named(&with(&every, Classification::RunsWithoutTyping)),
+        findings: tally
+            .findings
+            .iter()
+            .map(|finding| finding_document(finding, &tally.places))
+            .collect(),
     };
     let mut text = serde_json::to_string_pretty(&document)
         .expect("a document of numbers, dates, and text always serializes");

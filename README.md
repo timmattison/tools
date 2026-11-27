@@ -5699,6 +5699,8 @@ The excerpt leaves out rows of the table and entries of the groups. The run was 
 
 A definition that the shell runs without a typed name, for example a `precmd` hook or the function of a widget that a key starts, gets the state "runs without typing" with its reason. It does not show in "Never used". See [What runs without typing](#what-runs-without-typing).
 
+The report ends with the duplicates and the shadows: aliases with the same value, an alias and a function that do the same thing, an alias that your startup files define more than one time, an alias that hides a function, and a definition that hides a program. Each finding gives the use count of each name, so that you can choose which name to keep. See [Duplicates and shadows](#duplicates-and-shadows).
+
 Each definition gets its origin: the file that defined it. By default, the text report shows only your own definitions. A shell with oh-my-zsh has hundreds of aliases and functions from its plugins and its `lib` files, and those are not yours. `--all` shows each definition, and groups the others by the file that defined them.
 
 `wdid defs` reads the history and the shell definitions as the tools report does. It needs no cargo workspace, and it starts no `cargo` process and no `git` process. Thus it runs in any directory.
@@ -5814,11 +5816,54 @@ A widget function that no key starts ends its entry in "Never used" or in "Idle"
 
 Without `--all`, the three groups hold only my definitions. With `--all`, they hold each definition.
 
+The group `Duplicates and shadows` ends the report. See [Duplicates and shadows](#duplicates-and-shadows).
+
+#### Duplicates and shadows
+
+Over time, a shell gets definitions that do the same thing as other definitions, and names that hide other names. Each entry of the group `Duplicates and shadows` is one finding. It gives each name of the finding with its kind, its origin, and its uses. `wdid` finds five kinds:
+
+1. **Same expansion.** Two or more aliases have the same value, after `wdid` splits each value into words as the shell does. Thus `git  status` and `'git' status` are the same value as `git status`. A quoted word is not the expansion with the same text. For example, `echo '$HOME'` is not the same value as `echo $HOME`, and `ls '*.c'` is not the same value as `ls *.c`. A regular alias and a global alias are never in one finding. A suffix alias is never in a finding of this kind, because each suffix names different files.
+
+   ```text
+   Same expansion (git status): gs (alias, ~/.zshrc:3, 3 uses), gst (alias, ~/.oh-my-zsh/plugins/git/git.plugin.zsh:1, 2 uses)
+   ```
+
+2. **An alias and a function that do the same thing.** The body of the function is one simple command whose last argument is `"$@"` or `"${@}"`. The other words of that command are the words of the value of the alias. A brace group around the command is the same command. A pipe, a list, or a redirect makes a different command.
+
+   ```text
+   Alias and function (git log): gl (alias, ~/.zshrc:7, 0 uses), glog (function, ~/.zshrc, 1 use)
+   ```
+
+   An entry of the first two kinds gives the shared words as the shell reads them. A word that needs quotes shows in single quotes, for example `echo 'x y'`. Thus the words `echo` and `x y` do not look like the words `echo`, `x`, and `y`. A control character shows as an escape such as `\n`, so that the entry stays on one line.
+
+3. **Defined more than one time.** Your startup files define an alias name two or more times. The finding gives each `file:line` in order, and the last one is in effect. The wrapper function `alias` records each definition (see [The origin and my definitions](#the-origin-and-my-definitions)). Two definitions at the same `file:line` count one time, for example from a file that your startup files source two times. Each definition at an unknown place counts, because `wdid` cannot tell if two unknown places are one place. zsh keeps only the last definition of a function, and bash keeps no origin for an alias. Thus this kind covers zsh aliases only.
+
+   ```text
+   Defined 2 times: ll (alias, 4 uses) at ~/.oh-my-zsh/lib/directories.zsh:30, ~/.zshrc:12 (in effect)
+   ```
+
+4. **An alias hides a function.** An alias and a function have the same name. zsh expands the alias first in command position, thus a typed name never starts the function. An alias whose value starts with its own name is not a finding, because zsh does not expand that alias again: `alias y='y --color'` runs the function `y`.
+
+   ```text
+   Alias hides function: x (alias, ~/.zshrc:9, 0 uses), x (function, ~/.zshrc, 5 uses)
+   ```
+
+5. **A definition hides a program.** The name of an alias or a function is also the name of a program on the `PATH` of the shell. The shell finds the program after your startup files ran: zsh through `$commands`, bash through `type -P`. A name that is also a builtin of the shell is not a finding, because the builtin hides the program already. For example, macOS has `/usr/bin/cd`, and the builtin `cd` runs first. A wrapper is not a finding either:
+   - an alias whose value starts with its own name, for example `ls='ls -G'`
+   - an alias whose value runs its own name through `command`, for example `ls='command ls --color'`
+   - a function whose body runs the program through `command <name>`, for example `grep() { command grep --color=auto "$@" }`
+
+   ```text
+   Hides a program (/bin/cat): cat (function, ~/.zshrc, 12 uses)
+   ```
+
+By default, the group shows only a finding that holds one or more of your definitions. For example, two aliases with the same value in an oh-my-zsh plugin show only with `--all`. A finding of the kind "Defined more than one time" is also yours when one of its places is in your files. An example is an alias of your `~/.zshrc` that a plugin defines again later. A function whose name starts with `_` takes part only with `--all`, as in the table. The `--json` document holds each finding in `findings`, also with no `--all`.
+
 #### Options of wdid defs
 
 - `--since <YYYY-MM-DD>`: Count only the rows from this date on. A row on this date counts.
-- `--all`: Show each definition. The text report also shows the others, grouped by the file that defined them, and the functions whose names start with `_`.
-- `--json`: Print the report as one JSON document. `definitions` holds each definition, also the ones with zero uses and the ones that are not mine, and its `definition` is never cut. Each entry has `origin` and `mine`. `origin` holds `file` and `line`, or it is `null` when the origin is unknown. A function has no line, thus its `line` is `null`. `shell.mine` and `shell.others` give the two counts. Each entry has `reasons`, the text of each of its reasons as the text report writes it. The list is empty for most entries. `never_used`, `idle`, and `runs_without_typing` hold the name and the kind of each entry of the three groups, also the entries that are not mine. With `--all`, the document also holds the functions whose names start with `_`.
+- `--all`: Show each definition. The text report also shows the others, grouped by the file that defined them, and the functions whose names start with `_`. The group `Duplicates and shadows` shows each finding, also a finding that holds none of your definitions.
+- `--json`: Print the report as one JSON document. `definitions` holds each definition, also the ones with zero uses and the ones that are not mine, and its `definition` is never cut. Each entry has `origin` and `mine`. `origin` holds `file` and `line`, or it is `null` when the origin is unknown. A function has no line, thus its `line` is `null`. `shell.mine` and `shell.others` give the two counts. Each entry has `reasons`, the text of each of its reasons as the text report writes it. The list is empty for most entries. `never_used`, `idle`, and `runs_without_typing` hold the name and the kind of each entry of the three groups, also the entries that are not mine. `findings` holds each finding of [Duplicates and shadows](#duplicates-and-shadows), also a finding that holds none of your definitions. Each finding has `kind` (`same_expansion`, `alias_and_function`, `defined_more_than_once`, `alias_hides_function`, or `hides_program`), `mine`, and `definitions`, with the `name`, `kind`, `origin`, `uses`, and `mine` of each definition. The `mine` of a finding is true when one of its definitions or one of its places is yours, thus it can be true while the `mine` of its definition is false. `words` holds the shared words of the first two kinds. Each word is as the shell reads it, in single quotes when it needs them. `places` holds each place of `defined_more_than_once` (an origin, or `null` when it is unknown), and `program` holds the path of `hides_program`. A field that a kind does not use is an empty list or `null`. With `--all`, the document also holds the functions whose names start with `_`.
 - `--idle-days <DAYS>`: A definition is idle when its last use is older than this. Defaults to 180.
 
 The options of the tools report (`--repo`, `--no-shell`, `--unparsed`, `--new-days`) do not apply. An option of the tools report before `defs` is a usage error.
@@ -5853,6 +5898,9 @@ Never used:
 Idle (no use in the last 180 days):
   oldfn (function, 1 use, last use 2026-03-21)
 Runs without typing: none
+
+Duplicates and shadows:
+  Same expansion (git status): gs (alias, ~/.zshrc:3, 3 uses), gst (alias, ~/.oh-my-zsh/plugins/git/git.plugin.zsh:1, 2 uses)
 ```
 
 The same run with `--all` adds a table for the git plugin after the table of my definitions. This excerpt leaves out rows of the first table:
@@ -5882,6 +5930,9 @@ Never used:
 Idle (no use in the last 180 days):
   oldfn (function, 1 use, last use 2026-03-21)
 Runs without typing: none
+
+Duplicates and shadows:
+  Same expansion (git status): gs (alias, ~/.zshrc:3, 3 uses), gst (alias, ~/.oh-my-zsh/plugins/git/git.plugin.zsh:1, 2 uses)
 ```
 
 One entry of the `--json` document:
@@ -5904,6 +5955,28 @@ One entry of the `--json` document:
 ```
 
 `kind` is `alias`, `global_alias`, `suffix_alias`, or `function`. `classification` is `used`, `idle`, `never_used`, or `runs_without_typing`.
+
+The one entry of `findings` in the same document:
+
+```json
+{
+  "kind": "same_expansion",
+  "mine": true,
+  "definitions": [
+    { "name": "gs", "kind": "alias", "origin": { "file": "/Users/me/.zshrc", "line": 3 }, "uses": 3, "mine": true },
+    {
+      "name": "gst",
+      "kind": "alias",
+      "origin": { "file": "/Users/me/.oh-my-zsh/plugins/git/git.plugin.zsh", "line": 1 },
+      "uses": 2,
+      "mine": false
+    }
+  ],
+  "words": ["git", "status"],
+  "places": [],
+  "program": null
+}
+```
 
 ### Install
 
@@ -6558,12 +6631,14 @@ The editing engine of the crate has five parts:
   in-place filter (`register_in_place`) also gets the length of its region and
   whether anything comes after it. It rewrites its region and moves nothing. A
   span filter (`register_span`) also gets the length of its region and answers
-  a new length, and the later events move by the change in the length. A
-  span filter can also mark places on the timeline. It gets the marks inside
-  its region and answers the marks of its result, and `render_with_marks`
-  gives the marks with the recording. `filters::registry()` holds the filters
-  that ship. The cursor filter is an in-place filter, and each other one is a
-  span filter:
+  a new length, and the later events move by the change in the length. A span
+  filter also gets the events before and after its region and the size of the
+  terminal: the size of the clip that starts first, or 80 by 24 in
+  `FilterRegistry::run`. A span filter can also mark places on the timeline.
+  It gets the marks inside its region and answers the marks of its result, and
+  `render_with_marks` gives the marks with the recording. `filters::registry()`
+  holds the filters that ship. The cursor filter is an in-place filter, and
+  each other one is a span filter:
   - `cursor` (`visibility`, `shape`, `blink`, `color`, issue #168): sets how
     the cursor looks. [The cursor filter](#the-cursor-filter) below gives its
     options.
@@ -6589,11 +6664,15 @@ The editing engine of the crate has five parts:
     stretch, and marks the start of each one. It replays the output through
     the terminal emulator of the `termstate` crate. The idle panel below gives
     its rules.
+  - `backspace-removal` (no options, issue #152): removes each typo, the erase
+    key after it, their output, and their time.
+    [The backspace removal filter](#the-backspace-removal-filter) below gives
+    its rules.
 
   The filters of issue #154 parse their options as a Rust type, so the render
   refuses a missing option, a value of the wrong type, and a key that the
   filter does not know. The window cannot add them yet (issue #150). Issues
-  #152 and #157 to #166 add more filters.
+  #157 to #166 add more filters.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
@@ -6658,6 +6737,74 @@ the state of the recording back at the end. The filter sees only its range,
 thus it takes the state before the range to be the default of a terminal: a
 visible cursor, DECSCUSR 0, and the default color. After a reset of the
 terminal (RIS or DECSTR) in the recording, the filter sets the cursor again.
+
+### The backspace removal filter
+
+The `backspace-removal` filter removes the typing errors of a recording. It
+removes a typed key, the key that erased it, and the output of both, so the
+recording shows the text that the typist meant. It also removes their time, so
+no pause shows where the error was. For example, `h`, `r`, Backspace, `e`
+becomes `h`, `e`, and the `e` comes at the time of the `r`.
+
+The filter removes keys only when the screen proves that the removal changes
+nothing that a viewer sees after it. The filter keeps a model of the screen,
+the emulator of the `termstate` crate. It compares the screen after the erase
+with the screen before the typed key. It compares each cell, the cursor, and the
+other state of the emulator, for example the pen and the visibility of the
+cursor. Thus output that writes backspaces with no erase key before it stays,
+for example a progress bar. A full-screen program in which Backspace does a
+different thing also stays, because its screen does not come back.
+
+| Key | Data | What goes |
+|---|---|---|
+| Backspace | DEL (`\x7f`) or BS (`\x08`) | The newest typed key, the Backspace, and their output. |
+| Ctrl+W | `\x17` | The typed keys that the erase removed from the screen, the Ctrl+W, and their output. |
+| Ctrl+U | `\x15` | The same as for Ctrl+W. |
+
+An erase key that has output and changes nothing on the screen goes with that
+output, for example a Backspace at the start of a line that rings the bell. An
+erase key that no typed key explains and that has no output before the next key
+stays, because over a slow link its echo can come after the next key. A key
+that is not a typed character or an erase key ends the line that the filter
+follows: for example Enter, Tab, an arrow, or a paste. An erase after such a
+key does not remove a typed key before it.
+
+The filter takes no option. A project file names it in its `filters` list:
+
+```json
+{ "kind": "backspace-removal", "region": "All", "options": {} }
+```
+
+On a range, the filter replays the output before the range into its screen, so
+it compares the screens that the viewer sees. The events after the range move
+earlier by the removed time. When the first event after the range is output,
+the end of the range cuts the output of the last key of the range. That key
+stays, because the filter cannot see all of its output.
+
+The limits:
+
+- The comparison is as exact as the emulator. The emulator does not wrap at the
+  right margin, it gives each character one cell, and it reads `CSI C` or
+  `CSI D` with no number as a move of zero columns. Thus a typo near such
+  output usually stays.
+- At a prompt that echoes nothing, more than one typed key leaves the screen as
+  a Ctrl+W or a Ctrl+U leaves it. The filter cannot tell how many keys the
+  erase removed, so it keeps them all.
+- Type-ahead over a slow link can put the echo of a key after the next key.
+  The filter then removes a key and keeps its echo. The screen at the end is
+  correct, but the viewer sees one moment that the typist did not type. Two
+  cases are known:
+  - At a prompt that echoes nothing, a typed key and a Backspace with no output
+    go together. Double type-ahead gives the same order of events, and then
+    their echoes stay: the typo shows with no key.
+  - Under single type-ahead, the output after a Backspace can be unrelated
+    output that changes nothing on the screen, for example a bell. The
+    Backspace then goes with that output, and its late echo stays. Thus an
+    earlier typed character goes with no Backspace.
+- The filter keeps a copy of the screen for each typed key of a line: at most
+  256 copies, and at most 4,194,304 cells for all copies. A line of more typed
+  keys keeps its oldest keys. A terminal of more than 1,048,576 cells fails the
+  render.
 
 The export functions run `beta` with the PATH of the app, then
 `$CARGO_HOME/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.

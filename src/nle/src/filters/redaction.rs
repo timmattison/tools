@@ -105,7 +105,7 @@ mod stream;
 pub use preset::Preset;
 
 use crate::error::NleError;
-use crate::pipeline::{FilterRegistry, Span};
+use crate::pipeline::{FilterRegistry, Span, SpanContext};
 use crate::types::{AppliedFilter, FilterKind, FilterOptions, FilterRegion};
 
 /// The kind of the redaction filter.
@@ -297,7 +297,7 @@ fn missing(key: &str) -> String {
 
 /// Replace the text that the options name. The length and each mark keep
 /// their time, as each event does.
-fn redact(span: Span, options: &FilterOptions) -> Result<Span, String> {
+fn redact(span: Span, _context: SpanContext<'_>, options: &FilterOptions) -> Result<Span, String> {
     let redaction = read_options(options)?;
     Ok(Span {
         events: stream::rewrite(span.events, &redaction)?,

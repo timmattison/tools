@@ -16,9 +16,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 flate2 = "1.0"
 buildinfo = { workspace = true }
-# The terminal emulator of beta. The preview draws the screen with it, and the
-# idle compression filter replays the output through it to find the events that
-# change the screen.
+# The terminal emulator of beta. The preview draws the screen with it, the idle
+# compression filter replays the output through it to find the events that
+# change the screen, and the backspace removal filter compares screens with it.
 termstate = { workspace = true }
 # The width of a character in terminal cells, for the runs of the screen model,
 # and for the width of a match that the redaction filter masks.

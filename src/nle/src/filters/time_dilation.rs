@@ -8,7 +8,7 @@
 //! step. Different regions can have different speeds.
 
 use crate::error::NleError;
-use crate::pipeline::{FilterRegistry, Mark, Span};
+use crate::pipeline::{FilterRegistry, Mark, Span, SpanContext};
 use crate::types::{AppliedFilter, Event, FilterKind, FilterOptions, FilterRegion};
 
 /// The kind of the time dilation filter.
@@ -82,7 +82,7 @@ pub fn register(registry: &mut FilterRegistry) {
 /// Divide the times of the events and the marks, and the length of a span, by
 /// the speed option. Each event keeps its data, its type, and its place in the
 /// list.
-fn dilate(span: Span, options: &FilterOptions) -> Result<Span, String> {
+fn dilate(span: Span, _context: SpanContext<'_>, options: &FilterOptions) -> Result<Span, String> {
     let value = options
         .get(SPEED_OPTION)
         .and_then(serde_json::Value::as_f64)

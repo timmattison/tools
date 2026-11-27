@@ -36,7 +36,7 @@
 //! keeps its text.
 
 use crate::error::NleError;
-use crate::pipeline::{FilterRegistry, Mark, Span};
+use crate::pipeline::{FilterRegistry, Mark, Span, SpanContext};
 use crate::types::{
     AppliedFilter, Event, EventType, FilterKind, FilterOptions, FilterRegion, Seconds,
 };
@@ -190,7 +190,11 @@ impl Normalization {
 
 /// Put the keys of each burst at the rate, and move the other events and the
 /// marks with them, by the rules of the module doc.
-fn normalize(span: Span, options: &FilterOptions) -> Result<Span, String> {
+fn normalize(
+    span: Span,
+    _context: SpanContext<'_>,
+    options: &FilterOptions,
+) -> Result<Span, String> {
     let settings = Normalization::from_options(options)?;
     let keys = new_keys(&span.events, &settings);
     let length = new_time(span.length, keys.last().copied(), None);

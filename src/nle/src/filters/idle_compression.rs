@@ -27,7 +27,7 @@ use termstate::{Cell, TerminalState, TerminalTheme};
 
 use crate::error::NleError;
 use crate::format::format_duration;
-use crate::pipeline::{FilterRegistry, Mark, Span};
+use crate::pipeline::{FilterRegistry, Mark, Span, SpanContext};
 use crate::types::{AppliedFilter, Event, EventType, FilterKind, FilterOptions, FilterRegion};
 
 /// The kind of the idle compression filter.
@@ -245,7 +245,11 @@ pub fn register(registry: &mut FilterRegistry) {
 
 /// Compress the idle periods of a span by the settings in `options`: the
 /// steps in the documentation of this module.
-fn compress(span: Span, options: &FilterOptions) -> Result<Span, String> {
+fn compress(
+    span: Span,
+    _context: SpanContext<'_>,
+    options: &FilterOptions,
+) -> Result<Span, String> {
     let settings = settings_from(options)?;
     let activity = activity_times(&span.events, settings)?;
     let last_event = span.events.iter().map(|e| e.time).fold(0.0, f64::max);

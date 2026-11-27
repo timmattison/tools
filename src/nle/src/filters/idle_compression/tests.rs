@@ -548,7 +548,7 @@ fn an_earlier_mark_moves_with_the_time_that_it_is_in() {
     let mut registry = filters::registry();
     registry.register_span(
         FilterKind::new("mark"),
-        |mut span: Span, _: &FilterOptions| {
+        |mut span: Span, _, _: &FilterOptions| {
             span.marks.push(Mark {
                 time: 4.0,
                 label: "earlier".to_string(),

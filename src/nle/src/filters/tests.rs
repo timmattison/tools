@@ -561,7 +561,7 @@ fn marking(times: &[f64]) -> FilterRegistry {
     let mut registry = registry();
     registry.register_span(
         FilterKind::new(MARKER),
-        move |mut span: Span, _: &FilterOptions| {
+        move |mut span: Span, _, _: &FilterOptions| {
             span.marks.extend(times.iter().map(|&time| Mark {
                 time,
                 label: format!("m{time}"),

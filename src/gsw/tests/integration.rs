@@ -1507,9 +1507,9 @@ mod pull_indicator {
     use super::{gsw_command, run_git, setup_repo};
 
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
+    use gitscratch::testing::executable::write_executable;
     use tempfile::TempDir;
 
     /// The branch of the fixture of [`setup_repo`].
@@ -1553,8 +1553,7 @@ mod pull_indicator {
         let bin = root.join("bin");
         fs::create_dir(&bin).expect("make the bin directory");
         let gh = bin.join("gh");
-        fs::write(&gh, script).expect("write the gh stub");
-        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("make the stub run");
+        write_executable(&gh, script).expect("write the gh stub");
         bin
     }
 

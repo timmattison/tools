@@ -731,7 +731,7 @@ fn marking_registry() -> (Arc<FilterRegistry>, Arc<std::sync::atomic::AtomicUsiz
     let renders = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&renders);
     let mut registry = FilterRegistry::new();
-    registry.register_span(FilterKind::new(MARK_KIND), move |mut span, _| {
+    registry.register_span(FilterKind::new(MARK_KIND), move |mut span, _, _| {
         counter.fetch_add(1, Ordering::SeqCst);
         span.marks.push(Mark {
             time: 1.0,
@@ -843,7 +843,7 @@ fn a_render_that_fails_is_not_kept_and_the_next_read_renders_again() {
     let renders = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&renders);
     let mut registry = FilterRegistry::new();
-    registry.register_span(FilterKind::new("flaky"), move |mut span, _| {
+    registry.register_span(FilterKind::new("flaky"), move |mut span, _, _| {
         if counter.fetch_add(1, Ordering::SeqCst) == 0 {
             return Err("the first render fails".to_string());
         }
