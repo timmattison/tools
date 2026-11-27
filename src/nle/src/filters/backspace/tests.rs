@@ -342,8 +342,9 @@ fn a_range_that_ends_before_the_late_echo_of_a_backspace_keeps_the_backspace() {
 #[test]
 fn with_no_echo_a_backspace_erases_the_newest_typed_key() {
     // Mutant that was run: the rule for a key that changes nothing runs before
-    // the rule for the newest typed key. Then the backspace goes alone and the
-    // typed key `a` stays, and the test fails.
+    // the rule for the newest typed key. The backspace has no output, so it
+    // stays and the stack ends. Then `a`, the backspace and `b` all stay, and
+    // the test fails.
     let events = vec![
         out(0.0, "Password: "),
         input(1.0, "a"),
