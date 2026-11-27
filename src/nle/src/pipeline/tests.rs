@@ -601,6 +601,193 @@ fn render_of_a_clip_whose_end_overflows_the_timeline_fails() {
     );
 }
 
+// Tests of the in-place form.
+
+/// Registers an in-place spy under "spot". The spy records the region view
+/// that it gets, and answers its events with one more event, "mark", at
+/// `at(view)`.
+fn in_place_spy(at: fn(RegionView) -> f64) -> (FilterRegistry, TestArc<Mutex<Vec<RegionView>>>) {
+    let seen = TestArc::new(Mutex::new(Vec::new()));
+    let captured = TestArc::clone(&seen);
+    let mut registry = FilterRegistry::new();
+    registry.register_in_place(kind("spot"), move |events, view, _| {
+        captured.lock().unwrap().push(view);
+        let mut answer = events.to_vec();
+        answer.push(Event {
+            time: at(view),
+            event_type: EventType::Output,
+            data: "mark".to_string(),
+        });
+        Ok(answer)
+    });
+    (registry, seen)
+}
+
+fn with_data(events: &[Event]) -> Vec<(f64, &str)> {
+    events.iter().map(|e| (e.time, e.data.as_str())).collect()
+}
+
+#[test]
+fn an_in_place_filter_keeps_the_later_events_where_they_are() {
+    let (registry, _seen) = in_place_spy(|view| view.length);
+
+    let out = registry
+        .run(
+            events(&[0.5, 1.0, 1.5, 2.5, 3.5]),
+            &[range("spot", 1.0, 2.0)],
+        )
+        .unwrap();
+
+    // The mark is at the end of the region, before the events after it, and
+    // nothing moves.
+    assert_eq!(
+        with_data(&out),
+        vec![
+            (0.5, "e0.5"),
+            (1.0, "e1"),
+            (1.5, "e1.5"),
+            (2.0, "mark"),
+            (2.5, "e2.5"),
+            (3.5, "e3.5"),
+        ]
+    );
+}
+
+#[test]
+fn an_in_place_mark_at_the_region_end_comes_before_an_event_at_that_time() {
+    let (registry, _seen) = in_place_spy(|view| view.length);
+
+    let out = registry
+        .run(events(&[0.0, 1.0, 2.0]), &[range("spot", 1.0, 2.0)])
+        .unwrap();
+
+    assert_eq!(
+        with_data(&out),
+        vec![(0.0, "e0"), (1.0, "e1"), (2.0, "mark"), (2.0, "e2")]
+    );
+}
+
+#[test]
+fn an_in_place_mark_at_the_region_end_lands_on_the_end_when_the_sum_rounds_up() {
+    // The length is 5.79 - 1.73, and that length plus 1.73 is
+    // 5.790000000000001 in f64, one step after the end of the region.
+    let (start, end) = std::hint::black_box((1.73, 5.79));
+    assert!((end - start) + start > end);
+    let (registry, _seen) = in_place_spy(|view| view.length);
+
+    let out = registry
+        .run(events(&[0.0, start, end]), &[range("spot", start, end)])
+        .unwrap();
+
+    assert_eq!(
+        with_data(&out),
+        vec![
+            (0.0, "e0"),
+            (1.73, "e1.73"),
+            (5.79, "mark"),
+            (5.79, "e5.79")
+        ]
+    );
+}
+
+#[test]
+fn an_in_place_filter_gets_the_length_and_the_openness_of_its_region() {
+    let cases = [
+        // The region All reaches the end of the timeline at 4.
+        (all("spot"), 4.0, true),
+        // The event at 4 comes after the range.
+        (range("spot", 1.0, 2.0), 1.0, false),
+        (range("spot", 1.0, 4.0), 3.0, false),
+        // The range holds the last event and reaches past the end.
+        (range("spot", 3.0, 10.0), 1.0, true),
+        // The range starts after the end of the timeline.
+        (range("spot", 5.0, 6.0), 0.0, true),
+    ];
+    for (filter, length, open) in cases {
+        let (registry, seen) = in_place_spy(|_| 0.0);
+
+        registry
+            .run(events(&[0.0, 1.0, 4.0]), std::slice::from_ref(&filter))
+            .unwrap();
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![RegionView { length, open }],
+            "{:?}",
+            filter.region
+        );
+    }
+}
+
+#[test]
+fn render_gives_an_in_place_filter_the_end_of_the_project_and_keeps_the_duration() {
+    // The project ends at 10, after its last event at 8.
+    let (registry, seen) = in_place_spy(|view| view.length);
+
+    let rendered = registry
+        .render(&one_clip_project(vec![range("spot", 2.0, 9.0)]))
+        .unwrap();
+
+    // The silence from 9 to 10 comes after the range, so the range is not
+    // open, and the mark is at its end.
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![RegionView {
+            length: 7.0,
+            open: false
+        }]
+    );
+    assert_eq!(times(&rendered.events), vec![0.0, 8.0, 9.0]);
+    assert_eq!(rendered.duration, 10.0);
+
+    let (registry, seen) = in_place_spy(|view| view.length);
+    let rendered = registry
+        .render(&one_clip_project(vec![all("spot")]))
+        .unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![RegionView {
+            length: 10.0,
+            open: true
+        }]
+    );
+    assert_eq!(times(&rendered.events), vec![0.0, 8.0, 10.0]);
+    assert_eq!(rendered.duration, 10.0);
+}
+
+#[test]
+fn an_in_place_filter_that_fails_fails_the_run_with_its_kind_and_message() {
+    let mut registry = FilterRegistry::new();
+    registry.register_in_place(kind("grumpy"), |_, _, _| Err("bad options".to_string()));
+
+    let result = registry.run(events(&[1.0]), &[all("grumpy")]);
+
+    match result {
+        Err(NleError::RenderError(message)) => {
+            assert!(message.contains("grumpy"), "{message}");
+            assert!(message.contains("bad options"), "{message}");
+        }
+        other => panic!("expected a RenderError, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_in_place_filter_cannot_answer_a_time_outside_its_region() {
+    let answers: [fn(RegionView) -> f64; 3] = [|view| view.length + 0.5, |_| -0.5, |_| f64::NAN];
+    for at in answers {
+        let (registry, _seen) = in_place_spy(at);
+
+        let result = registry.run(events(&[0.0, 1.0, 1.5, 4.0]), &[range("spot", 1.0, 2.0)]);
+
+        match result {
+            Err(NleError::RenderError(message)) => {
+                assert!(message.contains("\"spot\" answered the time"), "{message}");
+            }
+            other => panic!("expected a RenderError, got {other:?}"),
+        }
+    }
+}
+
 // Tests of the span filter: the length and the shift.
 
 /// A span filter that multiplies each time and the length by `factor`.
