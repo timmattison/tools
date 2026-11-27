@@ -61,11 +61,20 @@ pub struct Screen {
 impl Screen {
     /// The screen of `state`.
     pub fn of(state: &termstate::TerminalState) -> Self {
+        let cursor = state
+            .is_cursor_visible()
+            .then(|| state.get_cursor_position());
         let rows = state
             .get_grid()
             .iter()
-            .map(|cells| Row {
-                runs: runs_of(state, cells),
+            .enumerate()
+            .map(|(row_index, cells)| {
+                let cursor_column = cursor
+                    .filter(|&(_, cursor_row)| cursor_row == row_index)
+                    .map(|(column, _)| column);
+                Row {
+                    runs: runs_of(state, cells, cursor_column),
+                }
             })
             .collect();
         let theme = state.get_theme();
@@ -104,10 +113,22 @@ fn style_of(state: &termstate::TerminalState, cell: &termstate::Cell) -> Style {
 }
 
 /// The runs of one row of cells. Cells next to each other with one style merge.
-fn runs_of(state: &termstate::TerminalState, cells: &[termstate::Cell]) -> Vec<Run> {
+/// The cell at `cursor_column` swaps its foreground and its background.
+fn runs_of(
+    state: &termstate::TerminalState,
+    cells: &[termstate::Cell],
+    cursor_column: Option<usize>,
+) -> Vec<Run> {
     let mut runs: Vec<Run> = Vec::new();
-    for cell in cells {
-        let style = style_of(state, cell);
+    for (column, cell) in cells.iter().enumerate() {
+        let mut style = style_of(state, cell);
+        if cursor_column == Some(column) {
+            style = Style {
+                foreground: style.background,
+                background: style.foreground,
+                ..style
+            };
+        }
         match runs.last_mut() {
             Some(run) if run.style == style && !run.single_cell => run.text.push(cell.ch),
             _ => runs.push(Run {
