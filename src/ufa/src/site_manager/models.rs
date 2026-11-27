@@ -32,6 +32,10 @@ pub struct Host {
     pub other_fields: serde_json::Map<String, serde_json::Value>,
 }
 
+/// The key of the software version that a host reports beside a null
+/// `firmware_version`, in the `network-server` example of the spec.
+const VERSION_KEY: &str = "version";
+
 /// The state that a host reports about itself.
 ///
 /// The spec gives `reportedState` no schema, so it promises no field in it.
@@ -42,6 +46,10 @@ pub struct ReportedState {
     /// The controllers of the host, as raw JSON. The spec gives no shape for
     /// them, and nothing in this crate reads one.
     pub controllers: Option<Vec<serde_json::Value>>,
+    /// The firmware version, read from `firmwareVersion` or from
+    /// `firmware_version`. The `network-server` example of the spec spells
+    /// the key in snake case. It is written back as `firmwareVersion`.
+    #[serde(alias = "firmware_version")]
     pub firmware_version: Option<String>,
     pub hostname: Option<String>,
     pub model: Option<String>,
@@ -49,6 +57,23 @@ pub struct ReportedState {
     /// Each other field the host reported, kept verbatim.
     #[serde(flatten)]
     pub other_fields: serde_json::Map<String, serde_json::Value>,
+}
+
+impl ReportedState {
+    /// The firmware version that the host reported.
+    ///
+    /// # Returns
+    ///
+    /// The firmware version when the host set one. The text of `version`
+    /// when the firmware version is absent or null. `None` when the host
+    /// set neither.
+    pub fn firmware(&self) -> Option<&str> {
+        self.firmware_version.as_deref().or_else(|| {
+            self.other_fields
+                .get(VERSION_KEY)
+                .and_then(serde_json::Value::as_str)
+        })
+    }
 }
 
 /// What the account keeps about a host: its name and its note, and the role,

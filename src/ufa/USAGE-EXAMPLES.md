@@ -82,6 +82,10 @@ leaves `reportedState` out for a console that never reported one, and it leaves 
 for a console it has no address for, so an example that reads either one supplies a fallback with
 `//`. The fallbacks below are the words the table itself prints, `Unknown` and `N/A`.
 
+The firmware version is `.reportedState.firmwareVersion`, also for a host that sent the key as
+`firmware_version`. A host that sets no firmware version can report `.reportedState.version`,
+and the Firmware column of the table then shows that version.
+
 An account with no consoles answers `[]`, and the note that says so goes to standard error. The
 recipes below then print nothing, and they do not fail.
 

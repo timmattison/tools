@@ -1,5 +1,5 @@
 use crate::output::{render_output, render_vec_table, OutputFormat, Report};
-use crate::site_manager::models::Host;
+use crate::site_manager::models::{Host, ReportedState};
 use crate::site_manager::SiteManagerClient;
 use anyhow::Result;
 use clap::Subcommand;
@@ -56,8 +56,9 @@ impl From<&Host> for HostRow {
                 .and_then(|state| state.model.clone())
                 .unwrap_or_else(|| UNKNOWN.to_string()),
             firmware: reported
-                .and_then(|state| state.firmware_version.clone())
-                .unwrap_or_else(|| UNKNOWN.to_string()),
+                .and_then(ReportedState::firmware)
+                .unwrap_or(UNKNOWN)
+                .to_string(),
             ip_address: host
                 .ip_address
                 .clone()
@@ -95,9 +96,10 @@ fn last_seen(changed: Option<&str>) -> String {
 
 /// Render the cloud host listing.
 ///
-/// `--output json` answers with the hosts exactly as the API reported them,
-/// rather than the columns the table happens to show, so a script reading the
-/// output keeps every field.
+/// `--output json` answers with the hosts as the API reported them, rather
+/// than the columns the table happens to show, so a script reading the output
+/// keeps every field. One key changes: a firmware version that a host sent as
+/// `firmware_version` is written as `firmwareVersion`.
 ///
 /// # Arguments
 ///
@@ -215,7 +217,6 @@ fn host_report(host: &Host, format: OutputFormat) -> Result<Report> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::site_manager::models::ReportedState;
 
     /// Box-drawing corner produced by the crate's table renderer.
     const TABLE_CORNER: char = '┌';
