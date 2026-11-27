@@ -45,3 +45,12 @@ pub fn applied(region: FilterRegion, options: &HudOptions) -> AppliedFilter {
     )
 )]
 mod timeline;
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the filter function uses the painter in a later commit of issue #161"
+    )
+)]
+mod paint;
