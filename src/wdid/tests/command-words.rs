@@ -1,6 +1,8 @@
 //! Tests of the command words of one command line.
 
-use wdid::command_words::{command_words, Aliases, CommandWord, Parsed};
+use wdid::command_words::{
+    command_words, parse_line, AliasDefinition, AliasKind, AliasUse, Aliases, CommandWord, Parsed,
+};
 
 /// Runs every row of a table. Each row is a line and the value that
 /// `command_words` must give for it, with an empty alias table.
@@ -1038,5 +1040,230 @@ fn a_suffix_alias_works_with_the_other_aliases() {
             ("y.md", words(vec![word("glow", ["y.md"]).through("*.md")])),
             ("a.rs", words(vec![word("y.rs", ["a.rs"]).through("*.rs")])),
         ],
+    );
+}
+
+/// Makes an alias use.
+fn used(name: &str, through: Option<&str>) -> AliasUse {
+    AliasUse {
+        name: name.to_owned(),
+        through: through.map(str::to_owned),
+    }
+}
+
+/// Gives the alias uses of a line, sorted, so the order of the walk does not
+/// matter. Gives `None` when the parser refuses the line.
+fn uses(line: &str, aliases: &Aliases) -> Option<Vec<AliasUse>> {
+    parse_line(line, aliases).map(|parsed| {
+        let mut list = parsed.aliases;
+        list.sort();
+        list
+    })
+}
+
+/// Sorts the expected alias uses, as `uses` sorts the real ones.
+fn sorted(mut list: Vec<AliasUse>) -> Option<Vec<AliasUse>> {
+    list.sort();
+    Some(list)
+}
+
+/// A regular alias that the person typed gives one use with no `through`.
+#[test]
+fn a_typed_regular_alias_is_one_use() {
+    let mut aliases = Aliases::new();
+    aliases.insert("wt", "cwt");
+    assert_eq!(uses("wt x", &aliases), sorted(vec![used("wt", None)]));
+}
+
+/// An alias in the value of another alias is a use through the typed alias.
+#[test]
+fn an_alias_of_an_alias_is_a_use_through_the_typed_one() {
+    let mut aliases = Aliases::new();
+    aliases.insert("wtf", "wt -f");
+    aliases.insert("wt", "cwt");
+    assert_eq!(
+        uses("wtf", &aliases),
+        sorted(vec![used("wtf", None), used("wt", Some("wtf"))])
+    );
+}
+
+/// With three levels, `through` stays the name that the person typed.
+#[test]
+fn three_levels_all_name_the_typed_alias() {
+    let mut aliases = Aliases::new();
+    aliases.insert("a", "b");
+    aliases.insert("b", "c");
+    aliases.insert("c", "d");
+    assert_eq!(
+        uses("a", &aliases),
+        sorted(vec![
+            used("a", None),
+            used("b", Some("a")),
+            used("c", Some("a")),
+        ])
+    );
+}
+
+/// A self-alias is one use, and a cycle ends after each name expanded once.
+#[test]
+fn a_self_alias_is_one_use_and_a_cycle_ends() {
+    let mut aliases = Aliases::new();
+    aliases.insert("ls", "ls -G");
+    assert_eq!(uses("ls x", &aliases), sorted(vec![used("ls", None)]));
+    let mut cycle = Aliases::new();
+    cycle.insert("a", "b");
+    cycle.insert("b", "a");
+    assert_eq!(
+        uses("a", &cycle),
+        sorted(vec![used("a", None), used("b", Some("a"))])
+    );
+}
+
+/// A global alias in an argument is one use for each occurrence.
+#[test]
+fn a_global_alias_in_an_argument_is_one_use_each_time() {
+    let mut aliases = Aliases::new();
+    aliases.insert_global("G", "| prhash");
+    assert_eq!(uses("ls G", &aliases), sorted(vec![used("G", None)]));
+    assert_eq!(
+        uses("ls G; ls G", &aliases),
+        sorted(vec![used("G", None), used("G", None)])
+    );
+}
+
+/// A global alias in the value of a regular alias is a use through it.
+#[test]
+fn a_global_alias_in_a_regular_value_is_a_use_through_it() {
+    let mut aliases = Aliases::new();
+    aliases.insert("l", "ls G");
+    aliases.insert_global("G", "| cat");
+    assert_eq!(
+        uses("l", &aliases),
+        sorted(vec![used("l", None), used("G", Some("l"))])
+    );
+}
+
+/// A global alias in the value of a global alias is a use through the outer one.
+#[test]
+fn a_global_alias_in_a_global_value_is_a_use_through_the_outer_one() {
+    let mut aliases = Aliases::new();
+    aliases.insert_global("G1", "G2 x");
+    aliases.insert_global("G2", "| prhash");
+    assert_eq!(
+        uses("ls G1", &aliases),
+        sorted(vec![used("G1", None), used("G2", Some("G1"))])
+    );
+}
+
+/// A suffix alias is a use with its marker as the name.
+#[test]
+fn a_suffix_alias_is_a_use_named_by_its_marker() {
+    let mut aliases = Aliases::new();
+    aliases.insert_suffix("md", "glow");
+    assert_eq!(
+        uses("README.md", &aliases),
+        sorted(vec![used("*.md", None)])
+    );
+}
+
+/// The trailing-blank rule expands the next word, and the person typed it.
+#[test]
+fn the_trailing_blank_rule_gives_a_use_of_the_next_word() {
+    let mut aliases = Aliases::new();
+    aliases.insert("sudo", "sudo ");
+    aliases.insert("ll", "ls -l");
+    assert_eq!(
+        uses("sudo ll", &aliases),
+        sorted(vec![used("sudo", None), used("ll", None)])
+    );
+}
+
+/// Quoted text and an escaped name give no use.
+#[test]
+fn quoted_text_gives_no_use() {
+    let mut aliases = Aliases::new();
+    aliases.insert("wt", "cwt");
+    for line in ["'wt'", "\\wt", "echo \"wt\"", "git commit -m \"wt x\""] {
+        assert_eq!(uses(line, &aliases), sorted(vec![]), "line: {line:?}");
+    }
+}
+
+/// An alias inside a substitution is a use.
+#[test]
+fn an_alias_inside_a_substitution_is_a_use() {
+    let mut aliases = Aliases::new();
+    aliases.insert("wt", "cwt");
+    assert_eq!(uses("echo $(wt)", &aliases), sorted(vec![used("wt", None)]));
+}
+
+/// A line that the parser refuses gives no result at all.
+#[test]
+fn a_refused_line_gives_none() {
+    let mut aliases = Aliases::new();
+    aliases.insert("wt", "cwt");
+    assert_eq!(parse_line("wt $(", &aliases), None);
+}
+
+/// The words of `parse_line` are the words of `command_words`.
+#[test]
+fn the_words_of_parse_line_are_the_words_of_command_words() {
+    let mut aliases = Aliases::new();
+    aliases.insert("wtf", "wt -f");
+    aliases.insert("wt", "cwt");
+    aliases.insert_global("G", "| cat");
+    for line in ["wtf a | wt b", "wtf", "ls G", "echo $(wt)", "plain x"] {
+        let parsed = parse_line(line, &aliases).map(|parsed| parsed.words);
+        let expected = match command_words(line, &aliases) {
+            Parsed::Words(list) => Some(list),
+            Parsed::Unparsed => None,
+        };
+        assert_eq!(parsed, expected, "line: {line:?}");
+    }
+}
+
+/// `definitions` gives each alias with its kind, sorted by name. The name of a
+/// suffix alias has its marker.
+#[test]
+fn definitions_give_each_alias_with_its_kind_sorted_by_name() {
+    let mut aliases = Aliases::new();
+    aliases.insert("ll", "ls -l");
+    aliases.insert_global("G", "| grep");
+    aliases.insert_suffix("md", "glow");
+    let expected = vec![
+        AliasDefinition {
+            name: "*.md".to_owned(),
+            kind: AliasKind::Suffix,
+            value: "glow".to_owned(),
+        },
+        AliasDefinition {
+            name: "G".to_owned(),
+            kind: AliasKind::Global,
+            value: "| grep".to_owned(),
+        },
+        AliasDefinition {
+            name: "ll".to_owned(),
+            kind: AliasKind::Regular,
+            value: "ls -l".to_owned(),
+        },
+    ];
+    assert_eq!(aliases.definitions(), expected);
+}
+
+#[test]
+fn definitions_of_an_empty_table_are_empty() {
+    assert_eq!(Aliases::new().definitions(), Vec::new());
+}
+
+#[test]
+fn definitions_keep_a_multibyte_name_and_value() {
+    let mut aliases = Aliases::new();
+    aliases.insert("日本", "echo 日本語 🎉");
+    assert_eq!(
+        aliases.definitions(),
+        vec![AliasDefinition {
+            name: "日本".to_owned(),
+            kind: AliasKind::Regular,
+            value: "echo 日本語 🎉".to_owned(),
+        }]
     );
 }
