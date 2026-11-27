@@ -387,6 +387,11 @@ const CAN: u8 = 0x18;
 const SUB: u8 = 0x1a;
 /// The last C0 control byte.
 const LAST_C0: u8 = 0x1f;
+/// The byte after `ESC` that starts a DCS string.
+const DCS_INTRODUCER: u8 = b'P';
+/// The bytes that move the parser out of the escape state. Each other byte
+/// runs there, or the parser ignores it.
+const ESCAPE_EXIT: std::ops::RangeInclusive<u8> = 0x20..=0x7e;
 
 /// A performer that ignores each callback. It serves the replay of `pending`.
 struct Discard;
@@ -714,19 +719,30 @@ impl TerminalState {
     ///
     /// The text starts at the last `ESC` of the unfinished sequence. An `ESC`
     /// moves the parser from each state to the escape state and clears its
-    /// parameters, thus the bytes before the last `ESC` do not matter. The text
-    /// holds no C0 control, because inside a sequence a control runs and does
+    /// parameters, thus the bytes before the last `ESC` do not matter.
+    ///
+    /// Before the `P` of a DCS, and in each other sequence, the text holds no
+    /// C0 control. There a control runs, or the parser ignores it, and it does
     /// not change the state. A terminal that reads the text then runs no
-    /// control twice.
+    /// control twice. After the `P` of a DCS, the text keeps each byte. vte 0.15
+    /// runs no control in a DCS, and it gives each control of the payload to
+    /// `put`.
     pub fn unfinished_sequence(&self) -> String {
         let Some(start) = self.pending.iter().rposition(|byte| *byte == ESC) else {
             return String::new();
         };
         let tail = self.pending.get(start..).unwrap_or_default();
+        let dcs_at = tail
+            .iter()
+            .position(|byte| ESCAPE_EXIT.contains(byte))
+            .filter(|&index| tail.get(index) == Some(&DCS_INTRODUCER));
         let kept: Vec<u8> = tail
             .iter()
-            .copied()
-            .filter(|byte| *byte == ESC || *byte > LAST_C0)
+            .enumerate()
+            .filter(|&(index, &byte)| {
+                byte == ESC || byte > LAST_C0 || dcs_at.is_some_and(|at| index > at)
+            })
+            .map(|(_, &byte)| byte)
             .collect();
         String::from_utf8_lossy(&kept).into_owned()
     }
