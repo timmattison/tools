@@ -1495,3 +1495,58 @@ async fn a_row_names_each_option_that_is_not_the_default() {
     );
     assert!(!page.contains("role=\"alert\""), "{page}");
 }
+
+#[tokio::test]
+async fn removing_a_color_scheme_row_restores_the_theme_background() {
+    let mut window = open_recording().await;
+    let control = window.playhead_control();
+    window.type_into(control, "1.0");
+    window.apply_color_scheme("", "", DEFAULT_MENUS_WITH_LIGHT);
+    assert!(window.html().contains("background-color:#fdf6e3"));
+
+    window.click(window.remove_button());
+
+    let page = window.html();
+    assert!(!page.contains("Solarized Light</span>"), "{page}");
+    assert!(!page.contains("background-color:#fdf6e3"), "{page}");
+    assert!(
+        page.contains("class=\"preview-screen\" style=\"background-color:#000000\""),
+        "{page}"
+    );
+}
+
+#[tokio::test]
+async fn a_bad_color_scheme_range_shows_the_reason_and_adds_no_row() {
+    let cases = [
+        (("abc", "20"), "the start is not a number"),
+        (("10", ""), "the end is not a number"),
+        (("10", "5"), "the end must come after the start"),
+        (("-1", "20"), "Invalid time: -1"),
+    ];
+    for ((start, end), reason) in cases {
+        let mut window = open_recording().await;
+        window.apply_color_scheme(start, end, DEFAULT_MENUS_WITH_LIGHT);
+        let page = window.html();
+        let banner = format!("Failed to change the color scheme: {reason}");
+        assert!(page.contains(&banner), "{banner} missing in {page}");
+        assert!(!page.contains("class=\"color-scheme-row\""), "{page}");
+    }
+}
+
+#[tokio::test]
+async fn a_speed_row_and_a_color_scheme_row_keep_their_own_remove() {
+    let mut window = open_recording().await;
+    window.apply_speed("10", "20", "2");
+    let remove_speed = window.remove_button();
+    window.apply_color_scheme("", "", DEFAULT_MENUS_WITH_LIGHT);
+    let remove_color = window.remove_button();
+
+    window.click(remove_color);
+    let page = window.html();
+    assert!(page.contains(&speed_row("10 s to 20 s", "2")), "{page}");
+    assert!(!page.contains("Solarized Light</span>"), "{page}");
+
+    window.click(remove_speed);
+    let page = window.html();
+    assert!(!page.contains(" at 2\u{d7}"), "{page}");
+}
