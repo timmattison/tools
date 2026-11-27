@@ -356,6 +356,13 @@ pub enum ShellError {
     /// The output has no start marker or no end marker.
     #[error("the shell output does not hold the start and end markers of wdid")]
     NoMarkers,
+    /// wdid cannot make the temporary `ZDOTDIR` that records the origin of
+    /// each alias.
+    #[error("cannot make the temporary ZDOTDIR for zsh: {source}")]
+    Zdotdir {
+        /// The error of the system.
+        source: std::io::Error,
+    },
 }
 
 /// One line of the output that starts with the marker, without the marker.

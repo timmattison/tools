@@ -470,6 +470,9 @@ fn no_error_message_names_a_flag_of_one_report() {
             stderr: "boom".to_owned(),
         },
         ShellError::NoMarkers,
+        ShellError::Zdotdir {
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        },
     ];
     let texts: Vec<String> = errors.iter().map(ToString::to_string).collect();
     assert_eq!(
@@ -481,6 +484,7 @@ fn no_error_message_names_a_flag_of_one_report() {
             "the shell did not stop in 30 seconds",
             "the shell failed (exit status: 3): boom",
             "the shell output does not hold the start and end markers of wdid",
+            "cannot make the temporary ZDOTDIR for zsh: permission denied",
         ]
     );
 }
@@ -1106,7 +1110,11 @@ source $ZSH_CUSTOM/mine.zsh\n\
 eval 'evalfn() { prcp \"$@\" }'\n\
 source <(print -r -- 'procfn() { prhash }')\n\
 builtin alias sneaky=ls\n\
-myfn() { cwt }\n";
+myfn() { cwt }\n\
+alias -g G='| grep'\n\
+alias -s md=glow\n\
+alias -- -='cd -'\n\
+source <(print -r -- 'alias procalias=y')\n";
 
 /// Makes a home with [`OMZ_ZSHRC`], the file that it sources, a plugin of the
 /// stand-in of oh-my-zsh, and a file in its custom directory.
@@ -1274,4 +1282,308 @@ fn a_real_bash_gives_the_file_of_a_function_and_no_origin_for_an_alias() {
     assert_eq!(alias_origin(&definitions, "wtm", AliasKind::Regular), None);
     assert_eq!(definitions.places.home, Some(home.path().to_path_buf()));
     assert_eq!(definitions.places.zsh, None);
+}
+
+/// The start of the name of each temporary `ZDOTDIR`.
+const ZDOTDIR_PREFIX: &str = "wdid-zdotdir-";
+
+/// Says if `directory` has the name of a temporary `ZDOTDIR`.
+fn is_temporary_zdotdir(directory: &Path) -> bool {
+    directory
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with(ZDOTDIR_PREFIX))
+}
+
+/// Asserts that the alias `name` of the kind `kind` in [`omz_home`] has
+/// `expected` as its origin, and that it is mine when `mine` is true.
+fn assert_omz_alias(name: &str, kind: AliasKind, expected: Option<(&str, u32)>, mine: bool) {
+    let Some((home, definitions)) = omz_definitions() else {
+        return;
+    };
+    let found = alias_origin(&definitions, name, kind);
+    let expected = expected.map(|(file, line)| origin(home.path().join(file), Some(line)));
+    assert_eq!(found, expected, "{name}");
+    assert_eq!(definitions.places.is_mine(found.as_ref()), mine, "{name}");
+}
+
+#[test]
+fn an_alias_in_zshrc_has_its_file_and_its_line_and_is_mine() {
+    assert_omz_alias("wt", AliasKind::Regular, Some((".zshrc", 3)), true);
+}
+
+#[test]
+fn an_alias_in_a_file_that_zshrc_sources_is_mine() {
+    assert_omz_alias(
+        "fromsourced",
+        AliasKind::Regular,
+        Some(("sourced.zsh", 1)),
+        true,
+    );
+}
+
+#[test]
+fn an_alias_of_an_oh_my_zsh_plugin_is_not_mine() {
+    assert_omz_alias(
+        "gst",
+        AliasKind::Regular,
+        Some(("omz/plugins/git/git.plugin.zsh", 1)),
+        false,
+    );
+}
+
+#[test]
+fn an_alias_in_the_custom_directory_of_oh_my_zsh_is_mine() {
+    assert_omz_alias(
+        "cust",
+        AliasKind::Regular,
+        Some(("omz/custom/mine.zsh", 1)),
+        true,
+    );
+}
+
+/// `builtin alias` goes around the wrapper function, thus zsh keeps no
+/// origin. An unknown origin is mine.
+#[test]
+fn an_alias_from_builtin_alias_has_no_origin_and_is_mine() {
+    let Some((_home, definitions)) = omz_definitions() else {
+        return;
+    };
+    assert_eq!(definitions.aliases.get("sneaky"), Some("ls"));
+    assert_omz_alias("sneaky", AliasKind::Regular, None, true);
+}
+
+#[test]
+fn a_global_alias_a_suffix_alias_and_an_alias_after_two_dashes_get_their_lines() {
+    assert_omz_alias("G", AliasKind::Global, Some((".zshrc", 11)), true);
+    assert_omz_alias("*.md", AliasKind::Suffix, Some((".zshrc", 12)), true);
+    assert_omz_alias("-", AliasKind::Regular, Some((".zshrc", 13)), true);
+}
+
+#[test]
+fn an_alias_from_a_process_substitution_is_in_dev_fd_and_is_not_mine() {
+    let Some((_home, definitions)) = omz_definitions() else {
+        return;
+    };
+    let found = alias_origin(&definitions, "procalias", AliasKind::Regular).expect("an origin");
+    assert!(found.file.starts_with("/dev/fd"), "{found:?}");
+    assert_eq!(found.line, Some(1));
+    assert!(!definitions.places.is_mine(Some(&found)));
+}
+
+/// The wrapper function `alias` records the origins, and the script removes
+/// it before the listing. It is not a definition of the person.
+#[test]
+fn the_wrapper_of_alias_is_not_a_function_of_the_shell() {
+    let Some((_home, definitions)) = omz_definitions() else {
+        return;
+    };
+    assert!(!definitions.functions.contains_key("alias"));
+    assert!(!definitions.function_lines.contains_key("alias"));
+    assert!(!definitions.unparsed_functions.contains(&"alias".to_owned()));
+    assert_eq!(definitions.aliases.get("wt"), Some("cwt"));
+}
+
+#[test]
+fn the_real_zshenv_still_runs_and_its_alias_has_its_origin() {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    write_file(home.path(), ".zshenv", "alias envalias='echo env'\n");
+    write_file(home.path(), ".zshrc", "alias rc=x\n");
+    let definitions = read(
+        real_shell(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert_eq!(definitions.aliases.get("envalias"), Some("echo env"));
+    assert_eq!(definitions.aliases.get("rc"), Some("x"));
+    assert_eq!(
+        alias_origin(&definitions, "envalias", AliasKind::Regular),
+        Some(origin(home.path().join(".zshenv"), Some(1)))
+    );
+}
+
+/// Makes a command for a real zsh with `HOME` in `home` and no `ZDOTDIR`, so
+/// zsh reads its files from `HOME`.
+fn zsh_without_zdotdir(path: &Path, home: &Path) -> Command {
+    let mut command = childenv::fixture_command(path);
+    command
+        .env("HOME", home)
+        .env_remove("ZDOTDIR")
+        .env("TERM", "dumb");
+    command
+}
+
+/// The real `.zshenv` can set `ZDOTDIR`. zsh then reads `.zshrc` from that
+/// directory, not from `HOME`.
+#[test]
+fn a_zshenv_that_moves_zdotdir_loads_the_zshrc_of_the_new_directory() {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    write_file(home.path(), ".zshenv", "ZDOTDIR=$HOME/config\n");
+    write_file(home.path(), "config/.zshrc", "alias moved='echo moved'\n");
+    write_file(home.path(), ".zshrc", "alias stale=x\n");
+    let definitions = read(
+        zsh_without_zdotdir(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert_eq!(definitions.aliases.get("moved"), Some("echo moved"));
+    assert_eq!(definitions.aliases.get("stale"), None);
+    assert_eq!(
+        alias_origin(&definitions, "moved", AliasKind::Regular),
+        Some(origin(home.path().join("config/.zshrc"), Some(1)))
+    );
+}
+
+/// The `.zshrc` of the tests that read `ZDOTDIR` in the startup files.
+const ZDOTDIR_ZSHRC: &str = "alias zd=\"${ZDOTDIR-unset}\"\n\
+alias leak=\"${__WDID_REAL_ZDOTDIR-none}\"\n";
+
+/// The startup files see the `ZDOTDIR` of the environment: the same value
+/// when it is set, and no value when it is not set. The variable that carries
+/// the real value does not stay.
+#[test]
+fn the_startup_files_see_the_zdotdir_of_the_environment() {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    write_file(home.path(), ".zshrc", ZDOTDIR_ZSHRC);
+    let set = read(
+        real_shell(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert_eq!(
+        set.aliases.get("zd"),
+        Some(home.path().to_string_lossy().as_ref())
+    );
+    assert_eq!(set.aliases.get("leak"), Some("none"));
+    let unset = read(
+        zsh_without_zdotdir(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert_eq!(unset.aliases.get("zd"), Some("unset"));
+    assert_eq!(unset.aliases.get("leak"), Some("none"));
+}
+
+#[test]
+fn the_temporary_zdotdir_is_gone_after_a_run() {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    write_file(
+        home.path(),
+        ".zshrc",
+        "zmodload zsh/parameter\nprint -r -- \"${functions_source[alias]-}\" > \"$HOME/record\"\n",
+    );
+    read(
+        real_shell(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let recorded = std::fs::read_to_string(home.path().join("record")).unwrap();
+    let zshenv = PathBuf::from(recorded.trim_end());
+    assert_eq!(
+        zshenv.file_name().and_then(|name| name.to_str()),
+        Some(".zshenv"),
+        "{recorded:?}"
+    );
+    let directory = zshenv.parent().unwrap();
+    assert!(is_temporary_zdotdir(directory), "{directory:?}");
+    assert!(!directory.exists(), "{directory:?} is still there");
+}
+
+#[test]
+fn the_temporary_zdotdir_is_gone_after_a_timeout() {
+    let records = tempfile::tempdir().unwrap();
+    let record = records.path().join("record");
+    let copy = records.path().join("zshenv");
+    let (_dir, path) = stub(&format!(
+        "printf '%s' \"$ZDOTDIR\" > {record}\ncp \"$ZDOTDIR/.zshenv\" {copy}\nexec sleep 60",
+        record = shellquote::shell_quote(&record.to_string_lossy()),
+        copy = shellquote::shell_quote(&copy.to_string_lossy()),
+    ));
+    let result = read(
+        childenv::fixture_command(&path),
+        ShellKind::Zsh,
+        Duration::from_secs(1),
+    );
+    assert!(
+        matches!(result, Err(ShellError::TimedOut { seconds: 1 })),
+        "{result:?}"
+    );
+    let directory = PathBuf::from(std::fs::read_to_string(&record).unwrap());
+    assert!(is_temporary_zdotdir(&directory), "{directory:?}");
+    assert!(!directory.exists(), "{directory:?} is still there");
+    let zshenv = std::fs::read_to_string(&copy).unwrap();
+    assert!(zshenv.contains("function alias"), "{zshenv}");
+    assert!(zshenv.contains("builtin alias \"$@\""), "{zshenv}");
+}
+
+#[test]
+fn each_run_has_a_temporary_zdotdir_of_its_own() {
+    let records = tempfile::tempdir().unwrap();
+    let record = records.path().join("record");
+    let (_dir, path) = stub(&format!(
+        "printf '%s\\n' \"$ZDOTDIR\" >> {}\nexit 1",
+        shellquote::shell_quote(&record.to_string_lossy()),
+    ));
+    for _ in 0..2 {
+        let result = read(
+            childenv::fixture_command(&path),
+            ShellKind::Zsh,
+            Duration::from_secs(10),
+        );
+        assert!(
+            matches!(result, Err(ShellError::Failed { .. })),
+            "{result:?}"
+        );
+    }
+    let text = std::fs::read_to_string(&record).unwrap();
+    let directories: Vec<PathBuf> = text.lines().map(PathBuf::from).collect();
+    assert_eq!(directories.len(), 2, "{text}");
+    assert_ne!(directories[0], directories[1], "{text}");
+    for directory in &directories {
+        assert!(is_temporary_zdotdir(directory), "{directory:?}");
+        assert!(!directory.exists(), "{directory:?} is still there");
+    }
+}
+
+/// bash does not read `ZDOTDIR`, thus a bash shell gets the `ZDOTDIR` of its
+/// command unchanged.
+#[test]
+fn a_bash_shell_gets_no_temporary_zdotdir() {
+    let records = tempfile::tempdir().unwrap();
+    let record = records.path().join("record");
+    let (_dir, path) = stub(&format!(
+        "printf '%s' \"$ZDOTDIR\" > {}\nexit 1",
+        shellquote::shell_quote(&record.to_string_lossy()),
+    ));
+    let mut command = childenv::fixture_command(&path);
+    command.env("ZDOTDIR", "/nowhere/zdotdir");
+    let result = read(command, ShellKind::Bash, Duration::from_secs(10));
+    assert!(
+        matches!(result, Err(ShellError::Failed { .. })),
+        "{result:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&record).unwrap(),
+        "/nowhere/zdotdir"
+    );
 }
