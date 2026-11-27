@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
 use gitscratch::testing::{DetachedGitDirRepo, TestRepo};
-use wdid::added::{added_dates, defined_name, read, AddedDates, Defined, Programs};
+use wdid::added::{added_dates, defined_names, read, AddedDates, Defined, Programs};
 
 /// Makes a date.
 fn date(year: i32, month: u32, day: u32) -> NaiveDate {
@@ -34,8 +34,28 @@ fn an_alias_line_defines_its_name() {
         ("alias café='echo é'", "café"),
     ];
     for (line, name) in cases {
-        assert_eq!(defined_name(line), Some(Defined::alias(name)), "{line}");
+        assert_eq!(defined_names(line), vec![Defined::alias(name)], "{line}");
     }
+}
+
+#[test]
+fn an_alias_command_defines_each_of_its_names() {
+    assert_eq!(
+        defined_names("alias gs='git status' gd='git diff'"),
+        vec![Defined::alias("gs"), Defined::alias("gd")]
+    );
+    assert_eq!(
+        defined_names("alias -s md=glow txt=less"),
+        vec![Defined::alias("*.md"), Defined::alias("*.txt")]
+    );
+}
+
+#[test]
+fn an_alias_line_with_an_open_quote_defines_only_its_first_name() {
+    assert_eq!(
+        defined_names("alias q1='open q2=z"),
+        vec![Defined::alias("q1")]
+    );
 }
 
 #[test]
@@ -53,7 +73,7 @@ fn a_function_line_defines_its_name() {
         ("日本() { echo 🎉 }", "日本"),
     ];
     for (line, name) in cases {
-        assert_eq!(defined_name(line), Some(Defined::function(name)), "{line}");
+        assert_eq!(defined_names(line), vec![Defined::function(name)], "{line}");
     }
 }
 
@@ -80,7 +100,7 @@ fn other_lines_define_no_name() {
         "functions[x]=y",
     ];
     for line in lines {
-        assert_eq!(defined_name(line), None, "{line:?}");
+        assert!(defined_names(line).is_empty(), "{line:?}");
     }
 }
 

@@ -1,8 +1,8 @@
 //! The added date of a definition: the date of the oldest commit that adds a
 //! line that defines its name to its origin file.
 //!
-//! [`defined_name`] reads one line of a shell file and gives the name that the
-//! line defines. [`added_dates`] reads the history of one file, with its full
+//! [`defined_names`] reads one line of a shell file and gives the names that
+//! the line defines. [`added_dates`] reads the history of one file, with its full
 //! diff, and gives the oldest date for each name that an added line defines.
 //! Both functions are pure. [`read`] starts the processes: one `git log` for
 //! each origin file, and for yadm one `yadm introspect repo` and one
@@ -16,7 +16,7 @@ use std::process::{Command, Stdio};
 use chrono::NaiveDate;
 
 use crate::catalog::{LOG_DATE_FORMAT, LOG_RECORD_START};
-use crate::command_words::SUFFIX_MARKER;
+use crate::command_words::{split_words, Argument, SUFFIX_MARKER};
 
 /// The family of a name that a line of a shell file defines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -388,28 +388,37 @@ const HUNK_HEADER: &str = "@@";
 /// The character that starts an added line in a hunk.
 const ADDED_MARK: char = '+';
 
-/// Gives the name that `line` defines, or `None`. Pure.
+/// Gives the names that `line` defines, in the order of the line. Pure.
 ///
 /// Blanks at the start of the line do not count. An alias line starts with
-/// the word `alias`, then option words such as `-g` and `-s`, then `name=`.
-/// The option `-s` makes the name a suffix alias, `*.` and the suffix. A word
-/// that starts with `-` and holds no `=` is an option word, and `--` ends the
-/// options. The quotes and the backslashes in the name do not count, thus
-/// `alias 'll=ls -l'` defines `ll`. Only the first name of the line counts.
+/// the word `alias`, then option words such as `-g` and `-s`, then one or
+/// more `name=value` words. Each such word defines a name, thus
+/// `alias gs='git status' gd='git diff'` defines `gs` and `gd`. A word with no
+/// `=` defines nothing. The words end at the first operator or comment, thus
+/// `alias s1=x; s2=y` defines only `s1`. The option `-s` makes each name a
+/// suffix alias, `*.` and the suffix. A word that starts with `-` and holds no
+/// `=` is an option word, and `--` ends the options. The quotes and the
+/// backslashes in a name do not count, thus `alias 'll=ls -l'` defines `ll`.
+/// When the line opens a quote that it does not close, the words of the line
+/// are the words between blanks, and only the first name counts. A word of
+/// the open value gives no false name that way.
 ///
 /// A function line is `name()`, `name ()`, or `function name`. A function
 /// name holds no blank, no quote, no `$`, and no operator of the shell. A
-/// comment line defines nothing, because `#` is not in a name.
+/// function line defines one name. A comment line defines nothing, because
+/// `#` is not in a name.
 #[must_use]
-pub fn defined_name(line: &str) -> Option<Defined> {
+pub fn defined_names(line: &str) -> Vec<Defined> {
     let text = line.trim_start();
     if let Some(rest) = after_word(text, ALIAS_WORD) {
-        return alias_name(rest);
+        return alias_names(rest);
     }
-    if let Some(rest) = after_word(text, FUNCTION_WORD) {
-        return keyword_function_name(rest);
-    }
-    parenthesized_function_name(text)
+    let single = if let Some(rest) = after_word(text, FUNCTION_WORD) {
+        keyword_function_name(rest)
+    } else {
+        parenthesized_function_name(text)
+    };
+    single.into_iter().collect()
 }
 
 /// Gives the text after `word` when `text` starts with `word` and a blank
@@ -419,34 +428,61 @@ fn after_word<'a>(text: &'a str, word: &str) -> Option<&'a str> {
     rest.starts_with(char::is_whitespace).then_some(rest)
 }
 
-/// Gives the alias that the words after `alias` define.
-fn alias_name(rest: &str) -> Option<Defined> {
+/// Gives the aliases that the words after `alias` define.
+///
+/// The shell splitter gives the words. A word after an operator belongs to
+/// another command, thus the read stops there. When the splitter refuses the
+/// text, the words are the words between blanks and only the first name
+/// counts.
+fn alias_names(rest: &str) -> Vec<Defined> {
+    let (words, first_only) = match split_words(rest) {
+        Some(arguments) => (
+            arguments
+                .into_iter()
+                .map_while(|argument| match argument {
+                    Argument::Literal(text) | Argument::Expansion(text) => Some(text),
+                    Argument::Operator(_) => None,
+                })
+                .collect::<Vec<String>>(),
+            false,
+        ),
+        None => (rest.split_whitespace().map(str::to_owned).collect(), true),
+    };
     let mut suffix = false;
-    let mut words = rest.split_whitespace();
-    let word = loop {
-        let word = words.next()?;
-        if word == END_OF_OPTIONS {
-            break words.next()?;
+    let mut in_options = true;
+    let mut names = Vec::new();
+    for word in &words {
+        if in_options {
+            if word == END_OF_OPTIONS {
+                in_options = false;
+                continue;
+            }
+            if word.starts_with(OPTION_START) && !word.contains(ASSIGNMENT) {
+                suffix |= word.contains(SUFFIX_OPTION);
+                continue;
+            }
+            in_options = false;
         }
-        if word.starts_with(OPTION_START) && !word.contains(ASSIGNMENT) {
-            suffix |= word.contains(SUFFIX_OPTION);
+        let Some((name, _)) = word.split_once(ASSIGNMENT) else {
+            continue;
+        };
+        let name: String = name
+            .chars()
+            .filter(|character| !QUOTE_CHARACTERS.contains(character))
+            .collect();
+        if name.is_empty() {
             continue;
         }
-        break word;
-    };
-    let (name, _) = word.split_once(ASSIGNMENT)?;
-    let name: String = name
-        .chars()
-        .filter(|character| !QUOTE_CHARACTERS.contains(character))
-        .collect();
-    if name.is_empty() {
-        return None;
+        names.push(if suffix {
+            Defined::alias(format!("{SUFFIX_MARKER}{name}"))
+        } else {
+            Defined::alias(name)
+        });
+        if first_only {
+            break;
+        }
     }
-    Some(if suffix {
-        Defined::alias(format!("{SUFFIX_MARKER}{name}"))
-    } else {
-        Defined::alias(name)
-    })
+    names
 }
 
 /// Gives the function that the words after `function` define.
@@ -504,7 +540,8 @@ pub fn added_dates(log: &str) -> BTreeMap<Defined, NaiveDate> {
             } else if line.starts_with(HUNK_HEADER) {
                 in_hunk = true;
             } else if in_hunk {
-                if let Some(defined) = line.strip_prefix(ADDED_MARK).and_then(defined_name) {
+                let added = line.strip_prefix(ADDED_MARK).unwrap_or_default();
+                for defined in defined_names(added) {
                     oldest
                         .entry(defined)
                         .and_modify(|known| *known = (*known).min(date))

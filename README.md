@@ -5797,7 +5797,7 @@ The added date of a definition is the date of the oldest commit that adds a line
 
 `wdid` reads the history of each origin file one time, with its full diff (`git log --follow --patch`). It finds each added line that defines a name:
 
-- An alias line starts with `alias`, then options such as `-g` and `-s`, then `name=`. Blanks at the start of the line do not count. With `-s`, the name is a suffix alias (`*.md`). The quotes in the name do not count, thus `alias 'll=ls -l'` defines `ll`.
+- An alias line starts with `alias`, then options such as `-g` and `-s`, then one or more `name=value` words. Each such word defines a name, thus `alias gs='git status' gd='git diff'` defines `gs` and `gd`. A word with no `=` defines nothing. The words end at the first operator or comment, thus `alias s1=x; s2=y` defines only `s1`. Blanks at the start of the line do not count. With `-s`, each name is a suffix alias (`*.md`). The quotes in a name do not count, thus `alias 'll=ls -l'` defines `ll`. When the line opens a quote that it does not close, only the first name counts.
 - A function line is `name()`, `name ()`, or `function name`.
 
 An alias and a function with the same name each get the date of their own line. The three kinds of alias share their dates, thus an alias that becomes a global alias keeps its date. When the history adds a name two times, for example after a removal, the oldest commit gives the date. `--follow` reads the history through each rename of the file.
