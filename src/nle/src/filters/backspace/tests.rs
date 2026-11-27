@@ -186,3 +186,9 @@ fn a_key_between_the_typo_and_the_backspace_keeps_both() {
     ];
     assert_eq!(run(events.clone()), events);
 }
+
+#[test]
+fn a_backspace_that_erases_text_no_typed_key_wrote_stays() {
+    let events = vec![out(0.0, "$ abc"), input(1.0, "\x7f"), out(1.0, "\x08 \x08")];
+    assert_eq!(run(events.clone()), events);
+}
