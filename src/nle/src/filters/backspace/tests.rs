@@ -716,6 +716,40 @@ fn a_mark_moves_earlier_by_the_cuts_before_it_and_a_mark_in_a_cut_moves_to_the_c
 }
 
 #[test]
+fn with_two_cuts_a_mark_moves_earlier_by_the_sum_of_the_cuts_before_it() {
+    // Two typos go: the cut of the `r` is from 1.5 s to the `e` at 2.5 s, and
+    // the cut of the `x` is from 3 s to the `l` at 4 s.
+    let events = vec![
+        out(0.0, "$ "),
+        input(1.0, "h"),
+        out(1.0, "h"),
+        input(1.5, "r"),
+        out(1.5, "r"),
+        input(2.0, "\x7f"),
+        out(2.0, "\x08 \x08"),
+        input(2.5, "e"),
+        out(2.5, "e"),
+        input(3.0, "x"),
+        out(3.0, "x"),
+        input(3.5, "\x7f"),
+        out(3.5, "\x08 \x08"),
+        input(4.0, "l"),
+        out(4.0, "l"),
+        input(5.0, "\r"),
+        out(5.0, "\r\n"),
+    ];
+
+    let rendered = render_marked(events, &[3.25, 4.5], FilterRegion::All).unwrap();
+
+    // The mark inside the second cut moves to 3 s less the first cut, where
+    // the `l` goes. The mark after both cuts moves 2 s earlier. It is before
+    // the new end at 3 s, so the limit of the length does not hide its time.
+    assert_eq!(rendered.recording.duration, 3.0);
+    assert_eq!(mark_times(&rendered.marks), vec![2.0, 2.5]);
+    assert_eq!(mark_labels(&rendered.marks), vec!["m0", "m1"]);
+}
+
+#[test]
 fn a_mark_in_a_cut_at_the_end_of_the_span_moves_to_the_new_end() {
     // Nothing comes after the backspace, so the cut is from the `r` at 1.5 s
     // to the end of the span at 2 s.
