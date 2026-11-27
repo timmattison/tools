@@ -867,6 +867,10 @@ fn the_help_texts_name_defs_and_the_flags_of_defs() {
         assert!(text.contains(flag), "{text}");
     }
     assert!(!text.contains("--repo"), "{text}");
+    assert!(
+        text.contains("ZSH_CUSTOM"),
+        "the help of --all names each place that Places::is_mine calls mine: {text}"
+    );
 }
 
 /// The `.zshrc` of the origin tests of `wdid defs`: an alias of mine on line
