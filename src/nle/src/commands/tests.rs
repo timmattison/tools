@@ -635,6 +635,37 @@ fn web_export_args_refuses_a_link_to_a_file_without_a_web_ending() {
     assert!(err.to_string().contains("must end in"), "got {err}");
 }
 
+/// A link whose chain ends at a path that is not valid UTF-8 is refused.
+/// `beta` takes the output path as text, and a lossy text names a different
+/// file. APFS keeps such a target in a link, but it refuses such a file name,
+/// thus each link ends at a missing file.
+#[cfg(unix)]
+#[test]
+fn export_args_refuse_a_link_to_a_name_that_is_not_utf8() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("a.json");
+    write_fixture(&input, false);
+    let cases: [(&str, &[u8], ExportFormat); 2] = [
+        ("out.mp4", b"x\xff.mp4", ExportFormat::Video),
+        ("page.html", b"x\xff.html", ExportFormat::Web),
+    ];
+    for (name, target, format) in cases {
+        let link = dir.path().join(name);
+        std::os::unix::fs::symlink(OsStr::from_bytes(target), &link).unwrap();
+        let export = options(&input, &link.to_string_lossy(), format);
+        let result = match export.format {
+            ExportFormat::Video => video_export_args(&export),
+            ExportFormat::Web => web_export_args(&export),
+        };
+        let Err(NleError::ExportError(text)) = result else {
+            panic!("{name}: expected an ExportError, got {result:?}");
+        };
+        assert!(text.contains("not valid UTF-8"), "{name}: {text}");
+    }
+}
+
 #[test]
 fn run_blocking_runs_the_work_on_another_thread() {
     let caller = std::thread::current().id();
