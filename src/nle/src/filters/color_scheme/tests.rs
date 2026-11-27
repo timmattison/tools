@@ -699,6 +699,19 @@ fn the_default_color_values_of_a_list_drop_and_the_others_stay() {
 }
 
 #[test]
+fn the_kept_values_next_to_each_other_stay_in_one_osc() {
+    assert_eq!(
+        filtered("\x1b]10;#111111;#222222;#333333;#444444\x07"),
+        "\x1b]12;#333333;#444444\x07"
+    );
+    assert_eq!(
+        filtered("\x1b]10;?;#222222;?\x1b\\"),
+        "\x1b]10;?\x1b\\\x1b]12;?\x1b\\"
+    );
+    assert_eq!(filtered("\x1b]10;;#222222\x07"), "\x1b]10;\x07");
+}
+
+#[test]
 fn a_query_of_a_default_color_stays() {
     assert_eq!(filtered("\x1b]10;?\x07"), "\x1b]10;?\x07");
     assert_eq!(filtered("\x1b]11;?\x1b\\"), "\x1b]11;?\x1b\\");
