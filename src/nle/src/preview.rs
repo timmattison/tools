@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use termstate::{TerminalState, TerminalTheme};
 
-use crate::types::{Recording, Seconds};
+use crate::types::{EventType, Recording, Seconds};
 
 /// One theme of the preview: one palette of `beta export --theme`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -62,6 +62,8 @@ pub struct Preview {
     recording: Arc<Recording>,
     theme: PreviewTheme,
     current: TerminalState,
+    /// The count of events that `current` has applied.
+    applied: usize,
 }
 
 impl Preview {
@@ -72,6 +74,7 @@ impl Preview {
             recording,
             theme,
             current: TerminalState::new(80, 24, theme.palette()),
+            applied: 0,
         }
     }
 
@@ -88,7 +91,26 @@ impl Preview {
     }
 
     /// The terminal after each event whose time is at or before `at`.
-    pub fn seek(&mut self, _at: Seconds) -> &TerminalState {
+    ///
+    /// The events are in time order. The render of the pipeline sorts them.
+    pub fn seek(&mut self, at: Seconds) -> &TerminalState {
+        let target = self
+            .recording
+            .events
+            .partition_point(|event| event.time <= at.get());
+        if target < self.applied {
+            self.current = TerminalState::new(80, 24, self.theme.palette());
+            self.applied = 0;
+        }
+        let pending = self.recording.events.get(self.applied..target);
+        for event in pending.unwrap_or_default() {
+            if event.event_type == EventType::Output {
+                // `process_output` never returns an error today. If it does
+                // later, skip the event and keep the rest of the replay.
+                self.current.process_output(&event.data).ok();
+            }
+        }
+        self.applied = target;
         &self.current
     }
 
