@@ -137,7 +137,7 @@ button {
   font-size: 13px;
 }
 
-button:hover:not(:disabled) {
+button:hover:where(:not(:disabled)) {
   background: #585b70;
 }
 
