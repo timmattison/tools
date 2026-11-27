@@ -7,9 +7,11 @@
 //! function, and for each definition that hides a program. The function is
 //! pure: it starts no process and reads no file.
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use super::{Kind, Usage};
+use crate::command_words::{split_words, AliasDefinition};
 use crate::origin::Origin;
 use crate::shell::Definitions;
 
@@ -74,8 +76,95 @@ impl Finding {
     }
 }
 
-/// Gives the findings among `usages`, in report order. Pure.
+impl Member {
+    /// Copies the fields of `usage` that a finding shows.
+    fn of(usage: &Usage) -> Self {
+        Self {
+            name: usage.name.clone(),
+            kind: usage.kind,
+            origin: usage.origin.clone(),
+            uses: usage.uses,
+            mine: usage.mine,
+        }
+    }
+}
+
+/// The entries of the report, with the aliases that have an entry.
+struct Entries<'a> {
+    /// Each alias of the table that has an entry, with its entry, sorted by
+    /// name, then by kind.
+    aliases: Vec<(AliasDefinition, &'a Usage)>,
+}
+
+impl<'a> Entries<'a> {
+    /// Matches each alias of `definitions` to its entry in `usages`.
+    fn new(definitions: &Definitions, usages: &'a [Usage]) -> Self {
+        let by_key: HashMap<(&str, Kind), &Usage> = usages
+            .iter()
+            .map(|usage| ((usage.name.as_str(), usage.kind), usage))
+            .collect();
+        let aliases = definitions
+            .aliases
+            .definitions()
+            .into_iter()
+            .filter_map(|alias| {
+                let usage = *by_key.get(&(alias.name.as_str(), Kind::from(alias.kind)))?;
+                Some((alias, usage))
+            })
+            .collect();
+        Self { aliases }
+    }
+}
+
+/// Finds the groups of regular aliases, and the groups of global aliases,
+/// that have the same words. A suffix alias takes no part, because each one
+/// names different files.
+fn same_expansion(entries: &Entries<'_>) -> Vec<Finding> {
+    let mut groups: BTreeMap<(Kind, Vec<String>), Vec<&Usage>> = BTreeMap::new();
+    for (alias, usage) in &entries.aliases {
+        let kind = usage.kind;
+        if kind == Kind::SuffixAlias {
+            continue;
+        }
+        let Some(split) = split_words(&alias.value).filter(|split| !split.is_empty()) else {
+            continue;
+        };
+        groups.entry((kind, split)).or_default().push(usage);
+    }
+    groups
+        .into_iter()
+        .filter(|(_, members)| members.len() >= 2)
+        .map(|((_, shared), mut members)| {
+            members.sort_by(|left, right| left.name.cmp(&right.name));
+            Finding {
+                kind: FindingKind::SameExpansion,
+                definitions: members.into_iter().map(Member::of).collect(),
+                words: shared,
+                places: Vec::new(),
+                program: None,
+            }
+        })
+        .collect()
+}
+
+/// Gives the findings among `usages`, sorted by kind, then by the name and the
+/// kind of the first definition. Pure.
+///
+/// Only an entry of `usages` takes part, thus a private function takes part
+/// only when the report lists it.
 pub(super) fn find(definitions: &Definitions, usages: &[Usage]) -> Vec<Finding> {
-    let _ = (definitions, usages);
-    Vec::new()
+    let entries = Entries::new(definitions, usages);
+    let mut found = same_expansion(&entries);
+    found.sort_by(|left, right| sort_key(left).cmp(&sort_key(right)));
+    found
+}
+
+/// Gives the key that orders the findings.
+fn sort_key(finding: &Finding) -> (FindingKind, &str, Kind) {
+    finding
+        .definitions
+        .first()
+        .map_or((finding.kind, "", Kind::Alias), |member| {
+            (finding.kind, member.name.as_str(), member.kind)
+        })
 }
