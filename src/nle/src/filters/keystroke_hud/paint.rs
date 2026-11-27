@@ -9,8 +9,8 @@
 //! in each theme of the export. A program color of exactly one of the 18 values
 //! maps to its theme code. This is the cost of the method.
 
-use super::options::HudOptions;
-use super::timeline::Shown;
+use super::options::{HudOptions, Position, Rgb};
+use super::timeline::{Piece, Shown};
 use crate::types::TerminalSize;
 use termstate::{Cell, TerminalState, TerminalTheme};
 
@@ -20,6 +20,9 @@ const MARGIN: usize = 1;
 const PADDING: usize = 1;
 /// The rows of the box: the top border, the label, the bottom border.
 const BOX_ROWS: usize = 3;
+
+/// The number of base colors in a theme.
+const BASE_COLORS: u8 = 16;
 
 /// A color as three channels.
 type Color = (u8, u8, u8);
@@ -58,22 +61,43 @@ fn replay_theme() -> TerminalTheme {
     }
 }
 
+/// The index of the base color that has the replay color `color`, if any.
+fn base_index(color: Color) -> Option<u8> {
+    let (red, green, blue) = color;
+    if red != 1 || green != 1 {
+        return None;
+    }
+    blue.checked_sub(3).filter(|index| *index < BASE_COLORS)
+}
+
 /// The SGR code that sets the foreground `color` of a replay cell.
 fn fg_code(color: Color) -> String {
-    let _ = color;
-    String::new()
+    if color == REPLAY_FOREGROUND {
+        return "39".to_string();
+    }
+    match base_index(color) {
+        Some(index) if index < 8 => format!("{}", 30 + u32::from(index)),
+        Some(index) => format!("{}", 90 + u32::from(index) - 8),
+        None => format!("38;2;{};{};{}", color.0, color.1, color.2),
+    }
 }
 
 /// The SGR code that sets the background `color` of a replay cell.
 fn bg_code(color: Color) -> String {
-    let _ = color;
-    String::new()
+    if color == REPLAY_BACKGROUND {
+        return "49".to_string();
+    }
+    match base_index(color) {
+        Some(index) if index < 8 => format!("{}", 40 + u32::from(index)),
+        Some(index) => format!("{}", 100 + u32::from(index) - 8),
+        None => format!("48;2;{};{};{}", color.0, color.1, color.2),
+    }
 }
 
 /// Whether the screen of `size` has room for a box with a label of one cell.
 pub(crate) fn fits(size: TerminalSize) -> bool {
-    let _ = size;
-    true
+    usize::from(size.columns) >= 2 * MARGIN + 2 * PADDING + 3
+        && usize::from(size.rows) >= 2 * MARGIN + BOX_ROWS
 }
 
 /// One cell of a box. `bg` is `None` for a border cell, which keeps the
@@ -99,14 +123,212 @@ pub(crate) struct Overlay {
     rows: Vec<Vec<OverlayCell>>,
 }
 
+impl Overlay {
+    /// The cell of the box at the screen position (`row`, `column`), or `None`
+    /// when the position is outside the box.
+    fn cell_at(&self, row: usize, column: usize) -> Option<&OverlayCell> {
+        self.rows
+            .get(row.checked_sub(self.top)?)?
+            .get(column.checked_sub(self.left)?)
+    }
+}
+
+/// The style of a cell of the label.
+#[derive(Clone, Copy)]
+enum Style {
+    /// Typed text.
+    Text,
+    /// The label of a special key.
+    Accent,
+}
+
+/// The color that is `alpha` of the way from `from` to `to`.
+fn blend(from: Rgb, to: Rgb, alpha: f64) -> Color {
+    let channel = |from: u8, to: u8| {
+        let value = f64::from(from) + (f64::from(to) - f64::from(from)) * alpha;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the value is rounded and clamped to 0..=255"
+        )]
+        let byte = value.round().clamp(0.0, 255.0) as u8;
+        byte
+    };
+    (
+        channel(from.red, to.red),
+        channel(from.green, to.green),
+        channel(from.blue, to.blue),
+    )
+}
+
+/// The cells of the label of `shown`, each with its style.
+fn label_cells(shown: &Shown) -> Vec<(char, Style)> {
+    let mut cells = Vec::new();
+    let mut before_is_special = None;
+    for piece in &shown.pieces {
+        let is_special = matches!(piece, Piece::Special { .. });
+        if before_is_special.is_some_and(|before| before || is_special) {
+            cells.push((' ', Style::Text));
+        }
+        match piece {
+            Piece::Text(text) => cells.extend(text.chars().map(|ch| (ch, Style::Text))),
+            Piece::Special { label, count } => {
+                cells.extend(label.chars().map(|ch| (ch, Style::Accent)));
+                if *count > 1 {
+                    cells.extend(
+                        format!(" \u{d7}{count}")
+                            .chars()
+                            .map(|ch| (ch, Style::Accent)),
+                    );
+                }
+            }
+        }
+        before_is_special = Some(is_special);
+    }
+    cells
+}
+
 /// The box that shows `shown`, or `None` when the screen of `size` has no room.
 pub(crate) fn layout(size: TerminalSize, options: &HudOptions, shown: &Shown) -> Option<Overlay> {
-    let _ = (size, options, shown);
+    if !fits(size) {
+        return None;
+    }
+    let columns = usize::from(size.columns);
+    let rows = usize::from(size.rows);
+    let mut label = label_cells(shown);
+    let most = columns.saturating_sub(2 * MARGIN + 2 * PADDING + 2);
+    if label.len() > most {
+        let keep = most.saturating_sub(1);
+        let mut kept = label.split_off(label.len().saturating_sub(keep));
+        kept.insert(0, ('\u{2026}', Style::Text));
+        label = kept;
+    }
+    let width = label.len() + 2 * PADDING + 2;
+    let top = match options.position {
+        Position::TopLeft | Position::TopCenter | Position::TopRight => MARGIN,
+        Position::BottomLeft | Position::BottomCenter | Position::BottomRight => {
+            rows.saturating_sub(MARGIN + BOX_ROWS)
+        }
+    };
+    let left = match options.position {
+        Position::TopLeft | Position::BottomLeft => MARGIN,
+        Position::TopCenter | Position::BottomCenter => columns.saturating_sub(width) / 2,
+        Position::TopRight | Position::BottomRight => columns.saturating_sub(MARGIN + width),
+    };
+
+    let alpha = shown.alpha.clamp(0.0, 1.0);
+    let from = options.fade_from();
+    let border = blend(from, options.border, alpha);
+    let text = blend(from, options.text, alpha);
+    let accent = blend(from, options.accent, alpha);
+    let background = blend(from, options.background, alpha);
+    let border_cell = |ch: char| OverlayCell {
+        ch,
+        fg: border,
+        bg: None,
+        bold: false,
+    };
+    let inside = width.saturating_sub(2);
+    let edge = |left: char, right: char| {
+        let mut row = vec![border_cell(left)];
+        row.extend((0..inside).map(|_| border_cell('\u{2500}')));
+        row.push(border_cell(right));
+        row
+    };
+    let blank = || OverlayCell {
+        ch: ' ',
+        fg: text,
+        bg: Some(background),
+        bold: false,
+    };
+    let mut middle = vec![border_cell('\u{2502}')];
+    middle.extend((0..PADDING).map(|_| blank()));
+    middle.extend(label.iter().map(|(ch, style)| match style {
+        Style::Text => OverlayCell {
+            ch: *ch,
+            fg: text,
+            bg: Some(background),
+            bold: false,
+        },
+        Style::Accent => OverlayCell {
+            ch: *ch,
+            fg: accent,
+            bg: Some(background),
+            bold: true,
+        },
+    }));
+    middle.extend((0..PADDING).map(|_| blank()));
+    middle.push(border_cell('\u{2502}'));
     Some(Overlay {
-        top: 0,
-        left: 0,
-        rows: Vec::new(),
+        top,
+        left,
+        rows: vec![
+            edge('\u{256d}', '\u{256e}'),
+            middle,
+            edge('\u{2570}', '\u{256f}'),
+        ],
     })
+}
+
+/// The SGR sequence that sets the style of a cell: it resets the attributes,
+/// then sets the ones of `cell` and the colors `fg` and `bg`.
+fn sgr(cell: &Cell, fg: &str, bg: &str) -> String {
+    let bold = if cell.bold { "1;" } else { "" };
+    let italic = if cell.italic { "3;" } else { "" };
+    let underline = if cell.underline { "4;" } else { "" };
+    format!("\x1b[0;{bold}{italic}{underline}{fg};{bg}m")
+}
+
+/// The sequence that moves the cursor to `row` and `column`, counted from zero.
+fn move_to(row: usize, column: usize) -> String {
+    format!("\x1b[{};{}H", row + 1, column + 1)
+}
+
+/// The state of a screen that the HUD can disturb: the cursor and the current
+/// attributes.
+#[derive(PartialEq)]
+struct Pen {
+    /// The cursor, as column and row.
+    cursor: (usize, usize),
+    /// The current foreground.
+    fg: Color,
+    /// The current background.
+    bg: Color,
+    /// Whether the text is bold.
+    bold: bool,
+    /// Whether the text is italic.
+    italic: bool,
+    /// Whether the text is underlined.
+    underline: bool,
+}
+
+impl Pen {
+    /// The pen of `screen`.
+    fn of(screen: &TerminalState) -> Self {
+        Self {
+            cursor: screen.get_cursor_position(),
+            fg: screen.current_fg,
+            bg: screen.current_bg,
+            bold: screen.bold,
+            italic: screen.italic,
+            underline: screen.underline,
+        }
+    }
+
+    /// The sequences that put a screen in this state.
+    fn restore(&self) -> String {
+        let cell = Cell {
+            bold: self.bold,
+            italic: self.italic,
+            underline: self.underline,
+            ..Cell::default()
+        };
+        format!(
+            "{}{}",
+            move_to(self.cursor.1, self.cursor.0),
+            sgr(&cell, &fg_code(self.fg), &bg_code(self.bg))
+        )
+    }
 }
 
 /// Two replays of the recording: the screen as the recording draws it, and
@@ -121,6 +343,9 @@ pub(crate) struct Painter {
 impl Painter {
     /// A painter for a screen of `size`, or `None` when `fits(size)` is false.
     pub(crate) fn new(size: TerminalSize) -> Option<Self> {
+        if !fits(size) {
+            return None;
+        }
         let width = usize::from(size.columns);
         let height = usize::from(size.rows);
         Some(Self {
@@ -136,10 +361,79 @@ impl Painter {
     }
 
     /// The output that makes the viewer see the screen of the recording with
-    /// `overlay` on top, or `None` when the viewer sees that already.
+    /// `overlay` on top, or `None` when the viewer sees that already. The
+    /// painter feeds this output to its own copy of the screen of the viewer.
     pub(crate) fn paint(&mut self, overlay: Option<&Overlay>) -> Option<String> {
-        let _ = (overlay, Cell::default());
-        None
+        let mut body = String::new();
+        let mut any_cell = false;
+        // The position and the style of the cell that was written last.
+        let mut last: Option<(usize, usize, String)> = None;
+        for (row, (shown_row, clean_row)) in self
+            .shown
+            .get_grid()
+            .iter()
+            .zip(self.clean.get_grid())
+            .enumerate()
+        {
+            for (column, (seen, clean)) in shown_row.iter().zip(clean_row).enumerate() {
+                let (wanted, fg, bg) = match overlay.and_then(|o| o.cell_at(row, column)) {
+                    Some(cell) => {
+                        let bg = cell.bg.unwrap_or(clean.bg_color);
+                        let bg_text = match cell.bg {
+                            Some(color) => format!("48;2;{};{};{}", color.0, color.1, color.2),
+                            None => bg_code(clean.bg_color),
+                        };
+                        let wanted = Cell {
+                            ch: cell.ch,
+                            fg_color: cell.fg,
+                            bg_color: bg,
+                            bold: cell.bold,
+                            italic: false,
+                            underline: false,
+                        };
+                        let fg_text = format!("38;2;{};{};{}", cell.fg.0, cell.fg.1, cell.fg.2);
+                        (wanted, fg_text, bg_text)
+                    }
+                    None => (
+                        clean.clone(),
+                        fg_code(clean.fg_color),
+                        bg_code(clean.bg_color),
+                    ),
+                };
+                if *seen == wanted {
+                    continue;
+                }
+                any_cell = true;
+                let style = sgr(&wanted, &fg, &bg);
+                let after_last = last.as_ref().is_some_and(|(last_row, last_column, _)| {
+                    *last_row == row && *last_column + 1 == column
+                });
+                if !after_last {
+                    body.push_str(&move_to(row, column));
+                }
+                if !last.as_ref().is_some_and(|(_, _, before)| *before == style) {
+                    body.push_str(&style);
+                }
+                body.push(wanted.ch);
+                last = Some((row, column, style));
+            }
+        }
+        let repair =
+            (Pen::of(&self.shown) != Pen::of(&self.clean)).then(|| Pen::of(&self.clean).restore());
+        let mut output = String::new();
+        if any_cell {
+            output.push_str("\x1b7\x0f\x1b(B\x1b[?6l");
+            output.push_str(&body);
+            output.push_str("\x1b8");
+        }
+        if let Some(repair) = repair {
+            output.push_str(&repair);
+        }
+        if output.is_empty() {
+            return None;
+        }
+        self.shown.process_output(&output).ok();
+        Some(output)
     }
 }
 

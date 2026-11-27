@@ -2,7 +2,7 @@
 //! painter in a viewer, and compares the viewer with a reference that gets only
 //! the recording.
 
-use super::{bg_code, fits, fg_code, layout, replay_theme, Color, Overlay, Painter};
+use super::{bg_code, fg_code, fits, layout, replay_theme, Color, Overlay, Painter};
 use crate::filters::keystroke_hud::options::{HudOptions, Position, Rgb};
 use crate::filters::keystroke_hud::timeline::{Piece, Shown};
 use crate::types::TerminalSize;
@@ -94,7 +94,10 @@ impl Rig {
 
     /// The text of the viewer in row `row`.
     fn row(&self, row: usize) -> String {
-        self.viewer.get_grid()[row].iter().map(|cell| cell.ch).collect()
+        self.viewer.get_grid()[row]
+            .iter()
+            .map(|cell| cell.ch)
+            .collect()
     }
 
     /// The text of the viewer in row `row`, from column `left`, `width` cells.
@@ -129,12 +132,47 @@ fn replay_cell_colors(data: &str) -> (Color, Color) {
 #[test]
 fn each_color_of_the_replay_theme_maps_back_to_the_code_that_set_it() {
     let foregrounds = [
-        "39", "30", "31", "32", "33", "34", "35", "36", "37", "90", "91", "92", "93", "94", "95",
-        "96", "97", "38;5;21", "38;5;200", "38;2;10;20;30",
+        "39",
+        "30",
+        "31",
+        "32",
+        "33",
+        "34",
+        "35",
+        "36",
+        "37",
+        "90",
+        "91",
+        "92",
+        "93",
+        "94",
+        "95",
+        "96",
+        "97",
+        "38;5;21",
+        "38;5;200",
+        "38;2;10;20;30",
     ];
     let backgrounds = [
-        "49", "40", "41", "42", "43", "44", "45", "46", "47", "100", "101", "102", "103", "104",
-        "105", "106", "107", "48;5;21", "48;2;10;20;30",
+        "49",
+        "40",
+        "41",
+        "42",
+        "43",
+        "44",
+        "45",
+        "46",
+        "47",
+        "100",
+        "101",
+        "102",
+        "103",
+        "104",
+        "105",
+        "106",
+        "107",
+        "48;5;21",
+        "48;2;10;20;30",
     ];
     let dracula = TerminalTheme::dracula();
     let cell_after = |data: &str| {
@@ -176,7 +214,11 @@ fn special_keys_are_bold_in_the_accent_color_and_apart_from_text() {
     let overlay = layout(size(40, 10), &options, &shown(pieces)).unwrap();
     let label = box_text(&overlay).remove(1);
     assert_eq!(label, "│ Ctrl+R foo │");
-    let accent = (options.accent.red, options.accent.green, options.accent.blue);
+    let accent = (
+        options.accent.red,
+        options.accent.green,
+        options.accent.blue,
+    );
     let text = (options.text.red, options.text.green, options.text.blue);
     let cells = &overlay.rows[1];
     // Skip the border and the padding.
@@ -211,7 +253,11 @@ fn each_position_puts_the_box_in_its_place() {
 
 #[test]
 fn a_long_label_keeps_its_end() {
-    let overlay = box_of(size(20, 10), Position::TopLeft, "abcdefghijklmnopqrstuvwxyz0123");
+    let overlay = box_of(
+        size(20, 10),
+        Position::TopLeft,
+        "abcdefghijklmnopqrstuvwxyz0123",
+    );
     let label: String = overlay.rows[1].iter().map(|cell| cell.ch).collect();
     assert_eq!(label, "│ …rstuvwxyz0123 │");
     assert_eq!(overlay.rows[1].len(), 14 + 4);
@@ -269,9 +315,9 @@ fn the_paint_shows_the_box_and_a_later_paint_removes_it() {
     let overlay = box_of(screen, Position::TopRight, "ls");
     rig.feed("$ ls\r\n");
     assert!(rig.paint(Some(&overlay)).is_some());
-    assert_eq!(rig.slice(1, 13, 6), "│ ls │");
-    assert_eq!(rig.slice(0, 13, 6), "╭────╮");
-    assert_eq!(rig.slice(2, 13, 6), "╰────╯");
+    assert_eq!(rig.slice(2, 13, 6), "│ ls │");
+    assert_eq!(rig.slice(1, 13, 6), "╭────╮");
+    assert_eq!(rig.slice(3, 13, 6), "╰────╯");
     assert_eq!(rig.paint(Some(&overlay)), None);
     assert!(rig.paint(None).is_some());
     rig.assert_viewer_is_reference();
@@ -349,7 +395,7 @@ fn the_label_is_ascii_when_the_program_uses_the_line_drawing_set() {
     let overlay = box_of(screen, Position::TopRight, "lq");
     rig.feed("\x1b(0");
     rig.paint(Some(&overlay));
-    assert_eq!(rig.slice(1, 13, 6), "│ lq │");
+    assert_eq!(rig.slice(2, 13, 6), "│ lq │");
     rig.feed("q");
     assert_eq!(rig.paint(Some(&overlay)), None);
     assert_eq!(rig.viewer.get_grid()[0][0].ch, '─');
