@@ -91,7 +91,7 @@ fn remove_backspacing(
     let mut screen = TerminalState::new(
         usize::from(context.size.width),
         usize::from(context.size.height),
-        TerminalTheme::auto(),
+        probe_theme(),
     );
     for event in context
         .before
@@ -224,6 +224,39 @@ impl Walk {
             (Some(_), Some(_)) => self.stack.clear(),
             (None, _) => self.erase_without_typed_key(unit, screen == before),
         }
+    }
+}
+
+/// The theme of the screen that the filter compares.
+///
+/// The 18 colors differ from each other and from each color of the 256-color
+/// palette. The color cube of that palette uses only the channel values 0, 95,
+/// 135, 175, 215 and 255, and its gray ramp has equal channels. No color
+/// `(n, 1, 2)` is in it. Thus two cells are equal only when a terminal in
+/// each theme draws them the same. With `TerminalTheme::auto()`, black is the
+/// background, so a space on `CSI 40 m` would equal a blank cell, and the
+/// filter would remove a black cell that a viewer sees in another theme.
+fn probe_theme() -> TerminalTheme {
+    let color = |n: u8| (n, 1, 2);
+    TerminalTheme {
+        background: color(1),
+        foreground: color(2),
+        black: color(3),
+        red: color(4),
+        green: color(5),
+        yellow: color(6),
+        blue: color(7),
+        magenta: color(8),
+        cyan: color(9),
+        white: color(10),
+        bright_black: color(11),
+        bright_red: color(12),
+        bright_green: color(13),
+        bright_yellow: color(14),
+        bright_blue: color(15),
+        bright_magenta: color(16),
+        bright_cyan: color(17),
+        bright_white: color(18),
     }
 }
 
