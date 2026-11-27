@@ -169,14 +169,61 @@ fn a_bare_escape_does_not_swallow_the_text_after_it() {
     assert_eq!(one("a\x1b", "a", "X"), "X\x1b");
 }
 
-#[test]
-fn an_unterminated_osc_ends_at_the_next_escape() {
-    let got = masked(
+/// Mask each run of digits in the events with asterisks, and give the data of
+/// each event.
+fn digits_masked(events: Vec<Event>) -> Vec<String> {
+    masked(
         Find::Regex(r"\d+".to_string()),
         Replacement::Asterisks,
-        vec![out(1.0, "\x1b]0;t\x1b[31mred")],
+        events,
+    )
+    .into_iter()
+    .map(|event| event.data)
+    .collect()
+}
+
+#[test]
+fn an_unterminated_osc_ends_at_the_next_escape() {
+    assert_eq!(
+        digits_masked(vec![out(1.0, "\x1b]0;t1\x1b[31mred")]),
+        vec!["\x1b]0;t*\x1b[31mred"]
     );
-    assert_eq!(datas(&got), vec!["\x1b]*;t\x1b[31mred"]);
+}
+
+#[test]
+fn the_number_of_an_osc_sequence_is_not_searched() {
+    for (data, want) in [
+        ("\x1b]0;t1\x07", "\x1b]0;t*\x07"),
+        ("\x1b]8;;http://h/1\x1b\\", "\x1b]8;;http://h/*\x1b\\"),
+        ("\x1b]133;A\x07", "\x1b]133;A\x07"),
+        ("\x1b]104\x07", "\x1b]104\x07"),
+    ] {
+        assert_eq!(digits_masked(vec![out(1.0, data)]), vec![want], "{data:?}");
+    }
+    assert_eq!(one("\x1b]0;title\x07", "0", "X"), "\x1b]0;title\x07");
+}
+
+#[test]
+fn an_osc_number_split_across_events_is_one_number() {
+    assert_eq!(
+        digits_masked(vec![out(1.0, "\x1b]"), out(1.1, "2;t1\x07")]),
+        vec!["\x1b]", "2;t*\x07"]
+    );
+    assert_eq!(
+        digits_masked(vec![out(1.0, "\x1b]13"), out(1.1, "37;File=1\x07")]),
+        vec!["\x1b]13", "37;File=1\x07"]
+    );
+}
+
+#[test]
+fn the_data_of_osc_52_and_osc_1337_is_not_searched() {
+    for data in [
+        "\x1b]52;c;aHVudGVyMg1=\x07",
+        "\x1b]1337;File=inline=1:aGVsbG8x\x07",
+        "\x1b]01337;File=inline=1:aGVsbG8x\x1b\\",
+    ] {
+        assert_eq!(digits_masked(vec![out(1.0, data)]), vec![data], "{data:?}");
+    }
 }
 
 #[test]
