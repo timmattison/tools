@@ -1095,6 +1095,22 @@ mod deletion_tests {
             Some(1),
             "the document must list the one match, got:\n{stdout}"
         );
+        // The match as the API sent it, in the shape of `vouchers list --all
+        // --output json`: camelCase keys, a number and a boolean.
+        let first = &parsed[0];
+        assert_eq!(
+            (
+                &first["createdAt"],
+                &first["timeLimitMinutes"],
+                &first["expired"]
+            ),
+            (
+                &serde_json::json!("2026-07-21T00:00:00Z"),
+                &serde_json::json!(60),
+                &serde_json::json!(true)
+            ),
+            "the document must hold the voucher as the API sent it, got:\n{stdout}"
+        );
         assert!(
             stderr.contains("Dry run"),
             "the dry run must say so on standard error, got:\n{stderr}"
