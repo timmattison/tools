@@ -1,5 +1,79 @@
-//! The backspace removal filter: it removes typing errors and the backspaces
-//! that erase them.
+//! The backspace removal filter. It removes a typed key and the key that
+//! erases it, so the viewer sees the text that the typist meant.
+//!
+//! # The idea
+//!
+//! The filter removes a typed key and its erase only when the screen after the
+//! erase is the screen before the typed key. Then the screen at each later
+//! event is the same with or without them. The filter keeps a model of the
+//! screen, a `TerminalState`, to make that comparison. It acts only on input
+//! events and on the output events that follow them. Thus a program that writes
+//! `\b` in its own output is never changed.
+//!
+//! # The units and the keys
+//!
+//! The filter walks the events in list order. It feeds each output event before
+//! the first input event to the screen and keeps it. Each input event starts a
+//! unit: the input event and the output events up to the next input event.
+//! The data of the input event gives the key of the unit:
+//!
+//! | Key | Data |
+//! |---|---|
+//! | typed | one printable character |
+//! | erase one | DEL (`\x7f`) or BS (`\x08`) |
+//! | erase word | Ctrl+W (`\x17`) |
+//! | erase line | Ctrl+U (`\x15`) |
+//! | other | all other data: Enter, Tab, arrows, a paste, two keys in one event |
+//!
+//! # The rules
+//!
+//! The filter keeps a stack of the typed keys of the current line. Each entry
+//! holds the screen before its key. The newest entry is at the back.
+//!
+//! - A typed key goes on the stack.
+//! - An erase-one key whose screen equals the screen before the newest typed
+//!   key removes the events from that typed key to the end of the erase. The
+//!   entry leaves the stack.
+//! - An erase-word or erase-line key looks for the entries whose screen equals
+//!   the screen now. If one entry matches, the events from that key to the end
+//!   of the erase go, and the stack keeps the keys before it. If many entries
+//!   match, as with a prompt that echoes nothing, the filter cannot tell how many
+//!   keys the erase removed. The unit stays and the stack ends.
+//! - An erase key that no typed key explains goes with its output when it
+//!   changed nothing on the screen, for example a Backspace at the start of a
+//!   line that rings the bell. Else the unit stays and the stack ends.
+//! - An other key stays and ends the stack. The filter follows one line.
+//!
+//! # The times
+//!
+//! The filter removes the time of each removed run, so the recording looks as if
+//! the typist made no error. The cut of a run is the time from its first event
+//! to the next kept event, or to the end of the span. Each kept event moves
+//! earlier by the cuts before it. The length of the span becomes the old
+//! length less all cuts, but never below the last kept event.
+//!
+//! The screen starts empty. The filter feeds the output events before the
+//! region into it, so a filter on a range sees the screen that the viewer
+//! sees. The screen uses its own theme, `probe_theme`, in which no two colors
+//! are equal.
+//!
+//! # The checks
+//!
+//! The filter takes no option, and a key in the options fails the render.
+//! The terminal must have at least one column and one row, and at most
+//! `MAX_CELLS` cells. Else the render fails and the message gives the size.
+//!
+//! # The limits
+//!
+//! - The comparison is as exact as the emulator of `termstate`. The emulator
+//!   does not wrap at the right margin. It uses one cell for each character.
+//!   It reads a `CSI C` or a `CSI D` with no number as a move of zero columns.
+//!   A typo near such output thus usually stays.
+//! - A prompt that echoes nothing keeps a Ctrl+W or a Ctrl+U, because many
+//!   entries match.
+//! - The stack holds `SNAPSHOT_BUDGET / cells` keys, at least 1 and at most
+//!   `MAX_DEPTH`. A line of more typed keys than that depth keeps its oldest
+//!   keys.
 
 use std::collections::VecDeque;
 use std::ops::Range;
@@ -126,13 +200,19 @@ pub fn register(registry: &mut FilterRegistry) {
     registry.register_span(kind(), remove_backspacing);
 }
 
-/// Remove each typed key and the backspace that erases it, when the screen
-/// after the backspace is the screen before the typed key. The filter changes
-/// only input events and the output events that follow them. It removes the
-/// time of each removed run, so the viewer sees no pause for the typo.
+/// Remove each typed key and the key that erases it, when the screen after
+/// the erase is the screen before the typed key. The erase keys are Backspace
+/// (DEL or BS), Ctrl+W, and Ctrl+U. The filter changes only input events and
+/// the output events that follow them. It removes the time of each removed run,
+/// so the viewer sees no pause for the typo.
 ///
-/// The filter takes no option. It replays the output events before
-/// the region into the screen first.
+/// The filter takes no option. It replays the output events before the region
+/// into the screen first.
+///
+/// # Errors
+/// Returns an error when `options` holds a key, when the terminal has no
+/// column or no row or more than `MAX_CELLS` cells, or when the screen fails
+/// to read an output event.
 fn remove_backspacing(
     span: Span,
     context: SpanContext<'_>,
