@@ -805,6 +805,10 @@ mod tests {
                 "running with no tail",
                 vec![running(10, "lint", Some(RUNNER), 50)],
             ),
+            (
+                "queued with no tail",
+                vec![job(10, "lint", RunState::Queued, None, None, None)],
+            ),
             ("no jobs", Vec::new()),
         ];
         for (label, jobs) in cases {
