@@ -420,10 +420,11 @@ pub enum WheelAction {
 /// What `wheel` does to a timeline in a window of `width` pixels.
 ///
 /// With Cmd or Ctrl, the vertical delta zooms: down zooms out, and up zooms
-/// in. With no modifier, the horizontal delta scrolls. With Shift, a vertical
-/// delta scrolls when there is no horizontal delta, because some systems send
-/// Shift with the wheel as a vertical delta. A delta that is not finite does
-/// nothing.
+/// in. With no modifier, a delta that is mostly horizontal scrolls by its
+/// horizontal part. A delta that is mostly vertical keeps its default action,
+/// so a trackpad swipe still scrolls the tracks and the page. With Shift, the
+/// vertical part of such a delta scrolls, because some systems send Shift with
+/// the wheel as a vertical delta. A delta that is not finite does nothing.
 #[must_use]
 pub fn wheel_action(wheel: Wheel, width: f64) -> WheelAction {
     let scale = match wheel.unit {
@@ -444,7 +445,7 @@ pub fn wheel_action(wheel: Wheel, width: f64) -> WheelAction {
             .clamp(1.0 / MAX_WHEEL_ZOOM_FACTOR, MAX_WHEEL_ZOOM_FACTOR);
         return WheelAction::Zoom(factor);
     }
-    if x != 0.0 {
+    if x != 0.0 && x.abs() >= y.abs() {
         WheelAction::Pan(x)
     } else if wheel.shift && y != 0.0 {
         WheelAction::Pan(y)
