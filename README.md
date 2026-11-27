@@ -5828,7 +5828,7 @@ Over time, a shell gets definitions that do the same thing as other definitions,
    Same expansion (git status): gs (alias, ~/.zshrc:3, 3 uses), gst (alias, ~/.oh-my-zsh/plugins/git/git.plugin.zsh:1, 2 uses)
    ```
 
-2. **An alias and a function that do the same thing.** The body of the function is one simple command whose last argument is `"$@"`. The other words of that command are the words of the value of the alias. A brace group around the command is the same command. A pipe, a list, or a redirect makes a different command.
+2. **An alias and a function that do the same thing.** The body of the function is one simple command whose last argument is `"$@"` or `"${@}"`. The other words of that command are the words of the value of the alias. A brace group around the command is the same command. A pipe, a list, or a redirect makes a different command.
 
    ```text
    Alias and function (git log): gl (alias, ~/.zshrc:7, 0 uses), glog (function, ~/.zshrc, 1 use)

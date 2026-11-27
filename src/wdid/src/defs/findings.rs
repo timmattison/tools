@@ -60,7 +60,7 @@ pub struct Finding {
     pub definitions: Vec<Member>,
     /// For [`FindingKind::SameExpansion`], the words that the aliases share.
     /// For [`FindingKind::AliasAndFunction`], the words of the alias, without
-    /// the `"$@"` of the function. Empty for the other kinds.
+    /// the `"$@"` or `"${@}"` of the function. Empty for the other kinds.
     pub words: Vec<String>,
     /// For [`FindingKind::DefinedMoreThanOnce`], each place that defined the
     /// alias, in order. The last place is in effect. Empty for the other
@@ -102,9 +102,6 @@ impl Member {
         }
     }
 }
-
-/// The last word of the body of a function that passes on its arguments.
-const ALL_ARGUMENTS: &str = "\"$@\"";
 
 /// The entries of the report, with the aliases that have an entry.
 struct Entries<'a> {
@@ -178,10 +175,11 @@ fn texts_of(words: &[Argument]) -> Vec<String> {
 
 /// Gives the words that the body of a function runs before it passes on its
 /// arguments, or `None` when the body does something else. The body must be
-/// one simple command that ends with `"$@"` and has a word before it.
+/// one simple command that ends with `"$@"` or `"${@}"` and has a word before
+/// it.
 fn passed_on_words(body: &str) -> Option<Vec<Argument>> {
     let mut words = simple_command(body)?;
-    if words.pop() != Some(Argument::Expansion(ALL_ARGUMENTS.to_string())) || words.is_empty() {
+    if !words.pop()?.is_all_arguments() || words.is_empty() {
         return None;
     }
     Some(words)

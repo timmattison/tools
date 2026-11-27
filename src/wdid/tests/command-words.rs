@@ -1344,6 +1344,26 @@ fn simple_command_gives_the_words_of_one_simple_command() {
     }
 }
 
+/// Only the double-quoted `@` passes on each argument as one word. The check
+/// reads the parsed word, thus the braces do not matter.
+#[test]
+fn is_all_arguments_reads_the_parsed_word() {
+    let rows = [
+        (exp("\"$@\""), true),
+        (exp("\"${@}\""), true),
+        (exp("$@"), false),
+        (exp("\"$*\""), false),
+        (exp("\"${*}\""), false),
+        (exp("\"$@x\""), false),
+        (exp("\"${@:2}\""), false),
+        (exp("\"$1\""), false),
+        (lit("\"$@\""), false),
+    ];
+    for (word, expected) in rows {
+        assert_eq!(word.is_all_arguments(), expected, "word: {word:?}");
+    }
+}
+
 #[test]
 fn simple_command_refuses_anything_that_is_not_one_simple_command() {
     let rows = [

@@ -85,7 +85,9 @@ use std::io::BufReader;
 use std::ops::Range;
 
 use brush_parser::ast;
-use brush_parser::word::{self, TildeExpr, WordPiece, WordPieceWithSource};
+use brush_parser::word::{
+    self, Parameter, ParameterExpr, SpecialParameter, TildeExpr, WordPiece, WordPieceWithSource,
+};
 use brush_parser::{tokenize_str_with_options, Parser, ParserOptions, Token};
 
 /// The alias table: the name of each alias and its value, after quote removal.
@@ -1626,6 +1628,34 @@ impl Argument {
         match self {
             Self::Literal(text) | Self::Expansion(text) | Self::Operator(text) => text,
         }
+    }
+
+    /// Says if the word is `"$@"` or `"${@}"`: a double-quoted expansion of
+    /// all the arguments, which passes on each argument as one word.
+    #[must_use]
+    pub fn is_all_arguments(&self) -> bool {
+        let Self::Expansion(raw) = self else {
+            return false;
+        };
+        let Ok(pieces) = word::parse(raw, &ParserOptions::default()) else {
+            return false;
+        };
+        matches!(
+            pieces.as_slice(),
+            [WordPieceWithSource { piece: WordPiece::DoubleQuotedSequence(inner), .. }]
+                if matches!(
+                    inner.as_slice(),
+                    [WordPieceWithSource {
+                        piece: WordPiece::ParameterExpansion(ParameterExpr::Parameter {
+                            parameter: Parameter::Special(
+                                SpecialParameter::AllPositionalParameters { concatenate: false }
+                            ),
+                            indirect: false,
+                        }),
+                        ..
+                    }]
+                )
+        )
     }
 }
 
