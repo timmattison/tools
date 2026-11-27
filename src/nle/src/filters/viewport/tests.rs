@@ -1328,3 +1328,35 @@ fn an_osc_that_the_end_of_a_range_splits_is_finished_after_the_range() {
 
     assert_range_property_each_shape(&stream, 3.0, 6.0);
 }
+
+#[test]
+fn each_form_of_an_open_sequence_that_the_end_of_a_range_splits_is_finished_after_the_range() {
+    for stream in [
+        // An ESC inside a control sequence starts a new one (Step::Restarted).
+        [
+            (1.0, "before\r\n"),
+            (4.0, "inside\x1b[3\x1b["),
+            (7.0, "31mred after"),
+        ],
+        // An ESC that does not start an ST ends an OSC (Step::EscapeBreak).
+        [
+            (1.0, "before\r\n"),
+            (4.0, "inside\x1b]2;ti\x1b["),
+            (7.0, "31mred after"),
+        ],
+        // A C0 control inside a control sequence runs where it stands.
+        [
+            (1.0, "before\r\n"),
+            (4.0, "inside\x1b[3\n"),
+            (7.0, "1mred after"),
+        ],
+        // The end of the range splits the ST of an OSC.
+        [
+            (1.0, "before\r\n"),
+            (4.0, "inside\x1b]2;ti\x1b"),
+            (7.0, "\\after"),
+        ],
+    ] {
+        assert_range_property_each_shape(&stream, 3.0, 6.0);
+    }
+}
