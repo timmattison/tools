@@ -221,9 +221,56 @@ fn the_data_of_osc_52_and_osc_1337_is_not_searched() {
         "\x1b]52;c;aHVudGVyMg1=\x07",
         "\x1b]1337;File=inline=1:aGVsbG8x\x07",
         "\x1b]01337;File=inline=1:aGVsbG8x\x1b\\",
+        "\x1b]1337;MultipartFile=name=aGVsbG8x;size=12\x07",
+        "\x1b]1337;FilePart=aGVsbG8x\x07",
+        "\x1b]1337;Copy=:aGVsbG8x\x07",
+        "\x1b]1337;SetUserVar=k=aGVsbG8x\x07",
+        "\x1b]1337;SetBadgeFormat=aGVsbG8x\x07",
+        "\x1b]1337;SetBackgroundImageFile=aGVsbG8x\x07",
+        "\x1b]1337;ReportVariable=aGVsbG8x\x07",
+        "\x1b]1337;OpenURL=:aGVsbG8x\x07",
+        "\x1b]1337;SetProfileProperty=Name=aGVsbG8x\x07",
     ] {
         assert_eq!(digits_masked(vec![out(1.0, data)]), vec![data], "{data:?}");
     }
+}
+
+#[test]
+fn the_plain_values_of_osc_1337_are_searched() {
+    for (data, want) in [
+        (
+            "\x1b]1337;RemoteHost=tim@host\x07",
+            "\x1b]1337;RemoteHost=X@host\x07",
+        ),
+        (
+            "\x1b]1337;CurrentDir=/Users/tim\x07",
+            "\x1b]1337;CurrentDir=/Users/X\x07",
+        ),
+        (
+            "\x1b]01337;CurrentDir=/Users/tim\x1b\\",
+            "\x1b]01337;CurrentDir=/Users/X\x1b\\",
+        ),
+    ] {
+        assert_eq!(one(data, "tim", "X"), want, "{data:?}");
+    }
+    assert_value_masked(
+        Preset::Hostname,
+        "\x1b]1337;RemoteHost=tim@",
+        "db.prod.local",
+        "\x07",
+    );
+}
+
+#[test]
+fn the_key_of_an_osc_1337_command_is_not_searched() {
+    assert_eq!(
+        one("\x1b]1337;CurrentDir=/srv\x07", "Dir", "X"),
+        "\x1b]1337;CurrentDir=/srv\x07"
+    );
+    assert_eq!(
+        one("\x1b]1337;SetMark\x07", "Mark", "X"),
+        "\x1b]1337;SetMark\x07"
+    );
 }
 
 #[test]
