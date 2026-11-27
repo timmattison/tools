@@ -478,6 +478,36 @@ fn two_size_changes_at_one_time_show_two_marks_after_a_new_render() {
 }
 
 #[test]
+fn the_ruler_of_a_very_long_project_renders_again_with_no_panic() {
+    // Near 1.6e14 seconds, an `f64` holds a time only to 1/32 of a second,
+    // so two ticks 1/50 of a second apart can get one place.
+    let length = 1.6e14;
+    let mut long = recording(80, 24);
+    long.duration = length;
+    let edits = vec![
+        Edit::AddTrack { id: TrackId(2) },
+        Edit::AddClip {
+            clip: crate::types::Clip {
+                id: ClipId(2),
+                source: Arc::new(long),
+                in_point: Seconds::ZERO,
+                out_point: seconds(length),
+                timeline_offset: Seconds::ZERO,
+            },
+            track: TrackId(2),
+        },
+    ];
+    let mut page = Page::open(edits);
+    for _ in 0..200 {
+        page.key("+", Modifiers::empty());
+    }
+    page.wheel(1e18, 0.0, 0.0, Modifiers::empty());
+    page.key("-", Modifiers::empty());
+    page.key("+", Modifiers::empty());
+    assert!(page.html().contains("timeline-tick"));
+}
+
+#[test]
 fn clips_of_one_size_show_no_mark() {
     let page = Page::open(vec![second_clip(80, 24)]).html();
     assert!(!page.contains("size-mark"), "{page}");
