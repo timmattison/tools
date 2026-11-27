@@ -97,3 +97,34 @@ fn any_order_of_seeks_gives_the_same_state_as_a_fresh_replay() {
         assert_eq!(got, want, "seek to {time}");
     }
 }
+
+fn steady_recording(count: usize, step: f64, width: u16, height: u16) -> Arc<Recording> {
+    let events = (0..count)
+        .map(|index| event(index as f64 * step, EventType::Output, "x"))
+        .collect();
+    recording(width, height, events)
+}
+
+#[test]
+fn snapshots_bound_the_replay_of_a_seek() {
+    // 600 events, one each 0.1 s. The snapshot interval is 1 s.
+    let mut preview = Preview::new(steady_recording(600, 0.1, 80, 24), PreviewTheme::Auto);
+    preview.seek(secs(60.0));
+    assert!(preview.snapshot_count() > 1);
+
+    let before = preview.events_replayed();
+    preview.seek(secs(30.05));
+    assert!(preview.events_replayed() - before <= 11);
+
+    let before = preview.events_replayed();
+    preview.seek(secs(45.0));
+    assert!(preview.events_replayed() - before <= 11);
+}
+
+#[test]
+fn the_number_of_snapshots_has_a_limit() {
+    let mut preview = Preview::new(steady_recording(100_000, 0.1, 80, 24), PreviewTheme::Auto);
+    preview.seek(secs(10_000.0));
+    assert!(preview.snapshot_count() > 1);
+    assert!(preview.snapshot_count() <= 2 * 256 + 1);
+}
