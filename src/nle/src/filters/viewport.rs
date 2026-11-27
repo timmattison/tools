@@ -282,6 +282,10 @@ struct Replay {
     layout: Layout,
     rows: Vec<usize>,
     columns: Vec<usize>,
+    /// For each row of the screen, whether it is in `rows`.
+    row_shown: Vec<bool>,
+    /// For each column of the screen, whether it is in `columns`.
+    column_shown: Vec<bool>,
     writer: Writer,
 }
 
@@ -295,6 +299,8 @@ impl Replay {
             reader: Reader::default(),
             layout: Layout::Moved,
             writer: Writer::blank(columns.len(), rows.len()),
+            row_shown: shown(&rows, usize::from(size.height)),
+            column_shown: shown(&columns, usize::from(size.width)),
             rows,
             columns,
         }
@@ -341,6 +347,8 @@ impl Replay {
             terminal,
             reader,
             layout: Layout::Masked,
+            row_shown: shown(&rows, usize::from(size.height)),
+            column_shown: shown(&columns, usize::from(size.width)),
             rows,
             columns,
             writer,
@@ -380,9 +388,11 @@ impl Replay {
                     .iter()
                     .enumerate()
                     .flat_map(|(row, cells)| {
-                        let row_shown = self.rows.contains(&row);
+                        let row_shown = self.row_shown.get(row).copied().unwrap_or(false);
                         cells.iter().enumerate().map(move |(column, cell)| {
-                            if row_shown && self.columns.contains(&column) {
+                            let column_shown =
+                                self.column_shown.get(column).copied().unwrap_or(false);
+                            if row_shown && column_shown {
                                 glyph_of(cell)
                             } else {
                                 Glyph::BLANK
@@ -390,9 +400,9 @@ impl Replay {
                         })
                     })
                     .collect();
-                let cursor =
-                    (shown && self.rows.contains(&cursor_y) && self.columns.contains(&cursor_x))
-                        .then_some((cursor_x, cursor_y));
+                let visible = self.row_shown.get(cursor_y).copied().unwrap_or(false)
+                    && self.column_shown.get(cursor_x).copied().unwrap_or(false);
+                let cursor = (shown && visible).then_some((cursor_x, cursor_y));
                 (target, cursor)
             }
         }
@@ -540,6 +550,17 @@ impl Reader {
     fn open(&self) -> &str {
         &self.open
     }
+}
+
+/// For each of `len` indexes, whether `indexes` holds it.
+fn shown(indexes: &[usize], len: usize) -> Vec<bool> {
+    let mut shown = vec![false; len];
+    for index in indexes {
+        if let Some(slot) = shown.get_mut(*index) {
+            *slot = true;
+        }
+    }
+    shown
 }
 
 /// An emulator of a screen of `size`.
