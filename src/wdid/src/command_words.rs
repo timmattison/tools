@@ -343,6 +343,16 @@ pub struct AliasUse {
     pub through: Option<String>,
 }
 
+/// One run of a word by a wrapper. In `sudo command ls`, `sudo` runs `command`
+/// and `command` runs `ls`, thus the line has two runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrapperRun {
+    /// The name of the wrapper.
+    pub wrapper: String,
+    /// The literal text of the word that the wrapper runs.
+    pub word: String,
+}
+
 /// The command words of one line, and the aliases that expanded in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
@@ -351,6 +361,9 @@ pub struct Line {
     pub words: Vec<CommandWord>,
     /// Each alias expansion of the walk, in walk order.
     pub aliases: Vec<AliasUse>,
+    /// Each run of a word by a wrapper, in walk order. A wrapper that looks a
+    /// name up (`command -v ls`) runs nothing and adds no run.
+    pub wrapped: Vec<WrapperRun>,
 }
 
 /// The most levels of nesting that the walk reads. A substitution inside a
@@ -733,6 +746,9 @@ const PLAIN: Wrapper = Wrapper {
     lookup_options: false,
 };
 
+/// The name of the wrapper `command`.
+pub const COMMAND: &str = "command";
+
 /// Every wrapper that the walk knows, with its option tables.
 const WRAPPERS: &[Wrapper] = &[
     Wrapper {
@@ -783,7 +799,7 @@ const WRAPPERS: &[Wrapper] = &[
         ..PLAIN
     },
     Wrapper {
-        name: "command",
+        name: COMMAND,
         lookup_options: true,
         ..PLAIN
     },
@@ -1568,6 +1584,7 @@ pub fn parse_line(line: &str, aliases: &Aliases) -> Option<Line> {
         Ok(()) => Some(Line {
             words: walker.words,
             aliases: walker.uses,
+            wrapped: Vec::new(),
         }),
         Err(Refused) => None,
     }

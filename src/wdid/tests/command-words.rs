@@ -2,7 +2,7 @@
 
 use wdid::command_words::{
     command_words, parse_line, simple_command, split_words, AliasDefinition, AliasKind, AliasUse,
-    Aliases, CommandWord, Parsed,
+    Aliases, CommandWord, Parsed, WrapperRun, COMMAND,
 };
 
 /// Runs every row of a table. Each row is a line and the value that
@@ -1339,4 +1339,38 @@ fn simple_command_refuses_anything_that_is_not_one_simple_command() {
     for text in rows {
         assert_eq!(simple_command(text), None, "text: {text:?}");
     }
+}
+
+/// Makes one run of a word by a wrapper.
+fn run(wrapper: &str, word: &str) -> WrapperRun {
+    WrapperRun {
+        wrapper: wrapper.to_owned(),
+        word: word.to_owned(),
+    }
+}
+
+#[test]
+fn the_line_records_each_run_of_a_word_by_a_wrapper() {
+    let rows = [
+        ("command ls -G \"$@\"", vec![run("command", "ls")]),
+        (
+            "sudo command ls",
+            vec![run("sudo", "command"), run("command", "ls")],
+        ),
+        ("command -v ls", vec![]),
+        ("echo command ls", vec![]),
+        ("ls", vec![]),
+        ("command", vec![]),
+        ("command $x", vec![]),
+        ("a | command b", vec![run("command", "b")]),
+    ];
+    for (text, expected) in rows {
+        let line = parse_line(text, &Aliases::new()).expect("the line parses");
+        assert_eq!(line.wrapped, expected, "text: {text:?}");
+    }
+}
+
+#[test]
+fn the_name_of_the_command_wrapper_is_a_constant() {
+    assert_eq!(COMMAND, "command");
 }
