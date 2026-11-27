@@ -4,10 +4,11 @@ use std::path::PathBuf;
 
 use chrono::{Days, NaiveDate, NaiveDateTime};
 use wdid::command_words::{command_words, Aliases, Parsed};
-use wdid::defs::{tally, Classification, Kind, Tally, Usage, Window};
+use wdid::defs::{tally, Classification, Kind, Reason, Tally, Usage, Window};
 use wdid::history::{Exit, HistoryEntry};
 use wdid::origin::{Origin, Places};
 use wdid::shell::Definitions;
+use wdid::starts::Trigger;
 
 /// The idle limit of the default window.
 const IDLE_DAYS: u32 = 30;
@@ -545,4 +546,307 @@ fn all_lists_the_private_functions_with_their_uses() {
     assert!(!comp.mine);
     assert_eq!(result.summary.functions, 3);
     assert_eq!((result.summary.mine, result.summary.others), (5, 3));
+}
+
+/// Makes the reason that `trigger` runs a definition directly.
+fn runs(trigger: Trigger) -> Reason {
+    Reason::Runs {
+        trigger,
+        through: None,
+    }
+}
+
+/// Makes the reason that `trigger` runs a definition through `name`.
+fn runs_through(trigger: Trigger, name: &str) -> Reason {
+    Reason::Runs {
+        trigger,
+        through: Some(name.to_owned()),
+    }
+}
+
+/// Makes the trigger of the zsh hook `hook`.
+fn hook(hook: &str) -> Trigger {
+    Trigger::Hook(hook.to_owned())
+}
+
+/// Gives the function entry `name` of `result`.
+fn function<'a>(result: &'a Tally, name: &str) -> &'a Usage {
+    usage(result, name, Kind::Function)
+}
+
+/// A hook function runs without a typed name. It is not in "Never used".
+#[test]
+fn a_hook_function_runs_without_typing() {
+    let mut defs = definitions(&[], &[], &[], &[("precmd", "\ttrue")]);
+    defs.starts.functions = vec![(hook("precmd"), "precmd".to_owned())];
+    let result = run(&[], &defs);
+    let precmd = function(&result, "precmd");
+    assert_eq!(precmd.classification, Classification::RunsWithoutTyping);
+    assert_eq!(precmd.reasons, [runs(hook("precmd"))]);
+    assert_eq!(precmd.uses, 0);
+}
+
+/// Each function that a hook function calls, to any depth, runs through the
+/// hook function. A cycle back to the hook function adds no reason to it.
+#[test]
+fn a_function_that_a_hook_function_calls_runs_through_it() {
+    let mut defs = definitions(
+        &[],
+        &[],
+        &[],
+        &[
+            ("myprecmd", "\thelper"),
+            ("helper", "\tdeep"),
+            ("deep", "\tmyprecmd"),
+            ("other", "\ttrue"),
+        ],
+    );
+    defs.starts.functions = vec![(hook("precmd"), "myprecmd".to_owned())];
+    let result = run(&[], &defs);
+    assert_eq!(
+        function(&result, "myprecmd").reasons,
+        [runs(hook("precmd"))]
+    );
+    for name in ["helper", "deep"] {
+        let entry = function(&result, name);
+        assert_eq!(entry.classification, Classification::RunsWithoutTyping);
+        assert_eq!(
+            entry.reasons,
+            [runs_through(hook("precmd"), "myprecmd")],
+            "{name}"
+        );
+    }
+    let other = function(&result, "other");
+    assert_eq!(other.classification, Classification::NeverUsed);
+    assert!(other.reasons.is_empty());
+}
+
+/// A trap function and the handler of a command that zsh does not find run
+/// without a typed name. A name that is not a function changes nothing.
+#[test]
+fn a_trap_function_and_the_handler_run_without_typing() {
+    let mut defs = definitions(
+        &[],
+        &[],
+        &[],
+        &[
+            ("TRAPINT", "\treturn 128"),
+            ("command_not_found_handler", "\treturn 127"),
+        ],
+    );
+    defs.starts.functions = vec![
+        (Trigger::Trap("INT".into()), "TRAPINT".to_owned()),
+        (
+            Trigger::CommandNotFound,
+            "command_not_found_handler".to_owned(),
+        ),
+        (hook("precmd"), "echo".to_owned()),
+    ];
+    let result = run(&[], &defs);
+    assert_eq!(
+        function(&result, "TRAPINT").reasons,
+        [runs(Trigger::Trap("INT".into()))]
+    );
+    assert_eq!(
+        function(&result, "command_not_found_handler").reasons,
+        [runs(Trigger::CommandNotFound)]
+    );
+    assert_eq!(result.definitions.len(), 2);
+}
+
+/// The function of a widget that a key starts runs without a typed name,
+/// with each key of the widget.
+#[test]
+fn a_widget_with_a_key_runs_without_typing() {
+    let mut defs = definitions(
+        &[],
+        &[],
+        &[],
+        &[("searchfn", "\thelper"), ("helper", "\ttrue")],
+    );
+    defs.starts.widgets = [("search".to_owned(), "searchfn".to_owned())].into();
+    defs.starts.keys = [(
+        "search".to_owned(),
+        ["^S".to_owned(), "^R".to_owned()].into(),
+    )]
+    .into();
+    let result = run(&[], &defs);
+    let widget = Trigger::Widget {
+        widget: "search".to_owned(),
+        keys: vec!["^R".to_owned(), "^S".to_owned()],
+    };
+    let searchfn = function(&result, "searchfn");
+    assert_eq!(searchfn.classification, Classification::RunsWithoutTyping);
+    assert_eq!(searchfn.reasons, [runs(widget.clone())]);
+    assert_eq!(
+        function(&result, "helper").reasons,
+        [runs_through(widget, "searchfn")]
+    );
+}
+
+/// The function of a widget that no key starts gets the reason, but it keeps
+/// its state by its uses, and its callees get nothing.
+#[test]
+fn a_widget_with_no_key_keeps_its_state_and_gets_the_reason() {
+    let mut defs = definitions(
+        &[],
+        &[],
+        &[],
+        &[
+            ("lonelyfn", "\thelper"),
+            ("helper", "\ttrue"),
+            ("typedfn", "\ttrue"),
+        ],
+    );
+    defs.starts.widgets = [
+        ("lonely".to_owned(), "lonelyfn".to_owned()),
+        ("typed".to_owned(), "typedfn".to_owned()),
+    ]
+    .into();
+    let result = run(&[row("typedfn")], &defs);
+    let lonely = function(&result, "lonelyfn");
+    assert_eq!(lonely.classification, Classification::NeverUsed);
+    assert_eq!(lonely.reasons, [Reason::WidgetWithoutKey]);
+    let typed = function(&result, "typedfn");
+    assert_eq!(typed.classification, Classification::Used);
+    assert_eq!(typed.reasons, [Reason::WidgetWithoutKey]);
+    assert!(function(&result, "helper").reasons.is_empty());
+}
+
+/// zle runs a special widget at an event of its own. A widget that
+/// `add-zle-hook-widget` added to a special widget runs at that event too,
+/// although no key starts it.
+#[test]
+fn a_special_widget_and_a_widget_of_add_zle_hook_widget_run_without_typing() {
+    let mut defs = definitions(
+        &[],
+        &[],
+        &[],
+        &[
+            ("initfn", "\ttrue"),
+            ("kmsel", "\ttrue"),
+            ("dispatch", "\ttrue"),
+        ],
+    );
+    defs.starts.widgets = [
+        ("zle-line-init".to_owned(), "initfn".to_owned()),
+        ("kmsel".to_owned(), "kmsel".to_owned()),
+        ("zle-keymap-select".to_owned(), "dispatch".to_owned()),
+    ]
+    .into();
+    defs.starts.hook_widgets = [("zle-keymap-select".to_owned(), vec!["kmsel".to_owned()])].into();
+    let result = run(&[], &defs);
+    let special = |name: &str| runs(Trigger::SpecialWidget(name.to_owned()));
+    assert_eq!(
+        function(&result, "initfn").reasons,
+        [special("zle-line-init")]
+    );
+    assert_eq!(
+        function(&result, "kmsel").reasons,
+        [special("zle-keymap-select")]
+    );
+    assert_eq!(
+        function(&result, "dispatch").reasons,
+        [special("zle-keymap-select")]
+    );
+    for name in ["initfn", "kmsel", "dispatch"] {
+        assert_eq!(
+            function(&result, name).classification,
+            Classification::RunsWithoutTyping,
+            "{name}"
+        );
+    }
+}
+
+/// The code of a start runs each function and each alias that it names. A
+/// function that an alias of the code calls, and each function that it
+/// calls, runs through that alias.
+#[test]
+fn the_code_of_a_start_runs_its_functions_and_its_aliases() {
+    let mut defs = definitions(
+        &[("ll", "lsfn -l"), ("idle", "true")],
+        &[],
+        &[],
+        &[
+            ("pcfn", "\thelper"),
+            ("helper", "\ttrue"),
+            ("lsfn", "\tdeep"),
+            ("deep", "\ttrue"),
+        ],
+    );
+    defs.starts.code = vec![(Trigger::PromptCommand, "pcfn; ll".to_owned())];
+    let result = run(&[], &defs);
+    let prompt = Trigger::PromptCommand;
+    assert_eq!(function(&result, "pcfn").reasons, [runs(prompt.clone())]);
+    assert_eq!(
+        function(&result, "helper").reasons,
+        [runs_through(prompt.clone(), "pcfn")]
+    );
+    let ll = usage(&result, "ll", Kind::Alias);
+    assert_eq!(ll.classification, Classification::RunsWithoutTyping);
+    assert_eq!(ll.reasons, [runs(prompt.clone())]);
+    for name in ["lsfn", "deep"] {
+        assert_eq!(
+            function(&result, name).reasons,
+            [runs_through(prompt.clone(), "ll")],
+            "{name}"
+        );
+    }
+    assert!(usage(&result, "idle", Kind::Alias).reasons.is_empty());
+}
+
+/// Code that does not parse runs nothing.
+#[test]
+fn code_that_does_not_parse_runs_nothing() {
+    let mut defs = definitions(&[], &[], &[], &[("pcfn", "\ttrue")]);
+    defs.starts.code = vec![(Trigger::PromptCommand, "pcfn $(".to_owned())];
+    let result = run(&[], &defs);
+    assert!(function(&result, "pcfn").reasons.is_empty());
+}
+
+/// A definition that runs without a typed name is never idle, and it keeps
+/// the count of its typed uses.
+#[test]
+fn a_definition_that_runs_without_typing_is_not_idle() {
+    let mut defs = definitions(&[], &[], &[], &[("precmd", "\ttrue")]);
+    defs.starts.functions = vec![(hook("precmd"), "precmd".to_owned())];
+    let result = run(&[entry(100, 0, "precmd")], &defs);
+    let precmd = function(&result, "precmd");
+    assert_eq!(precmd.classification, Classification::RunsWithoutTyping);
+    assert_eq!(precmd.uses, 1);
+    assert_eq!(precmd.typed, 1);
+}
+
+/// A private hook function has no entry, but its callee runs through it.
+#[test]
+fn a_private_hook_function_gives_its_reason_to_its_callee() {
+    let mut defs = definitions(
+        &[],
+        &[],
+        &[],
+        &[("_my_precmd", "\thelper"), ("helper", "\ttrue")],
+    );
+    defs.starts.functions = vec![(hook("precmd"), "_my_precmd".to_owned())];
+    let result = run(&[], &defs);
+    assert!(result.definitions.iter().all(|u| u.name != "_my_precmd"));
+    assert_eq!(
+        function(&result, "helper").reasons,
+        [runs_through(hook("precmd"), "_my_precmd")]
+    );
+}
+
+/// The reasons of a definition are sorted, and each reason is there one time.
+#[test]
+fn the_reasons_are_sorted_and_unique() {
+    let mut defs = definitions(&[], &[], &[], &[("both", "\ttrue")]);
+    defs.starts.functions = vec![
+        (hook("preexec"), "both".to_owned()),
+        (hook("chpwd"), "both".to_owned()),
+        (hook("preexec"), "both".to_owned()),
+    ];
+    let result = run(&[], &defs);
+    assert_eq!(
+        function(&result, "both").reasons,
+        [runs(hook("chpwd")), runs(hook("preexec"))]
+    );
 }
