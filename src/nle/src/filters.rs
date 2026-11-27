@@ -1,5 +1,6 @@
 //! The filters that ship with the app.
 
+pub mod color_scheme;
 pub mod cursor;
 pub mod time_dilation;
 pub mod typing_speed;

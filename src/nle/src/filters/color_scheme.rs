@@ -1,0 +1,394 @@
+//! The filter that converts the colors of a recording to the colors of a theme.
+//!
+//! The filter works at the level of events. It rewrites the SGR color
+//! parameters in the `data` of the output events. Thus a recording made in one
+//! terminal theme plays in the colors of another theme, in each renderer. Input
+//! events stay as they are. The options, with their keys in the project file:
+//!
+//! - `theme`: necessary. It is one of `auto`, `dracula`, `monokai`,
+//!   `solarized-dark`, and `solarized-light`. The filter takes the 16 colors,
+//!   the default foreground, and the default background from this theme.
+//! - `swap`: `true` or `false`. The default is `false`. When it is `true`, the
+//!   default foreground and the default background of the theme change places.
+//! - `cube`: `keep` (the default) or `nearest`. It sets what the filter does
+//!   with a color of the 6x6x6 cube, the palette indexes 16 to 231. `nearest`
+//!   gives the color of the 16 colors of the theme that is the nearest to it.
+//! - `grayscale`: `keep` (the default) or `invert`. It sets what the filter
+//!   does with a color of the grayscale ramp, the palette indexes 232 to 255.
+//!   `invert` swaps the ends of the ramp, so 232 becomes 255.
+//! - `truecolor`: `keep` (the default) or `invert-lightness`. It sets what the
+//!   filter does with a 24-bit color. `invert-lightness` changes the lightness
+//!   L of the color to 1 - L, and it keeps the hue and the saturation.
+//!
+//! The color rules:
+//!
+//! - A color of the 16 base colors, from `30` to `37`, `40` to `47`, `90` to
+//!   `97`, `100` to `107`, and `38;5;n`, `48;5;n`, `58;5;n` with n below 16,
+//!   becomes the 24-bit color of the same index in the theme.
+//! - The cube, the grayscale ramp, and the 24-bit colors follow the three rules
+//!   above.
+//! - The filter writes each new color in the form `38;2;r;g;b` or `38;5;n`,
+//!   with the codes 48 and 58 for the background and the underline. It always
+//!   uses the semicolon form, because the emulator of `termstate` reads only
+//!   that form.
+//! - The filter reads the colon form (`38:5:n`, `38:2::r:g:b`) and rewrites it
+//!   in the semicolon form.
+//! - A parameter that is not a color stays as written. An incomplete color
+//!   stays as written. A color with an operand that is not a number from 0 to
+//!   255 stays as written.
+//!
+//! The filter does not read OSC 4, thus a palette that the recording sets with
+//! OSC 4 is not converted. A terminal that shows bold text in the bright colors
+//! does not do so for a base color that the filter converted, because the
+//! converted color is a 24-bit color.
+
+use serde_json::Value;
+use termstate::TerminalTheme;
+
+use crate::preview::screen::Rgb;
+use crate::preview::PreviewTheme;
+use crate::types::{AppliedFilter, FilterKind, FilterOptions, FilterRegion};
+
+/// The kind of the color scheme filter.
+pub const KIND: &str = "color-scheme";
+
+/// The option that holds the theme.
+pub const THEME_OPTION: &str = "theme";
+
+/// The option that swaps the default foreground and the default background.
+pub const SWAP_OPTION: &str = "swap";
+
+/// The option that holds the rule for the colors of the 6x6x6 cube.
+pub const CUBE_OPTION: &str = "cube";
+
+/// The option that holds the rule for the colors of the grayscale ramp.
+pub const GRAYSCALE_OPTION: &str = "grayscale";
+
+/// The option that holds the rule for the 24-bit colors.
+pub const TRUECOLOR_OPTION: &str = "truecolor";
+
+/// The name of the rule that leaves a color as it is.
+const RULE_KEEP: &str = "keep";
+/// The name of the cube rule that gives the nearest color of the theme.
+const RULE_NEAREST: &str = "nearest";
+/// The name of the grayscale rule that swaps the ends of the ramp.
+const RULE_INVERT: &str = "invert";
+/// The name of the truecolor rule that inverts the lightness.
+const RULE_INVERT_LIGHTNESS: &str = "invert-lightness";
+
+/// The first palette index of the 6x6x6 cube.
+const CUBE_START: u8 = 16;
+/// The first palette index of the grayscale ramp.
+const GRAYSCALE_START: u8 = 232;
+/// The sum of the first and the last index of the grayscale ramp.
+const GRAYSCALE_MIRROR: u16 = 232 + 255;
+/// The number of colors in a theme.
+const THEME_COLORS: usize = 16;
+
+/// What the filter does with a color of the 6x6x6 cube (palette indexes 16 to
+/// 231).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CubeRule {
+    /// Leave the color as it is.
+    #[default]
+    Keep,
+    /// Give the nearest color of the 16 colors of the theme.
+    Nearest,
+}
+
+impl CubeRule {
+    /// Each rule.
+    pub const ALL: [Self; 2] = [Self::Keep, Self::Nearest];
+
+    /// The name of the rule in the options.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Keep => RULE_KEEP,
+            Self::Nearest => RULE_NEAREST,
+        }
+    }
+
+    /// The rule with this exact `name`, or `None`.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|rule| rule.name() == name)
+    }
+}
+
+/// What the filter does with a color of the grayscale ramp (palette indexes 232
+/// to 255).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GrayscaleRule {
+    /// Leave the color as it is.
+    #[default]
+    Keep,
+    /// Swap the ends of the ramp.
+    Invert,
+}
+
+impl GrayscaleRule {
+    /// Each rule.
+    pub const ALL: [Self; 2] = [Self::Keep, Self::Invert];
+
+    /// The name of the rule in the options.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Keep => RULE_KEEP,
+            Self::Invert => RULE_INVERT,
+        }
+    }
+
+    /// The rule with this exact `name`, or `None`.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|rule| rule.name() == name)
+    }
+}
+
+/// What the filter does with a 24-bit color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TruecolorRule {
+    /// Leave the color as it is.
+    #[default]
+    Keep,
+    /// Change the lightness L of the color to 1 - L.
+    InvertLightness,
+}
+
+impl TruecolorRule {
+    /// Each rule.
+    pub const ALL: [Self; 2] = [Self::Keep, Self::InvertLightness];
+
+    /// The name of the rule in the options.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Keep => RULE_KEEP,
+            Self::InvertLightness => RULE_INVERT_LIGHTNESS,
+        }
+    }
+
+    /// The rule with this exact `name`, or `None`.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|rule| rule.name() == name)
+    }
+}
+
+/// The options of the filter, after their checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColorScheme {
+    /// The theme that gives the 16 colors and the default colors.
+    pub theme: PreviewTheme,
+    /// True to swap the default foreground and the default background of the
+    /// theme.
+    pub swap: bool,
+    /// The rule for the colors of the 6x6x6 cube.
+    pub cube: CubeRule,
+    /// The rule for the colors of the grayscale ramp.
+    pub grayscale: GrayscaleRule,
+    /// The rule for the 24-bit colors.
+    pub truecolor: TruecolorRule,
+}
+
+impl ColorScheme {
+    /// The scheme of `theme`, with no swap and each rule `Keep`.
+    #[must_use]
+    pub fn new(theme: PreviewTheme) -> Self {
+        Self {
+            theme,
+            swap: false,
+            cube: CubeRule::Keep,
+            grayscale: GrayscaleRule::Keep,
+            truecolor: TruecolorRule::Keep,
+        }
+    }
+
+    /// Read and check the options of a filter.
+    ///
+    /// # Errors
+    /// Returns a message when the options are not valid.
+    pub fn parse(_options: &FilterOptions) -> Result<Self, String> {
+        Err(String::new())
+    }
+
+    /// The options of the filter: all five keys, always.
+    #[must_use]
+    pub fn options(&self) -> FilterOptions {
+        FilterOptions::new()
+    }
+
+    /// The default foreground that the filter sets: the foreground of the
+    /// theme, or its background when `swap` is true.
+    #[must_use]
+    pub fn foreground(&self) -> Rgb {
+        let theme = self.theme.palette();
+        theme.foreground
+    }
+
+    /// The default background that the filter sets: the background of the
+    /// theme, or its foreground when `swap` is true.
+    #[must_use]
+    pub fn background(&self) -> Rgb {
+        let theme = self.theme.palette();
+        theme.background
+    }
+}
+
+/// The value of the rule option `key`, or the default rule when the option is
+/// not set.
+fn read_rule<T: Default>(
+    map: &serde_json::Map<String, Value>,
+    key: &str,
+    from_name: fn(&str) -> Option<T>,
+    names: &[&str],
+) -> Result<T, String> {
+    match map.get(key) {
+        None => Ok(T::default()),
+        Some(Value::String(name)) => from_name(name)
+            .ok_or_else(|| format!("the {key} \"{name}\" is not one of {}", names.join(", "))),
+        Some(_) => Err(format!("the option \"{key}\" is not a string")),
+    }
+}
+
+/// The kind of the color scheme filter, as a `FilterKind`.
+#[must_use]
+pub fn kind() -> FilterKind {
+    FilterKind::new(KIND)
+}
+
+/// A color scheme filter for `region` with `scheme`.
+#[must_use]
+pub fn applied(region: FilterRegion, scheme: &ColorScheme) -> AppliedFilter {
+    AppliedFilter {
+        kind: kind(),
+        region,
+        options: scheme.options(),
+    }
+}
+
+/// The scheme of a color scheme filter. It is `None` when the filter is of
+/// another kind, or when its options do not parse.
+#[must_use]
+pub fn scheme_of(_filter: &AppliedFilter) -> Option<ColorScheme> {
+    None
+}
+
+/// The target of an SGR color: the codes 38, 48, and 58 set it, and 39, 49,
+/// and 59 set it back to its default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Foreground,
+    Background,
+    Underline,
+}
+
+impl Slot {
+    /// The code that sets a color of this slot.
+    fn code(self) -> u8 {
+        match self {
+            Self::Foreground => 38,
+            Self::Background => 48,
+            Self::Underline => 58,
+        }
+    }
+}
+
+/// A color that an SGR parameter names: a palette index 0 to 255, or a 24-bit
+/// color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SgrColor {
+    Index(u8),
+    Rgb(Rgb),
+}
+
+/// One item of an SGR parameter list, with its text as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SgrItem {
+    /// An empty parameter or 0: the reset of all attributes. It holds its text.
+    Reset(String),
+    /// 39, 49, or 59: a slot back to its default. It holds its text.
+    Default(Slot, String),
+    /// A color for a slot. `text` is its parameters as written, for example
+    /// `31`, `38;5;196`, or `38:2::1:2:3`.
+    Color {
+        slot: Slot,
+        text: String,
+        color: SgrColor,
+    },
+    /// Any other parameter, and a color form that is not complete or not
+    /// valid, as written.
+    Other(String),
+}
+
+impl SgrItem {
+    /// The parameters of the item, as written.
+    fn text(&self) -> &str {
+        match self {
+            Self::Reset(text) | Self::Default(_, text) | Self::Other(text) => text,
+            Self::Color { text, .. } => text,
+        }
+    }
+}
+
+/// The color of `palette` that has the smallest squared distance to `color` in
+/// RGB. A tie goes to the lower index.
+fn nearest(palette: &[Rgb; THEME_COLORS], _color: Rgb) -> Rgb {
+    palette[0]
+}
+
+/// The color with the same hue and saturation as `color`, and the lightness
+/// 1 - L. Each channel c becomes `c + 255 - (max + min)`.
+fn invert_lightness(color: Rgb) -> Rgb {
+    color
+}
+
+/// The index of the grayscale ramp that mirrors `index`: 232 and 255 swap.
+fn invert_gray(index: u8) -> u8 {
+    index
+}
+
+/// The items of a list of SGR parameters, read from left to right. The texts of
+/// the items, joined with `;`, give back `params`.
+fn sgr_items(params: &str) -> Vec<SgrItem> {
+    vec![SgrItem::Other(params.to_string())]
+}
+
+/// The colors of the filter: the 16 colors of the target theme and the three
+/// rules.
+struct Converter {
+    palette: [Rgb; THEME_COLORS],
+    cube: CubeRule,
+    grayscale: GrayscaleRule,
+    truecolor: TruecolorRule,
+}
+
+impl Converter {
+    /// The converter of `scheme`.
+    fn new(scheme: &ColorScheme) -> Self {
+        let theme = scheme.theme.palette();
+        Self {
+            palette: std::array::from_fn(|index| theme.get_color(u8::try_from(index).unwrap_or(0))),
+            cube: scheme.cube,
+            grayscale: scheme.grayscale,
+            truecolor: scheme.truecolor,
+        }
+    }
+
+    /// The replacement text of one color item, or `None` when the rules leave
+    /// its color as it is.
+    fn convert(&self, _slot: Slot, _color: SgrColor) -> Option<String> {
+        None
+    }
+
+    /// The parameters with each color converted, or `None` when no item
+    /// changes.
+    fn rewrite(&self, _params: &str) -> Option<String> {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests;
