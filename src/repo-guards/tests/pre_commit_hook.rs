@@ -278,6 +278,19 @@ const DEFAULT_CARGO_HOME: &str = ".cargo";
 /// The directory, in the cargo home, where cargo looks for a subcommand.
 const CARGO_HOME_BIN: &str = "bin";
 
+/// The shell that Husky starts each hook with. `.husky/_/h` runs
+/// `sh -e "$s" "$@"`, and it ignores the shebang of the hook. A test that
+/// starts the hook with bash thus proves nothing about a machine whose `sh` is
+/// dash, which is the `sh` of Debian and Ubuntu.
+const HUSKY_SHELL: &str = "sh";
+
+/// The flag that Husky gives [`HUSKY_SHELL`]: stop at the first command that
+/// fails.
+const HUSKY_SHELL_FLAG: &str = "-e";
+
+/// The dash that macOS installs, and that Debian and Ubuntu start as `sh`.
+const DASH: &str = "/bin/dash";
+
 /// The cargo home of a hook run, as an absolute path. It obeys the rule of
 /// cargo: a `CARGO_HOME` that is set and not empty, else `.cargo` in the home
 /// directory. Gives back `None` when neither one is known.
@@ -289,9 +302,16 @@ fn cargo_home() -> Option<PathBuf> {
         .and_then(|home| std::path::absolute(home).ok())
 }
 
-/// Run the real hook once with `dir` as CWD, shedding the inherited `GIT_`
-/// family so the hook operates on the fixture repo rather than this test's
-/// repo. It sets `CARGO_TARGET_DIR` to `dir/target`, so the cargo in the fixture
+/// Run the real hook once with `dir` as CWD, as Husky starts it:
+/// `sh -e <hook>`. See [`run_hook_in_shell`].
+fn run_hook_configured(dir: &Path, configure: impl FnOnce(&mut Command)) -> HookRun {
+    run_hook_in_shell(HUSKY_SHELL, dir, configure)
+}
+
+/// Run the real hook once with `dir` as CWD, as `shell -e <hook>`, shedding
+/// the inherited `GIT_` family so the hook operates on the fixture repo rather
+/// than this test's repo. It sets `CARGO_TARGET_DIR` to `dir/target`, so the
+/// cargo in the fixture
 /// never waits for the build-directory lock of the outer `cargo test` run.
 ///
 /// It puts a stub `cargo-machete` that exits 0 first on PATH. The check script
@@ -308,8 +328,8 @@ fn cargo_home() -> Option<PathBuf> {
 /// `configure` changes the command after that setup and before it starts, so a
 /// `PATH` that `configure` sets wins. Gives back the exit status and the printed
 /// output of that one run.
-fn run_hook_configured(dir: &Path, configure: impl FnOnce(&mut Command)) -> HookRun {
-    let mut command = childenv::fixture_command("bash");
+fn run_hook_in_shell(shell: &str, dir: &Path, configure: impl FnOnce(&mut Command)) -> HookRun {
+    let mut command = childenv::fixture_command(shell);
     let stub_dir = dir.join(MACHETE_STUB_DIR);
     fs::create_dir_all(&stub_dir).expect("failed to create the stub directory");
     write_executable(stub_dir.join(MACHETE_BINARY_NAME), MACHETE_STUB_SCRIPT)
@@ -329,10 +349,11 @@ fn run_hook_configured(dir: &Path, configure: impl FnOnce(&mut Command)) -> Hook
     configure(&mut command);
 
     let completed = command
+        .arg(HUSKY_SHELL_FLAG)
         .arg(hook_path())
         .current_dir(dir)
         .output()
-        .expect("failed to spawn pre-commit hook");
+        .unwrap_or_else(|e| panic!("failed to spawn the pre-commit hook with {shell}: {e}"));
     HookRun {
         passed: completed.status.success(),
         output: format!(
@@ -711,6 +732,41 @@ fn tool_index_block_runs_cargo_without_git_variables() {
     assert_clean_recording(&calls, &["test"], "tool-index block");
 }
 
+/// Under dash, the `sh` of Debian and Ubuntu, the hook must run as Husky
+/// starts it, `sh -e <hook>`: a staged tool index runs the tool-index guard
+/// through `without_git_environment`, with no `GIT_` variable. Dash refuses
+/// each option that POSIX sh does not have. A hook that sets one stops before
+/// any block runs, and Husky then fails each commit on such a machine.
+#[test]
+fn hook_runs_its_blocks_under_dash() {
+    assert!(
+        Path::new(DASH).is_file(),
+        "{DASH} is missing; this test needs the sh of Debian and Ubuntu"
+    );
+    let dir = unique_fixture_dir();
+    fs::write(dir.join("README.md"), "# fixture\n").expect("write README.md");
+    git_init_and_stage(&dir, &["README.md"]);
+    let cargo = install_fake_cargo(&dir);
+
+    let HookRun { passed, output } = run_hook_in_shell(DASH, &dir, |command| {
+        plant_fake_and_git_variables(command, &cargo);
+    });
+    let calls = read_recording(&cargo);
+    cleanup(&dir);
+
+    assert!(passed, "the hook must pass under {DASH} -e: {output}");
+    assert_eq!(
+        calls.arguments,
+        [INDEX_GUARD_CARGO_CALL],
+        "README.md must run the tool-index guard under {DASH}: {output}"
+    );
+    assert!(
+        calls.git_lines.is_empty(),
+        "a cargo command saw GIT_ variables under {DASH}: {:?}",
+        calls.git_lines
+    );
+}
+
 /// `test.sh` must run `cargo test` with no `GIT_` variable.
 #[test]
 fn test_sh_runs_cargo_without_git_variables() {
@@ -841,9 +897,9 @@ fn directory_of_links(dir: &Path, programs: &[&str]) -> PathBuf {
 /// and name the fix. A gate that skips the checks would report a plugin that it
 /// never read as clean.
 ///
-/// `PATH` holds only the programs that the hook and the script run before the
-/// check for the CLI, so a claude CLI that is installed on this machine cannot
-/// be found.
+/// `PATH` holds only the shell that starts the hook, and the programs that the
+/// hook and the script run before the check for the CLI, so a claude CLI that
+/// is installed on this machine cannot be found.
 /// Proven able to fail by mutation: with `exit 0` in place of the `exit 1` of
 /// the check, the hook passes and this test fails.
 #[test]
@@ -851,7 +907,7 @@ fn plugin_block_without_claude_fails_the_commit() {
     let dir = unique_fixture_dir();
     write_fixture_plugin(&dir);
     git_init_and_stage(&dir, &[FIXTURE_PLUGIN_FILE]);
-    let bin_dir = directory_of_links(&dir, &["bash", "dirname", "git", "grep"]);
+    let bin_dir = directory_of_links(&dir, &[HUSKY_SHELL, "bash", "dirname", "git", "grep"]);
 
     let HookRun { passed, output } = run_hook_configured(&dir, |command| {
         command.env("PATH", &bin_dir);
@@ -1368,4 +1424,212 @@ fn staged_msgs_file_runs_the_msgs_checks() {
             assert_msgs_checks_ran(&dir, &format!("{how:?} of {staged}"));
         }
     }
+}
+
+/// The Rust file that the removal fixtures of the Rust gate commit, and then
+/// take away from its path.
+const REMOVED_RUST_FILE: &str = "src/gone.rs";
+
+/// A move of a Rust file to a path that is not Rust, a deletion of it, and a
+/// symbolic link in its place must each run the Rust gate, with no `GIT_`
+/// variable. A `mod` item can still name the file, so the build of the tree
+/// fails, and without the gate the next commit that stages a Rust file fails
+/// in a change that did not cause it. `git diff` finds renames by default, and
+/// `--name-only` then prints only the new path, so a trigger that matches the
+/// old path misses the move.
+#[test]
+fn removed_rust_file_runs_the_rust_gate() {
+    for removal in each_removal("src/gone.txt") {
+        let dir = unique_fixture_dir();
+        write_toolchain_and_check_script(&dir);
+        write_files(&dir, &[REMOVED_RUST_FILE]);
+        commit_then_stage_removal(&dir, REMOVED_RUST_FILE, removal);
+        let cargo = install_fake_cargo(&dir);
+
+        let HookRun { passed, output } = run_hook_with_planted_git_variables(&dir, &cargo);
+        let calls = read_recording(&cargo);
+        cleanup(&dir);
+
+        assert!(
+            passed,
+            "the hook must pass with a fake cargo ({removal:?}): {output}"
+        );
+        assert_clean_recording(
+            &calls,
+            &["fmt", "clippy", "test"],
+            &format!("{removal:?} of {REMOVED_RUST_FILE}"),
+        );
+    }
+}
+
+/// The folder of the filler files of a large commit. `git diff` lists the
+/// staged paths in byte order, and `z` sorts after the first letter of each
+/// path that a trigger of the hook names. Thus each trigger path comes before
+/// the filler.
+const FILLER_DIR: &str = "zz-filler";
+
+/// The count of filler files in a large commit.
+const FILLER_COUNT: usize = 2000;
+
+/// The length of the long part of the name of each filler file. A long name
+/// gives a long list from few files, and few files keep the fixture fast.
+const FILLER_NAME_LENGTH: usize = 200;
+
+/// The least length, in bytes, of the staged list of a large commit.
+///
+/// `grep -q` stops at its first match. A pipe holds 64 KiB on Linux and on
+/// macOS, and GNU grep reads at most 96 KiB at a time. When the list is much
+/// longer than the sum of the two, `git diff` still has paths to write when
+/// grep stops, so it gets SIGPIPE every time, and a short list does not show
+/// the fault.
+const LARGE_LIST_MIN_BYTES: usize = 256 * 1024;
+
+/// Stage `staged`, which the caller wrote into `dir`, and [`FILLER_COUNT`]
+/// empty filler files, in a new repository in `dir`.
+///
+/// It asserts the two facts that make the fixture show the fault: the staged
+/// list is longer than [`LARGE_LIST_MIN_BYTES`], and each path of `staged`
+/// comes before the filler. A fixture that loses either fact fails here, and
+/// not as a clean pass of the hook.
+fn stage_with_large_filler(dir: &Path, staged: &[&str]) {
+    let filler_dir = dir.join(FILLER_DIR);
+    fs::create_dir_all(&filler_dir).expect("create the filler directory");
+    let long_part = "x".repeat(FILLER_NAME_LENGTH);
+    for index in 0..FILLER_COUNT {
+        let name = format!("{index:04}-{long_part}.txt");
+        fs::write(filler_dir.join(&name), "")
+            .unwrap_or_else(|e| panic!("write the filler file {name}: {e}"));
+    }
+    let mut paths = staged.to_vec();
+    paths.push(FILLER_DIR);
+    git_init_and_stage(dir, &paths);
+
+    let list = run_git(
+        dir,
+        &[
+            "diff",
+            "--cached",
+            "--name-only",
+            "--no-renames",
+            "--no-color",
+        ],
+    );
+    assert!(
+        list.len() > LARGE_LIST_MIN_BYTES,
+        "the staged list of a large commit holds {} bytes, and it must hold more than {LARGE_LIST_MIN_BYTES}",
+        list.len()
+    );
+    let first_paths: Vec<&str> = list.lines().take(staged.len()).collect();
+    for path in staged {
+        assert!(
+            first_paths.contains(path),
+            "{path} must come before the filler in the staged list: {first_paths:?}"
+        );
+    }
+}
+
+/// A commit that stages a tool index among some thousand other paths must run
+/// the tool-index guard. `README.md` sorts before the filler, so `grep -q`
+/// finds it in the first read and stops. If the hook sets `pipefail` and the
+/// trigger reads the list from a pipe, `git diff` then gets SIGPIPE, the pipe
+/// is false, and the hook runs no guard and exits 0.
+#[test]
+fn tool_index_in_a_large_commit_runs_the_index_guard() {
+    let dir = unique_fixture_dir();
+    write_files(&dir, &["README.md"]);
+    stage_with_large_filler(&dir, &["README.md"]);
+    let cargo = install_fake_cargo(&dir);
+
+    let HookRun { passed, output } = run_hook_with_planted_git_variables(&dir, &cargo);
+    let calls = read_recording(&cargo);
+    cleanup(&dir);
+
+    assert!(passed, "the hook must pass with a fake cargo: {output}");
+    assert_eq!(
+        calls.arguments,
+        [INDEX_GUARD_CARGO_CALL],
+        "README.md in a large commit must run the tool-index guard: {output}"
+    );
+}
+
+/// A commit that stages `Cargo.lock` among some thousand other paths must run
+/// the Rust gate, with no `GIT_` variable. A large commit that changes the lock
+/// file is the commit most likely to break the build, and `Cargo.lock` sorts
+/// before the filler, so under `pipefail` a trigger that reads the list from a
+/// pipe into `grep -q` runs no gate for it.
+#[test]
+fn cargo_lock_in_a_large_commit_runs_the_rust_gate() {
+    let dir = unique_fixture_dir();
+    write_toolchain_and_check_script(&dir);
+    write_files(&dir, &["Cargo.lock"]);
+    stage_with_large_filler(&dir, &["Cargo.lock"]);
+    let cargo = install_fake_cargo(&dir);
+
+    let HookRun { passed, output } = run_hook_with_planted_git_variables(&dir, &cargo);
+    let calls = read_recording(&cargo);
+    cleanup(&dir);
+
+    assert!(passed, "the hook must pass with a fake cargo: {output}");
+    assert_clean_recording(
+        &calls,
+        &["fmt", "clippy", "test"],
+        "Cargo.lock in a large commit",
+    );
+}
+
+/// A commit that stages a file of the msgs frontend among some thousand other
+/// paths must run the type check and the tests of msgs. The path sorts before
+/// the filler, so under `pipefail` a trigger that reads the list from a pipe
+/// into `grep -q` runs no check for it.
+#[test]
+fn msgs_file_in_a_large_commit_runs_the_msgs_checks() {
+    let staged = MSGS_FILES[0];
+    let dir = unique_fixture_dir();
+    write_files(&dir, &[staged]);
+    stage_with_large_filler(&dir, &[staged]);
+    assert_msgs_checks_ran(&dir, &format!("{staged} in a large commit"));
+}
+
+/// A commit that stages a file of a plugin among some thousand other paths
+/// must run the checks of the claude CLI. The path sorts before the filler, so
+/// under `pipefail` a trigger that reads the list from a pipe into `grep -q`
+/// runs no check for it.
+#[test]
+fn plugin_file_in_a_large_commit_runs_the_plugin_checks() {
+    let dir = unique_fixture_dir();
+    write_fixture_plugin(&dir);
+    stage_with_large_filler(&dir, &[FIXTURE_PLUGIN_FILE]);
+    let claude = install_fake_program(&dir, "claude", None);
+
+    let HookRun { passed, output } = run_hook_with_planted_git_variables(&dir, &claude);
+    let calls = read_recording(&claude);
+    cleanup(&dir);
+
+    assert!(passed, "the hook must pass with a fake claude: {output}");
+    assert_eq!(
+        calls.arguments, EXPECTED_CLAUDE_CALLS,
+        "{FIXTURE_PLUGIN_FILE} in a large commit must run each check of the plugin block: {output}"
+    );
+}
+
+/// A commit that stages a file of `plugins/ic-inline` among some thousand other
+/// paths must run the test target of `ic` that reads the plugin. The path
+/// sorts before the filler, so under `pipefail` a trigger that reads the list
+/// from a pipe into `grep -q` runs no test for it.
+#[test]
+fn ic_inline_file_in_a_large_commit_runs_the_emit_rgba_tests() {
+    let staged = IC_INLINE_FILES[0];
+    let dir = unique_fixture_dir();
+    write_files(&dir, &[staged]);
+    stage_with_large_filler(&dir, &[staged]);
+
+    let (HookRun { passed, output }, calls) = run_hook_with_fake_cargo_and_claude(&dir);
+    cleanup(&dir);
+
+    assert!(passed, "the hook must pass with a fake cargo: {output}");
+    assert_eq!(
+        calls.arguments,
+        [IC_INLINE_CARGO_CALL],
+        "{staged} in a large commit must run the emit-rgba tests of ic: {output}"
+    );
 }

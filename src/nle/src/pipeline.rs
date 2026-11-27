@@ -5,14 +5,15 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use serde::de::DeserializeOwned;
-
 use crate::error::NleError;
 use crate::types::{
     AppliedFilter, Clip, EditProject, Event, FilterKind, FilterOptions, FilterRegion, Recording,
 };
 
 /// A filter: a pure function from the events of a region to new events.
+///
+/// This is the event form. `SpanFilterFn` is the span form, for a filter that
+/// changes the length of its region.
 ///
 /// The pipeline calls a filter once for each `AppliedFilter` that names it.
 /// What a filter sees, and what the pipeline does with its answer:
@@ -43,75 +44,55 @@ use crate::types::{
 /// The region of a later filter is in the time that the earlier filters leave.
 /// After the last filter, `FilterRegistry::run` fails when an event time or
 /// the end of the timeline is not finite, because a shift can overflow.
-///
-/// A filter of `FilterRegistry::register_typed` gets these steps too, with
-/// more: its options are parsed first, it sees the length of its region, it
-/// sees and can set the end of the timeline, it can set the shift, and it can
-/// refuse its options (see `Span`).
 pub type FilterFn = dyn Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync;
 
-/// The events of a region, the end of the timeline, and the shift of the
-/// events after the region, as a filter of `FilterRegistry::register_typed`
-/// sees them and answers them.
-///
-/// The steps on `FilterFn` apply to `events`. These steps apply to `end`:
-///
-/// 1. The filter sees the end of the timeline, relative to the region start,
-///    when the end is inside the region: at or after its start, and before its
-///    end. The region `All` holds every end. Else the filter sees `None`.
-/// 2. An answer of `None` leaves the end to step 8 on `FilterFn`: the end
-///    moves by the shift.
-/// 3. An answer of `Some(end)` sets the end of the timeline to `end` plus the
-///    region start. It is an error when the filter saw `None`, and when `end`
-///    is not finite or is below zero on the timeline. Each error is a render
-///    error that names the kind.
-/// 4. The end is never less than the time of the last event.
-///
-/// These steps apply to `shift`:
-///
-/// 1. The filter sees `None`.
-/// 2. An answer of `None` leaves the shift of step 6 on `FilterFn`.
-/// 3. An answer of `Some(shift)` is the shift. The events after the region
-///    move by it, also when no event of the region moves, and so does the end
-///    by step 8 on `FilterFn`. It is an error when `shift` is not finite, and
-///    when it moves an event after the region below zero. The error is a
-///    render error that names the kind.
-///
-/// These steps apply to `length`:
-///
-/// 1. The filter sees the length of its region: its end minus its start. The
-///    length of `All` is infinite. The length does not stop at the end of the
-///    timeline, because `end` gives that.
-/// 2. The pipeline does not read the length of the answer.
-///
-/// Thus a filter that cuts the time after its last event answers that time
-/// as the end. A plain filter cannot do this, because step 8 on `FilterFn`
-/// keeps the gap between the last event and the end. And a filter that adds
-/// time to its region answers that time as the shift, so the events after the
-/// region move also when no event of the region moves. And a filter whose
-/// options do not fit its region answers an error, for example a pause at a
-/// point past the end of its range.
+/// A region of the timeline as a span filter sees it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Span {
-    /// The events, with times relative to the region start.
+    /// The events of the region, with times relative to its start.
     pub events: Vec<Event>,
-    /// The end of the timeline, relative to the region start, by the steps
-    /// above.
-    pub end: Option<f64>,
-    /// The shift of the events after the region, by the steps above.
-    pub shift: Option<f64>,
-    /// The length of the region, by the steps above.
+    /// The length of the region in seconds.
     pub length: f64,
 }
 
-/// The one form in which the registry keeps a filter: a function from a span
-/// to a span. It fails with a reason when the options do not parse.
-type Stage = dyn Fn(Span, &FilterOptions) -> Result<Span, String> + Send + Sync;
+/// A span filter: a pure function from a region and its length to new events
+/// and a new length, or an error message.
+///
+/// Use a span filter when the filter changes the length of its region, for
+/// example a change of speed. The pipeline calls it once for each
+/// `AppliedFilter` that names it. Steps 1 to 3 and 7 to 8 of `FilterFn` are the
+/// same. The other steps are:
+///
+/// 1. The length of the region is from its start to its end, or to the end of
+///    the timeline when the end of the timeline comes first. It is never below
+///    zero, so a region that starts after the end of the timeline has the
+///    length 0. For the region `All`, the length is the end of the timeline.
+/// 2. The filter gets a `Span` with the events inside the region, relative to
+///    its start, and the length. It answers `Ok` with a new `Span`, or `Err`
+///    with a message.
+/// 3. An `Err` fails the pipeline with a render error. Its text names the kind
+///    and holds the message.
+/// 4. Each answered time is checked as in step 5 of `FilterFn`, with the same
+///    error.
+/// 5. The answered length must be finite. It must not be below zero, and it
+///    must not be below the largest answered time. Else the pipeline fails
+///    with a render error that names the kind and the length.
+/// 6. The shift is the answered length minus the length. The events after the
+///    region move by the shift, also when the region holds no event. The end
+///    of the timeline moves by the shift as in step 8 of `FilterFn`.
+pub type SpanFilterFn = dyn Fn(Span, &FilterOptions) -> Result<Span, String> + Send + Sync;
+
+/// A filter in one of its two forms.
+#[derive(Clone)]
+enum Registered {
+    Events(Arc<FilterFn>),
+    Span(Arc<SpanFilterFn>),
+}
 
 /// The filters that a project can use, by kind.
 #[derive(Clone, Default)]
 pub struct FilterRegistry {
-    filters: BTreeMap<FilterKind, Arc<Stage>>,
+    filters: BTreeMap<FilterKind, Registered>,
 }
 
 impl fmt::Debug for FilterRegistry {
@@ -141,42 +122,19 @@ impl FilterRegistry {
         kind: FilterKind,
         filter: impl Fn(&[Event], &FilterOptions) -> Vec<Event> + Send + Sync + 'static,
     ) {
-        self.filters.insert(
-            kind,
-            Arc::new(move |span: Span, options: &FilterOptions| {
-                Ok(Span {
-                    events: filter(&span.events, options),
-                    end: None,
-                    shift: None,
-                    length: span.length,
-                })
-            }),
-        );
+        self.filters
+            .insert(kind, Registered::Events(Arc::new(filter)));
     }
 
-    /// Register `filter` under `kind`, with options of the type `O`.
-    ///
-    /// Before each call, the pipeline parses the `FilterOptions` of the
-    /// `AppliedFilter` as `O`. When they do not parse, the render fails with a
-    /// render error that names the kind and the reason. Thus `O` holds the
-    /// rules of the options: a missing key, a value of the wrong type, and,
-    /// with `#[serde(deny_unknown_fields)]`, a key that `O` does not know.
-    /// The filter answers `Ok` with a span, or `Err` with a reason when its
-    /// options do not fit its region. An `Err` is a render error that names
-    /// the kind, says that the options are invalid, and holds the reason.
-    /// A filter that is already under `kind` is replaced.
-    pub fn register_typed<O, F>(&mut self, kind: FilterKind, filter: F)
-    where
-        O: DeserializeOwned + 'static,
-        F: Fn(Span, &O) -> Result<Span, String> + Send + Sync + 'static,
-    {
-        self.filters.insert(
-            kind,
-            Arc::new(move |span: Span, options: &FilterOptions| {
-                let options = options.parse::<O>().map_err(|error| error.to_string())?;
-                filter(span, &options)
-            }),
-        );
+    /// Register `filter` as a span filter under `kind`. A filter of either
+    /// form that is already under `kind` is replaced.
+    pub fn register_span(
+        &mut self,
+        kind: FilterKind,
+        filter: impl Fn(Span, &FilterOptions) -> Result<Span, String> + Send + Sync + 'static,
+    ) {
+        self.filters
+            .insert(kind, Registered::Span(Arc::new(filter)));
     }
 
     /// Whether a filter is registered under `kind`.
@@ -186,7 +144,7 @@ impl FilterRegistry {
     }
 
     /// The filter under `kind`, or a render error that names the kind.
-    fn lookup(&self, kind: &FilterKind) -> Result<&Arc<Stage>, NleError> {
+    fn lookup(&self, kind: &FilterKind) -> Result<&Registered, NleError> {
         self.filters.get(kind).ok_or_else(|| {
             NleError::RenderError(format!(
                 "no filter is registered for kind \"{}\"",
@@ -195,7 +153,7 @@ impl FilterRegistry {
         })
     }
 
-    /// One filter step: the steps on `FilterFn` and on `Span`.
+    /// One filter step: the steps on `FilterFn` or on `SpanFilterFn`.
     fn apply(
         &self,
         events: Vec<Event>,
@@ -203,7 +161,6 @@ impl FilterRegistry {
         end: &mut f64,
     ) -> Result<Vec<Event>, NleError> {
         let filter = self.lookup(&applied.kind)?;
-        let name = applied.kind.as_str();
         let (start, region_end) = match &applied.region {
             FilterRegion::All => (0.0, f64::INFINITY),
             FilterRegion::Range { start, end } => (start.get(), end.get()),
@@ -225,64 +182,47 @@ impl FilterRegistry {
             }
         }
 
-        let inside_last = last_time(&inside);
-        let end_inside = start <= *end && *end < region_end;
-        let span = Span {
-            events: inside,
-            end: end_inside.then_some(*end - start),
-            shift: None,
-            length: region_end - start,
+        // The answer, and how far the events after the region move.
+        let (answer, shift) = match filter {
+            Registered::Events(filter) => {
+                let answer = filter(&inside, &applied.options);
+                let shift = last_time(&answer) - last_time(&inside);
+                (answer, shift)
+            }
+            Registered::Span(filter) => {
+                let length = (region_end.min(*end) - start).max(0.0);
+                let span = Span {
+                    events: inside,
+                    length,
+                };
+                let answer = filter(span, &applied.options).map_err(|message| {
+                    NleError::RenderError(format!(
+                        "filter \"{}\" failed: {message}",
+                        applied.kind.as_str()
+                    ))
+                })?;
+                let largest = last_time(&answer.events);
+                if !(answer.length.is_finite() && answer.length >= 0.0 && answer.length >= largest)
+                {
+                    return Err(NleError::RenderError(format!(
+                        "filter \"{}\" answered the length {} s, which is not finite, is below zero, or is below its last time {largest} s",
+                        applied.kind.as_str(),
+                        answer.length
+                    )));
+                }
+                let shift = answer.length - length;
+                (answer.events, shift)
+            }
         };
-        let Span {
-            events: answer,
-            end: answered_end,
-            shift: answered_shift,
-            length: _,
-        } = filter(span, &applied.options).map_err(|reason| {
-            NleError::RenderError(format!("filter \"{name}\" has invalid options: {reason}"))
-        })?;
         for event in &answer {
             let time = event.time + start;
             if !(time.is_finite() && time >= 0.0) {
                 return Err(NleError::RenderError(format!(
-                    "filter \"{name}\" answered the time {time} s, which is not finite or is below zero"
+                    "filter \"{}\" answered the time {time} s, which is not finite or is below zero",
+                    applied.kind.as_str()
                 )));
             }
         }
-        let answered_end = match answered_end {
-            None => None,
-            Some(_) if !end_inside => {
-                return Err(NleError::RenderError(format!(
-                    "filter \"{name}\" answered an end of the timeline, but the end is not inside its region"
-                )));
-            }
-            Some(relative) => {
-                let time = relative + start;
-                if !(time.is_finite() && time >= 0.0) {
-                    return Err(NleError::RenderError(format!(
-                        "filter \"{name}\" answered the end {time} s, which is not finite or is below zero"
-                    )));
-                }
-                Some(time)
-            }
-        };
-        let shift = match answered_shift {
-            None => last_time(&answer) - inside_last,
-            Some(shift) => {
-                // A shift below zero moves the first event after the region
-                // below zero first.
-                let first_after = after
-                    .iter()
-                    .map(|event| event.time)
-                    .fold(f64::INFINITY, f64::min);
-                if !(shift.is_finite() && first_after + shift >= 0.0) {
-                    return Err(NleError::RenderError(format!(
-                        "filter \"{name}\" answered the shift {shift} s, which is not finite or moves an event after its region below zero"
-                    )));
-                }
-                shift
-            }
-        };
 
         let mut result = before;
         result.extend(answer.into_iter().map(|event| Event {
@@ -296,27 +236,23 @@ impl FilterRegistry {
         // A stable sort: events at one time keep the order that they had.
         result.sort_by(|a, b| a.time.total_cmp(&b.time));
 
-        match answered_end {
-            Some(time) => *end = time,
-            None if *end >= start => *end += shift,
-            None => {}
+        if *end >= start {
+            *end += shift;
         }
         *end = end.max(last_time(&result)).max(0.0);
         Ok(result)
     }
 
-    /// Run `filters` in order over `events`, by the steps on `FilterFn` and
-    /// on `Span`. The end of the timeline starts at the time of the last
+    /// Run `filters` in order over `events`, by the steps on `FilterFn` or on
+    /// `SpanFilterFn`. The end of the timeline starts at the time of the last
     /// event.
     ///
     /// # Errors
     /// Returns `NleError::RenderError` when a filter kind is not registered,
-    /// when the options of a typed filter do not parse or the filter refuses
-    /// them, when a filter answers a time or an end that is not finite or is
-    /// below zero on the timeline, when a filter answers an end that it did
-    /// not see, when a filter answers a shift that is not finite or moves an
-    /// event below zero, or when an event time or the end of the timeline that
-    /// the filters give is not finite.
+    /// when a filter answers a time that is not finite or is below zero on
+    /// the timeline, when a span filter answers an error or a bad length, or
+    /// when an event time or the end of the timeline that the filters give is
+    /// not finite.
     pub fn run(
         &self,
         events: Vec<Event>,
@@ -331,8 +267,9 @@ impl FilterRegistry {
     /// starts at `end`. Returns the events and the final end.
     ///
     /// # Errors
-    /// Returns `NleError::RenderError` when a filter fails, or when an event
-    /// time or the final end is not finite.
+    /// Returns `NleError::RenderError` when a filter fails, when a span
+    /// filter answers an error or a bad length, or when an event time or the
+    /// final end is not finite.
     fn run_with_end(
         &self,
         events: Vec<Event>,
@@ -369,8 +306,8 @@ impl FilterRegistry {
     /// 2. The events are the events of each clip on the timeline, track by
     ///    track and clip by clip, in a stable time order. Events at one time
     ///    keep track order, then clip order.
-    /// 3. The filters of the project run on them by the steps on `FilterFn`
-    ///    and on `Span`, with the end of the timeline starting at
+    /// 3. The filters of the project run on them by the steps on `FilterFn` or
+    ///    on `SpanFilterFn`, with the end of the timeline starting at
     ///    `EditProject::duration`.
     /// 4. The header (`version`, `width`, `height`, `timestamp`, `command`,
     ///    `title`, `env`) is the header of the source of the clip that starts

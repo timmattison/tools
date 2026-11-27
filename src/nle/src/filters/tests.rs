@@ -54,12 +54,21 @@ fn range(kind: &str, start: f64, end: f64, options: FilterOptions) -> AppliedFil
 }
 
 fn run(events: Vec<Event>, filter: AppliedFilter) -> Result<Vec<Event>, NleError> {
-    builtin().run(events, &[filter])
+    registry().run(events, &[filter])
 }
 
 /// Renders a project of one recording that holds `events` and ends at
 /// `duration`, with `filter` applied.
 fn render(events: Vec<Event>, duration: f64, filter: AppliedFilter) -> Recording {
+    try_render(events, duration, filter).unwrap()
+}
+
+/// The result of `render`, which can be a render error.
+fn try_render(
+    events: Vec<Event>,
+    duration: f64,
+    filter: AppliedFilter,
+) -> Result<Recording, NleError> {
     let source = Recording {
         version: 2,
         width: 80,
@@ -73,7 +82,7 @@ fn render(events: Vec<Event>, duration: f64, filter: AppliedFilter) -> Recording
     };
     let mut project = EditProject::from_recording(Arc::new(source)).unwrap();
     project.filters = vec![filter];
-    builtin().render(&project).unwrap()
+    registry().render(&project)
 }
 
 /// Asserts that `result` is a render error that names the kind of `filter`,
@@ -257,15 +266,30 @@ fn pause_insertion_after_the_last_event_still_makes_the_timeline_longer() {
 }
 
 #[test]
-fn pause_insertion_after_the_end_of_the_timeline_changes_nothing() {
-    let rendered = render(
+fn pause_insertion_refuses_a_point_past_the_end_of_the_timeline() {
+    // The region `All` ends at the end of the timeline, 3. A pause there
+    // would make the timeline longer, but the end at 3 is before the point.
+    let result = try_render(
         outputs(&[0.0, 2.0]),
         3.0,
         all(PAUSE_INSERTION, insertion(5.0, 1.0)),
     );
 
+    assert_invalid_options(
+        result.map(|rendered| rendered.events),
+        PAUSE_INSERTION,
+        "past the end of the region",
+    );
+
+    // The point 3 is the end of the timeline, so the timeline gets longer.
+    let rendered = render(
+        outputs(&[0.0, 2.0]),
+        3.0,
+        all(PAUSE_INSERTION, insertion(3.0, 1.0)),
+    );
+
     assert_eq!(times(&rendered.events), vec![0.0, 2.0]);
-    assert_eq!(rendered.duration, 3.0);
+    assert_eq!(rendered.duration, 4.0);
 }
 
 #[test]
@@ -450,9 +474,10 @@ fn auto_trim_on_a_range_trims_the_ends_of_the_range() {
     let out = run(events, range(AUTO_TRIM, 3.0, 10.0, FilterOptions::new())).unwrap();
 
     // In the range, the start of the range comes up to the input at 6, and the
-    // input at 9 comes back to the output at 7. The event after the range
-    // keeps its gap from the last event of the range.
-    assert_eq!(times(&out), vec![0.0, 3.0, 3.0, 4.0, 4.0, 7.0]);
+    // input at 9 and the end of the range at 10 come back to the output at 7.
+    // The event at 12 after the range keeps its gap of 2 from the end of the
+    // range, which is now at 4.
+    assert_eq!(times(&out), vec![0.0, 3.0, 3.0, 4.0, 4.0, 6.0]);
 }
 
 #[test]

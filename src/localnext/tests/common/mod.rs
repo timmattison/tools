@@ -30,12 +30,12 @@ const WORKERS: usize = 2;
 /// `root` must already be canonical — path confinement compares canonical paths,
 /// and on macOS a `TempDir` lives under `/var`, a symlink to `/private/var`.
 ///
-/// Returns the bound address and the [`localnext::Pool`] serving it; pass the
+/// Returns the bound address and the [`httpfile::Pool`] serving it; pass the
 /// pool to [`stop`] when the test is done with it.
-pub fn start(root: PathBuf) -> (SocketAddr, localnext::Pool) {
+pub fn start(root: PathBuf) -> (SocketAddr, httpfile::Pool) {
     let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port"));
     let addr = server.server_addr().to_ip().expect("ip addr");
-    let pool = localnext::serve(server, Arc::new(root), WORKERS);
+    let pool = localnext::serve(server, root, WORKERS);
     (addr, pool)
 }
 
@@ -45,7 +45,7 @@ pub fn start(root: PathBuf) -> (SocketAddr, localnext::Pool) {
 /// Asserts that shutdown reported no error: a broken shutdown path should fail
 /// the test that exercises it, not leak a running server into the rest of the
 /// session.
-pub fn stop(pool: localnext::Pool) {
+pub fn stop(pool: httpfile::Pool) {
     pool.shutdown().expect("worker pool shuts down cleanly");
 }
 

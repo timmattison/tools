@@ -1,2 +1,4 @@
 *.json
 *.mp4
+# The recordings that the tests read are fixtures, not output.
+!tests/fixtures/**/*.json

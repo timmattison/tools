@@ -363,82 +363,6 @@ fn events_at_one_time_keep_the_order_the_filter_gave() {
     assert_eq!(data, vec!["first", "second", "third", "late"]);
 }
 
-// Tests of a filter with typed options.
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ShiftBy {
-    seconds: f64,
-}
-
-/// Moves each event later by `options.seconds`, and leaves the end to the
-/// shift.
-fn shift_by(span: Span, options: &ShiftBy) -> Result<Span, String> {
-    Ok(Span {
-        events: span
-            .events
-            .into_iter()
-            .map(|e| Event {
-                time: e.time + options.seconds,
-                ..e
-            })
-            .collect(),
-        end: None,
-        shift: None,
-        length: span.length,
-    })
-}
-
-fn typed_registry() -> FilterRegistry {
-    let mut registry = FilterRegistry::new();
-    registry.register_typed(kind("shift"), shift_by);
-    registry
-}
-
-fn all_with(name: &str, options: FilterOptions) -> AppliedFilter {
-    AppliedFilter {
-        kind: kind(name),
-        region: FilterRegion::All,
-        options,
-    }
-}
-
-#[test]
-fn a_typed_filter_gets_its_options_parsed() {
-    let out = typed_registry()
-        .run(
-            events(&[1.0, 2.0]),
-            &[all_with("shift", FilterOptions::new().with("seconds", 0.5))],
-        )
-        .unwrap();
-
-    assert_eq!(times(&out), vec![1.5, 2.5]);
-}
-
-#[test]
-fn a_typed_filter_with_invalid_options_fails_and_names_the_kind_and_the_reason() {
-    let cases = [
-        (FilterOptions::new(), "seconds"),
-        (FilterOptions::new().with("seconds", "soon"), "invalid type"),
-        (
-            FilterOptions::new().with("seconds", 0.5).with("extra", 1),
-            "extra",
-        ),
-    ];
-    for (options, reason) in cases {
-        let result = typed_registry().run(events(&[1.0]), &[all_with("shift", options)]);
-
-        match result {
-            Err(NleError::RenderError(message)) => {
-                assert!(message.contains("\"shift\""), "{message}");
-                assert!(message.contains("invalid options"), "{message}");
-                assert!(message.contains(reason), "{reason}: {message}");
-            }
-            other => panic!("expected a RenderError, got {other:?}"),
-        }
-    }
-}
-
 // Tests of the render of one clip.
 
 use std::collections::BTreeMap;
@@ -677,208 +601,203 @@ fn render_of_a_clip_whose_end_overflows_the_timeline_fails() {
     );
 }
 
-// Tests of the end of the timeline in a typed filter.
+// Tests of the span filter: the length and the shift.
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct NoOptions {}
-
-/// A typed filter under the kind "set-end" that keeps its events and answers
-/// `end`.
-fn end_registry(end: Option<f64>) -> FilterRegistry {
-    let mut registry = FilterRegistry::new();
-    registry.register_typed(kind("set-end"), move |span: Span, _: &NoOptions| {
+/// A span filter that multiplies each time and the length by `factor`.
+fn scale_span(factor: f64) -> impl Fn(Span, &FilterOptions) -> Result<Span, String> + Send + Sync {
+    move |span, _| {
         Ok(Span {
-            events: span.events,
-            end,
-            shift: None,
-            length: span.length,
+            events: span
+                .events
+                .into_iter()
+                .map(|e| Event {
+                    time: e.time * factor,
+                    ..e
+                })
+                .collect(),
+            length: span.length * factor,
         })
-    });
-    registry
-}
-
-fn assert_render_names(result: Result<Recording, NleError>, name: &str) {
-    assert_render_error_names(result.map(|recording| recording.events), name);
-}
-
-#[test]
-fn a_typed_filter_sees_the_end_only_when_the_end_is_inside_its_region() {
-    let seen = TestArc::new(Mutex::new(Vec::new()));
-    let captured = TestArc::clone(&seen);
-    let mut registry = FilterRegistry::new();
-    registry.register_typed(kind("spy"), move |span: Span, _: &NoOptions| {
-        captured.lock().unwrap().push(span.end);
-        Ok(Span {
-            events: span.events,
-            end: None,
-            shift: None,
-            length: span.length,
-        })
-    });
-
-    // The end of the timeline starts at the last event, 4.0.
-    let cases = [
-        (all("spy"), Some(4.0)),
-        (range("spy", 1.0, 5.0), Some(3.0)),
-        // A range holds its start and not its end, so an end of the timeline
-        // at the end of the range is after the range.
-        (range("spy", 0.0, 4.0), None),
-        (range("spy", 5.0, 6.0), None),
-    ];
-    for (filter, expected) in cases {
-        registry.run(events(&[1.0, 4.0]), &[filter]).unwrap();
-
-        assert_eq!(seen.lock().unwrap().pop(), Some(expected));
     }
 }
 
-#[test]
-fn a_typed_filter_that_answers_an_end_sets_the_end_of_the_timeline() {
-    // The project ends at 10, and its last event is at 8.
-    let rendered = end_registry(Some(8.5))
-        .render(&one_clip_project(vec![all("set-end")]))
-        .unwrap();
-    assert_eq!(rendered.duration, 8.5);
-
-    // The answered end is relative to the start of the range.
-    let rendered = end_registry(Some(4.0))
-        .render(&one_clip_project(vec![range("set-end", 5.0, 20.0)]))
-        .unwrap();
-    assert_eq!(rendered.duration, 9.0);
-
-    // The end is never before the last event.
-    let rendered = end_registry(Some(1.0))
-        .render(&one_clip_project(vec![all("set-end")]))
-        .unwrap();
-    assert_eq!(rendered.duration, 8.0);
-
-    // No answered end leaves the end to the shift: 10 moves by 8.5 - 8.
-    let rendered = typed_registry()
-        .render(&one_clip_project(vec![all_with(
-            "shift",
-            FilterOptions::new().with("seconds", 0.5),
-        )]))
-        .unwrap();
-    assert_eq!(rendered.duration, 10.5);
-}
-
-#[test]
-fn a_typed_filter_that_answers_an_end_outside_its_region_fails_and_names_the_kind() {
-    // The range starts after the end of the project at 10, so the filter
-    // does not see the end, and it cannot set it.
-    let result =
-        end_registry(Some(1.0)).render(&one_clip_project(vec![range("set-end", 20.0, 30.0)]));
-
-    assert_render_names(result, "\"set-end\"");
-}
-
-#[test]
-fn a_typed_filter_that_answers_an_end_that_is_not_finite_or_is_below_zero_fails() {
-    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
-        let result = end_registry(Some(bad)).render(&one_clip_project(vec![all("set-end")]));
-
-        assert_render_names(result, "\"set-end\"");
-    }
-
-    // Relative -6 on a range that starts at 5 is -1 on the timeline.
-    let result =
-        end_registry(Some(-6.0)).render(&one_clip_project(vec![range("set-end", 5.0, 20.0)]));
-    assert_render_names(result, "\"set-end\"");
-
-    // Relative -1 on a range that starts at 5 is 4 on the timeline, which is
-    // fine. The last event at 8 then keeps the end at 8.
-    let rendered = end_registry(Some(-1.0))
-        .render(&one_clip_project(vec![range("set-end", 5.0, 20.0)]))
-        .unwrap();
-    assert_eq!(rendered.duration, 8.0);
-}
-
-#[test]
-fn a_typed_filter_sees_the_length_of_its_region() {
+/// Registers a span filter under "spy" that records the length that it gets
+/// and answers with the span that it got.
+fn span_spy_registry() -> (FilterRegistry, TestArc<Mutex<Vec<f64>>>) {
     let seen = TestArc::new(Mutex::new(Vec::new()));
     let captured = TestArc::clone(&seen);
     let mut registry = FilterRegistry::new();
-    registry.register_typed(kind("spy"), move |span: Span, _: &NoOptions| {
+    registry.register_span(kind("spy"), move |span, _| {
         captured.lock().unwrap().push(span.length);
-        Ok(Span {
-            events: span.events,
-            end: None,
-            shift: None,
-            length: span.length,
-        })
+        Ok(span)
     });
-
-    // The events end at 4. The length of a range does not stop there.
-    let cases = [
-        (all("spy"), f64::INFINITY),
-        (range("spy", 1.0, 5.0), 4.0),
-        (range("spy", 1.0, 50.0), 49.0),
-    ];
-    for (filter, expected) in cases {
-        registry.run(events(&[1.0, 4.0]), &[filter]).unwrap();
-
-        assert_eq!(seen.lock().unwrap().pop(), Some(expected));
-    }
+    (registry, seen)
 }
 
 #[test]
-fn a_typed_filter_that_answers_an_error_fails() {
-    let mut registry = FilterRegistry::new();
-    registry.register_typed(kind("refuse"), |_: Span, _: &NoOptions| {
-        Err("no fit".to_string())
-    });
+fn a_span_filter_on_a_range_sees_the_length_of_the_range() {
+    let (registry, seen) = span_spy_registry();
 
-    let result = registry.run(events(&[1.0, 4.0]), &[all("refuse")]);
+    registry
+        .run(events(&[0.5, 1.5, 5.0]), &[range("spy", 1.0, 3.0)])
+        .unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), vec![2.0]);
+}
+
+#[test]
+fn a_span_filter_on_all_sees_the_last_event_time_as_the_length_in_run() {
+    let (registry, seen) = span_spy_registry();
+
+    registry.run(events(&[1.0, 4.0]), &[all("spy")]).unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), vec![4.0]);
+}
+
+#[test]
+fn a_span_filter_on_all_sees_the_duration_of_the_project_in_render() {
+    let (registry, seen) = span_spy_registry();
+
+    registry
+        .render(&one_clip_project(vec![all("spy")]))
+        .unwrap();
+
+    // The events end at 8 s, and the project lasts 10 s.
+    assert_eq!(*seen.lock().unwrap(), vec![10.0]);
+}
+
+#[test]
+fn a_span_filter_length_stops_at_the_end_of_the_timeline() {
+    let (registry, seen) = span_spy_registry();
+
+    registry
+        .run(events(&[1.0, 4.0]), &[range("spy", 2.0, 100.0)])
+        .unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), vec![2.0]);
+}
+
+#[test]
+fn a_span_filter_length_is_zero_for_a_range_after_the_end_of_the_timeline() {
+    let (registry, seen) = span_spy_registry();
+
+    registry
+        .run(events(&[1.0, 4.0]), &[range("spy", 10.0, 20.0)])
+        .unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), vec![0.0]);
+}
+
+#[test]
+fn a_span_filter_moves_the_later_events_by_the_change_of_the_length() {
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("halve"), scale_span(0.5));
+
+    let out = registry
+        .run(events(&[0.5, 1.5, 5.0]), &[range("halve", 1.0, 3.0)])
+        .unwrap();
+
+    // The length 2 becomes 1, so the event at 5 moves by -1.
+    assert_eq!(times(&out), vec![0.5, 1.25, 4.0]);
+}
+
+#[test]
+fn a_span_filter_on_a_region_with_no_event_still_moves_the_later_events() {
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("halve"), scale_span(0.5));
+
+    let out = registry
+        .run(events(&[0.5, 5.0]), &[range("halve", 1.0, 3.0)])
+        .unwrap();
+
+    assert_eq!(times(&out), vec![0.5, 4.0]);
+}
+
+#[test]
+fn render_moves_the_duration_by_the_change_of_the_length_of_a_span_filter() {
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("halve"), scale_span(0.5));
+
+    let whole = registry
+        .render(&one_clip_project(vec![all("halve")]))
+        .unwrap();
+    // The project lasts 10 s, and the length 10 becomes 5.
+    assert_eq!(whole.duration, 5.0);
+
+    let part = registry
+        .render(&one_clip_project(vec![range("halve", 1.0, 3.0)]))
+        .unwrap();
+    assert_eq!(part.duration, 9.0);
+}
+
+// Tests of the span filter: errors and registration.
+
+#[test]
+fn a_span_filter_that_answers_an_error_fails_the_run_with_the_kind_and_the_message() {
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("speed"), |_, _| Err("bad speed".to_string()));
+
+    let result = registry.run(events(&[1.0]), &[all("speed")]);
 
     match result {
         Err(NleError::RenderError(message)) => {
-            assert!(message.contains("\"refuse\""), "{message}");
-            assert!(message.contains("invalid options"), "{message}");
-            assert!(message.contains("no fit"), "{message}");
+            assert!(message.contains("speed"), "{message}");
+            assert!(message.contains("bad speed"), "{message}");
         }
         other => panic!("expected a RenderError, got {other:?}"),
     }
 }
 
-// Tests of the shift in a typed filter.
+#[test]
+fn a_span_filter_that_answers_a_bad_length_fails_and_names_the_kind() {
+    // The events end at 3 s, so a length below 3 is below the largest time.
+    let bad_lengths = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 2.5];
+    for length in bad_lengths {
+        let mut registry = FilterRegistry::new();
+        registry.register_span(kind("len"), move |span, _| {
+            Ok(Span {
+                events: span.events,
+                length,
+            })
+        });
 
-/// A typed filter under the kind "set-shift" that keeps its events and
-/// answers `shift`.
-fn shift_registry(shift: f64) -> FilterRegistry {
-    let mut registry = FilterRegistry::new();
-    registry.register_typed(kind("set-shift"), move |span: Span, _: &NoOptions| {
-        Ok(Span {
-            events: span.events,
-            end: None,
-            shift: Some(shift),
-            length: span.length,
-        })
-    });
-    registry
+        let result = registry.run(events(&[1.0, 3.0]), &[all("len")]);
+
+        match result {
+            Err(NleError::RenderError(message)) => {
+                assert!(message.contains("len"), "length {length}: {message}");
+            }
+            other => panic!("length {length}: expected a RenderError, got {other:?}"),
+        }
+    }
 }
 
 #[test]
-fn a_typed_filter_that_answers_a_shift_that_is_not_finite_or_moves_an_event_below_zero_fails() {
-    // The project has events at 0 and 8, and it ends at 10. The range from 0
-    // to 1 holds the event at 0, so the event at 8 is after the range.
-    let filters = || vec![range("set-shift", 0.0, 1.0)];
-    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -9.0] {
-        let result = shift_registry(bad).render(&one_clip_project(filters()));
+fn a_span_filter_may_answer_a_length_equal_to_its_largest_time() {
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("len"), |span, _| {
+        Ok(Span {
+            events: span.events,
+            length: 3.0,
+        })
+    });
 
-        assert_render_names(result, "\"set-shift\"");
-    }
+    let out = registry.run(events(&[1.0, 3.0]), &[all("len")]).unwrap();
 
-    // With no event after the range, the end of the timeline moves by the
-    // shift, so a shift that is not finite still fails.
-    let result =
-        shift_registry(f64::NAN).render(&one_clip_project(vec![range("set-shift", 8.5, 9.0)]));
-    assert_render_names(result, "\"set-shift\"");
+    assert_eq!(times(&out), vec![1.0, 3.0]);
+}
 
-    // -8 moves the event at 8 to 0, which is fine, and the end at 10 to 2.
-    let rendered = shift_registry(-8.0)
-        .render(&one_clip_project(filters()))
-        .unwrap();
-    assert_eq!(times(&rendered.events), vec![0.0, 0.0]);
-    assert_eq!(rendered.duration, 2.0);
+#[test]
+fn register_span_and_register_replace_each_other_under_one_kind() {
+    let mut registry = FilterRegistry::new();
+    assert!(!registry.contains(&kind("f")));
+
+    registry.register_span(kind("f"), scale_span(0.5));
+    assert!(registry.contains(&kind("f")));
+    registry.register(kind("f"), add_one());
+    let out = registry.run(events(&[1.0, 2.0]), &[all("f")]).unwrap();
+    assert_eq!(times(&out), vec![2.0, 3.0]);
+
+    registry.register_span(kind("f"), scale_span(2.0));
+    let out = registry.run(events(&[1.0, 2.0]), &[all("f")]).unwrap();
+    assert_eq!(times(&out), vec![2.0, 4.0]);
 }

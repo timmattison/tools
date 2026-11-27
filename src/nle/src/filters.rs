@@ -1,14 +1,17 @@
-//! The built-in filters of the editor (issue #154).
+//! The filters that ship with the app.
 //!
-//! Each filter is registered with `FilterRegistry::register_typed`, so its
-//! options have a type, and the render refuses options that break a rule of
-//! that type. The keys of the options are the field names below, and they
-//! are a part of the project file format.
+//! The filters of issue #154 are span filters with typed options: each one is
+//! registered with `register_with_options`, so the render refuses options that
+//! break a rule of its type. The keys of the options are the field names
+//! below, and they are a part of the project file format.
 
+pub mod time_dilation;
+
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 use crate::pipeline::{FilterRegistry, Span};
-use crate::types::{Event, EventType, FilterKind, Seconds};
+use crate::types::{Event, EventType, FilterKind, FilterOptions, Seconds};
 
 /// The kind of the filter that shortens the long pauses between events.
 ///
@@ -23,13 +26,15 @@ pub const PAUSE_REMOVAL: &str = "pause-removal";
 ///
 /// Options: `at` and `duration`, in seconds. `at` is relative to the start of
 /// the region. Each event at or after `at` moves later by `duration`, so a
-/// pause at the time of a key comes before that key. The end of the timeline
-/// moves later too when it is at or after `at`, also when no event moves.
-/// The normal region is `All`. In a range, each event after the range moves
-/// later by `duration`, also when no event of the range moves. Thus `at` must
-/// not be past the end of a range. The events between the end of the range and
-/// such a point are before the point, but they move, so the render refuses the
-/// point.
+/// pause at the time of a key comes before that key. The region gets longer
+/// by `duration`, so the events after a range and the end of the timeline move
+/// later by `duration` too, also when no event of the region moves. The normal
+/// region is `All`.
+///
+/// `at` must not be past the end of the region: the end of a range, or the end
+/// of the timeline when it comes first. The events after the region and the
+/// end of the timeline are before such a point, but they move, so the render
+/// refuses the point.
 pub const PAUSE_INSERTION: &str = "pause-insertion";
 
 /// The kind of the filter that cuts the silence at the start and at the end.
@@ -40,24 +45,54 @@ pub const PAUSE_INSERTION: &str = "pause-insertion";
 /// back by the same time, and each output event before it moves to the start,
 /// in its order. Thus the screen that the user saw before the first key is
 /// still there. The trailing silence is the time after the last output event:
-/// each event after it moves back to it, and the end of the timeline comes
-/// back to it. A region with no input event keeps its start, and a region
-/// with no output event keeps its end. On a range, the events after the range
-/// move by the shift of step 6 on `FilterFn`.
+/// each event after it moves back to it, and the end of the region comes back
+/// to it. The end of the region is the end of a range, or the end of the
+/// timeline when it comes first. A region with no input event keeps its
+/// start, and a region with no output event keeps its end. The region gets
+/// shorter by the silence, so on `All` the end of the timeline comes back, and
+/// on a range the events after the range keep their gap from its end.
 pub const AUTO_TRIM: &str = "auto-trim";
 
-/// A registry that holds each built-in filter under its kind.
+/// A registry that holds every filter that ships with the app.
 #[must_use]
-pub fn builtin() -> FilterRegistry {
+pub fn registry() -> FilterRegistry {
     let mut registry = FilterRegistry::new();
-    registry.register_typed(FilterKind::new(PAUSE_REMOVAL), |span, options| {
+    time_dilation::register(&mut registry);
+    register_with_options(&mut registry, PAUSE_REMOVAL, |span, options| {
         Ok(remove_pauses(span, options))
     });
-    registry.register_typed(FilterKind::new(PAUSE_INSERTION), insert_pause);
-    registry.register_typed(FilterKind::new(AUTO_TRIM), |span, options| {
+    register_with_options(&mut registry, PAUSE_INSERTION, insert_pause);
+    register_with_options(&mut registry, AUTO_TRIM, |span, options| {
         Ok(trim_silence(span, options))
     });
     registry
+}
+
+/// Register `filter` under `kind` as a span filter whose options have the
+/// type `O`.
+///
+/// Before each call, the `FilterOptions` of the `AppliedFilter` are parsed as
+/// `O`. Thus `O` holds the rules of the options: a missing key, a value of the
+/// wrong type, and, with `#[serde(deny_unknown_fields)]`, a key that `O` does
+/// not know. The filter answers `Ok` with a span, or `Err` with a reason when
+/// its options do not fit its region. Options that do not parse, and an
+/// `Err`, each fail the render with a render error that names the kind, says
+/// that the options are invalid, and holds the reason.
+fn register_with_options<O, F>(registry: &mut FilterRegistry, kind: &str, filter: F)
+where
+    O: DeserializeOwned + 'static,
+    F: Fn(Span, &O) -> Result<Span, String> + Send + Sync + 'static,
+{
+    registry.register_span(
+        FilterKind::new(kind),
+        move |span, options: &FilterOptions| {
+            options
+                .parse::<O>()
+                .map_err(|error| error.to_string())
+                .and_then(|options| filter(span, &options))
+                .map_err(|reason| format!("invalid options: {reason}"))
+        },
+    );
 }
 
 /// The options of pause removal, as the project file holds them.
@@ -98,11 +133,10 @@ impl TryFrom<PauseRemovalFile> for PauseRemoval {
 ///
 /// The gaps are measured in time order. The first event keeps its time, and
 /// each later event moves earlier by the time that the gaps before it lost.
-/// The answer sets no end, so the end moves by the shift, and the time after
-/// the last event stays.
+/// The answer keeps the time from the last event to the end of the region, so
+/// the region gets shorter by the time that the gaps lost.
 fn remove_pauses(span: Span, options: &PauseRemoval) -> Span {
-    let length = span.length;
-    let mut events = span.events;
+    let Span { mut events, length } = span;
     // A stable sort: events at one time keep their order.
     events.sort_by(|a, b| a.time.total_cmp(&b.time));
     let mut removed = 0.0;
@@ -125,12 +159,10 @@ fn remove_pauses(span: Span, options: &PauseRemoval) -> Span {
         event.time = new;
         previous = Some((old, new));
     }
-    Span {
-        events,
-        end: None,
-        shift: None,
-        length,
-    }
+    // The time after the last event, added to its new time. It is never
+    // below zero, so the new length is never below the new last time.
+    let length = previous.map_or(length, |(old, new)| (length - old) + new);
+    Span { events, length }
 }
 
 /// The options of pause insertion.
@@ -143,14 +175,12 @@ struct PauseInsertion {
 
 /// Put a pause of the duration at the point `at` of `span`.
 ///
-/// Each event at or after the point moves later by the duration. When the
-/// filter sees the end of the timeline, and that end is at or after the
-/// point, the answer sets the end later by the duration. Else the end stays,
-/// or it moves by the shift when the filter does not see it. The answer sets
-/// the shift to the duration, so each event after the region moves later by
-/// it, also when no event of the region moves. A point past the length of the
-/// region is an error, because the shift also moves the events after the region
-/// that are before the point.
+/// Each event at or after the point moves later by the duration, and the
+/// length of the region gets longer by the duration. Thus the pipeline moves
+/// each event after the region and the end of the timeline later by the
+/// duration, also when no event of the region moves. A point past the length
+/// of the region is an error, because that shift also moves the events after
+/// the region and the end of the timeline, which are before the point.
 fn insert_pause(span: Span, options: &PauseInsertion) -> Result<Span, String> {
     let (at, duration) = (options.at.get(), options.duration.get());
     if at > span.length {
@@ -169,9 +199,7 @@ fn insert_pause(span: Span, options: &PauseInsertion) -> Result<Span, String> {
                 ..event
             })
             .collect(),
-        end: span.end.map(later),
-        shift: Some(duration),
-        length: span.length,
+        length: span.length + duration,
     })
 }
 
@@ -200,22 +228,20 @@ fn times_of<'a>(events: &'a [Event], event_type: &'a EventType) -> impl Iterator
 
 /// Cut the silence at the two ends of `span`, by the rules on `AUTO_TRIM`.
 ///
-/// When the filter sees the end of the timeline, the answer sets it: back by
-/// the time of the first input event, then to the time of the last output
-/// event. Else the end moves by the shift.
+/// The leading cut makes the length shorter by the time of the first input
+/// event. The trailing cut makes the length the time of the last output
+/// event.
 fn trim_silence(span: Span, options: &AutoTrim) -> Span {
     let Span {
         mut events,
-        mut end,
-        shift: _,
-        length,
+        mut length,
     } = span;
     if options.leading {
         if let Some(first_input) = times_of(&events, &EventType::Input).min_by(f64::total_cmp) {
             for event in &mut events {
                 event.time = (event.time - first_input).max(0.0);
             }
-            end = end.map(|end| (end - first_input).max(0.0));
+            length = (length - first_input).max(0.0);
         }
     }
     if options.trailing {
@@ -223,15 +249,10 @@ fn trim_silence(span: Span, options: &AutoTrim) -> Span {
             for event in &mut events {
                 event.time = event.time.min(last_output);
             }
-            end = end.map(|_| last_output);
+            length = last_output;
         }
     }
-    Span {
-        events,
-        end,
-        shift: None,
-        length,
-    }
+    Span { events, length }
 }
 
 #[cfg(test)]
