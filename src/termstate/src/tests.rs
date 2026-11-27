@@ -490,6 +490,25 @@ fn the_saved_cursor_counts_although_the_cursor_is_the_same() {
 }
 
 #[test]
+fn the_alternate_screen_counts_although_the_screen_is_the_same() {
+    // Mode 47 sets only the flag: it does not clear the grid or save a cursor.
+    // A later save goes to the other slot.
+    assert!(fed("") != fed("\x1b[?47h"));
+}
+
+#[test]
+fn the_saved_cursor_of_the_alternate_screen_counts() {
+    assert!(fed("\x1b[?47h") != fed("\x1b[?47h\x1b[5C\x1b7\x1b[5D"));
+}
+
+#[test]
+fn the_count_of_restores_does_not_count() {
+    // No later byte reads the count, so a restore that brings back the same
+    // state gives an equal terminal.
+    assert!(fed("\x1b7\x1b8") == fed("\x1b7"));
+}
+
+#[test]
 fn an_unfinished_sequence_counts_until_it_ends() {
     let mut unfinished = fed("x\x1b[");
     assert!(unfinished != fed("x"));
