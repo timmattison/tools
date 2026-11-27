@@ -5848,6 +5848,7 @@ Over time, a shell gets definitions that do the same thing as other definitions,
 
 5. **A definition hides a program.** The name of an alias or a function is also the name of a program on the `PATH` of the shell. The shell finds the program after your startup files ran: zsh through `$commands`, bash through `type -P`. A name that is also a builtin of the shell is not a finding, because the builtin hides the program already. For example, macOS has `/usr/bin/cd`, and the builtin `cd` runs first. A wrapper is not a finding either:
    - an alias whose value starts with its own name, for example `ls='ls -G'`
+   - an alias whose value runs its own name through `command`, for example `ls='command ls --color'`
    - a function whose body runs the program through `command <name>`, for example `grep() { command grep --color=auto "$@" }`
 
    ```text

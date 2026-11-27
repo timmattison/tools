@@ -270,26 +270,30 @@ fn alias_hides_function(entries: &Entries<'_>) -> Vec<Finding> {
         .collect()
 }
 
-/// Says if the body of a function runs the program `name` through `command`,
-/// which skips the function and runs the program. Such a function wraps the
-/// program, and hides nothing.
-fn runs_through_command(body: &str, name: &str) -> bool {
+/// Says if `code`, the body of a function or the value of an alias, runs the
+/// program `name` through `command`, which skips the function and the alias
+/// and runs the program. Such a definition wraps the program.
+fn runs_through_command(code: &str, name: &str) -> bool {
     let wrapped = WrapperRun {
         wrapper: COMMAND.to_string(),
         word: name.to_string(),
     };
-    parse_line(body, &Aliases::new()).is_some_and(|line| line.wrapped.contains(&wrapped))
+    parse_line(code, &Aliases::new()).is_some_and(|line| line.wrapped.contains(&wrapped))
 }
 
 /// Finds each regular alias, each global alias, and each function that has the
-/// name of a program. An alias that starts with its own name, and a function
-/// that runs the program through `command`, wrap the program and are no
-/// finding.
+/// name of a program. An alias that starts with its own name, and an alias or
+/// a function that runs the program through `command`, wrap the program and
+/// are no finding.
 fn hides_program(definitions: &Definitions, entries: &Entries<'_>) -> Vec<Finding> {
     let aliases = entries
         .aliases
         .iter()
-        .filter(|(alias, _)| alias.kind != AliasKind::Suffix && !starts_with_own_name(alias))
+        .filter(|(alias, _)| {
+            alias.kind != AliasKind::Suffix
+                && !starts_with_own_name(alias)
+                && !runs_through_command(&alias.value, &alias.name)
+        })
         .map(|(_, usage)| *usage);
     let functions = entries.functions.values().copied().filter(|function| {
         let body = definitions.function_bodies.get(&function.name);
