@@ -353,7 +353,8 @@ pub struct WrapperRun {
     pub word: String,
 }
 
-/// The command words of one line, and the aliases that expanded in it.
+/// The command words of one line, the aliases that expanded in it, and each
+/// run of a word by a wrapper.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
     /// The command words, in source order. These are the words that
