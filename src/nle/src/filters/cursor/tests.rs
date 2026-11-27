@@ -596,9 +596,10 @@ fn a_color_drops_the_cursor_slot_of_a_list_of_dynamic_colors() {
 #[test]
 fn the_color_of_the_recording_comes_back_at_the_end_of_a_range() {
     let green = json!({ "color": "#00ff00" });
+    let red = format!("{RESET_COLOR}{}", set_color("#ff0000"));
     let cases = [
-        ("\x1b]12;#ff0000\x07b", set_color("#ff0000")),
-        ("\x1b]10;#111111;#222222;#ff0000\x07b", set_color("#ff0000")),
+        ("\x1b]12;#ff0000\x07b", red.clone()),
+        ("\x1b]10;#111111;#222222;#ff0000\x07b", red),
         ("\x1b]12;#ff0000\x07\x1b]112\x07b", RESET_COLOR.to_string()),
         ("b", RESET_COLOR.to_string()),
     ];
@@ -614,6 +615,29 @@ fn the_color_of_the_recording_comes_back_at_the_end_of_a_range() {
         assert_eq!(got[2], out(2.0, &restore), "{data:?}");
         assert_eq!(got[3], out(3.0, "d"), "{data:?}");
     }
+}
+
+#[test]
+fn a_color_that_a_terminal_ignores_does_not_keep_the_filter_color_after_a_range() {
+    // The terminal of the recording ignored `bogus` and kept its default
+    // color. The restore gives OSC 112 first, thus a terminal that also
+    // ignores `bogus` shows its default color, not the color of the filter.
+    let got = run(
+        vec![out(1.0, "\x1b]12;bogus\x07b"), out(3.0, "d")],
+        json!({ "color": "#ffcc00" }),
+        range(0.5, 2.0),
+    )
+    .unwrap();
+
+    assert_eq!(
+        got,
+        vec![
+            out(0.5, &set_color("#ffcc00")),
+            out(1.0, "b"),
+            out(2.0, &format!("{RESET_COLOR}{}", set_color("bogus"))),
+            out(3.0, "d"),
+        ]
+    );
 }
 
 #[test]
