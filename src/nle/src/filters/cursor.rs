@@ -73,7 +73,8 @@ const ST: &str = "\x1b\\";
 /// its event. At the end of a region that is not open, it sets the state of
 /// the recording back: the state that the last sequence of the region gave,
 /// or else the default of a terminal. The restore writes the DECSCUSR of the
-/// recording, then the mode 12 that came after it.
+/// recording, then the mode 12 that came after it. It writes OSC 112 before
+/// the OSC 12 of the recording.
 ///
 /// The filter sees only its region. A sequence that the start of the region
 /// splits is not seen, and the state of the recording before the region is
@@ -645,6 +646,12 @@ impl<'a> Rewriter<'a> {
     /// Drop the color of the cursor from an OSC `text`. Returns what is left
     /// of the OSC, with the same `terminator`, or `None` when the OSC sets no
     /// color of the cursor. A query (`?`) of that color stays.
+    ///
+    /// The recorded color is the last value, also a value that a terminal
+    /// does not read as a color. The restore gives OSC 112 before that
+    /// value, thus such a value gives the default color. One case stays
+    /// wrong: after `OSC 12;#00ff00` then `OSC 12;bogus`, the terminal of the
+    /// recording keeps `#00ff00`, but the restore gives the default color.
     fn osc_colors(&mut self, text: &str, terminator: &str) -> Option<String> {
         let mut parts = text.split(';');
         let number: usize = parts.next()?.parse().ok()?;
@@ -697,6 +704,12 @@ impl<'a> Rewriter<'a> {
         }
         if let Some(color) = self.wanted_color(target) {
             if self.shown_color.as_ref() != Some(&color) {
+                // A terminal ignores an OSC 12 value that it does not read as
+                // a color, and keeps the color that it shows. The reset first
+                // makes such a value of the recording give the default.
+                if target == Target::Recording && color != CursorColor::Default {
+                    text.push_str(&CursorColor::Default.sequence());
+                }
                 text.push_str(&color.sequence());
                 self.shown_color = Some(color);
             }
