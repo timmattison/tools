@@ -204,3 +204,31 @@ fn two_terminals_that_read_the_same_bytes_are_equal() {
 fn an_echo_and_its_erase_leave_a_terminal_equal_to_one_that_read_neither() {
     assert!(fed("$ h") == fed("$ hr\x08 \x08"));
 }
+
+#[test]
+fn the_pen_counts_although_the_screen_is_the_same() {
+    assert!(fed("ab") != fed("ab\x1b[31m"));
+}
+
+#[test]
+fn the_saved_cursor_counts_although_the_cursor_is_the_same() {
+    assert!(fed("") != fed("\x1b[5C\x1b7\x1b[5D"));
+}
+
+#[test]
+fn an_unfinished_sequence_counts_until_it_ends() {
+    let mut unfinished = fed("x\x1b[");
+    assert!(unfinished != fed("x"));
+
+    unfinished.process_output("m").unwrap();
+    assert!(unfinished == fed("x"));
+}
+
+#[test]
+fn the_theme_counts_although_only_a_palette_color_differs() {
+    // The two themes have the same default colors, so the screens are the
+    // same. A later `CSI 31 m` paints in different reds.
+    let mut other = TerminalTheme::auto();
+    other.red = (1, 2, 3);
+    assert!(TerminalState::new(10, 3, TerminalTheme::auto()) != TerminalState::new(10, 3, other));
+}
