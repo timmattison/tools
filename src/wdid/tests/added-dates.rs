@@ -151,3 +151,16 @@ fn a_record_without_a_date_and_a_rename_add_nothing() {
     assert!(added_dates(log).is_empty());
     assert!(added_dates("").is_empty());
 }
+
+#[test]
+fn only_a_line_inside_a_hunk_is_an_added_line() {
+    let log = "\u{0}2025-01-01\n\ndiff --git a/f b/f\n+alias header=1\n\
+               @@ -0,0 +1 @@\n+alias real=1\n\
+               diff --git a/g b/g\n+alias between=1\n";
+    let dates = added_dates(log);
+    assert_eq!(
+        dates.keys().cloned().collect::<Vec<_>>(),
+        vec![Defined::alias("real")],
+        "{dates:?}"
+    );
+}

@@ -628,7 +628,7 @@ struct GlobalWord<'a> {
 
 /// The text that comes before the suffix in the marker of a suffix alias, as
 /// in `*.md`.
-const SUFFIX_MARKER: &str = "*.";
+pub(crate) const SUFFIX_MARKER: &str = "*.";
 
 /// The characters that make an alias expand the next word too, when the value
 /// of the alias ends with one of them.
