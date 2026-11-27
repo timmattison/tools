@@ -444,8 +444,13 @@ fn two_clip_project() -> EditProject {
     }
 }
 
+/// The output event of a hard cut into a clip of the full size: reset the
+/// attributes, reset the scroll region, clear the screen, and move the cursor
+/// home.
+const CUT: &str = "\x1b[0m\x1b[r\x1b[2J\x1b[H";
+
 #[test]
-fn render_merges_two_clips_in_time_order_and_keeps_track_order_on_a_tie() {
+fn render_merges_two_clips_in_time_order_and_cuts_after_the_last_event_of_the_first() {
     let rendered = FilterRegistry::new().render(&two_clip_project()).unwrap();
 
     let got: Vec<(f64, &str)> = rendered
@@ -453,16 +458,78 @@ fn render_merges_two_clips_in_time_order_and_keeps_track_order_on_a_tie() {
         .iter()
         .map(|e| (e.time, e.data.as_str()))
         .collect();
+    // The last event of "early" is at its end, which is the start of "late".
+    // It plays before the cut, so the cut clears it.
     assert_eq!(
         got,
         vec![
             (0.0, "early0"),
             (1.0, "early1"),
-            (2.0, "late0"),
             (2.0, "early2"),
+            (2.0, CUT),
+            (2.0, "late0"),
             (3.0, "late1"),
         ]
     );
+}
+
+/// The events of `rendered` as their times and their texts.
+fn timed_data(rendered: &Recording) -> Vec<(f64, &str)> {
+    rendered
+        .events
+        .iter()
+        .map(|e| (e.time, e.data.as_str()))
+        .collect()
+}
+
+/// A recording named `title` with one output event for each of `times`. The
+/// text of each event is the title and the index of the event.
+fn texts(title: &str, times: &[f64], duration: f64) -> Recording {
+    let mut recording = source(title, &[], duration);
+    recording.events = times
+        .iter()
+        .enumerate()
+        .map(|(index, &time)| data_event(time, &format!("{title}{index}")))
+        .collect();
+    recording
+}
+
+#[test]
+fn render_puts_a_hard_cut_at_the_start_of_each_clip_after_the_first() {
+    let project = EditProject {
+        clips: vec![
+            clip_of(1, texts("a", &[0.0, 1.0], 2.0), 0.0),
+            clip_of(2, texts("b", &[0.0, 1.0], 3.0), 2.0),
+            clip_of(3, texts("c", &[0.5], 1.0), 6.0),
+        ],
+        timeline: vec![TimelineTrack {
+            id: TrackId(1),
+            clips: vec![ClipId(1), ClipId(2), ClipId(3)],
+        }],
+        filters: Vec::new(),
+    };
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    // Clip "b" starts at the end of "a". Clip "c" starts after a gap, and the
+    // screen of "b" stays until its cut.
+    assert_eq!(
+        timed_data(&rendered),
+        vec![
+            (0.0, "a0"),
+            (1.0, "a1"),
+            (2.0, CUT),
+            (2.0, "b0"),
+            (3.0, "b1"),
+            (6.0, CUT),
+            (6.5, "c0"),
+        ]
+    );
+    assert!(rendered
+        .events
+        .iter()
+        .all(|event| event.event_type == EventType::Output));
+    assert_eq!(rendered.duration, 7.0);
 }
 
 #[test]
