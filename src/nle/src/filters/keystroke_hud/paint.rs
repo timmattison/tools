@@ -376,33 +376,33 @@ impl Painter {
             .enumerate()
         {
             for (column, (seen, clean)) in shown_row.iter().zip(clean_row).enumerate() {
-                let (wanted, fg, bg) = match overlay.and_then(|o| o.cell_at(row, column)) {
-                    Some(cell) => {
-                        let bg = cell.bg.unwrap_or(clean.bg_color);
-                        let bg_text = match cell.bg {
-                            Some(color) => format!("48;2;{};{};{}", color.0, color.1, color.2),
-                            None => bg_code(clean.bg_color),
-                        };
-                        let wanted = Cell {
-                            ch: cell.ch,
-                            fg_color: cell.fg,
-                            bg_color: bg,
-                            bold: cell.bold,
-                            italic: false,
-                            underline: false,
-                        };
-                        let fg_text = format!("38;2;{};{};{}", cell.fg.0, cell.fg.1, cell.fg.2);
-                        (wanted, fg_text, bg_text)
-                    }
-                    None => (
-                        clean.clone(),
-                        fg_code(clean.fg_color),
-                        bg_code(clean.bg_color),
-                    ),
+                let over = overlay.and_then(|o| o.cell_at(row, column));
+                let wanted = match over {
+                    Some(cell) => Cell {
+                        ch: cell.ch,
+                        fg_color: cell.fg,
+                        bg_color: cell.bg.unwrap_or(clean.bg_color),
+                        bold: cell.bold,
+                        italic: false,
+                        underline: false,
+                    },
+                    None => clean.clone(),
                 };
+                // Most cells do not change. Compare before the codes are built,
+                // so that a cell that does not change costs no allocation.
                 if *seen == wanted {
                     continue;
                 }
+                let (fg, bg) = match over {
+                    Some(cell) => (
+                        format!("38;2;{};{};{}", cell.fg.0, cell.fg.1, cell.fg.2),
+                        match cell.bg {
+                            Some(color) => format!("48;2;{};{};{}", color.0, color.1, color.2),
+                            None => bg_code(clean.bg_color),
+                        },
+                    ),
+                    None => (fg_code(clean.fg_color), bg_code(clean.bg_color)),
+                };
                 any_cell = true;
                 let style = sgr(&wanted, &fg, &bg);
                 let after_last = last.as_ref().is_some_and(|(last_row, last_column, _)| {
