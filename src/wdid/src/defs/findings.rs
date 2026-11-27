@@ -60,7 +60,9 @@ pub struct Finding {
     pub definitions: Vec<Member>,
     /// For [`FindingKind::SameExpansion`], the words that the aliases share.
     /// For [`FindingKind::AliasAndFunction`], the words of the alias, without
-    /// the `"$@"` or `"${@}"` of the function. Empty for the other kinds.
+    /// the `"$@"` or `"${@}"` of the function. Empty for the other kinds. Each
+    /// word is as the shell reads it, and a literal that needs quotes is in
+    /// single quotes.
     pub words: Vec<String>,
     /// For [`FindingKind::DefinedMoreThanOnce`], each place that defined the
     /// alias, in order. The last place is in effect. Empty for the other
@@ -168,9 +170,10 @@ fn same_expansion(entries: &Entries<'_>) -> Vec<Finding> {
         .collect()
 }
 
-/// Gives the text of each word of `words`.
+/// Gives each word of `words` as the shell reads it. A literal that needs
+/// quotes is in single quotes.
 fn texts_of(words: &[Argument]) -> Vec<String> {
-    words.iter().map(|word| word.text().to_string()).collect()
+    words.iter().map(Argument::shell_text).collect()
 }
 
 /// Gives the words that the body of a function runs before it passes on its

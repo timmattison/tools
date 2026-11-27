@@ -459,18 +459,37 @@ fn members_text(finding: &Finding, places: &Places, with_origin: bool) -> String
         .join(MEMBER_SEPARATOR)
 }
 
+/// Joins `words` with one space. Each control character shows as an escape,
+/// so that the entry stays on one line. A backslash stays as it is, because
+/// the words are shell text.
+fn words_text(words: &[String]) -> String {
+    words
+        .join(" ")
+        .chars()
+        .flat_map(|c| -> Vec<char> {
+            match c {
+                '\n' => vec!['\\', 'n'],
+                '\r' => vec!['\\', 'r'],
+                '\t' => vec!['\\', 't'],
+                c if c.is_control() => c.escape_default().collect(),
+                c => vec![c],
+            }
+        })
+        .collect()
+}
+
 /// Gives the entry of `finding` in the group of the duplicates and the
 /// shadows. The text of each kind has its own shape.
 fn finding_entry(finding: &Finding, places: &Places) -> String {
     match finding.kind {
         FindingKind::SameExpansion => format!(
             "{LABEL_SAME_EXPANSION} ({}): {}",
-            finding.words.join(" "),
+            words_text(&finding.words),
             members_text(finding, places, true),
         ),
         FindingKind::AliasAndFunction => format!(
             "{LABEL_ALIAS_AND_FUNCTION} ({}): {}",
-            finding.words.join(" "),
+            words_text(&finding.words),
             members_text(finding, places, true),
         ),
         FindingKind::DefinedMoreThanOnce => {

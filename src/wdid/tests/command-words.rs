@@ -1421,3 +1421,24 @@ fn the_line_records_each_run_of_a_word_by_a_wrapper() {
 fn the_name_of_the_command_wrapper_is_a_constant() {
     assert_eq!(COMMAND, "command");
 }
+
+#[test]
+fn shell_text_quotes_a_literal_only_when_it_needs_quotes() {
+    let rows = [
+        (Argument::Literal("git".to_string()), "git"),
+        (Argument::Literal("x y".to_string()), "'x y'"),
+        (Argument::Literal(String::new()), "''"),
+        (Argument::Literal("it's".to_string()), "'it'\\''s'"),
+        (Argument::Literal("=ls".to_string()), "'=ls'"),
+        (Argument::Literal("FOO=1".to_string()), "FOO=1"),
+        (Argument::Literal("日本語".to_string()), "日本語"),
+        (Argument::Literal("🎉".to_string()), "'🎉'"),
+        (Argument::Literal("$HOME".to_string()), "'$HOME'"),
+        (Argument::Expansion("$HOME".to_string()), "$HOME"),
+        (Argument::Expansion("\"$@\"".to_string()), "\"$@\""),
+        (Argument::Operator("|".to_string()), "|"),
+    ];
+    for (word, expected) in rows {
+        assert_eq!(word.shell_text(), expected, "word: {word:?}");
+    }
+}

@@ -1621,7 +1621,34 @@ pub enum Argument {
     Operator(String),
 }
 
+/// The characters, besides letters and digits, that a literal word holds
+/// without quotes. `=` is not safe as the first character, because zsh
+/// expands `=ls` to the path of `ls`.
+const SAFE_WORD_CHARACTERS: &str = "_-./,:@%+=";
+
 impl Argument {
+    /// Gives the word as the shell reads it. A literal that holds only safe
+    /// characters stays bare, and each other literal gets single quotes. An
+    /// expansion and an operator keep their text.
+    #[must_use]
+    pub fn shell_text(&self) -> String {
+        match self {
+            Self::Literal(text) => {
+                let bare = !text.is_empty()
+                    && !text.starts_with('=')
+                    && text
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || SAFE_WORD_CHARACTERS.contains(c));
+                if bare {
+                    text.clone()
+                } else {
+                    shellquote::shell_quote(text)
+                }
+            }
+            Self::Expansion(text) | Self::Operator(text) => text.clone(),
+        }
+    }
+
     /// Gives the text of the word, whatever its kind.
     #[must_use]
     pub fn text(&self) -> &str {
