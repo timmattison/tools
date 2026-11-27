@@ -144,7 +144,8 @@ pub struct ScreenView<'a> {
     pub size: ScreenSize,
     /// The events before the region, with their times on the timeline.
     pub before: &'a [Event],
-    /// True when the region is `All`, the whole timeline. Only a filter on such a region can change the size of the screen.
+    /// True when the region is `All`, the whole timeline. Only a filter on
+    /// such a region can change the size of the screen.
     pub whole_timeline: bool,
 }
 
@@ -168,8 +169,11 @@ pub struct Screen {
 ///
 /// 1. The filter gets the events inside the region, relative to its start,
 ///    and a `ScreenView`. The view holds the `RegionView` that an in-place
-///    filter gets, the size of the screen at this step, and the events before
-///    the region with their times on the timeline. The size of the first step
+///    filter gets, the size of the screen at this step, the events before
+///    the region with their times on the timeline, and `whole_timeline`, which
+///    is true only for the region `All`. A range that holds each event is not
+///    `All`, thus a filter reads `whole_timeline` and not `RegionView::open`
+///    to know if it can change the size. The size of the first step
 ///    is the width and the height of the header that `FilterRegistry::render`
 ///    takes. A later step gets the size that the step before it gave.
 /// 2. The filter answers `Ok` with a `Screen`, or `Err` with a message. An
@@ -364,7 +368,7 @@ impl FilterRegistry {
                     region: view,
                     size: current,
                     before: &before,
-                    whole_timeline: false,
+                    whole_timeline: applied.region == FilterRegion::All,
                 };
                 let answer = filter(&inside, screen, &applied.options).map_err(|message| {
                     NleError::RenderError(format!("filter \"{kind}\" failed: {message}"))

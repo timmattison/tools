@@ -32,13 +32,36 @@
 //!
 //! The region `All` gives an output of the count of visible columns by the
 //! count of visible rows. The visible cells move together: a hidden row or
-//! column goes out, and the cells after it move up or left. The region `Range`
-//! is not supported yet.
+//! column goes out, and the cells after it move up or left.
 //!
-//! For each output event, the filter first writes the sequences that do not
+//! The region `Range` keeps the size of the screen, and each cell keeps its
+//! place. During the range, each cell that is not visible is a blank: a space
+//! with the default colors and no attribute. The cursor shows only when its
+//! row and its column are visible. The filter feeds the output events before
+//! the range to the emulator, so it knows the screen at the start. It does not
+//! feed the input events. Then it works as follows:
+//!
+//! - At the start of the range (time 0), it writes the mask. When the emulator
+//!   uses the line-drawing character set, it first writes `ESC ( B`, because
+//!   the filter writes each line-drawing character as its Unicode
+//!   box-drawing character. The first paint has a CUP, because the cursor of
+//!   the output is not known.
+//! - At the end of a range that is not open (time `view.region.length`), it
+//!   writes one output event that gives the full screen back and sets the
+//!   state of the terminal to the state of the emulator, in this order: the
+//!   cells that differ, the scrolling region (DECSTBM), the pen (one SGR),
+//!   the saved cursor position (a CUP, then `ESC 7`), the line-drawing
+//!   character set (`ESC ( 0`, when the emulator uses it), and the cursor
+//!   (a CUP, then mode 25). A range that is open has no restore.
+//!
+//! A `ESC 7` in a real terminal also saves the pen. The restore saves the
+//! position only, as `termstate` does.
+//!
+//! For each output event of the region, the filter first writes the sequences that do not
 //! change a cell, in their order: each OSC, each DECSCUSR, mode 12 (the blink
 //! of the cursor), and BEL. Then it writes the paint of the screen after the
-//! event. It removes each other byte of the event, and it removes an output
+//! event. A `Scanner` reads the events before the range too, so a sequence that
+//! the start of the range splits is read correctly. It removes each other byte of the event, and it removes an output
 //! event whose new data is empty. An input event stays as it is.
 
 mod writer;
@@ -55,6 +78,16 @@ use crate::types::{Event, EventType, FilterKind, FilterOptions};
 
 /// The character BEL, which passes through.
 const BEL: char = '\x07';
+/// The sequence that selects the ASCII character set.
+const ASCII_SET: &str = "\x1b(B";
+/// The sequence that selects the line-drawing character set.
+const LINE_DRAWING_SET: &str = "\x1b(0";
+/// The sequence that saves the cursor position.
+const SAVE_CURSOR: &str = "\x1b7";
+/// The sequence that shows the cursor.
+const SHOW_CURSOR: &str = "\x1b[?25h";
+/// The sequence that hides the cursor.
+const HIDE_CURSOR: &str = "\x1b[?25l";
 
 /// The kind of the viewport filter.
 pub const VIEWPORT: &str = "viewport";
@@ -88,7 +121,10 @@ struct Options {
 ///
 /// It checks the options and the screen, as the module doc says. When every
 /// row and every column is visible, it answers the events as they are. Else it
-/// runs `Replay` over the events. A range is not supported yet.
+/// runs `Replay` over the events. On the region `All` the answer has the size
+/// of the visible cells. On a range it has the size of the screen, and the
+/// replay starts from the emulator after `view.before`. The view says which
+/// path to take with `whole_timeline`.
 fn filter(
     events: &[Event],
     view: ScreenView<'_>,
@@ -111,9 +147,11 @@ fn filter(
             size: view.size,
         });
     }
-    if !(view.whole_timeline || (view.before.is_empty() && view.region.open)) {
+    if !view.whole_timeline {
+        let restore_at = (!view.region.open).then_some(view.region.length);
+        let replay = Replay::masked(view.size, rows, columns, view.before)?;
         return Ok(Screen {
-            events: events.to_vec(),
+            events: replay.run(events, restore_at)?,
             size: view.size,
         });
     }
@@ -121,7 +159,7 @@ fn filter(
         width: u16::try_from(columns.len()).map_err(|error| error.to_string())?,
         height: u16::try_from(rows.len()).map_err(|error| error.to_string())?,
     };
-    let events = Replay::new(view.size, rows, columns).run(events)?;
+    let events = Replay::moved(view.size, rows, columns).run(events, None)?;
     Ok(Screen { events, size })
 }
 
@@ -214,65 +252,205 @@ impl Axis {
     }
 }
 
-/// What the emulator at the full size shows at one moment: the visible cells
-/// in row order, and the cursor, mapped into the visible cells.
+/// How the visible cells go to the output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    /// The region `All`: the visible cells move together, and the output has
+    /// the size of the visible cells.
+    Moved,
+    /// The region `Range`: each cell keeps its place, and a cell that is not
+    /// visible is blank.
+    Masked,
+}
+
+/// What the emulator at the full size shows at one moment, and the output
+/// terminal that shows the visible cells of it.
 struct Replay {
     terminal: TerminalState,
+    scanner: Scanner,
+    layout: Layout,
     rows: Vec<usize>,
     columns: Vec<usize>,
     writer: Writer,
 }
 
 impl Replay {
-    /// A replay of a screen of `size`, with the visible `rows` and `columns`.
-    /// The output is a blank terminal of the size of the visible cells.
-    fn new(size: ScreenSize, rows: Vec<usize>, columns: Vec<usize>) -> Self {
+    /// A replay for the region `All` of a screen of `size`, with the visible
+    /// `rows` and `columns`. The output is a blank terminal of the size of the
+    /// visible cells.
+    fn moved(size: ScreenSize, rows: Vec<usize>, columns: Vec<usize>) -> Self {
         Self {
-            terminal: TerminalState::new(
-                usize::from(size.width),
-                usize::from(size.height),
-                TerminalTheme::auto(),
-            ),
+            terminal: new_terminal(size),
+            scanner: Scanner::new(),
+            layout: Layout::Moved,
             writer: Writer::blank(columns.len(), rows.len()),
             rows,
             columns,
         }
     }
 
-    /// The paint of the screen that the emulator shows now.
-    fn paint(&mut self) -> String {
-        let grid = self.terminal.get_grid();
-        let target: Vec<Glyph> = self
-            .rows
-            .iter()
-            .flat_map(|row| self.columns.iter().map(move |column| (*row, *column)))
-            .map(|(row, column)| {
-                grid.get(row)
-                    .and_then(|cells| cells.get(column))
-                    .map_or(Glyph::BLANK, glyph_of)
-            })
-            .collect();
-        let (cursor_x, cursor_y) = self.terminal.get_cursor_position();
-        let cursor = if self.terminal.is_cursor_visible() {
-            self.columns
-                .iter()
-                .position(|column| *column == cursor_x)
-                .zip(self.rows.iter().position(|row| *row == cursor_y))
-        } else {
-            None
-        };
-        self.writer.paint(&target, cursor)
-    }
-
-    /// The events of the region `All` after the filter. The first event is the
-    /// paint of the start, at time 0.
+    /// A replay for the region `Range` of a screen of `size`, with the visible
+    /// `rows` and `columns`. It feeds the output events of `before` to the
+    /// emulator, and each character of them to the scanner. The output is
+    /// what the emulator shows then.
     ///
     /// # Errors
     ///
     /// The emulator refuses the data of an event.
-    fn run(mut self, events: &[Event]) -> Result<Vec<Event>, String> {
+    fn masked(
+        size: ScreenSize,
+        rows: Vec<usize>,
+        columns: Vec<usize>,
+        before: &[Event],
+    ) -> Result<Self, String> {
+        let mut terminal = new_terminal(size);
+        let mut scanner = Scanner::new();
+        for event in before.iter().filter(|e| e.event_type == EventType::Output) {
+            terminal
+                .process_output(&event.data)
+                .map_err(|error| error.to_string())?;
+            for c in event.data.chars() {
+                scanner.feed(c);
+            }
+        }
+        let pen = Look {
+            fg: terminal.current_fg_source,
+            bg: terminal.current_bg_source,
+            bold: terminal.bold,
+            italic: terminal.italic,
+            underline: terminal.underline,
+        };
+        let writer = Writer::from_screen(
+            usize::from(size.width),
+            full_target(&terminal),
+            pen,
+            terminal.is_cursor_visible(),
+        );
+        Ok(Self {
+            terminal,
+            scanner,
+            layout: Layout::Masked,
+            rows,
+            columns,
+            writer,
+        })
+    }
+
+    /// The cells that the output must show now, in row order, and the place of
+    /// its cursor, or `None` when the cursor is hidden.
+    fn target(&self) -> (Vec<Glyph>, Option<(usize, usize)>) {
+        let grid = self.terminal.get_grid();
+        let (cursor_x, cursor_y) = self.terminal.get_cursor_position();
+        let shown = self.terminal.is_cursor_visible();
+        match self.layout {
+            Layout::Moved => {
+                let target = self
+                    .rows
+                    .iter()
+                    .flat_map(|row| self.columns.iter().map(move |column| (*row, *column)))
+                    .map(|(row, column)| {
+                        grid.get(row)
+                            .and_then(|cells| cells.get(column))
+                            .map_or(Glyph::BLANK, glyph_of)
+                    })
+                    .collect();
+                let cursor = shown
+                    .then(|| {
+                        self.columns
+                            .iter()
+                            .position(|column| *column == cursor_x)
+                            .zip(self.rows.iter().position(|row| *row == cursor_y))
+                    })
+                    .flatten();
+                (target, cursor)
+            }
+            Layout::Masked => {
+                let target = grid
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(row, cells)| {
+                        let row_shown = self.rows.contains(&row);
+                        cells.iter().enumerate().map(move |(column, cell)| {
+                            if row_shown && self.columns.contains(&column) {
+                                glyph_of(cell)
+                            } else {
+                                Glyph::BLANK
+                            }
+                        })
+                    })
+                    .collect();
+                let cursor =
+                    (shown && self.rows.contains(&cursor_y) && self.columns.contains(&cursor_x))
+                        .then_some((cursor_x, cursor_y));
+                (target, cursor)
+            }
+        }
+    }
+
+    /// The paint of the screen that the emulator shows now.
+    fn paint(&mut self) -> String {
+        let (target, cursor) = self.target();
+        self.writer.paint(&target, cursor)
+    }
+
+    /// The data of the first event, at time 0. A range first sets the
+    /// character set that the paint needs, then it paints the mask.
+    fn start(&mut self) -> String {
+        let mut data = String::new();
+        if self.layout == Layout::Masked && self.terminal.uses_line_drawing() {
+            data.push_str(ASCII_SET);
+        }
+        data.push_str(&self.paint());
+        data
+    }
+
+    /// The data of the event that ends a range: the full screen, then the
+    /// state of the terminal, in the order that the module doc gives.
+    fn restore(&mut self) -> String {
+        let mut data = String::new();
+        self.writer
+            .paint_cells(&full_target(&self.terminal), &mut data);
+        let (top, bottom) = self.terminal.scroll_region();
+        data.push_str(&format!(
+            "\x1b[{};{}r",
+            top.saturating_add(1),
+            bottom.saturating_add(1)
+        ));
+        let pen = Look {
+            fg: self.terminal.current_fg_source,
+            bg: self.terminal.current_bg_source,
+            bold: self.terminal.bold,
+            italic: self.terminal.italic,
+            underline: self.terminal.underline,
+        };
+        data.push_str(&writer::sgr(&pen));
+        self.writer.set_pen(pen);
+        let (saved_x, saved_y) = self.terminal.saved_cursor_position();
+        data.push_str(&writer::cup(saved_x, saved_y));
+        data.push_str(SAVE_CURSOR);
+        if self.terminal.uses_line_drawing() {
+            data.push_str(LINE_DRAWING_SET);
+        }
+        let (cursor_x, cursor_y) = self.terminal.get_cursor_position();
+        data.push_str(&writer::cup(cursor_x, cursor_y));
+        data.push_str(if self.terminal.is_cursor_visible() {
+            SHOW_CURSOR
+        } else {
+            HIDE_CURSOR
+        });
+        data
+    }
+
+    /// The events of the region after the filter. The first event is the
+    /// start, at time 0. When `restore_at` is a time, the last event is the
+    /// restore at that time.
+    ///
+    /// # Errors
+    ///
+    /// The emulator refuses the data of an event.
+    fn run(mut self, events: &[Event], restore_at: Option<f64>) -> Result<Vec<Event>, String> {
         let mut answer = Vec::new();
-        let start = self.paint();
+        let start = self.start();
         if !start.is_empty() {
             answer.push(Event {
                 time: 0.0,
@@ -280,7 +458,6 @@ impl Replay {
                 data: start,
             });
         }
-        let mut scanner = Scanner::new();
         for event in events {
             if event.event_type != EventType::Output {
                 answer.push(event.clone());
@@ -289,7 +466,7 @@ impl Replay {
             let mut data: String = event
                 .data
                 .chars()
-                .map(|c| pass_through(&scanner.feed(c), c))
+                .map(|c| pass_through(&self.scanner.feed(c), c))
                 .collect();
             self.terminal
                 .process_output(&event.data)
@@ -302,8 +479,33 @@ impl Replay {
                 });
             }
         }
+        if let Some(time) = restore_at {
+            answer.push(Event {
+                time,
+                event_type: EventType::Output,
+                data: self.restore(),
+            });
+        }
         Ok(answer)
     }
+}
+
+/// An emulator of a screen of `size`.
+fn new_terminal(size: ScreenSize) -> TerminalState {
+    TerminalState::new(
+        usize::from(size.width),
+        usize::from(size.height),
+        TerminalTheme::auto(),
+    )
+}
+
+/// The glyphs of the whole grid of `terminal`, in row order.
+fn full_target(terminal: &TerminalState) -> Vec<Glyph> {
+    terminal
+        .get_grid()
+        .iter()
+        .flat_map(|cells| cells.iter().map(glyph_of))
+        .collect()
 }
 
 /// The glyph that an emulator cell shows.

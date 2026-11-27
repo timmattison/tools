@@ -65,15 +65,44 @@ impl Writer {
         }
     }
 
+    /// A terminal that shows `cells`, in row order, `width` cells to a row.
+    ///
+    /// The pen is `pen`, and the cursor is shown or hidden as `cursor_shown`
+    /// says. The place of the cursor is unknown, thus the first write gets a
+    /// CUP.
+    pub(super) fn from_screen(
+        width: usize,
+        cells: Vec<Glyph>,
+        pen: Look,
+        cursor_shown: bool,
+    ) -> Self {
+        Self {
+            width,
+            grid: cells,
+            pen,
+            cursor: None,
+            cursor_shown,
+        }
+    }
+
     /// The bytes that bring the model to `target` and `cursor`.
     ///
     /// `target` holds the cells in row order. `cursor` is the place of the
     /// cursor as `(column, row)`, or `None` when the cursor is hidden. The
     /// paint writes only the cells that differ from the model. A cell that
     /// the cursor is not on gets a CUP, and a cell with a new look gets one
-    /// SGR. The paint then updates the model.
+    /// SGR. The paint then updates the model. It is `paint_cells`, then the
+    /// cursor step.
     pub(super) fn paint(&mut self, target: &[Glyph], cursor: Option<(usize, usize)>) -> String {
         let mut bytes = String::new();
+        self.paint_cells(target, &mut bytes);
+        self.paint_cursor(cursor, &mut bytes);
+        bytes
+    }
+
+    /// Write to `bytes` the cells that differ between the model and `target`,
+    /// and update the model. `target` holds the cells in row order.
+    pub(super) fn paint_cells(&mut self, target: &[Glyph], bytes: &mut String) {
         let width = self.width.max(1);
         for (index, (model, want)) in self.grid.iter_mut().zip(target).enumerate() {
             if model == want {
@@ -81,7 +110,7 @@ impl Writer {
             }
             let (x, y) = (index % width, index / width);
             if self.cursor != Some((x, y)) {
-                push_cup(&mut bytes, x, y);
+                push_cup(bytes, x, y);
             }
             if self.pen != want.look {
                 bytes.push_str(&sgr(&want.look));
@@ -92,10 +121,16 @@ impl Writer {
             let one_wide = UnicodeWidthChar::width(want.ch) == Some(1);
             self.cursor = (one_wide && x + 1 < width).then_some((x + 1, y));
         }
+    }
+
+    /// Write to `bytes` the sequences that bring the cursor to `cursor`, a
+    /// `(column, row)` place or `None` for a hidden cursor, and update the
+    /// model.
+    fn paint_cursor(&mut self, cursor: Option<(usize, usize)>, bytes: &mut String) {
         match cursor {
             Some((x, y)) => {
                 if self.cursor != Some((x, y)) {
-                    push_cup(&mut bytes, x, y);
+                    push_cup(bytes, x, y);
                     self.cursor = Some((x, y));
                 }
                 if !self.cursor_shown {
@@ -110,7 +145,11 @@ impl Writer {
                 }
             }
         }
-        bytes
+    }
+
+    /// Set the pen of the model to `look`, for a caller that wrote its SGR.
+    pub(super) fn set_pen(&mut self, look: Look) {
+        self.pen = look;
     }
 }
 
@@ -121,15 +160,16 @@ const HIDE: &str = "\x1b[?25l";
 
 /// Write the CUP to the cell at column `x` and row `y`, counted from 0.
 fn push_cup(bytes: &mut String, x: usize, y: usize) {
-    bytes.push_str(&format!(
-        "\x1b[{};{}H",
-        y.saturating_add(1),
-        x.saturating_add(1)
-    ));
+    bytes.push_str(&cup(x, y));
+}
+
+/// The CUP to the cell at column `x` and row `y`, counted from 0.
+pub(super) fn cup(x: usize, y: usize) -> String {
+    format!("\x1b[{};{}H", y.saturating_add(1), x.saturating_add(1))
 }
 
 /// The SGR that sets exactly `look`: it resets the pen first.
-fn sgr(look: &Look) -> String {
+pub(super) fn sgr(look: &Look) -> String {
     let mut bytes = String::from("\x1b[0");
     if look.bold {
         bytes.push_str(";1");
