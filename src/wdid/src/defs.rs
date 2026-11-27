@@ -8,12 +8,18 @@
 //! other definition by the date of its last use. It also gives each
 //! [`Finding`]: the duplicates and the shadows among the definitions. The
 //! function is pure: it starts no process and reads no file.
+//!
+//! [`Tally::my_origin_files`] gives the files for [`crate::added::read`], and
+//! [`Tally::apply_added_dates`] gives each of my definitions the date that the
+//! read found. A definition that never ran is then new or old by that date.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
+use std::path::PathBuf;
 
 use chrono::NaiveDate;
 
+use crate::added::{AddedDates, Defined};
 use crate::command_words::{parse_line, AliasKind, CommandWord, Line};
 use crate::history::HistoryEntry;
 use crate::origin::{Origin, Places};
@@ -46,6 +52,9 @@ pub struct Window {
     pub today: NaiveDate,
     /// The first date that counts. A row on an earlier date does not count.
     pub since: Option<NaiveDate>,
+    /// A definition that never ran is new when its added date is younger than
+    /// this many days.
+    pub new_days: u32,
     /// A definition whose last use is older than this many days is idle.
     pub idle_days: u32,
     /// The report lists each definition: the functions whose name starts
@@ -81,6 +90,18 @@ impl Kind {
     }
 }
 
+impl Kind {
+    /// Gives the name that a line of a shell file defines for a definition of
+    /// this kind with the name `name`. The three kinds of alias are one
+    /// family, thus an alias that becomes a global alias keeps its date.
+    fn defined(self, name: &str) -> Defined {
+        match self {
+            Self::Alias | Self::GlobalAlias | Self::SuffixAlias => Defined::alias(name),
+            Self::Function => Defined::function(name),
+        }
+    }
+}
+
 impl From<AliasKind> for Kind {
     fn from(kind: AliasKind) -> Self {
         match kind {
@@ -99,8 +120,12 @@ pub enum Classification {
     Used,
     /// The definition ran, but not in the last `idle_days` days.
     Idle,
-    /// The definition never ran.
-    NeverUsed,
+    /// The definition never ran, and its added date is unknown or not
+    /// younger than `new_days` days.
+    NeverUsedOld,
+    /// The definition never ran, and its added date is younger than
+    /// `new_days` days.
+    NeverUsedNew,
     /// The shell runs the definition without a typed name, for example at
     /// each prompt. The state does not depend on the uses.
     RunsWithoutTyping,
@@ -179,6 +204,10 @@ pub struct Usage {
     pub origin: Option<Origin>,
     /// True when the definition is mine (see [`Places::is_mine`]).
     pub mine: bool,
+    /// The date of the oldest commit that adds a line that defines the name
+    /// to the file of the origin (see [`crate::added`]). `None` when it is
+    /// unknown, and for each definition that is not mine.
+    pub added: Option<NaiveDate>,
     /// Why the shell runs the definition without a typed name, sorted. It is
     /// empty for most definitions.
     pub reasons: Vec<Reason>,
@@ -224,6 +253,42 @@ pub struct Tally {
     pub findings: Vec<Finding>,
 }
 
+impl Tally {
+    /// Gives the file of the origin of each of my definitions, one time each,
+    /// in path order. A definition that is not mine and a definition with an
+    /// unknown origin give no file.
+    #[must_use]
+    pub fn my_origin_files(&self) -> BTreeSet<PathBuf> {
+        self.definitions
+            .iter()
+            .filter(|usage| usage.mine)
+            .filter_map(|usage| usage.origin.as_ref())
+            .map(|origin| origin.file.clone())
+            .collect()
+    }
+
+    /// Gives each of my definitions its added date from `dates`: the date of
+    /// its name and family in the file of its origin. Then each of them gets
+    /// its state again. A definition that never ran is new when its added date
+    /// is younger than `window.new_days` days. A definition that is not mine
+    /// keeps no added date, thus it stays old.
+    pub fn apply_added_dates(&mut self, dates: &AddedDates, window: &Window) {
+        for usage in self.definitions.iter_mut().filter(|usage| usage.mine) {
+            let Some(origin) = &usage.origin else {
+                continue;
+            };
+            usage.added = dates.get(&origin.file, &usage.kind.defined(&usage.name));
+            usage.classification = classify(
+                &usage.reasons,
+                usage.uses,
+                usage.last_use,
+                usage.added,
+                window,
+            );
+        }
+    }
+}
+
 /// Gives the first line of `text`, with its other characters unchanged.
 fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or("")
@@ -264,8 +329,9 @@ fn empty_usages(definitions: &Definitions, all: bool) -> Vec<Usage> {
             through: Vec::new(),
             first_use: None,
             last_use: None,
-            classification: Classification::NeverUsed,
+            classification: Classification::NeverUsedOld,
             mine: definitions.places.is_mine(origin.as_ref()),
+            added: None,
             origin,
             reasons: Vec::new(),
         })
@@ -409,12 +475,14 @@ impl<'a> Counter<'a> {
 
 /// Classifies one definition. A definition that the shell runs without a
 /// typed name has that state, whatever its uses. A definition with no use
-/// never ran. A definition whose last use is older than `idle_days` days is
-/// idle.
+/// never ran: it is new when its added date is known and younger than
+/// `new_days` days, else old. A definition whose last use is older than
+/// `idle_days` days is idle.
 fn classify(
     reasons: &[Reason],
     uses: u64,
     last_use: Option<NaiveDate>,
+    added: Option<NaiveDate>,
     window: &Window,
 ) -> Classification {
     if reasons.iter().any(Reason::runs_without_typing) {
@@ -428,7 +496,12 @@ fn classify(
                 Classification::Used
             }
         }
-        _ => Classification::NeverUsed,
+        _ => match added {
+            Some(added) if days_since(window.today, added) < i64::from(window.new_days) => {
+                Classification::NeverUsedNew
+            }
+            _ => Classification::NeverUsedOld,
+        },
     }
 }
 
@@ -492,7 +565,13 @@ pub fn tally(entries: &[HistoryEntry], definitions: &Definitions, window: &Windo
             .remove(&(usage.name.clone(), usage.kind))
             .map(Vec::from_iter)
             .unwrap_or_default();
-        usage.classification = classify(&usage.reasons, usage.uses, counts.last_use, window);
+        usage.classification = classify(
+            &usage.reasons,
+            usage.uses,
+            counts.last_use,
+            usage.added,
+            window,
+        );
     }
     usages.sort_by(|left, right| {
         right

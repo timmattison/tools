@@ -32,6 +32,29 @@ pub(crate) fn format_duration(total_seconds: f64) -> String {
     }
 }
 
+/// Formats a time in seconds for the ruler of the timeline: `m:ss` below one
+/// hour, and `h:mm:ss` from one hour. With `tenths`, the text ends in the
+/// tenths of a second, as in `0:01.5`.
+///
+/// The function rounds to tenths of a second first, as `format_duration`
+/// does. A value that is not finite, or that is below zero, formats as zero.
+pub(crate) fn format_clock(total_seconds: f64, tenths: bool) -> String {
+    let count = tenths_of_a_second(total_seconds);
+    let hours = count / TENTHS_PER_HOUR;
+    let minutes = count % TENTHS_PER_HOUR / TENTHS_PER_MINUTE;
+    let seconds = count % TENTHS_PER_MINUTE / 10;
+    let clock = if count >= TENTHS_PER_HOUR {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    };
+    if tenths {
+        format!("{clock}.{}", count % 10)
+    } else {
+        clock
+    }
+}
+
 /// Rounds `total_seconds` to whole tenths of a second. A value that is not
 /// finite, or that is below zero, gives zero. A very large value stops at
 /// `MAX_TENTHS`.
@@ -118,6 +141,48 @@ mod tests {
     #[test]
     fn format_duration_does_not_panic_on_a_huge_value() {
         assert!(!format_duration(1e300).is_empty());
+    }
+
+    #[test]
+    fn format_clock_shows_minutes_and_seconds_and_hours_from_one_hour() {
+        let cases = [
+            (0.0, "0:00"),
+            (5.0, "0:05"),
+            (65.0, "1:05"),
+            (600.0, "10:00"),
+            (3599.0, "59:59"),
+            (3600.0, "1:00:00"),
+            (3725.0, "1:02:05"),
+            (36000.0, "10:00:00"),
+        ];
+        for (seconds, expected) in cases {
+            assert_eq!(format_clock(seconds, false), expected, "{seconds} seconds");
+        }
+    }
+
+    #[test]
+    fn format_clock_shows_tenths_when_asked() {
+        let cases = [
+            (0.0, "0:00.0"),
+            (0.1, "0:00.1"),
+            (1.5, "0:01.5"),
+            // The sum is a little above 0.3 in an `f64`.
+            (0.1 + 0.2, "0:00.3"),
+            (59.96, "1:00.0"),
+            (3600.2, "1:00:00.2"),
+        ];
+        for (seconds, expected) in cases {
+            assert_eq!(format_clock(seconds, true), expected, "{seconds} seconds");
+        }
+    }
+
+    #[test]
+    fn format_clock_refuses_values_outside_the_range() {
+        for seconds in [f64::NAN, -1.0, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(format_clock(seconds, false), "0:00", "{seconds}");
+            assert_eq!(format_clock(seconds, true), "0:00.0", "{seconds}");
+        }
+        assert!(!format_clock(1e300, true).is_empty());
     }
 
     #[test]
