@@ -89,6 +89,22 @@ fn a_visible_cursor_swaps_the_colors_of_its_cell() {
 }
 
 #[test]
+fn the_cursor_swaps_the_colors_only_in_its_own_row() {
+    let screen = Screen::of(&terminal(3, 2, "ab\r\nc"));
+    let swapped = Style {
+        foreground: BLACK,
+        background: WHITE,
+        ..plain()
+    };
+    assert_eq!(texts(&screen.rows[0]), ["ab "]);
+    assert_eq!(screen.rows[0].runs[0].style, plain());
+    assert_eq!(texts(&screen.rows[1]), ["c", " ", " "]);
+    assert_eq!(screen.rows[1].runs[0].style, plain());
+    assert_eq!(screen.rows[1].runs[1].style, swapped);
+    assert_eq!(screen.rows[1].runs[2].style, plain());
+}
+
+#[test]
 fn a_hidden_cursor_changes_no_cell() {
     let screen = Screen::of(&terminal(4, 1, "\x1b[?25lab"));
     assert_eq!(texts(&screen.rows[0]), ["ab  "]);
