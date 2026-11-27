@@ -809,3 +809,39 @@ fn an_undo_gives_the_marks_of_the_project_before_the_edit() {
     assert!(editor.redo().unwrap());
     assert_eq!(editor.rendered_marks().unwrap().len(), 1);
 }
+
+#[test]
+fn a_render_that_fails_is_not_kept_and_the_next_read_renders_again() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let renders = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&renders);
+    let mut registry = FilterRegistry::new();
+    registry.register_span(FilterKind::new("flaky"), move |mut span, _| {
+        if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err("the first render fails".to_string());
+        }
+        span.marks.push(Mark {
+            time: 1.0,
+            label: "m".to_string(),
+        });
+        Ok(span)
+    });
+    let mut editor = Editor::new(project(), Arc::new(registry)).unwrap();
+    editor
+        .apply(Edit::AddFilter {
+            index: 0,
+            filter: filter("flaky"),
+        })
+        .unwrap();
+
+    assert!(editor.rendered_marks().is_err());
+
+    assert_eq!(
+        editor.rendered_marks().unwrap(),
+        vec![Mark {
+            time: 1.0,
+            label: "m".to_string()
+        }]
+    );
+    assert_eq!(render_count(&renders), 2);
+}
