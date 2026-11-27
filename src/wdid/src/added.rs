@@ -379,10 +379,13 @@ const SUFFIX_OPTION: char = 's';
 const ASSIGNMENT: char = '=';
 
 /// The texts that the read puts at the end of an alias line, in order:
-/// nothing, a closing single quote, and a closing double quote. A line that
-/// opens a quote and does not close it goes on to the next line, and the
-/// closing quote at the end of the line stands for that.
-const LINE_ENDINGS: [&str; 3] = ["", "'", "\""];
+/// nothing, a closing single quote, a closing double quote, and a newline with
+/// a closing double quote. A line that opens a quote and does not close it
+/// goes on to the next line, and the closing quote at the end of the line
+/// stands for that. A backslash at the end of a double-quoted value escapes a
+/// closing double quote, but the shell removes a backslash and a newline in
+/// double quotes. Thus the last ending closes `b="x \`.
+const LINE_ENDINGS: [&str; 4] = ["", "'", "\"", "\n\""];
 
 /// The characters that a function name of a definition line does not hold,
 /// other than the blanks. Each one is a quote, an expansion, or an operator
