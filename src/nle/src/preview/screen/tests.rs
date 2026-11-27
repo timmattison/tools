@@ -70,3 +70,26 @@ fn underline_and_italic_show_in_the_style() {
     assert!(row.runs[0].style.underline && !row.runs[0].style.italic);
     assert!(row.runs[1].style.italic && !row.runs[1].style.underline);
 }
+
+#[test]
+fn a_visible_cursor_swaps_the_colors_of_its_cell() {
+    let screen = Screen::of(&terminal(4, 1, "ab"));
+    let row = &screen.rows[0];
+    assert_eq!(texts(row), ["ab", " ", " "]);
+    assert_eq!(
+        row.runs[1].style,
+        Style {
+            foreground: BLACK,
+            background: WHITE,
+            ..plain()
+        }
+    );
+    assert_eq!(row.runs[0].style, plain());
+    assert_eq!(row.runs[2].style, plain());
+}
+
+#[test]
+fn a_hidden_cursor_changes_no_cell() {
+    let screen = Screen::of(&terminal(4, 1, "\x1b[?25lab"));
+    assert_eq!(texts(&screen.rows[0]), ["ab  "]);
+}
