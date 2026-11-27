@@ -930,6 +930,25 @@ fn each_cursor_move_ends_the_pending_wrap() {
 }
 
 #[test]
+fn an_ignored_decstbm_keeps_the_pending_wrap() {
+    // xterm ignores a DECSTBM whose top is not above its bottom, or whose
+    // bottom is below the screen. Such a DECSTBM moves no cursor, thus the
+    // next character wraps.
+    for ignored in ["\x1b[3;2r", "\x1b[2;2r", "\x1b[1;9r"] {
+        let state = feed_on(5, 3, &format!("abcde{ignored}X"));
+        assert_eq!(row_text(&state, 0), "abcde", "{ignored:?}");
+        assert_eq!(row_text(&state, 1), "X", "{ignored:?}");
+        assert_eq!(state.scroll_region(), (0, 2), "{ignored:?}");
+    }
+
+    // A valid DECSTBM moves the cursor home, thus it ends the pending wrap.
+    let state = feed_on(5, 3, "abcde\x1b[1;2rX");
+    assert_eq!(row_text(&state, 0), "Xbcde");
+    assert_eq!(row_text(&state, 1), "");
+    assert!(!state.is_wrap_pending());
+}
+
+#[test]
 fn a_wrap_on_the_last_row_scrolls_the_screen() {
     let state = feed_on(5, 2, "abcdefghijk");
 
