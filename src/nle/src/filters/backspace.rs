@@ -6,9 +6,10 @@
 //! The filter removes a typed key and its erase only when the screen after the
 //! erase is the screen before the typed key. Then the screen at each later
 //! event is the same with or without them. The filter keeps a model of the
-//! screen, a `TerminalState`, to make that comparison. It acts only on input
-//! events and on the output events that follow them. Thus a program that writes
-//! `\b` in its own output is never changed.
+//! screen, a `TerminalState`, to make that comparison. It acts only on erase
+//! keys in input events. Thus output that writes `\b` with no erase key before
+//! it stays, and so does the output of a program whose screen does not come
+//! back after an erase key.
 //!
 //! # The units and the keys
 //!

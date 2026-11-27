@@ -7,6 +7,10 @@
 //! A clone of a `TerminalState` is exact. It copies the screen, and it replays the
 //! bytes of an unfinished escape sequence into its own parser.
 //!
+//! Two terminals are equal when each later byte has the same effect on both. The
+//! backspace removal filter of `nle` uses this equality: it compares the screen
+//! before a typed key with the screen after the key that erased it.
+//!
 //! It does not draw pixels. `beta` keeps the drawing, the fonts, the tmux
 //! layout, and the ffmpeg pipe.
 

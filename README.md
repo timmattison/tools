@@ -6399,11 +6399,14 @@ The editing engine of the crate has four parts:
   in-place filter (`register_in_place`) also gets the length of its region and
   whether anything comes after it. It rewrites its region and moves nothing. A
   span filter (`register_span`) also gets the length of its region and answers
-  a new length, and the later events move by the change in the length.
+  a new length, and the later events move by the change in the length. A span
+  filter also gets the events before its region and the size of the terminal:
+  the size of the clip that starts first, or 80 by 24 in `FilterRegistry::run`.
   `filters::registry()` holds the filters that ship: the cursor filter
   (`cursor`, issue #168) is an in-place filter, and time dilation
-  (`time-dilation`, issue #153) is a span filter. Issues #152 to #167 add the
-  others.
+  (`time-dilation`, issue #153) and backspace removal (`backspace-removal`,
+  issue #152) are span filters. The other issues from #154 to #167 add the
+  rest.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
@@ -6449,6 +6452,58 @@ the state of the recording back at the end. The filter sees only its range,
 thus it takes the state before the range to be the default of a terminal: a
 visible cursor, DECSCUSR 0, and the default color. After a reset of the
 terminal (RIS or DECSTR) in the recording, the filter sets the cursor again.
+
+### The backspace removal filter
+
+The `backspace-removal` filter removes the typing errors of a recording. It
+removes a typed key, the key that erased it, and the output of both, so the
+recording shows the text that the typist meant. It also removes their time, so
+no pause shows where the error was. For example, `h`, `r`, Backspace, `e`
+becomes `h`, `e`, and the `e` comes at the time of the `r`.
+
+The filter removes keys only when the screen proves that the removal changes
+nothing that a viewer sees after it. The filter keeps a model of the screen,
+the emulator of the `termstate` crate. It compares the screen after the erase
+with the screen before the typed key, in each cell, in the cursor, and in each
+mode. Thus output that writes backspaces with no erase key before it stays, for
+example a progress bar. A full-screen program in which Backspace does a
+different thing also stays, because its screen does not come back.
+
+| Key | Data | What goes |
+|---|---|---|
+| Backspace | DEL (`\x7f`) or BS (`\x08`) | The newest typed key, the Backspace, and their output. |
+| Ctrl+W | `\x17` | The typed keys that the erase removed from the screen, the Ctrl+W, and their output. |
+| Ctrl+U | `\x15` | The same as for Ctrl+W. |
+
+An erase key that changes nothing on the screen goes with its output, for
+example a Backspace at the start of a line that rings the bell. A key that is
+not a typed character or an erase key ends the line that the filter follows:
+for example Enter, Tab, an arrow, or a paste. An erase after such a key does not
+remove a typed key before it.
+
+The filter takes no option. A project file names it in its `filters` list:
+
+```json
+{ "kind": "backspace-removal", "region": "All", "options": {} }
+```
+
+On a range, the filter replays the output before the range into its screen, so
+it compares the screens that the viewer sees. The events after the range move
+earlier by the removed time.
+
+The limits:
+
+- The comparison is as exact as the emulator. The emulator does not wrap at the
+  right margin, it gives each character one cell, and it reads `CSI C` or
+  `CSI D` with no number as a move of zero columns. Thus a typo near such
+  output usually stays.
+- At a prompt that echoes nothing, more than one typed key leaves the screen as
+  a Ctrl+W or a Ctrl+U leaves it. The filter cannot tell how many keys the
+  erase removed, so it keeps them all.
+- The filter keeps a copy of the screen for each typed key of a line: at most
+  256 copies, and at most 4,194,304 cells for all copies. A line of more typed
+  keys keeps its oldest keys. A terminal of more than 1,048,576 cells fails the
+  render.
 
 The export functions run `beta` with the PATH of the app, then
 `$CARGO_HOME/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.
