@@ -353,8 +353,29 @@ pub struct SizeMark {
 /// before it.
 #[must_use]
 pub fn size_marks(project: &EditProject) -> Vec<SizeMark> {
-    let _ = (project, std::marker::PhantomData::<Clip>);
-    Vec::new()
+    let mut ordered: Vec<&Clip> = project
+        .timeline
+        .iter()
+        .flat_map(|track| &track.clips)
+        .filter_map(|id| project.clips.iter().find(|clip| clip.id == *id))
+        .collect();
+    // A stable sort keeps track order, then clip order, on a tie.
+    ordered.sort_by(|a, b| a.timeline_offset.get().total_cmp(&b.timeline_offset.get()));
+    let size = |clip: &Clip| (clip.source.width, clip.source.height);
+    ordered
+        .windows(2)
+        .filter_map(|pair| {
+            let [before, after] = pair else {
+                return None;
+            };
+            let (from, to) = (size(before), size(after));
+            (from != to).then(|| SizeMark {
+                time: after.timeline_offset.get(),
+                from,
+                to,
+            })
+        })
+        .collect()
 }
 
 /// The unit of the deltas of a wheel event.
