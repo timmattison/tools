@@ -267,6 +267,31 @@ fn a_function_body_gives_its_command_words() {
 }
 
 #[test]
+fn the_body_of_a_function_is_kept_as_the_shell_gave_it() {
+    let definitions = parsed(&with_functions(
+        "",
+        &[("gitclean", "\tgitnuke --safe \"$@\"\n\tprcp")],
+    ));
+    assert_eq!(
+        definitions
+            .function_bodies
+            .get("gitclean")
+            .map(String::as_str),
+        Some("\tgitnuke --safe \"$@\"\n\tprcp")
+    );
+}
+
+#[test]
+fn the_body_of_a_function_that_does_not_parse_is_kept_too() {
+    let definitions = parsed(&with_functions("", &[("zed", "\techo $(")]));
+    assert_eq!(definitions.unparsed_functions, ["zed"]);
+    assert_eq!(
+        definitions.function_bodies.get("zed").map(String::as_str),
+        Some("\techo $(")
+    );
+}
+
+#[test]
 fn a_function_body_of_many_lines_is_read_as_one_script() {
     let body = "\tif [[ -n $1 ]]; then\n\t\tcwt \"$1\"\n\telse\n\t\tcat x | prhash\n\tfi";
     let definitions = parsed(&with_functions("", &[("wt", body)]));

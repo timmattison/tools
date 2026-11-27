@@ -418,6 +418,9 @@ pub struct Definitions {
     /// without the blanks at its start and at its end. It is empty when the
     /// body has no such line.
     pub function_lines: BTreeMap<String, String>,
+    /// The body of each function, parsed or not, by name, as the shell gave
+    /// it.
+    pub function_bodies: BTreeMap<String, String>,
     /// The names of the functions whose body did not parse, sorted.
     pub unparsed_functions: Vec<String>,
     /// The alias lines that did not parse, in output order.
