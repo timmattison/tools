@@ -393,3 +393,153 @@ fn an_alias_that_wraps_its_own_function_is_not_a_finding() {
     function(&mut defs, "wdy", "\techo y", ZSHRC);
     assert_eq!(findings(&[], &defs), Vec::new());
 }
+
+/// Says that the shell finds the program `path` for `name`.
+fn program(defs: &mut Definitions, name: &str, path: &str) {
+    defs.programs.insert(name.to_string(), PathBuf::from(path));
+}
+
+/// An alias that has the name of a program is one finding with the program.
+#[test]
+fn an_alias_that_hides_a_program_is_one_finding() {
+    let mut defs = empty();
+    alias(&mut defs, "hidden", "echo hi", ZSHRC, 9);
+    program(&mut defs, "hidden", "/usr/bin/hidden");
+    let found = findings(&[row("hidden")], &defs);
+    assert_eq!(
+        found,
+        vec![Finding {
+            kind: FindingKind::HidesProgram,
+            definitions: vec![member(
+                "hidden",
+                Kind::Alias,
+                Some(origin(ZSHRC, Some(9))),
+                1,
+                true
+            )],
+            words: Vec::new(),
+            places: Vec::new(),
+            program: Some(PathBuf::from("/usr/bin/hidden")),
+        }]
+    );
+}
+
+/// A function that has the name of a program is one finding.
+#[test]
+fn a_function_that_hides_a_program_is_one_finding() {
+    let mut defs = empty();
+    function(&mut defs, "wdcat", "\tbat \"$@\"", ZSHRC);
+    program(&mut defs, "wdcat", "/bin/wdcat");
+    let found = findings(&[], &defs);
+    let finding = only(&found, FindingKind::HidesProgram).unwrap();
+    assert_eq!(finding.definitions[0].kind, Kind::Function);
+    assert_eq!(finding.program, Some(PathBuf::from("/bin/wdcat")));
+}
+
+/// A global alias that has the name of a program is a finding.
+#[test]
+fn a_global_alias_that_hides_a_program_is_a_finding() {
+    let mut defs = empty();
+    defs.aliases.insert_global("wdglobal", "echo x");
+    program(&mut defs, "wdglobal", "/bin/wdglobal");
+    let found = findings(&[], &defs);
+    let finding = only(&found, FindingKind::HidesProgram).unwrap();
+    assert_eq!(finding.definitions[0].kind, Kind::GlobalAlias);
+}
+
+/// An alias that starts with its own name, and a function that runs the
+/// program through `command`, are wrappers and not findings.
+#[test]
+fn a_wrapper_of_a_program_is_not_a_finding() {
+    let mut defs = empty();
+    alias(&mut defs, "ls", "ls -G", ZSHRC, 1);
+    program(&mut defs, "ls", "/bin/ls");
+    function(
+        &mut defs,
+        "grep",
+        "\tcommand grep --color=auto \"$@\"",
+        ZSHRC,
+    );
+    program(&mut defs, "grep", "/usr/bin/grep");
+    assert_eq!(findings(&[], &defs), Vec::new());
+}
+
+/// A function that runs a different program through `command` still hides
+/// the program of its name.
+#[test]
+fn a_function_that_runs_another_program_through_command_is_a_finding() {
+    let mut defs = empty();
+    function(&mut defs, "wdcat", "\tcommand bat \"$@\"", ZSHRC);
+    program(&mut defs, "wdcat", "/bin/wdcat");
+    assert_eq!(kinds(&findings(&[], &defs)), [FindingKind::HidesProgram]);
+}
+
+/// A private function takes part only when the report lists it.
+#[test]
+fn a_private_function_takes_part_only_with_all() {
+    let mut defs = empty();
+    function(&mut defs, "_wdpriv", "\techo y", ZSHRC);
+    program(&mut defs, "_wdpriv", "/bin/_wdpriv");
+    assert_eq!(findings(&[], &defs), Vec::new());
+    let with_all = tally(&[], &defs, &window(true)).findings;
+    assert_eq!(kinds(&with_all), [FindingKind::HidesProgram]);
+}
+
+/// A finding is mine when one of its definitions is mine.
+#[test]
+fn a_finding_is_mine_when_one_definition_is_mine() {
+    let mut defs = empty();
+    alias(&mut defs, "gs", "git status", ZSHRC, 1);
+    alias(&mut defs, "gst", "git status", GIT_PLUGIN, 1);
+    alias(&mut defs, "ga", "git add", GIT_PLUGIN, 2);
+    alias(&mut defs, "gad", "git add", GIT_PLUGIN, 3);
+    let found = findings(&[], &defs);
+    assert_eq!(found.len(), 2);
+    let mine: Vec<(&str, bool)> = found
+        .iter()
+        .map(|finding| (finding.definitions[0].name.as_str(), finding.mine()))
+        .collect();
+    assert_eq!(mine, [("ga", false), ("gs", true)]);
+}
+
+/// The findings are sorted by kind, then by the name of the first
+/// definition, then by its kind.
+#[test]
+fn the_findings_are_sorted_by_kind_then_name() {
+    let mut defs = empty();
+    alias(&mut defs, "hp", "echo hi", ZSHRC, 1);
+    program(&mut defs, "hp", "/bin/hp");
+    function(&mut defs, "fz", "\techo y", ZSHRC);
+    program(&mut defs, "fz", "/bin/fz");
+    alias(&mut defs, "fz", "echo z", ZSHRC, 2);
+    alias(&mut defs, "dd", "ls -l", ZSHRC, 3);
+    set_places(
+        &mut defs,
+        "dd",
+        &[Some(origin(ZSHRC, Some(3))), Some(origin(MORE, Some(1)))],
+    );
+    alias(&mut defs, "s2", "wc -l", ZSHRC, 4);
+    alias(&mut defs, "s1", "wc -l", ZSHRC, 5);
+    alias(&mut defs, "gl", "git log", ZSHRC, 6);
+    function(&mut defs, "glog", "\tgit log \"$@\"", ZSHRC);
+    let found = findings(&[], &defs);
+    let order: Vec<(FindingKind, &str, Kind)> = found
+        .iter()
+        .map(|finding| {
+            let first = &finding.definitions[0];
+            (finding.kind, first.name.as_str(), first.kind)
+        })
+        .collect();
+    assert_eq!(
+        order,
+        [
+            (FindingKind::SameExpansion, "s1", Kind::Alias),
+            (FindingKind::AliasAndFunction, "gl", Kind::Alias),
+            (FindingKind::DefinedMoreThanOnce, "dd", Kind::Alias),
+            (FindingKind::AliasHidesFunction, "fz", Kind::Alias),
+            (FindingKind::HidesProgram, "fz", Kind::Alias),
+            (FindingKind::HidesProgram, "fz", Kind::Function),
+            (FindingKind::HidesProgram, "hp", Kind::Alias),
+        ]
+    );
+}
