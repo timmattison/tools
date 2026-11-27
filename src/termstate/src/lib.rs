@@ -870,13 +870,6 @@ impl TerminalState {
     }
 
     fn put_char(&mut self, ch: char) {
-        // A character after the last column goes to the start of the next row.
-        if self.wrap_pending {
-            self.wrap_pending = false;
-            self.cursor_x = 0;
-            self.line_feed();
-        }
-
         // Convert ACS characters to Unicode box drawing if needed
         let display_char = if self.use_acs {
             match ch {
@@ -897,11 +890,20 @@ impl TerminalState {
             ch
         };
 
-        // A character of no width, such as a combining mark, takes no cell.
+        // A character of no width, such as a combining mark, takes no cell,
+        // and thus it keeps a pending wrap.
         let width = UnicodeWidthChar::width(display_char).unwrap_or(1);
         if width == 0 {
             return;
         }
+
+        // A character after the last column goes to the start of the next row.
+        if self.wrap_pending {
+            self.wrap_pending = false;
+            self.cursor_x = 0;
+            self.line_feed();
+        }
+
         if width >= 2 && self.cursor_x + 2 > self.width {
             // A wide character does not fit in the last column.
             if self.autowrap && self.width >= 2 {
