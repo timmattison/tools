@@ -164,26 +164,38 @@ fn unparsable_toml(subject: &str, text: &str, span: Option<Range<usize>>) -> any
 /// The line and the column of a byte offset in a text, both counted from 1.
 ///
 /// The column counts characters, not bytes, as the parse error of `toml_edit`
-/// counts them, so the two give the same position.
+/// counts them, so the two give the same position. An offset at the end of
+/// the text is one column after the last character, as `toml_edit` gives it,
+/// thus a final newline does not start a line.
 ///
 /// # Arguments
 ///
 /// * `text` - The text that holds the offset.
-/// * `offset` - A byte offset at a character boundary of `text`.
+/// * `offset` - A byte offset at a character boundary of `text`, or the
+///   length of `text`.
 ///
 /// # Returns
 ///
 /// The line and the column of the character that starts at `offset`.
 fn line_and_column(text: &str, offset: usize) -> (usize, usize) {
-    text.char_indices()
-        .take_while(|(index, _)| *index < offset)
-        .fold((1, 1), |(line, column), (_, character)| {
-            if character == '\n' {
-                (line.saturating_add(1), 1)
-            } else {
-                (line, column.saturating_add(1))
-            }
-        })
+    let position_of = |offset: usize| -> (usize, usize) {
+        text.char_indices()
+            .take_while(|(index, _)| *index < offset)
+            .fold((1, 1), |(line, column), (_, character)| {
+                if character == '\n' {
+                    (line.saturating_add(1), 1)
+                } else {
+                    (line, column.saturating_add(1))
+                }
+            })
+    };
+    match text.char_indices().next_back() {
+        Some((last, _)) if offset > last => {
+            let (line, column) = position_of(last);
+            (line, column.saturating_add(1))
+        }
+        _ => position_of(offset),
+    }
 }
 
 /// A reader that counts the physical lines it has handed out.
