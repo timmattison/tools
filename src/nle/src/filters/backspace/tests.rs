@@ -124,6 +124,48 @@ fn the_rendered_recording_is_shorter_by_the_removed_time() {
     assert_eq!(rendered.duration, 1.5);
 }
 
+/// A chapter stays on its content when the filter removes a typo and its time.
+/// A chapter before the typo stays. A chapter at the typo, or inside it, moves
+/// to the place of the cut. A chapter after the typo moves earlier by the cut.
+#[test]
+fn a_chapter_moves_earlier_by_the_cut_of_each_typo_before_it() {
+    let mut source = Recording::test_fixture();
+    source.width = 80;
+    source.height = 24;
+    let mut events = typo_then_backspace("\x7f");
+    events.push(out(10.0, "\r\n$ "));
+    source.duration = 10.0;
+    source.events = events;
+    source.chapters = [
+        (0.5, "before"),
+        (1.5, "at the typo"),
+        (1.75, "inside the typo"),
+        (6.0, "after"),
+    ]
+    .into_iter()
+    .map(|(time, label)| crate::types::Chapter {
+        time,
+        label: label.to_string(),
+    })
+    .collect();
+    let mut project = EditProject::from_recording(Arc::new(source)).unwrap();
+    project.filters.push(applied_to_all());
+    let mut registry = FilterRegistry::new();
+    register(&mut registry);
+    let rendered = registry.render(&project).unwrap();
+    let times: Vec<f64> = rendered.chapters.iter().map(|c| c.time).collect();
+    let labels: Vec<&str> = rendered.chapters.iter().map(|c| c.label.as_str()).collect();
+    let expected = [0.5, 1.5, 1.5, 5.0];
+    assert_eq!(times.len(), expected.len(), "times: {times:?}");
+    for (time, want) in times.iter().zip(expected) {
+        assert!((time - want).abs() < 1e-9, "times: {times:?}");
+    }
+    assert_eq!(
+        labels,
+        ["before", "at the typo", "inside the typo", "after"]
+    );
+}
+
 #[test]
 fn ctrl_h_erases_like_the_backspace_key() {
     assert_eq!(run(typo_then_backspace("\x08")), without_the_typo());
