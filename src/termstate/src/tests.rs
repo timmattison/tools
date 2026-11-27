@@ -992,6 +992,84 @@ fn lf_ind_and_nel_below_the_scrolling_region_stop_at_the_last_row() {
 }
 
 #[test]
+fn cnl_from_inside_the_scrolling_region_stops_at_its_bottom_margin() {
+    // Rows 2 to 4 of 6 scroll. From row 3, nine rows down stop on row 4, the
+    // bottom margin, as in xterm. Thus the x goes on row 4, not on row 6.
+    let state = feed_on(10, 6, "\x1b[2;4r\x1b[3;1H\x1b[9Ex");
+
+    assert_eq!(row_text(&state, 3), "x");
+    assert_eq!(row_text(&state, 5), "");
+    assert_eq!(state.get_cursor_position(), (1, 3));
+}
+
+/// Feeds a screen of 8 rows whose rows 3 to 6 scroll. The cursor starts in
+/// column 5 of `start_row`, then `CSI <count> <final_byte>` moves it, then
+/// an `x` prints.
+///
+/// Fails when the `x` is not on `x_row` in `x_column`, or when the cursor is
+/// not just after it. Rows are counted from one, and columns from zero.
+fn assert_move_in_region(
+    final_byte: char,
+    start_row: usize,
+    count: usize,
+    x_row: usize,
+    x_column: usize,
+) {
+    let text = format!("\x1b[3;6r\x1b[{start_row};5H\x1b[{count}{final_byte}x");
+    let state = feed_on(10, 8, &text);
+    let case = format!("CSI {count} {final_byte} from row {start_row}");
+
+    assert_eq!(state.get_grid()[x_row - 1][x_column].ch, 'x', "{case}");
+    assert_eq!(
+        state.get_cursor_position(),
+        (x_column + 1, x_row - 1),
+        "{case}"
+    );
+}
+
+#[test]
+fn cud_and_cnl_stop_at_the_bottom_margin_unless_the_cursor_starts_below_it() {
+    // As CursorDown in xterm's cursor.c, a move down stops on the bottom
+    // margin (row 6) when the cursor starts on it or above it. From below
+    // it, the move stops on the last row of the screen.
+    for (final_byte, x_column) in [('B', 4), ('E', 0)] {
+        for (start_row, count, x_row) in [
+            (1, 9, 6),
+            (2, 1, 3),
+            (3, 9, 6),
+            (4, 1, 5),
+            (5, 9, 6),
+            (6, 9, 6),
+            (7, 1, 8),
+            (7, 9, 8),
+        ] {
+            assert_move_in_region(final_byte, start_row, count, x_row, x_column);
+        }
+    }
+}
+
+#[test]
+fn cuu_and_cpl_stop_at_the_top_margin_unless_the_cursor_starts_above_it() {
+    // As CursorUp in xterm's cursor.c, a move up stops on the top margin
+    // (row 3) when the cursor starts on it or below it. From above it, the
+    // move stops on the first row of the screen.
+    for (final_byte, x_column) in [('A', 4), ('F', 0)] {
+        for (start_row, count, x_row) in [
+            (8, 9, 3),
+            (7, 1, 6),
+            (6, 9, 3),
+            (5, 1, 4),
+            (4, 9, 3),
+            (3, 9, 3),
+            (2, 1, 1),
+            (2, 9, 1),
+        ] {
+            assert_move_in_region(final_byte, start_row, count, x_row, x_column);
+        }
+    }
+}
+
+#[test]
 fn with_autowrap_off_each_character_after_the_last_column_overwrites_it() {
     let state = feed_on(5, 3, "\x1b[?7labcdefg");
 
