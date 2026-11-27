@@ -446,6 +446,37 @@ fn a_change_of_the_terminal_size_shows_a_mark_at_the_clip() {
     assert!(page.contains("left: 600px; width: 600px;"), "{page}");
 }
 
+/// The edits that put a clip of `width` x `height` cells at the end of the
+/// first clip, on a new track with the id `track`.
+fn clip_on_new_track(track: u64, width: u16, height: u16) -> [Edit; 2] {
+    [
+        Edit::AddTrack { id: TrackId(track) },
+        Edit::AddClip {
+            clip: crate::types::Clip {
+                id: ClipId(track),
+                source: Arc::new(recording(width, height)),
+                in_point: Seconds::ZERO,
+                out_point: seconds(LENGTH),
+                timeline_offset: seconds(LENGTH),
+            },
+            track: TrackId(track),
+        },
+    ]
+}
+
+#[test]
+fn two_size_changes_at_one_time_show_two_marks_after_a_new_render() {
+    let edits = [clip_on_new_track(2, 100, 30), clip_on_new_track(3, 120, 40)].concat();
+    let mut page = Page::open(edits);
+    // The zoom keeps the time of the marks, the center, in the window, and
+    // the marks render again.
+    page.key("+", Modifiers::empty());
+    let html = page.html();
+    assert_eq!(html.matches("class=\"size-mark\"").count(), 2, "{html}");
+    assert!(html.contains(">100x30</span>"), "{html}");
+    assert!(html.contains(">120x40</span>"), "{html}");
+}
+
 #[test]
 fn clips_of_one_size_show_no_mark() {
     let page = Page::open(vec![second_clip(80, 24)]).html();
