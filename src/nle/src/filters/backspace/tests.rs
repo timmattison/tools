@@ -244,3 +244,31 @@ fn with_no_echo_a_backspace_erases_the_newest_typed_key() {
     ];
     assert_eq!(run(events), vec![out(0.0, "Password: "), input(1.0, "b")]);
 }
+
+/// Events that type each of `keys` after the prompt `$ `. Each key has its
+/// echo at its time.
+fn typed(keys: &[(&str, f64)]) -> Vec<Event> {
+    keys.iter()
+        .flat_map(|&(key, time)| [input(time, key), out(time, key)])
+        .collect()
+}
+
+#[test]
+fn ctrl_w_erases_the_typed_word() {
+    let mut events = vec![out(0.0, "$ ")];
+    events.extend(typed(&[
+        ("l", 1.0),
+        ("s", 1.25),
+        (" ", 1.5),
+        ("f", 1.75),
+        ("o", 2.0),
+        ("o", 2.25),
+    ]));
+    events.push(input(2.5, "\x17"));
+    events.push(out(2.5, "\x08\x08\x08   \x08\x08\x08"));
+    events.extend(typed(&[("x", 2.75)]));
+
+    let mut expected = vec![out(0.0, "$ ")];
+    expected.extend(typed(&[("l", 1.0), ("s", 1.25), (" ", 1.5), ("x", 1.75)]));
+    assert_eq!(run(events), expected);
+}
