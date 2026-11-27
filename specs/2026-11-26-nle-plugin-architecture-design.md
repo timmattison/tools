@@ -30,9 +30,13 @@ their slices make them final.
    a plugin from the plugin itself.
 3. **One plugin is one folder, one manifest, one component, and one function.**
 4. **Each call gets a new instance.** No state survives from one call to the
-   next, and the same input always gives the same output. A failure at a
-   limit is also the same on each machine, because fuel, not the clock,
-   bounds the work of a call.
+   next, and the same input always gives the same output. A failure at the
+   fuel limit or at the memory limit is also the same on each machine,
+   because fuel, not the clock, bounds the work of WASM code. The wall-clock
+   backstop is the one limit that depends on the machine. It stops a call
+   that spends its time in host functions that return, and such a call can
+   pass it on a fast machine and fail on a slow one. [The host](#the-host)
+   gives the limits.
 5. **The sandbox gives a plugin no file, no network, no environment, no real
    clock, and no real random source.** Limits bound its memory and its work. A
    wall-clock deadline is only a backstop.
