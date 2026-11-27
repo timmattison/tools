@@ -27,17 +27,30 @@ impl Extent {
     /// `MIN_WIDTH`, counts as `MIN_WIDTH`.
     #[must_use]
     pub fn new(duration: f64, width: f64) -> Self {
-        let _ = (duration, width);
-        Self {
-            duration: 0.0,
-            width: MIN_WIDTH,
-        }
+        let duration = if duration.is_finite() && duration > 0.0 {
+            duration
+        } else {
+            0.0
+        };
+        let width = if width.is_finite() && width > MIN_WIDTH {
+            width
+        } else {
+            MIN_WIDTH
+        };
+        Self { duration, width }
     }
 
     /// The zoom that shows the whole project in the window. It is never above
-    /// `MAX_PIXELS_PER_SECOND`.
+    /// `MAX_PIXELS_PER_SECOND`, and it is above zero.
     fn fit(self) -> f64 {
-        MAX_PIXELS_PER_SECOND
+        let fit = self.width / self.duration;
+        // An empty project gives infinity, and `min` holds it at the largest
+        // zoom. A very long project gives a very small zoom.
+        if fit > 0.0 {
+            fit.min(MAX_PIXELS_PER_SECOND)
+        } else {
+            f64::MIN_POSITIVE
+        }
     }
 }
 
@@ -62,9 +75,20 @@ impl View {
     /// shorter than the window.
     #[must_use]
     pub fn frame(self, extent: Extent) -> Frame {
+        let fit = extent.fit();
+        let pixels_per_second = match self.zoom {
+            Some(zoom) if zoom.is_finite() => zoom.clamp(fit, MAX_PIXELS_PER_SECOND),
+            _ => fit,
+        };
+        let last_start = (extent.duration - extent.width / pixels_per_second).max(0.0);
+        let start = if self.start.is_finite() {
+            self.start.clamp(0.0, last_start)
+        } else {
+            0.0
+        };
         Frame {
-            pixels_per_second: extent.fit(),
-            start: 0.0,
+            pixels_per_second,
+            start,
             width: extent.width,
         }
     }
@@ -76,16 +100,50 @@ impl View {
     /// window.
     #[must_use]
     pub fn zoom(self, extent: Extent, factor: f64, anchor: f64) -> Self {
-        let _ = (extent, factor, anchor);
-        self
+        if !factor.is_finite() || factor <= 0.0 {
+            return self;
+        }
+        let frame = self.frame(extent);
+        let anchor = if anchor.is_finite() {
+            anchor
+        } else {
+            frame.width / 2.0
+        };
+        let time = frame.time_at(anchor);
+        let fit = extent.fit();
+        let pixels_per_second =
+            (frame.pixels_per_second * factor).clamp(fit, MAX_PIXELS_PER_SECOND);
+        // At the zoom of the whole project, the view follows later changes of
+        // the window and of the project.
+        let zoom = (pixels_per_second > fit).then_some(pixels_per_second);
+        Self {
+            zoom,
+            start: time - anchor / pixels_per_second,
+        }
+        .clamped(extent)
     }
 
     /// The view after a scroll by `pixels`. A positive value shows later
     /// times. A value that is not finite changes nothing.
     #[must_use]
     pub fn pan(self, extent: Extent, pixels: f64) -> Self {
-        let _ = (extent, pixels);
-        self
+        if !pixels.is_finite() {
+            return self;
+        }
+        let frame = self.frame(extent);
+        Self {
+            zoom: self.zoom,
+            start: frame.start + pixels / frame.pixels_per_second,
+        }
+        .clamped(extent)
+    }
+
+    /// This view with the start that `frame` gives it in `extent`.
+    fn clamped(self, extent: Extent) -> Self {
+        Self {
+            zoom: self.zoom,
+            start: self.frame(extent).start,
+        }
     }
 }
 

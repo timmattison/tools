@@ -85,7 +85,9 @@ fn a_zoom_keeps_the_time_under_the_anchor() {
 
 #[test]
 fn a_zoom_out_keeps_the_time_under_the_anchor() {
-    let start = View::default().zoom(minute(), 4.0, 0.0).pan(minute(), 1600.0);
+    let start = View::default()
+        .zoom(minute(), 4.0, 0.0)
+        .pan(minute(), 1600.0);
     let before = start.frame(minute()).time_at(900.0);
     let frame = start.zoom(minute(), 1.0 / 2.0, 900.0).frame(minute());
     assert_close(frame.pixels_per_second(), 40.0);
@@ -94,9 +96,7 @@ fn a_zoom_out_keeps_the_time_under_the_anchor() {
 
 #[test]
 fn a_zoom_stops_at_the_largest_zoom() {
-    let frame = View::default()
-        .zoom(minute(), 1e9, 600.0)
-        .frame(minute());
+    let frame = View::default().zoom(minute(), 1e9, 600.0).frame(minute());
     assert_close(frame.pixels_per_second(), MAX_PIXELS_PER_SECOND);
 }
 
@@ -110,9 +110,7 @@ fn a_zoom_out_past_the_whole_project_shows_the_whole_project() {
 
 #[test]
 fn a_zoom_near_the_end_keeps_the_window_inside_the_project() {
-    let frame = View::default()
-        .zoom(minute(), 2.0, 1200.0)
-        .frame(minute());
+    let frame = View::default().zoom(minute(), 2.0, 1200.0).frame(minute());
     assert_close(frame.pixels_per_second(), 40.0);
     assert_close(frame.end(), 60.0);
     assert_close(frame.start(), 30.0);
@@ -142,8 +140,14 @@ fn the_whole_project_follows_a_new_width_of_the_window() {
 #[test]
 fn a_zoom_stays_when_the_window_grows_until_it_shows_the_whole_project() {
     let view = View::default().zoom(minute(), 2.0, 0.0);
-    assert_close(view.frame(Extent::new(60.0, 1800.0)).pixels_per_second(), 40.0);
-    assert_close(view.frame(Extent::new(60.0, 3000.0)).pixels_per_second(), 50.0);
+    assert_close(
+        view.frame(Extent::new(60.0, 1800.0)).pixels_per_second(),
+        40.0,
+    );
+    assert_close(
+        view.frame(Extent::new(60.0, 3000.0)).pixels_per_second(),
+        50.0,
+    );
 }
 
 #[test]
@@ -151,7 +155,10 @@ fn a_pan_moves_the_window_by_the_pixels() {
     let view = View::default().zoom(minute(), 4.0, 0.0);
     let frame = view.pan(minute(), 160.0).frame(minute());
     assert_close(frame.start(), 2.0);
-    let back = view.pan(minute(), 160.0).pan(minute(), -80.0).frame(minute());
+    let back = view
+        .pan(minute(), 160.0)
+        .pan(minute(), -80.0)
+        .frame(minute());
     assert_close(back.start(), 1.0);
 }
 
@@ -171,7 +178,9 @@ fn a_pan_of_the_whole_project_changes_nothing() {
 
 #[test]
 fn a_bad_pan_changes_nothing() {
-    let view = View::default().zoom(minute(), 4.0, 0.0).pan(minute(), 100.0);
+    let view = View::default()
+        .zoom(minute(), 4.0, 0.0)
+        .pan(minute(), 100.0);
     for pixels in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         assert_eq!(view.pan(minute(), pixels), view, "{pixels}");
     }
