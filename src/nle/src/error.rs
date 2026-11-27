@@ -25,6 +25,18 @@ pub enum NleError {
     #[error("Invalid time: {0} (a time must be finite and not below zero)")]
     InvalidTime(f64),
 
+    #[error("Invalid speed: {0} (a speed must be finite and above zero)")]
+    InvalidSpeed(f64),
+
+    #[error("Invalid redaction: {0}")]
+    InvalidRedaction(String),
+
+    #[error("Invalid typing rate: {0} (a typing rate must be finite and above zero)")]
+    InvalidTypingRate(f64),
+
+    #[error("Invalid jitter: {0} (a jitter must be from 0 up to, and not including, 1)")]
+    InvalidJitter(f64),
+
     #[error("Invalid project: {0}")]
     InvalidProject(String),
 

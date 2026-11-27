@@ -1,18 +1,19 @@
 //! Integration tests for `httpfile::serve_file`'s HTTP byte-range support.
 //!
 //! A raw HTTP/1.0 client over `std::net::TcpStream` exercises the server with no
-//! async runtime and no `reqwest`, mirroring the shape of
-//! `src/localnext/tests/common/mod.rs`. Every server binds `127.0.0.1:0` (an
+//! async runtime and no `reqwest`. Every server binds `127.0.0.1:0` (an
 //! OS-assigned ephemeral port) and every fixture is a fresh `tempfile::TempDir`,
 //! so a second concurrent `cargo test` cannot collide with this one (see
 //! `CLAUDE.md`'s parallel-safety rule).
+
+mod common;
+use common::within_timeout;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::thread::JoinHandle;
 use std::time::Duration;
 
 use tempfile::TempDir;
@@ -27,27 +28,21 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Starts a server on an ephemeral loopback port that answers every request by
 /// streaming `file` through [`httpfile::serve_file`].
 ///
-/// Returns the bound address, the server handle (to `unblock()` it for
-/// shutdown), and the worker thread's join handle.
-fn start(file: PathBuf) -> (SocketAddr, Arc<tiny_http::Server>, JoinHandle<()>) {
+/// Returns the bound address and the one-worker [`httpfile::Pool`], which a
+/// test ends with [`stop`].
+fn start(file: PathBuf) -> (SocketAddr, httpfile::Pool) {
     let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port"));
     let addr = server.server_addr().to_ip().expect("ip addr");
-    let handle = {
-        let server = Arc::clone(&server);
-        std::thread::spawn(move || {
-            // `recv()` errors when the server is unblocked, ending the loop.
-            while let Ok(request) = server.recv() {
-                let _ = httpfile::serve_file(&file, request);
-            }
-        })
-    };
-    (addr, server, handle)
+    let pool = httpfile::Pool::spawn(server, 1, move |request| {
+        httpfile::serve_file(&file, request)
+    });
+    (addr, pool)
 }
 
-/// Unblocks `server` and joins its worker so the thread never outlives the test.
-fn stop(server: &Arc<tiny_http::Server>, handle: JoinHandle<()>) {
-    server.unblock();
-    handle.join().expect("worker thread joins cleanly");
+/// Shuts `pool` down on purpose and joins its worker within a time limit, so
+/// the thread never outlives the test.
+fn stop(pool: httpfile::Pool) {
+    within_timeout(move || pool.shutdown()).expect("worker pool shuts down cleanly");
 }
 
 /// Issues `GET / HTTP/1.0` against `addr`, optionally carrying one extra header
@@ -131,11 +126,11 @@ fn ten_byte_fixture() -> (TempDir, PathBuf) {
 #[test]
 fn a_range_request_returns_206_and_only_the_bytes_it_asked_for() {
     let (_dir, file) = ten_byte_fixture();
-    let (addr, server, handle) = start(file);
+    let (addr, pool) = start(file);
 
     let (status, headers, body) = get(addr, Some(("Range", "bytes=2-5")));
 
-    stop(&server, handle);
+    stop(pool);
 
     assert_eq!(status, 206);
     assert_eq!(
@@ -148,11 +143,11 @@ fn a_range_request_returns_206_and_only_the_bytes_it_asked_for() {
 #[test]
 fn a_plain_request_gets_200_and_advertises_accept_ranges() {
     let (_dir, file) = ten_byte_fixture();
-    let (addr, server, handle) = start(file);
+    let (addr, pool) = start(file);
 
     let (status, headers, body) = get(addr, None);
 
-    stop(&server, handle);
+    stop(pool);
 
     assert_eq!(status, 200);
     assert_eq!(
@@ -166,11 +161,11 @@ fn a_plain_request_gets_200_and_advertises_accept_ranges() {
 #[test]
 fn a_range_response_also_advertises_accept_ranges() {
     let (_dir, file) = ten_byte_fixture();
-    let (addr, server, handle) = start(file);
+    let (addr, pool) = start(file);
 
     let (status, headers, _body) = get(addr, Some(("Range", "bytes=0-3")));
 
-    stop(&server, handle);
+    stop(pool);
 
     assert_eq!(status, 206);
     assert_eq!(
@@ -182,11 +177,11 @@ fn a_range_response_also_advertises_accept_ranges() {
 #[test]
 fn an_open_ended_range_runs_to_the_end_of_the_file() {
     let (_dir, file) = ten_byte_fixture();
-    let (addr, server, handle) = start(file);
+    let (addr, pool) = start(file);
 
     let (status, headers, body) = get(addr, Some(("Range", "bytes=7-")));
 
-    stop(&server, handle);
+    stop(pool);
 
     assert_eq!(status, 206);
     assert_eq!(
@@ -199,11 +194,11 @@ fn an_open_ended_range_runs_to_the_end_of_the_file() {
 #[test]
 fn a_suffix_range_serves_the_last_n_bytes() {
     let (_dir, file) = ten_byte_fixture();
-    let (addr, server, handle) = start(file);
+    let (addr, pool) = start(file);
 
     let (status, headers, body) = get(addr, Some(("Range", "bytes=-3")));
 
-    stop(&server, handle);
+    stop(pool);
 
     assert_eq!(status, 206);
     assert_eq!(
@@ -216,11 +211,11 @@ fn a_suffix_range_serves_the_last_n_bytes() {
 #[test]
 fn a_range_past_the_end_is_clamped_to_the_whole_file() {
     let (_dir, file) = ten_byte_fixture();
-    let (addr, server, handle) = start(file);
+    let (addr, pool) = start(file);
 
     let (status, headers, body) = get(addr, Some(("Range", "bytes=0-999999")));
 
-    stop(&server, handle);
+    stop(pool);
 
     assert_eq!(status, 206);
     assert_eq!(
@@ -233,11 +228,11 @@ fn a_range_past_the_end_is_clamped_to_the_whole_file() {
 #[test]
 fn an_unsatisfiable_range_gets_416_with_a_content_range() {
     let (_dir, file) = ten_byte_fixture();
-    let (addr, server, handle) = start(file);
+    let (addr, pool) = start(file);
 
     let (status, headers, body) = get(addr, Some(("Range", "bytes=100-200")));
 
-    stop(&server, handle);
+    stop(pool);
 
     assert_eq!(status, 416);
     assert_eq!(
@@ -252,11 +247,11 @@ fn an_empty_file_answers_200_for_a_plain_request() {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join("empty.bin");
     std::fs::write(&path, b"").expect("write empty fixture");
-    let (addr, server, handle) = start(path);
+    let (addr, pool) = start(path);
 
     let (status, headers, body) = get(addr, None);
 
-    stop(&server, handle);
+    stop(pool);
 
     assert_eq!(status, 200);
     assert_eq!(
@@ -271,11 +266,11 @@ fn an_empty_file_is_unsatisfiable_for_any_range() {
     let dir = TempDir::new().expect("temp dir");
     let path = dir.path().join("empty.bin");
     std::fs::write(&path, b"").expect("write empty fixture");
-    let (addr, server, handle) = start(path);
+    let (addr, pool) = start(path);
 
     let (status, headers, body) = get(addr, Some(("Range", "bytes=0-0")));
 
-    stop(&server, handle);
+    stop(pool);
 
     assert_eq!(status, 416);
     assert_eq!(
@@ -288,11 +283,11 @@ fn an_empty_file_is_unsatisfiable_for_any_range() {
 #[test]
 fn a_multi_range_request_is_ignored_and_serves_the_whole_file() {
     let (_dir, file) = ten_byte_fixture();
-    let (addr, server, handle) = start(file);
+    let (addr, pool) = start(file);
 
     let (status, headers, body) = get(addr, Some(("Range", "bytes=0-1,4-5")));
 
-    stop(&server, handle);
+    stop(pool);
 
     assert_eq!(status, 200);
     assert_eq!(
@@ -305,11 +300,11 @@ fn a_multi_range_request_is_ignored_and_serves_the_whole_file() {
 #[test]
 fn an_unparsable_range_header_is_ignored_and_serves_the_whole_file() {
     let (_dir, file) = ten_byte_fixture();
-    let (addr, server, handle) = start(file);
+    let (addr, pool) = start(file);
 
     let (status, _headers, body) = get(addr, Some(("Range", "not-a-range-at-all")));
 
-    stop(&server, handle);
+    stop(pool);
 
     assert_eq!(status, 200);
     assert_eq!(body, b"0123456789");
@@ -319,11 +314,11 @@ fn an_unparsable_range_header_is_ignored_and_serves_the_whole_file() {
 fn a_lowercase_range_header_name_is_honored() {
     // HTTP header names are case-insensitive; a client may send `range:`.
     let (_dir, file) = ten_byte_fixture();
-    let (addr, server, handle) = start(file);
+    let (addr, pool) = start(file);
 
     let (status, headers, body) = get(addr, Some(("range", "bytes=2-5")));
 
-    stop(&server, handle);
+    stop(pool);
 
     assert_eq!(status, 206);
     assert_eq!(

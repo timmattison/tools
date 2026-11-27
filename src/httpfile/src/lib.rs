@@ -1,12 +1,19 @@
 //! `httpfile` — shared static-file serving primitives for `tiny_http` servers.
 //!
-//! `localnext` and `sirn` each grew their own copy of a content-type lookup
-//! table, a path-confinement traversal guard, and the small file-streaming
-//! helper that uses them — and the copies drifted: each content-type table
-//! gained extensions the other lacked. This crate is the one home for all
-//! three, so every static-file server in this workspace shares one
-//! content-type table and one traversal guard. A fix to either reaches every
-//! caller instead of having to be repeated per crate.
+//! This crate holds a content-type lookup table, a path-confinement traversal
+//! guard, and the small file-streaming helper that uses them. Each static-file
+//! server in this workspace takes all three from here, so the servers share
+//! one content-type table and one traversal guard, and a fix to either reaches
+//! each caller. Before this crate existed, two private copies of these pieces
+//! drifted apart: each content-type table got extensions that the other did
+//! not have.
+//!
+//! The fourth piece is the worker pool. It tells a dead accept thread apart
+//! from a deliberate shutdown, thus a failed `accept()` does not leave the
+//! workers blocked forever. `sirn` runs its requests on it.
+
+mod pool;
+pub use pool::Pool;
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -318,8 +325,10 @@ fn parse_range(header: &str, len: u64) -> RangeOutcome {
 /// # Errors
 ///
 /// Returns an error when reading the file's metadata fails, when seeking
-/// within it fails, or when writing the HTTP response itself fails (e.g. the
-/// client disconnected mid-response).
+/// within it fails, or when reading the file or writing the HTTP response
+/// fails part way through. A client that disconnects is not an error:
+/// `tiny_http` 0.12's `Request::respond` turns `BrokenPipe`,
+/// `ConnectionReset`, `ConnectionAborted` and `ConnectionRefused` into `Ok`.
 ///
 /// # Panics
 ///
