@@ -410,8 +410,80 @@ fn a_cell_after_a_wide_character_gets_its_own_cup() {
 
     assert_eq!(
         pairs(&rendered.events),
-        vec![(1.0, "日\x1b[1;2H本\x1b[1;3H")]
+        vec![(1.0, "日\x1b[1;3H本\x1b[1;5H")]
     );
+}
+
+#[test]
+fn a_wide_character_that_a_hidden_column_cuts_in_half_shows_as_a_space() {
+    for options in [
+        json!({ "hide_columns": [2] }),
+        json!({ "hide_columns": [1] }),
+    ] {
+        let rendered = render_on(
+            20,
+            6,
+            vec![out(1.0, "a日b")],
+            options.clone(),
+            FilterRegion::All,
+        )
+        .unwrap();
+
+        assert_eq!(
+            pairs(&rendered.events),
+            vec![(1.0, "a\x1b[1;3Hb")],
+            "{options}"
+        );
+    }
+}
+
+#[test]
+fn a_wide_character_that_the_end_of_a_crop_cuts_in_half_shows_as_a_space() {
+    let rendered = render_on(
+        20,
+        6,
+        vec![out(1.0, "a日b")],
+        json!({ "columns": { "start": 0, "end": 2 } }),
+        FilterRegion::All,
+    )
+    .unwrap();
+
+    assert_eq!(pairs(&rendered.events), vec![(1.0, "a\x1b[?25l")]);
+}
+
+#[test]
+fn a_wide_character_that_the_mask_cuts_in_half_shows_as_a_space() {
+    let rendered = render_on(
+        20,
+        6,
+        vec![out(1.0, "a日b")],
+        json!({ "hide_columns": [2] }),
+        span(0.5, 2.0),
+    )
+    .unwrap();
+
+    assert_eq!(
+        pairs(&rendered.events),
+        vec![
+            (0.5, "\x1b[1;1H"),
+            (1.0, "\x1b[0ma\x1b[1;4Hb"),
+            (
+                2.0,
+                "\x1b[1;2H日\x1b[1;6r\x1b[?7h\x1b[0m\x1b[1;1H\x1b7\x1b[1;5H\x1b[?25h"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_range_gives_back_a_pending_wrap_after_a_wide_character() {
+    let stream = [
+        (1.0, "start"),
+        (4.0, "\x1b[2;1H012345678901234567日"),
+        (7.0, "Z"),
+    ];
+
+    assert_range_property_each_shape(&stream, 3.0, 6.0);
 }
 
 #[test]

@@ -849,3 +849,102 @@ fn a_tab_moves_the_cursor_and_writes_no_cell() {
     assert_eq!(state.get_grid()[0][9].ch, 'X');
     assert_eq!(row_text(&state, 1), "");
 }
+
+/// The characters of the cells of row `y`, from column `from` to column `to`
+/// (not included).
+fn cells_of(state: &TerminalState, y: usize, from: usize, to: usize) -> Vec<char> {
+    state.get_grid()[y][from..to]
+        .iter()
+        .map(|cell| cell.ch)
+        .collect()
+}
+
+#[test]
+fn a_wide_character_takes_two_cells() {
+    let state = feed_on(10, 2, "日本");
+
+    assert_eq!(cells_of(&state, 0, 0, 4), vec!['日', '\0', '本', '\0']);
+    assert_eq!(state.get_cursor_position(), (4, 0));
+}
+
+#[test]
+fn a_wide_character_that_does_not_fit_wraps_to_the_next_row() {
+    let state = feed_on(5, 2, "abcd日");
+
+    assert_eq!(cells_of(&state, 0, 0, 5), vec!['a', 'b', 'c', 'd', ' ']);
+    assert_eq!(state.get_grid()[1][0].ch, '日');
+    assert_eq!(state.get_grid()[1][1].ch, '\0');
+    assert_eq!(state.get_cursor_position(), (2, 1));
+}
+
+#[test]
+fn a_wide_character_in_the_last_two_columns_holds_a_pending_wrap() {
+    let mut state = feed_on(5, 2, "abc日");
+
+    assert_eq!(state.get_grid()[0][3].ch, '日');
+    assert_eq!(state.get_grid()[0][4].ch, '\0');
+    assert_eq!(state.get_cursor_position(), (4, 0));
+    assert!(state.is_wrap_pending());
+
+    state.process_output("x").unwrap();
+    assert_eq!(state.get_grid()[1][0].ch, 'x');
+}
+
+#[test]
+fn a_wide_character_with_autowrap_off_that_does_not_fit_gets_no_cell() {
+    let state = feed_on(5, 2, "\x1b[?7labcd日");
+
+    assert_eq!(cells_of(&state, 0, 0, 5), vec!['a', 'b', 'c', 'd', ' ']);
+    assert_eq!(state.get_cursor_position(), (4, 0));
+}
+
+#[test]
+fn a_write_on_the_second_cell_of_a_wide_character_blanks_its_first_cell() {
+    let state = feed_on(10, 2, "日\x1b[1;2Hx");
+
+    assert_eq!(cells_of(&state, 0, 0, 2), vec![' ', 'x']);
+}
+
+#[test]
+fn a_write_on_the_first_cell_of_a_wide_character_blanks_its_second_cell() {
+    let state = feed_on(10, 2, "日\x1b[1;1Hx");
+
+    assert_eq!(cells_of(&state, 0, 0, 2), vec!['x', ' ']);
+}
+
+#[test]
+fn a_wide_character_over_two_wide_characters_blanks_the_halves_it_cuts() {
+    let state = feed_on(10, 2, "日本\x1b[1;2H語");
+
+    assert_eq!(cells_of(&state, 0, 0, 4), vec![' ', '語', '\0', ' ']);
+    assert_eq!(state.get_cursor_position(), (3, 0));
+}
+
+#[test]
+fn a_combining_mark_takes_no_cell() {
+    let state = feed_on(10, 2, "e\u{301}x");
+
+    assert_eq!(cells_of(&state, 0, 0, 3), vec!['e', 'x', ' ']);
+    assert_eq!(state.get_cursor_position(), (2, 0));
+}
+
+#[test]
+fn an_erase_that_cuts_a_wide_character_blanks_the_rest_of_it() {
+    let state = feed_on(10, 2, "日本\x1b[1;2H\x1b[K");
+
+    assert_eq!(cells_of(&state, 0, 0, 10), vec![' '; 10]);
+}
+
+#[test]
+fn a_delete_that_cuts_a_wide_character_blanks_the_rest_of_it() {
+    let state = feed_on(10, 2, "a日b\x1b[1;2H\x1b[P");
+
+    assert_eq!(cells_of(&state, 0, 0, 4), vec!['a', ' ', 'b', ' ']);
+}
+
+#[test]
+fn an_insert_that_cuts_a_wide_character_blanks_the_rest_of_it() {
+    let state = feed_on(10, 2, "a日b\x1b[1;3H\x1b[@");
+
+    assert_eq!(cells_of(&state, 0, 0, 5), vec!['a', ' ', ' ', ' ', 'b']);
+}

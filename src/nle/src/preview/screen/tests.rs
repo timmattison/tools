@@ -114,7 +114,7 @@ fn a_hidden_cursor_changes_no_cell() {
 fn a_wide_character_is_a_run_of_its_own() {
     let screen = Screen::of(&terminal(6, 1, "\x1b[?25l日本ab"));
     let row = &screen.rows[0];
-    assert_eq!(texts(row), ["日", "本", "ab  "]);
+    assert_eq!(texts(row), ["日", "本", "ab"]);
     assert_eq!(
         row.runs
             .iter()
