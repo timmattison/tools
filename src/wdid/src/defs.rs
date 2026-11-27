@@ -437,9 +437,11 @@ fn classify(
 /// read the function.
 ///
 /// Each entry also gets the reasons that the shell runs it without a typed
-/// name: a hook, a trap, a widget with a key, and each function and alias that
-/// one of them calls (see [`Definitions::starts`]). Such an entry has the
-/// state [`Classification::RunsWithoutTyping`].
+/// name (see [`Definitions::starts`]). A reason goes to each function that a
+/// hook, a trap, or a widget with a key runs, to each function that such a
+/// function calls, to any depth, and to each alias that the code of a bash
+/// start names. Such an entry has the state
+/// [`Classification::RunsWithoutTyping`].
 #[must_use]
 pub fn tally(entries: &[HistoryEntry], definitions: &Definitions, window: &Window) -> Tally {
     let mut usages = empty_usages(definitions, window.all);
