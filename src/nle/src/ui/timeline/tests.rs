@@ -18,7 +18,10 @@ use dioxus_core::{ElementId, Mutation};
 use super::*;
 use crate::editor::Edit;
 use crate::timeline::{Extent, ZOOM_STEP};
-use crate::types::{ClipId, Event, EventType, LoadedRecording, Recording, Seconds, TrackId};
+use crate::types::{
+    ChapterId, ChapterMarker, ClipId, Event, EventType, LoadedRecording, Recording, Seconds,
+    TrackId,
+};
 
 /// The length of the fixture recording, in seconds.
 const LENGTH: f64 = 60.0;
@@ -445,6 +448,50 @@ fn a_change_of_the_terminal_size_shows_a_mark_at_the_clip() {
         "{page}"
     );
     assert!(page.contains("left: 600px; width: 600px;"), "{page}");
+}
+
+/// The edit that adds the chapter `label` with the id `id` at `time` seconds.
+fn chapter(id: u64, time: f64, label: &str) -> Edit {
+    Edit::AddChapter {
+        chapter: ChapterMarker {
+            id: ChapterId(id),
+            time: seconds(time),
+            label: label.into(),
+        },
+    }
+}
+
+#[test]
+fn a_chapter_shows_a_marker_with_its_label_at_its_time() {
+    let page = Page::open(vec![chapter(1, 30.0, "Build")]).html();
+    // 20 pixels each second put 30 seconds at 600 pixels.
+    assert!(
+        page.contains("class=\"chapter-mark\" style=\"left: 600px;\""),
+        "{page}"
+    );
+    assert!(page.contains(">Build</span>"), "{page}");
+    assert!(page.contains("Chapter Build at 0:30.0"), "{page}");
+}
+
+#[test]
+fn a_chapter_after_the_end_of_the_timeline_shows_no_marker() {
+    let page = Page::open(vec![chapter(1, 90.0, "Late")]).html();
+    assert!(!page.contains("chapter-mark"), "{page}");
+}
+
+#[test]
+fn a_zoom_moves_the_chapter_marker() {
+    let mut page = Page::open(vec![chapter(1, 15.0, "Intro")]);
+    page.key("+", Modifiers::empty());
+    let x = View::default()
+        .zoom(start_extent(), ZOOM_STEP, START_WIDTH / 2.0)
+        .frame(start_extent())
+        .x_of(15.0);
+    let html = page.html();
+    assert!(
+        html.contains(&format!("class=\"chapter-mark\" style=\"left: {x}px;\"")),
+        "{html}"
+    );
 }
 
 /// The edits that put a clip of `width` x `height` cells at the end of the
