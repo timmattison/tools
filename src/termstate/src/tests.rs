@@ -929,6 +929,15 @@ fn a_combining_mark_takes_no_cell() {
 }
 
 #[test]
+fn a_combining_mark_after_the_last_column_keeps_the_pending_wrap() {
+    let state = feed_on(5, 2, "\x1b[2;1Habcde\u{301}");
+
+    assert_eq!(row_text(&state, 1), "abcde");
+    assert_eq!(state.get_cursor_position(), (4, 1));
+    assert!(state.is_wrap_pending());
+}
+
+#[test]
 fn an_erase_that_cuts_a_wide_character_blanks_the_rest_of_it() {
     let state = feed_on(10, 2, "日本\x1b[1;2H\x1b[K");
 
