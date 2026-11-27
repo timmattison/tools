@@ -1,10 +1,16 @@
-//! The layout of the timeline: the map from time to pixels, the zoom, and the
-//! scroll. The functions are pure, so a test needs no webview.
+//! The layout of the timeline: the map from time to pixels, the zoom, the
+//! scroll, the ruler, and the event density of the clips. The functions are
+//! pure, so a test needs no webview.
 //!
 //! The timeline shows project time: the times of the clips on their tracks,
 //! before the filters change them.
 
 use crate::format::format_clock;
+
+mod density;
+pub use density::{
+    density_path, tile_width, visible_tiles, ClipEvents, EventCache, OVERSCAN, TILE_WIDTH,
+};
 
 /// The largest zoom, in pixels per second: one pixel for each millisecond.
 pub const MAX_PIXELS_PER_SECOND: f64 = 1000.0;
