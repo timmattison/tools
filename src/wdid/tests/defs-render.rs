@@ -191,11 +191,15 @@ fn assert_fits(report: &str, width: usize) {
     }
 }
 
+/// The width of the cut tests. The table of one definition with dates fits in
+/// it, so the test sees only the cut.
+const WIDTH: u16 = 100;
+
 /// A long definition is cut to one line that ends with an ellipsis.
 #[test]
 fn long_definition_is_cut() {
-    let report = text(&one(&"a".repeat(200)), &window(), "/bin/zsh", Some(80));
-    assert_fits(&report, 80);
+    let report = text(&one(&"a".repeat(200)), &window(), "/bin/zsh", Some(WIDTH));
+    assert_fits(&report, usize::from(WIDTH));
     let cells = row(&report, "wide");
     assert!(cells[8].ends_with('…'), "{report}");
     assert_eq!(
@@ -212,16 +216,16 @@ fn multibyte_definition_is_cut() {
         &one(&"日本語🎉".repeat(60)),
         &window(),
         "/bin/zsh",
-        Some(80),
+        Some(WIDTH),
     );
-    assert_fits(&report, 80);
+    assert_fits(&report, usize::from(WIDTH));
     assert!(row(&report, "wide")[8].ends_with('…'), "{report}");
 }
 
 /// A short definition is not cut.
 #[test]
 fn short_definition_is_not_cut() {
-    let report = text(&one("echo hi"), &window(), "/bin/zsh", Some(80));
+    let report = text(&one("echo hi"), &window(), "/bin/zsh", Some(WIDTH));
     assert!(!report.contains('…'), "{report}");
     assert_eq!(row(&report, "wide")[8], "echo hi");
 }
@@ -503,9 +507,15 @@ fn all_groups_the_others_by_origin_with_a_count() {
         .find("\n/usr/share/zsh/functions/_comp: 1 definition\n┌")
         .expect(&report);
     assert!(mine < plugin && plugin < comp, "{report}");
-    assert_eq!(names(&report[mine..plugin]), ["Name", "wt", "bare"]);
-    assert_eq!(names(&report[plugin..comp]), ["Name", "gst", "gfun"]);
-    assert_eq!(names(&report[comp..]), ["Name", "_comp"]);
+    assert_eq!(
+        names(report.get(mine..plugin).unwrap()),
+        ["Name", "wt", "bare"]
+    );
+    assert_eq!(
+        names(report.get(plugin..comp).unwrap()),
+        ["Name", "gst", "gfun"]
+    );
+    assert_eq!(names(report.get(comp..).unwrap()), ["Name", "_comp"]);
     assert!(
         report.contains(
             "Never used:\n  _comp (function)\n  bare (alias)\n  gfun (function)\n  gst (alias)\n  wt (alias)\n"
