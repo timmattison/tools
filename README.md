@@ -6465,8 +6465,8 @@ cargo tauri build --no-bundle   # the binary is target/release/msgs
 
 A desktop application for the terminal recordings that `beta` writes. It opens
 a `.json` or `.json.gz` recording, makes an edit project of it, shows its
-metadata, and plays the edited recording in its preview pane. The timeline
-(issue #150) is a placeholder with a playhead control.
+metadata, shows its clips on a timeline, and plays the edited recording in its
+preview pane.
 
 The preview pane draws the terminal of the edited recording at the playhead.
 Drag the playhead control under **Timeline** to go to a time. **Play** plays
@@ -6478,6 +6478,25 @@ menu selects one of the palettes of `beta export --theme`: Auto, Dracula,
 Monokai, Solarized Dark, or Solarized Light. The terminal grows or shrinks to
 fit the pane, and each edit shows in the preview at once. A new recording opens
 stopped, at time zero.
+
+The timeline shows the clips of the project on their tracks, in project time:
+the times before the filters change them. Each clip is a block with the title
+of its recording, and the lines in the block show how many events each part of
+the clip holds. The ruler above the tracks shows the time, and its labels
+adapt to the zoom. A dashed line marks the start of a clip whose terminal size
+differs from the size of the clip before it, with the new size as its label.
+
+- Click **−** or **+** to zoom out or in, or click the tracks and press `-` or
+  `+`.
+- Hold Cmd or Ctrl and turn the wheel to zoom at the pointer.
+- Scroll horizontally, or hold Shift and turn the wheel, to move along the
+  timeline.
+- Click **Fit**, or press `0`, to show the whole project. A new recording opens
+  with the whole project in view.
+
+The playhead control above the tracks is in the time of the edited recording,
+after the filters. Thus a filter that changes the speed moves the playhead
+away from the time of the ruler.
 
 The speed panel under the metadata changes the speed of a region. Type the
 start and the end of the region in seconds and a speed, then click

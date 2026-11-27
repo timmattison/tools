@@ -51,7 +51,7 @@ At the end of this phase: load a recording, apply filters, preview the result, e
 
 | Issue | Description | Notes |
 |-------|-------------|-------|
-| #151 | Terminal preview pane | Done. The preview replays the rendered recording through the emulator of `src/termstate` (issue #768), the emulator of the video export, and draws the cell grid as RSX (`src/nle/src/preview.rs`, `src/nle/src/ui/preview.rs`). Snapshots of the terminal let a seek replay only from the nearest snapshot. The pane has Play/Pause, Stop, a time readout, and the five themes of `beta export --theme`. A range input in the timeline region is the playhead until #150 builds the timeline. |
+| #151 | Terminal preview pane | Done. The preview replays the rendered recording through the emulator of `src/termstate` (issue #768), the emulator of the video export, and draws the cell grid as RSX (`src/nle/src/preview.rs`, `src/nle/src/ui/preview.rs`). Snapshots of the terminal let a seek replay only from the nearest snapshot. The pane has Play/Pause, Stop, a time readout, and the five themes of `beta export --theme`. A range input in the timeline region is the playhead. It is in the time of the render, after the filters, and the timeline of #150 shows project time, before the filters. A playhead on the timeline waits for a map between the two times. |
 | #158 | Export edited recordings | Flatten timeline to Beta JSON, pipe to existing Rust exporter. |
 | #164 | Chapter index | Manual markers first. Auto-detect commands is a future enhancement. |
 
@@ -61,7 +61,7 @@ The big UI push. This is the most complex part of the project.
 
 | Issue | Description | Notes |
 |-------|-------------|-------|
-| #150 | Timeline UI component | Informed by #159 research ([specs/2026-11-26-nle-timeline-research.md](../../specs/2026-11-26-nle-timeline-research.md)). Horizontal scrolling, zoom, clip dragging, playhead, selection ranges. RSX elements with virtualization in tiles, and one SVG path for the event density of each tile. A canvas is the fallback for a later dense layer. |
+| #150 | Timeline UI component | Part 1 is done: the timeline shows the clips on their tracks in project time, with a ruler of adaptive ticks, a zoom by buttons, keys, and Cmd or Ctrl with the wheel, a horizontal scroll, tiles of 512 px that each draw their event density as one SVG path, and a mark where the terminal size changes (`src/nle/src/timeline.rs`, `src/nle/src/ui/timeline.rs`). It takes the design of the #159 research ([specs/2026-11-26-nle-timeline-research.md](../../specs/2026-11-26-nle-timeline-research.md)). The follow-up issues of #150 hold the playhead on the timeline and its keys, the clip drag, the edge trim, the region selection and the cut, and the map from project time to the time of the render that the playhead waits for. |
 | #157 | Multi-clip splicing | Start with hard cuts (clear screen between clips). Transitions later. Terminal size differences between clips need handling. |
 
 ### Phase 4: Advanced Filters (1-2 weeks, parallel)
