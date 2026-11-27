@@ -1358,8 +1358,9 @@ does the work of CI a second time, and it slows each other step on the machine.
      pnpm --dir src/msgs/frontend run check
      ```
 3. Commit with `--no-verify`. The pre-commit hook runs the full list for each
-   commit that stages a Rust file, a `Cargo.toml`, `Cargo.lock`, or
-   `scripts/rust-checks.sh`.
+   commit that stages a Rust file, a `Cargo.toml`, a `Cargo.lock`,
+   `scripts/rust-checks.sh`, or the `rustfmt.toml` or the `rust-toolchain.toml`
+   at the root.
 4. Do not end a TDD run with the full list. Make no closing
    `git commit --allow-empty`, and do not run the list by hand in its place.
    The CI run of the pull request ends the TDD run.
