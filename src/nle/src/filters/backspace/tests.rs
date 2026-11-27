@@ -1,10 +1,7 @@
 //! Tests of the backspace removal filter.
 
-use std::sync::Arc;
-
 use super::*;
-use crate::error::NleError;
-use crate::types::{AppliedFilter, EditProject, Event, EventType, FilterRegion, Recording};
+use crate::types::{AppliedFilter, Event, EventType, FilterRegion};
 
 /// An output event.
 fn out(time: f64, data: &str) -> Event {
@@ -38,21 +35,6 @@ fn run(events: Vec<Event>) -> Vec<Event> {
     let mut registry = FilterRegistry::new();
     register(&mut registry);
     registry.run(events, &[applied_to_all()]).unwrap()
-}
-
-/// Render a recording of `width` by `height` with `events` through the
-/// filter. The duration of the source is the largest event time.
-fn render(width: u16, height: u16, events: Vec<Event>) -> Result<Recording, NleError> {
-    let mut source = Recording::test_fixture();
-    source.width = width;
-    source.height = height;
-    source.duration = events.iter().map(|event| event.time).fold(0.0, f64::max);
-    source.events = events;
-    let mut project = EditProject::from_recording(Arc::new(source))?;
-    project.filters.push(applied_to_all());
-    let mut registry = FilterRegistry::new();
-    register(&mut registry);
-    registry.render(&project)
 }
 
 /// The events of the issue: a typo `r`, its backspace `key`, and the key `e`.
