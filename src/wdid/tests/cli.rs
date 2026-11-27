@@ -777,7 +777,7 @@ fn defs_json_holds_each_definition_also_the_ones_with_zero_uses() {
     let unused = definition(&document, "unused");
     assert_eq!(unused["uses"], 0, "{document}");
     assert_eq!(unused["kind"], "function", "{document}");
-    assert_eq!(unused["classification"], "never_used", "{document}");
+    assert_eq!(unused["classification"], "never_used_old", "{document}");
     assert!(!has_definition(&document, "_private"), "{document}");
     let wt = definition(&document, "wt");
     assert_eq!(wt["typed"], 0, "{document}");
@@ -1176,7 +1176,7 @@ fn defs_gives_the_functions_that_zsh_runs_without_a_typed_name_their_state() {
         assert!(!listed_in(&document, "idle", name), "{name}");
     }
     let lonely = definition(&document, "lonelyfn");
-    assert_eq!(lonely["classification"], "never_used", "{document}");
+    assert_eq!(lonely["classification"], "never_used_old", "{document}");
     assert_eq!(reasons_of(&document, "lonelyfn"), ["widget, no key"]);
     assert!(listed_in(&document, "never_used", "lonelyfn"), "{document}");
     assert!(reasons_of(&document, "unused").is_empty(), "{document}");

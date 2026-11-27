@@ -9,11 +9,13 @@
 //! [`Finding`]: the duplicates and the shadows among the definitions. The
 //! function is pure: it starts no process and reads no file.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
+use std::path::PathBuf;
 
 use chrono::NaiveDate;
 
+use crate::added::AddedDates;
 use crate::command_words::{parse_line, AliasKind, CommandWord, Line};
 use crate::history::HistoryEntry;
 use crate::origin::{Origin, Places};
@@ -46,6 +48,9 @@ pub struct Window {
     pub today: NaiveDate,
     /// The first date that counts. A row on an earlier date does not count.
     pub since: Option<NaiveDate>,
+    /// A definition that never ran is new when its added date is younger than
+    /// this many days.
+    pub new_days: u32,
     /// A definition whose last use is older than this many days is idle.
     pub idle_days: u32,
     /// The report lists each definition: the functions whose name starts
@@ -99,8 +104,12 @@ pub enum Classification {
     Used,
     /// The definition ran, but not in the last `idle_days` days.
     Idle,
-    /// The definition never ran.
-    NeverUsed,
+    /// The definition never ran, and its added date is unknown or not
+    /// younger than `new_days` days.
+    NeverUsedOld,
+    /// The definition never ran, and its added date is younger than
+    /// `new_days` days.
+    NeverUsedNew,
     /// The shell runs the definition without a typed name, for example at
     /// each prompt. The state does not depend on the uses.
     RunsWithoutTyping,
@@ -179,6 +188,10 @@ pub struct Usage {
     pub origin: Option<Origin>,
     /// True when the definition is mine (see [`Places::is_mine`]).
     pub mine: bool,
+    /// The date of the oldest commit that adds a line that defines the name
+    /// to the file of the origin (see [`crate::added`]). `None` when it is
+    /// unknown, and for each definition that is not mine.
+    pub added: Option<NaiveDate>,
     /// Why the shell runs the definition without a typed name, sorted. It is
     /// empty for most definitions.
     pub reasons: Vec<Reason>,
@@ -224,6 +237,17 @@ pub struct Tally {
     pub findings: Vec<Finding>,
 }
 
+impl Tally {
+    /// Gives the file of the origin of each of my definitions.
+    #[must_use]
+    pub fn my_origin_files(&self) -> BTreeSet<PathBuf> {
+        BTreeSet::new()
+    }
+
+    /// Gives each of my definitions its added date from `dates`.
+    pub fn apply_added_dates(&mut self, _dates: &AddedDates, _window: &Window) {}
+}
+
 /// Gives the first line of `text`, with its other characters unchanged.
 fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or("")
@@ -264,8 +288,9 @@ fn empty_usages(definitions: &Definitions, all: bool) -> Vec<Usage> {
             through: Vec::new(),
             first_use: None,
             last_use: None,
-            classification: Classification::NeverUsed,
+            classification: Classification::NeverUsedOld,
             mine: definitions.places.is_mine(origin.as_ref()),
+            added: None,
             origin,
             reasons: Vec::new(),
         })
@@ -428,7 +453,7 @@ fn classify(
                 Classification::Used
             }
         }
-        _ => Classification::NeverUsed,
+        _ => Classification::NeverUsedOld,
     }
 }
 

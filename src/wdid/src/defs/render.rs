@@ -307,7 +307,7 @@ fn reasons_suffix(usage: &Usage) -> String {
 /// definitions idle, and the definitions that the shell runs without a typed
 /// name. Each entry ends with its reasons.
 fn group_lines(usages: &[&Usage], window: &Window) -> String {
-    let never: Vec<String> = with(usages, Classification::NeverUsed)
+    let never: Vec<String> = with(usages, Classification::NeverUsedOld)
         .iter()
         .map(|usage| {
             format!(
@@ -760,7 +760,7 @@ pub fn json(tally: &Tally, window: &Window, shell: &str) -> String {
             others: summary.others,
         },
         definitions: tally.definitions.iter().map(definition_document).collect(),
-        never_used: named(&with(&every, Classification::NeverUsed)),
+        never_used: named(&with(&every, Classification::NeverUsedOld)),
         idle: named(&idle_definitions(&every)),
         runs_without_typing: named(&with(&every, Classification::RunsWithoutTyping)),
         findings: tally

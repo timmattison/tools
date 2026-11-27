@@ -24,6 +24,7 @@ fn window() -> Window {
     Window {
         today: date(2026, 11, 26),
         since: None,
+        new_days: 90,
         idle_days: 180,
         all: false,
     }
@@ -56,9 +57,10 @@ fn never(name: &str, kind: Kind, definition: &str) -> Usage {
         through: Vec::new(),
         first_use: None,
         last_use: None,
-        classification: Classification::NeverUsed,
+        classification: Classification::NeverUsedOld,
         origin: None,
         mine: true,
+        added: None,
         reasons: Vec::new(),
     }
 }
@@ -377,7 +379,7 @@ fn json_document() {
     assert_eq!(defs[0]["first_use"], "2026-01-01");
     assert_eq!(defs[0]["classification"], "used");
     assert_eq!(defs[1]["uses"], 0);
-    assert_eq!(defs[1]["classification"], "never_used");
+    assert_eq!(defs[1]["classification"], "never_used_old");
     assert_eq!(defs[2]["kind"], "global_alias");
     assert_eq!(
         value["never_used"],
@@ -712,7 +714,7 @@ fn the_json_gives_the_state_and_the_reasons() {
         serde_json::json!(["precmd hook, through myprecmd", "INT trap"])
     );
     let lonely = entry("lonely");
-    assert_eq!(lonely["classification"], "never_used");
+    assert_eq!(lonely["classification"], "never_used_old");
     assert_eq!(lonely["reasons"], serde_json::json!(["widget, no key"]));
     let pc = entry("pc");
     assert_eq!(pc["reasons"], serde_json::json!(["PROMPT_COMMAND"]));

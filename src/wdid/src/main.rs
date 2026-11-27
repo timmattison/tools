@@ -125,6 +125,11 @@ struct DefsArgs {
     #[arg(long)]
     json: bool,
 
+    /// A definition that never ran is new when its added date is younger
+    /// than this many days.
+    #[arg(long, value_name = "DAYS", default_value = DEFAULT_NEW_DAYS)]
+    new_days: u32,
+
     /// A definition is idle when its last use is older than this many days.
     #[arg(long, value_name = "DAYS", default_value = DEFAULT_IDLE_DAYS)]
     idle_days: u32,
@@ -248,6 +253,7 @@ fn run_defs(args: &DefsArgs) -> Result<String, Error> {
     let window = defs::Window {
         today,
         since: args.since,
+        new_days: args.new_days,
         idle_days: args.idle_days,
         all: args.all,
     };
