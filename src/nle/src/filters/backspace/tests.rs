@@ -527,8 +527,9 @@ fn on_a_range_the_screen_before_the_region_counts() {
 
 #[test]
 fn a_typo_inside_a_range_goes_and_the_events_after_the_range_move_earlier() {
-    // Mutant that was run: the filter answers `length: span.length`. Then the
-    // events after the range stay at their old times and the test fails.
+    // Mutant that was run: `cut_events` answers the old `length` of the
+    // region. Then the events after the range stay at their old times and the
+    // test fails.
     let events = vec![
         out(0.0, "$ "),
         input(1.0, "h"),
