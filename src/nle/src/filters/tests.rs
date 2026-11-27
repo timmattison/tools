@@ -374,6 +374,27 @@ fn pause_insertion_accepts_the_end_of_a_range_with_decimal_bounds() {
 }
 
 #[test]
+fn pause_insertion_at_a_point_inside_the_tolerance_moves_the_event_at_the_end() {
+    // The last event, and thus the end of the timeline, is one rounding step
+    // before the point 0.2. The point is the end, so the event at the end
+    // moves, the same as for a point that is exactly the end.
+    let end = 1.3 - 1.1;
+    let out = run(
+        outputs(&[0.0, end]),
+        all(PAUSE_INSERTION, insertion(0.2, 1.0)),
+    )
+    .unwrap();
+    let exact = run(
+        outputs(&[0.0, end]),
+        all(PAUSE_INSERTION, insertion(end, 1.0)),
+    )
+    .unwrap();
+
+    assert_eq!(times(&out), vec![0.0, end + 1.0]);
+    assert_eq!(times(&out), times(&exact));
+}
+
+#[test]
 fn pause_insertion_refuses_invalid_options() {
     let cases = [
         (FilterOptions::new().with("duration", 1.0), "at"),
