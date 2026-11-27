@@ -1178,9 +1178,15 @@ fn defs_gives_the_functions_that_zsh_runs_without_a_typed_name_their_state() {
     let lonely = definition(&document, "lonelyfn");
     assert_eq!(lonely["classification"], "never_used_old", "{document}");
     assert_eq!(reasons_of(&document, "lonelyfn"), ["widget, no key"]);
-    assert!(listed_in(&document, "never_used_old", "lonelyfn"), "{document}");
+    assert!(
+        listed_in(&document, "never_used_old", "lonelyfn"),
+        "{document}"
+    );
     assert!(reasons_of(&document, "unused").is_empty(), "{document}");
-    assert!(listed_in(&document, "never_used_old", "unused"), "{document}");
+    assert!(
+        listed_in(&document, "never_used_old", "unused"),
+        "{document}"
+    );
 
     let output = defs_command(&setup)
         .current_dir(cwd.path())
@@ -1241,7 +1247,10 @@ fn defs_gives_the_functions_that_bash_runs_without_a_typed_name_their_state() {
         assert_eq!(reasons_of(&document, name), [reason], "{name}: {document}");
         assert!(!listed_in(&document, "never_used_old", name), "{name}");
     }
-    assert!(listed_in(&document, "never_used_old", "unused"), "{document}");
+    assert!(
+        listed_in(&document, "never_used_old", "unused"),
+        "{document}"
+    );
 }
 
 /// The `.zshrc` of the tests of the duplicates and the shadows. Each name
