@@ -51,7 +51,7 @@ At the end of this phase: load a recording, apply filters, preview the result, e
 
 | Issue | Description | Notes |
 |-------|-------------|-------|
-| #151 | xterm.js preview pane | Reference code already exists in `web.rs` (the `TerminalPlayer` JavaScript class). Consider snapshotting terminal state at intervals for efficient seeking. |
+| #151 | Terminal preview pane | Done. The preview replays the rendered recording through the emulator of `src/termstate` (issue #768), the emulator of the video export, and draws the cell grid as RSX (`src/nle/src/preview.rs`, `src/nle/src/ui/preview.rs`). Snapshots of the terminal let a seek replay only from the nearest snapshot. The pane has Play/Pause, Stop, a time readout, and the five themes of `beta export --theme`. A range input in the timeline region is the playhead until #150 builds the timeline. |
 | #158 | Export edited recordings | Flatten timeline to Beta JSON, pipe to existing Rust exporter. |
 | #164 | Chapter index | Manual markers first. Auto-detect commands is a future enhancement. |
 
@@ -116,6 +116,6 @@ These filters need deeper terminal state analysis or more complex heuristics.
 
 3. **Existing code to reuse**:
    - `src/main.rs` lines 85-113: `Recording`, `Event`, `EventType` structs (the types in `src/nle/src/types.rs` must mirror these exactly)
-   - `src/export/web.rs`: `TerminalPlayer` JavaScript class (prototype for #151)
+   - `src/export/web.rs`: `TerminalPlayer` JavaScript class. #151 did not use it: the preview uses the Rust emulator of `src/termstate`, so the preview and the video export draw from one emulator.
    - `src/export/video.rs`: Frame-to-FFmpeg pipeline (#160 already exists)
    - `src/termstate/src/lib.rs` (the `termstate` crate): VT100 emulator (reference for #152's state analysis)

@@ -7610,9 +7610,11 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "termstate",
  "thiserror 2.0.21",
  "tokio",
  "toml 0.8.23",
+ "unicode-width",
 ]
 
 [[package]]
