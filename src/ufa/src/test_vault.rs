@@ -18,6 +18,7 @@ use anyhow::{Context, Result};
 use std::cell::Cell;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The time that each seeded cache entry says it was read from 1Password.
@@ -27,12 +28,17 @@ const SEEDED_AT: &str = "2026-01-01T00:00:00Z";
 /// of the vault wrote it.
 const VAULT_READ_AT: &str = "2026-01-02T00:00:00Z";
 
+/// The count of the directories that [`TempConfigDir::new`] named in this
+/// process. Two reads of the clock in one tick give one value, thus the count
+/// keeps two tests with one label apart.
+static TEMP_CONFIG_DIRS: AtomicU64 = AtomicU64::new(0);
+
 /// A throwaway config directory that never touches the developer's real
 /// `~/.config/ufa`.
 ///
-/// The directory name is keyed on the process id *and* a nanosecond
-/// timestamp so two concurrent `cargo test` runs — or two tests inside one
-/// run — can never collide on the same file.
+/// The directory name is keyed on the process id, a nanosecond timestamp, and
+/// a count of the directories of this process, so two concurrent `cargo test`
+/// runs — or two tests inside one run — can never collide on the same file.
 pub(crate) struct TempConfigDir {
     /// The directory. Nothing makes it until a test writes into it.
     pub(crate) dir: PathBuf,
@@ -58,8 +64,11 @@ impl TempConfigDir {
             .duration_since(UNIX_EPOCH)
             .expect("system clock is after the Unix epoch")
             .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("ufa-config-{label}-{}-{nanos}", std::process::id()));
+        let count = TEMP_CONFIG_DIRS.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "ufa-config-{label}-{}-{nanos}-{count}",
+            std::process::id()
+        ));
         Self { dir }
     }
 
