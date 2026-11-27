@@ -1201,3 +1201,42 @@ fn a_mark_inside_or_after_the_region_of_an_in_place_filter_keeps_its_time() {
 
     assert_eq!(mark_times(&marks), vec![3.0, 8.0]);
 }
+
+/// Registers a span filter under "halve" that records the mark times that it
+/// gets, and halves its length and its event times. It answers its marks as
+/// it got them.
+fn halving_mark_spy(registry: &mut FilterRegistry) -> TestArc<Mutex<Vec<Vec<f64>>>> {
+    let seen = TestArc::new(Mutex::new(Vec::new()));
+    let captured = TestArc::clone(&seen);
+    let halve = scale_span(0.5);
+    registry.register_span(kind("halve"), move |span: Span, options: &FilterOptions| {
+        captured.lock().unwrap().push(mark_times(&span.marks));
+        halve(span, options)
+    });
+    seen
+}
+
+#[test]
+fn a_mark_at_the_start_of_a_region_is_inside_it_at_the_relative_time_zero() {
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("mark"), marker(2.0, "start"));
+    let seen = halving_mark_spy(&mut registry);
+
+    let marks = rendered_marks(&registry, vec![all("mark"), range("halve", 2.0, 6.0)]);
+
+    assert_eq!(*seen.lock().unwrap(), vec![vec![0.0]]);
+    assert_eq!(mark_times(&marks), vec![2.0]);
+}
+
+#[test]
+fn a_mark_at_the_end_of_a_region_is_after_it_and_moves_by_the_shift() {
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("mark"), marker(6.0, "end"));
+    let seen = halving_mark_spy(&mut registry);
+
+    // The length 4 becomes 2, so the mark at 6 moves by -2.
+    let marks = rendered_marks(&registry, vec![all("mark"), range("halve", 2.0, 6.0)]);
+
+    assert_eq!(*seen.lock().unwrap(), vec![Vec::<f64>::new()]);
+    assert_eq!(mark_times(&marks), vec![4.0]);
+}
