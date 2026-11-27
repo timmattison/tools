@@ -110,6 +110,19 @@ impl Mods {
     }
 }
 
+/// The label of the character `c` with the modifiers `mods`, of which there
+/// is at least one. An ASCII letter shows in upper case, as in `Ctrl+C`, and
+/// an upper-case letter adds Shift. Thus each encoding of a key gives one
+/// label: `ESC F` and `CSI 102;4u` both give `Alt+Shift+F`.
+fn modified_label(mods: Mods, c: char) -> String {
+    let mods = if c.is_ascii_uppercase() {
+        mods.with_shift()
+    } else {
+        mods
+    };
+    mods.label(c.to_ascii_uppercase().encode_utf8(&mut [0; 4]))
+}
+
 /// The key of a control character that is not part of an escape sequence, as
 /// its modifiers and its base label. `None` when the character gives no key.
 fn control_key(c: char) -> Option<(Mods, String)> {
@@ -338,7 +351,7 @@ impl Parser {
             'P' | '_' if !at_end => self.skip_string(),
             c if c.is_control() => self.push_control(c, Mods::NONE.with_alt()),
             ' ' => self.push_special(Mods::NONE.with_alt().label(SPACE)),
-            c => self.push_special(Mods::NONE.with_alt().label(c.encode_utf8(&mut [0; 4]))),
+            c => self.push_special(modified_label(Mods::NONE.with_alt(), c)),
         }
     }
 
@@ -472,8 +485,7 @@ impl Parser {
         if mods.is_none() {
             self.push_text(c.encode_utf8(&mut [0; 4]));
         } else {
-            let c = c.to_ascii_uppercase();
-            self.push_special(mods.label(c.encode_utf8(&mut [0; 4])));
+            self.push_special(modified_label(mods, c));
         }
     }
 }
