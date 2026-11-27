@@ -5806,8 +5806,8 @@ With `--all`, the table of my definitions gets the heading `Mine` and a count. A
 
 Three groups follow the tables:
 
-- **Never used.** The definitions with zero uses, each with its kind.
-- **Idle.** The definitions whose last use is older than `--idle-days` days, each with its kind, its uses, and the date of its last use.
+- **Never used.** The definitions with zero uses, each with its kind, but not a definition that runs without typing.
+- **Idle.** The definitions whose last use is older than `--idle-days` days, each with its kind, its uses, and the date of its last use, but not a definition that runs without typing.
 - **Runs without typing.** The definitions that the shell runs without a typed name, each with its kind and its reasons. `; ` divides two reasons. See [What runs without typing](#what-runs-without-typing).
 
 A widget function that no key starts ends its entry in "Never used" or in "Idle" with its reason, `widget, no key`.
