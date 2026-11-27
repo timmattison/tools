@@ -2,9 +2,10 @@
 //! which the terminal is idle.
 //!
 //! The terminal is idle when no key is pressed and the screen does not change.
-//! The filter replays the output of its region through the terminal emulator
-//! of `termstate`, from a blank screen at the start of the region. An input
-//! event is activity. An output event is activity when it changes a cell of a
+//! The filter replays the output through the terminal emulator of
+//! `termstate`, on a screen of the size of the recording. It replays the
+//! output before its region first, so the replay of the region starts from
+//! the screen at its start. An input event is activity. An output event is activity when it changes a cell of a
 //! watched row. A cursor move, a change of the window title, or a redraw of
 //! the same text changes no cell. The rows to ignore at the top and at the
 //! bottom of the screen can hold a status bar with a clock, so a change there
@@ -18,8 +19,10 @@
 //! periods before it lost. The filter marks the start of each period that it
 //! compressed.
 //!
-//! The options hold the size of the screen, because the emulator needs it.
-//! The idle panel of the window takes the size from the open recording.
+//! The size of the screen comes from the `SpanContext` of the region, which
+//! gives the size of the recording. The filter refuses a screen with no cell
+//! or more than `MAX_SCREEN_CELLS` cells, and more rows to ignore than the
+//! screen has.
 
 use std::iter;
 
@@ -27,7 +30,7 @@ use termstate::{Cell, TerminalState, TerminalTheme};
 
 use crate::error::NleError;
 use crate::format::format_duration;
-use crate::pipeline::{FilterRegistry, Mark, Span, SpanContext};
+use crate::pipeline::{FilterRegistry, Mark, Span, SpanContext, TerminalSize};
 use crate::types::{AppliedFilter, Event, EventType, FilterKind, FilterOptions, FilterRegion};
 
 /// The kind of the idle compression filter.
@@ -39,12 +42,6 @@ pub const THRESHOLD_OPTION: &str = "threshold";
 /// The option that holds the length of a compressed period, in seconds.
 pub const COMPRESS_TO_OPTION: &str = "compress_to";
 
-/// The option that holds the number of columns of the screen.
-pub const WIDTH_OPTION: &str = "width";
-
-/// The option that holds the number of rows of the screen.
-pub const HEIGHT_OPTION: &str = "height";
-
 /// The option that holds the number of rows at the top of the screen whose
 /// changes are not activity.
 pub const IGNORE_TOP_ROWS_OPTION: &str = "ignore_top_rows";
@@ -53,40 +50,31 @@ pub const IGNORE_TOP_ROWS_OPTION: &str = "ignore_top_rows";
 /// whose changes are not activity.
 pub const IGNORE_BOTTOM_ROWS_OPTION: &str = "ignore_bottom_rows";
 
-/// The most cells that the screen of the filter can have. A file can state
-/// any size, and the emulator keeps each cell in memory.
+/// The most cells that the screen of the filter can have. A recording can
+/// state any size, and the emulator keeps each cell in memory.
 pub const MAX_SCREEN_CELLS: u32 = 1 << 22;
 
 /// The settings of one idle compression. The threshold is finite and above
 /// zero. The compressed length is finite, not below zero, and not above the
-/// threshold. The screen has at least one cell and at most
-/// `MAX_SCREEN_CELLS`, and the ignored rows are not more than its rows.
+/// threshold. The filter checks the ignored rows against the rows of the
+/// recording.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IdleCompression {
     threshold: f64,
     compress_to: f64,
-    width: u16,
-    height: u16,
     ignore_top_rows: u16,
     ignore_bottom_rows: u16,
 }
 
 impl IdleCompression {
     /// Settings that compress each idle period of at least `threshold`
-    /// seconds to `compress_to` seconds, on a screen of `width` columns and
-    /// `height` rows. No row is ignored.
+    /// seconds to `compress_to` seconds. No row is ignored.
     ///
     /// # Errors
     /// Returns `NleError::InvalidIdleCompression` when the threshold is not
-    /// finite or not above zero, when the compressed length is not finite, is
-    /// below zero, or is above the threshold, or when the screen has no cell
-    /// or more than `MAX_SCREEN_CELLS` cells.
-    pub fn new(
-        threshold: f64,
-        compress_to: f64,
-        width: u16,
-        height: u16,
-    ) -> Result<Self, NleError> {
+    /// finite or not above zero, or when the compressed length is not finite,
+    /// is below zero, or is above the threshold.
+    pub fn new(threshold: f64, compress_to: f64) -> Result<Self, NleError> {
         if !(threshold.is_finite() && threshold > 0.0) {
             return Err(NleError::InvalidIdleCompression(format!(
                 "the threshold {threshold} s must be finite and above zero"
@@ -97,40 +85,24 @@ impl IdleCompression {
                 "the compressed length {compress_to} s must be finite, not below zero, and not above the threshold {threshold} s"
             )));
         }
-        let cells = u32::from(width) * u32::from(height);
-        if cells == 0 || cells > MAX_SCREEN_CELLS {
-            return Err(NleError::InvalidIdleCompression(format!(
-                "the screen of {width}x{height} cells must have at least one column and one row, and at most {MAX_SCREEN_CELLS} cells"
-            )));
-        }
         Ok(Self {
             threshold,
             compress_to,
-            width,
-            height,
             ignore_top_rows: 0,
             ignore_bottom_rows: 0,
         })
     }
 
     /// These settings, with `top` rows at the top and `bottom` rows at the
-    /// bottom of the screen ignored.
-    ///
-    /// # Errors
-    /// Returns `NleError::InvalidIdleCompression` when `top` and `bottom`
-    /// together are more than the rows of the screen.
-    pub fn ignoring_rows(self, top: u16, bottom: u16) -> Result<Self, NleError> {
-        if u32::from(top) + u32::from(bottom) > u32::from(self.height) {
-            return Err(NleError::InvalidIdleCompression(format!(
-                "the {top} top and {bottom} bottom rows to ignore are more than the {} rows of the screen",
-                self.height
-            )));
-        }
-        Ok(Self {
+    /// bottom of the screen ignored. The filter refuses them when `top` and
+    /// `bottom` together are more than the rows of the recording.
+    #[must_use]
+    pub fn ignoring_rows(self, top: u16, bottom: u16) -> Self {
+        Self {
             ignore_top_rows: top,
             ignore_bottom_rows: bottom,
             ..self
-        })
+        }
     }
 
     /// The shortest idle period to compress, in seconds.
@@ -143,18 +115,6 @@ impl IdleCompression {
     #[must_use]
     pub fn compress_to(self) -> f64 {
         self.compress_to
-    }
-
-    /// The number of columns of the screen.
-    #[must_use]
-    pub fn width(self) -> u16 {
-        self.width
-    }
-
-    /// The number of rows of the screen.
-    #[must_use]
-    pub fn height(self) -> u16 {
-        self.height
     }
 
     /// The number of rows at the top of the screen that are ignored.
@@ -185,8 +145,6 @@ pub fn applied(region: FilterRegion, settings: IdleCompression) -> AppliedFilter
         options: FilterOptions::new()
             .with(THRESHOLD_OPTION, settings.threshold)
             .with(COMPRESS_TO_OPTION, settings.compress_to)
-            .with(WIDTH_OPTION, settings.width)
-            .with(HEIGHT_OPTION, settings.height)
             .with(IGNORE_TOP_ROWS_OPTION, settings.ignore_top_rows)
             .with(IGNORE_BOTTOM_ROWS_OPTION, settings.ignore_bottom_rows),
     }
@@ -228,14 +186,9 @@ fn settings_from(options: &FilterOptions) -> Result<IdleCompression, String> {
         count(IGNORE_TOP_ROWS_OPTION)?,
         count(IGNORE_BOTTOM_ROWS_OPTION)?,
     );
-    IdleCompression::new(
-        seconds(THRESHOLD_OPTION)?,
-        seconds(COMPRESS_TO_OPTION)?,
-        count(WIDTH_OPTION)?,
-        count(HEIGHT_OPTION)?,
-    )
-    .and_then(|settings| settings.ignoring_rows(top, bottom))
-    .map_err(|error| error.to_string())
+    IdleCompression::new(seconds(THRESHOLD_OPTION)?, seconds(COMPRESS_TO_OPTION)?)
+        .map(|settings| settings.ignoring_rows(top, bottom))
+        .map_err(|error| error.to_string())
 }
 
 /// Add the idle compression filter to `registry`.
@@ -244,14 +197,11 @@ pub fn register(registry: &mut FilterRegistry) {
 }
 
 /// Compress the idle periods of a span by the settings in `options`: the
-/// steps in the documentation of this module.
-fn compress(
-    span: Span,
-    _context: SpanContext<'_>,
-    options: &FilterOptions,
-) -> Result<Span, String> {
+/// steps in the documentation of this module. `context` gives the size of the
+/// screen and the events before the span.
+fn compress(span: Span, context: SpanContext<'_>, options: &FilterOptions) -> Result<Span, String> {
     let settings = settings_from(options)?;
-    let activity = activity_times(&span.events, settings)?;
+    let activity = activity_times(context, &span.events, settings)?;
     let last_event = span.events.iter().map(|e| e.time).fold(0.0, f64::max);
     let end = span.length.max(last_event);
     let map = TimeMap::new(idle_periods(&activity, end, settings), settings.compress_to);
@@ -288,29 +238,33 @@ fn compress(
 }
 
 /// The times of the activity of `events`, in time order: each input event,
-/// and each output event that changes a cell of a watched row. The output
-/// replays in time order through an emulator with a blank screen, and events
-/// at one time keep their order.
-fn activity_times(events: &[Event], settings: IdleCompression) -> Result<Vec<f64>, String> {
-    let mut ordered: Vec<&Event> = events.iter().collect();
-    ordered.sort_by(|a, b| a.time.total_cmp(&b.time));
-
-    let height = usize::from(settings.height);
+/// and each output event that changes a cell of a watched row. The emulator
+/// has the size of `context`, and the output of `context.before` replays into
+/// it first. The output replays in time order, and events at one time keep
+/// their order.
+fn activity_times(
+    context: SpanContext<'_>,
+    events: &[Event],
+    settings: IdleCompression,
+) -> Result<Vec<f64>, String> {
+    let (width, height) = screen_of(context.size, settings)?;
     let watched = usize::from(settings.ignore_top_rows)
         ..height.saturating_sub(usize::from(settings.ignore_bottom_rows));
-    let mut terminal =
-        TerminalState::new(usize::from(settings.width), height, TerminalTheme::auto());
+    let mut terminal = TerminalState::new(width, height, TerminalTheme::auto());
+    for event in in_time_order(context.before) {
+        if event.event_type == EventType::Output {
+            feed(&mut terminal, event)?;
+        }
+    }
     // The watched rows as the last activity left them.
     let mut shown: Vec<Vec<Cell>> = watched_rows(&terminal, watched.clone()).to_vec();
 
     let mut times = Vec::new();
-    for event in ordered {
+    for event in in_time_order(events) {
         let active = match event.event_type {
             EventType::Input => true,
             EventType::Output => {
-                terminal
-                    .process_output(&event.data)
-                    .map_err(|error| error.to_string())?;
+                feed(&mut terminal, event)?;
                 update(&mut shown, watched_rows(&terminal, watched.clone()))
             }
         };
@@ -319,6 +273,40 @@ fn activity_times(events: &[Event], settings: IdleCompression) -> Result<Vec<f64
         }
     }
     Ok(times)
+}
+
+/// The columns and the rows of a screen of `size`, or the reason why the
+/// filter refuses it: the screen has no cell or more than `MAX_SCREEN_CELLS`
+/// cells, or the rows that `settings` ignore are more than its rows.
+fn screen_of(size: TerminalSize, settings: IdleCompression) -> Result<(usize, usize), String> {
+    let TerminalSize { width, height } = size;
+    let cells = u32::from(width) * u32::from(height);
+    if cells == 0 || cells > MAX_SCREEN_CELLS {
+        return Err(format!(
+            "the screen of {width}x{height} cells must have at least one column and one row, and at most {MAX_SCREEN_CELLS} cells"
+        ));
+    }
+    let (top, bottom) = (settings.ignore_top_rows, settings.ignore_bottom_rows);
+    if u32::from(top) + u32::from(bottom) > u32::from(height) {
+        return Err(format!(
+            "the {top} top and {bottom} bottom rows to ignore are more than the {height} rows of the screen"
+        ));
+    }
+    Ok((usize::from(width), usize::from(height)))
+}
+
+/// `events` in time order. Events at one time keep their order.
+fn in_time_order(events: &[Event]) -> Vec<&Event> {
+    let mut ordered: Vec<&Event> = events.iter().collect();
+    ordered.sort_by(|a, b| a.time.total_cmp(&b.time));
+    ordered
+}
+
+/// Replay the output of `event` into `terminal`.
+fn feed(terminal: &mut TerminalState, event: &Event) -> Result<(), String> {
+    terminal
+        .process_output(&event.data)
+        .map_err(|error| error.to_string())
 }
 
 /// The rows of the screen of `terminal` in `rows`, or no row when the range

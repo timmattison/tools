@@ -6659,11 +6659,11 @@ The editing engine of the crate has five parts:
   - `auto-trim` (`leading`, `trailing`, both on when not set, issue #154):
     removes the time before the first input event and the time after the last
     output event. A mark moves as an event at its time does.
-  - `idle-compression` (`threshold`, `compress_to`, `width`, `height`,
-    `ignore_top_rows`, `ignore_bottom_rows`, issue #167): compresses each idle
-    stretch, and marks the start of each one. It replays the output through
-    the terminal emulator of the `termstate` crate. The idle panel below gives
-    its rules.
+  - `idle-compression` (`threshold`, `compress_to`, `ignore_top_rows`,
+    `ignore_bottom_rows`, issue #167): compresses each idle stretch, and marks
+    the start of each one. It replays the output through the terminal emulator
+    of the `termstate` crate, on the size of the recording, and it replays the
+    output before its region first. The idle panel below gives its rules.
   - `backspace-removal` (no options, issue #152): removes each typo, the erase
     key after it, their output, and their time. A mark moves as a kept event
     at its time does, and a mark inside the removed time moves to the cut.

@@ -8,10 +8,9 @@ use crate::filters;
 use crate::pipeline::{Mark, Rendered};
 use crate::types::{EditProject, Event, EventType, Recording, Seconds};
 
-/// The settings of most tests: compress each period of 3 s or more to 1 s, on
-/// a screen of 20 columns and 5 rows.
+/// The settings of most tests: compress each period of 3 s or more to 1 s.
 fn settings() -> IdleCompression {
-    IdleCompression::new(3.0, 1.0, 20, 5).unwrap()
+    IdleCompression::new(3.0, 1.0).unwrap()
 }
 
 fn assert_invalid(result: Result<IdleCompression, NleError>, needle: &str) {
@@ -27,11 +26,10 @@ fn assert_invalid(result: Result<IdleCompression, NleError>, needle: &str) {
 
 #[test]
 fn new_keeps_valid_settings() {
-    let settings = IdleCompression::new(3.0, 0.5, 80, 24).unwrap();
+    let settings = IdleCompression::new(3.0, 0.5).unwrap();
 
     assert_eq!(settings.threshold(), 3.0);
     assert_eq!(settings.compress_to(), 0.5);
-    assert_eq!((settings.width(), settings.height()), (80, 24));
     assert_eq!(
         (settings.ignore_top_rows(), settings.ignore_bottom_rows()),
         (0, 0)
@@ -40,54 +38,39 @@ fn new_keeps_valid_settings() {
 
 #[test]
 fn new_accepts_a_compressed_length_of_zero_and_one_equal_to_the_threshold() {
-    assert!(IdleCompression::new(3.0, 0.0, 80, 24).is_ok());
-    assert!(IdleCompression::new(3.0, 3.0, 80, 24).is_ok());
+    assert!(IdleCompression::new(3.0, 0.0).is_ok());
+    assert!(IdleCompression::new(3.0, 3.0).is_ok());
 }
 
 #[test]
 fn new_refuses_a_bad_threshold() {
     for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        assert_invalid(IdleCompression::new(bad, 0.0, 80, 24), "threshold");
+        assert_invalid(IdleCompression::new(bad, 0.0), "threshold");
     }
 }
 
 #[test]
 fn new_refuses_a_bad_compressed_length() {
     for bad in [-0.5, 3.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        assert_invalid(IdleCompression::new(3.0, bad, 80, 24), "compressed length");
+        assert_invalid(IdleCompression::new(3.0, bad), "compressed length");
     }
 }
 
 #[test]
-fn new_refuses_a_screen_with_no_cell_or_too_many_cells() {
-    for (width, height) in [(0, 24), (80, 0), (0, 0), (u16::MAX, u16::MAX), (4097, 1024)] {
-        assert_invalid(IdleCompression::new(3.0, 1.0, width, height), "screen");
-    }
-    assert!(IdleCompression::new(3.0, 1.0, 4096, 1024).is_ok());
-}
-
-#[test]
-fn ignoring_rows_keeps_rows_that_fit_on_the_screen() {
-    let ignoring = settings().ignoring_rows(1, 2).unwrap();
+fn ignoring_rows_keeps_the_rows() {
+    let ignoring = settings().ignoring_rows(1, 2);
     assert_eq!(
         (ignoring.ignore_top_rows(), ignoring.ignore_bottom_rows()),
         (1, 2)
     );
-    // All 5 rows can be ignored. Then only a key is activity.
-    assert!(settings().ignoring_rows(2, 3).is_ok());
-}
-
-#[test]
-fn ignoring_rows_refuses_more_rows_than_the_screen_has() {
-    assert_invalid(settings().ignoring_rows(3, 3), "rows");
-    assert_invalid(settings().ignoring_rows(u16::MAX, u16::MAX), "rows");
+    assert_eq!(ignoring.threshold(), settings().threshold());
 }
 
 // Tests of the options.
 
 #[test]
 fn settings_of_reads_back_an_applied_filter() {
-    let settings = settings().ignoring_rows(1, 2).unwrap();
+    let settings = settings().ignoring_rows(1, 2);
     let range = FilterRegion::Range {
         start: Seconds::new(1.0).unwrap(),
         end: Seconds::new(9.0).unwrap(),
@@ -123,8 +106,6 @@ fn options_without(key: &str) -> AppliedFilter {
     for name in [
         THRESHOLD_OPTION,
         COMPRESS_TO_OPTION,
-        WIDTH_OPTION,
-        HEIGHT_OPTION,
         IGNORE_TOP_ROWS_OPTION,
         IGNORE_BOTTOM_ROWS_OPTION,
     ] {
@@ -141,8 +122,6 @@ fn settings_of_is_none_for_a_missing_or_bad_option() {
     let names = [
         THRESHOLD_OPTION,
         COMPRESS_TO_OPTION,
-        WIDTH_OPTION,
-        HEIGHT_OPTION,
         IGNORE_TOP_ROWS_OPTION,
         IGNORE_BOTTOM_ROWS_OPTION,
     ];
@@ -151,12 +130,7 @@ fn settings_of_is_none_for_a_missing_or_bad_option() {
         let text = serde_json::Value::from("3");
         assert_eq!(settings_of(&options_with(name, text)), None, "{name} text");
     }
-    for name in [
-        WIDTH_OPTION,
-        HEIGHT_OPTION,
-        IGNORE_TOP_ROWS_OPTION,
-        IGNORE_BOTTOM_ROWS_OPTION,
-    ] {
+    for name in [IGNORE_TOP_ROWS_OPTION, IGNORE_BOTTOM_ROWS_OPTION] {
         for bad in [
             serde_json::Value::from(1.5),
             serde_json::Value::from(-1),
@@ -169,14 +143,9 @@ fn settings_of_is_none_for_a_missing_or_bad_option() {
             );
         }
     }
-    // Each value is of the right type, but the settings break a rule.
+    // The value is of the right type, but the settings break a rule.
     let zero = serde_json::Value::from(0.0);
     assert_eq!(settings_of(&options_with(THRESHOLD_OPTION, zero)), None);
-    let rows = serde_json::Value::from(9);
-    assert_eq!(
-        settings_of(&options_with(IGNORE_TOP_ROWS_OPTION, rows)),
-        None
-    );
 }
 
 // Tests of the compression.
@@ -273,7 +242,7 @@ fn a_gap_of_exactly_the_threshold_shrinks() {
 
 #[test]
 fn a_compressed_length_of_zero_removes_the_gap() {
-    let remove = IdleCompression::new(3.0, 0.0, 20, 5).unwrap();
+    let remove = IdleCompression::new(3.0, 0.0).unwrap();
 
     let rendered = compressed(vec![output(0.0, "a"), output(10.0, "b")], 10.0, remove);
 
@@ -331,7 +300,7 @@ fn multi_byte_output_that_changes_a_cell_is_activity() {
         output(4.0, "café"),
     ];
 
-    let rendered = compressed(events, 4.0, IdleCompression::new(1.5, 0.5, 20, 5).unwrap());
+    let rendered = compressed(events, 4.0, IdleCompression::new(1.5, 0.5).unwrap());
 
     assert_eq!(times(&rendered.recording.events), vec![0.0, 0.5, 1.0]);
 }
@@ -349,7 +318,7 @@ fn bottom_clock() -> Vec<Event> {
 
 #[test]
 fn a_change_of_an_ignored_bottom_row_is_not_activity() {
-    let ignoring = settings().ignoring_rows(0, 1).unwrap();
+    let ignoring = settings().ignoring_rows(0, 1);
 
     let rendered = compressed(bottom_clock(), 10.0, ignoring);
 
@@ -366,7 +335,7 @@ fn a_change_of_a_watched_bottom_row_is_activity() {
 
 #[test]
 fn a_change_of_an_ignored_top_row_is_not_activity() {
-    let ignoring = settings().ignoring_rows(1, 0).unwrap();
+    let ignoring = settings().ignoring_rows(1, 0);
     let events = vec![
         output(0.0, "\x1b[2;1Ha"),
         output(4.0, "\x1b[1;1H12:00"),
@@ -380,7 +349,7 @@ fn a_change_of_an_ignored_top_row_is_not_activity() {
 
 #[test]
 fn with_each_row_ignored_only_a_key_is_activity() {
-    let ignoring = settings().ignoring_rows(2, 3).unwrap();
+    let ignoring = settings().ignoring_rows(2, 3);
     let events = vec![output(0.0, "a"), input(5.0, "x"), output(10.0, "b")];
 
     let rendered = compressed(events, 10.0, ignoring);
@@ -505,7 +474,7 @@ fn the_filter_replays_on_the_columns_of_the_recording() {
 
 #[test]
 fn the_ignored_rows_are_the_rows_of_the_recording() {
-    let ignoring = settings().ignoring_rows(0, 1).unwrap();
+    let ignoring = settings().ignoring_rows(0, 1);
     let events = vec![
         output(0.0, "a"),
         // Row 5 of a screen of 10 rows is not its bottom row.
@@ -530,7 +499,7 @@ fn render_error(project: &EditProject) -> String {
 
 #[test]
 fn more_ignored_rows_than_the_recording_has_fail_the_render() {
-    let ignoring = settings().ignoring_rows(2, 2).unwrap();
+    let ignoring = settings().ignoring_rows(2, 2);
     let filter = applied(FilterRegion::All, ignoring);
     let project = project_on(20, 3, vec![output(0.0, "a")], 5.0, vec![filter]);
 
@@ -538,7 +507,9 @@ fn more_ignored_rows_than_the_recording_has_fail_the_render() {
 
     assert!(message.contains(KIND), "{message}");
     assert!(
-        message.contains("the 2 top and 2 bottom rows to ignore are more than the 3 rows of the screen"),
+        message.contains(
+            "the 2 top and 2 bottom rows to ignore are more than the 3 rows of the screen"
+        ),
         "{message}"
     );
 }
@@ -556,7 +527,11 @@ fn compress_on(width: u16, height: u16) -> Result<Span, String> {
         after: &[],
         size: crate::pipeline::TerminalSize { width, height },
     };
-    compress(span, context, &applied(FilterRegion::All, settings()).options)
+    compress(
+        span,
+        context,
+        &applied(FilterRegion::All, settings()).options,
+    )
 }
 
 #[test]
@@ -567,10 +542,7 @@ fn a_screen_with_no_cell_or_too_many_cells_fails_the_filter() {
             message.contains(&format!("the screen of {width}x{height} cells")),
             "{message}"
         );
-        assert!(
-            message.contains(&MAX_SCREEN_CELLS.to_string()),
-            "{message}"
-        );
+        assert!(message.contains(&MAX_SCREEN_CELLS.to_string()), "{message}");
     }
     // Exactly `MAX_SCREEN_CELLS` cells.
     assert!(compress_on(4096, 1024).is_ok());
@@ -628,7 +600,7 @@ fn the_filter_marks_the_start_of_each_compressed_period() {
 
 #[test]
 fn a_removed_period_has_a_mark_that_says_so() {
-    let remove = IdleCompression::new(3.0, 0.0, 20, 5).unwrap();
+    let remove = IdleCompression::new(3.0, 0.0).unwrap();
 
     let rendered = compressed(vec![output(0.0, "a"), output(12.5, "b")], 12.5, remove);
 
@@ -643,7 +615,7 @@ fn a_removed_period_has_a_mark_that_says_so() {
 
 #[test]
 fn a_period_that_keeps_its_length_has_no_mark() {
-    let same = IdleCompression::new(3.0, 3.0, 20, 5).unwrap();
+    let same = IdleCompression::new(3.0, 3.0).unwrap();
 
     let rendered = compressed(vec![output(0.0, "a"), output(3.0, "b")], 3.0, same);
 
@@ -653,7 +625,7 @@ fn a_period_that_keeps_its_length_has_no_mark() {
 
 #[test]
 fn a_compressed_length_equal_to_the_threshold_shortens_a_longer_period() {
-    let same = IdleCompression::new(3.0, 3.0, 20, 5).unwrap();
+    let same = IdleCompression::new(3.0, 3.0).unwrap();
 
     let rendered = compressed(vec![output(0.0, "a"), output(5.0, "b")], 5.0, same);
 

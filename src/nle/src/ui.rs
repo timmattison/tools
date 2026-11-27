@@ -556,9 +556,8 @@ fn SpeedPanel(
 
 /// The idle panel: four fields for the settings of an idle compression of the
 /// whole timeline, the button that applies them, and the idle compressions of
-/// the project. The screen size of the settings is the size of the open
-/// recording. `on_result` gets the outcome of each Compress Idle Time and each
-/// Remove.
+/// the project. The filter takes the size of the screen from the recording.
+/// `on_result` gets the outcome of each Compress Idle Time and each Remove.
 #[component]
 fn IdlePanel(
     loaded: Signal<Option<Document>>,
@@ -615,19 +614,12 @@ fn IdlePanel(
             }
             button {
                 onclick: move |_| {
-                    // The read ends here, before the edit borrows the document.
-                    let screen = loaded
-                        .read()
-                        .as_ref()
-                        .map(|open| (open.metadata.width, open.metadata.height));
-                    let Some((width, height)) = screen else {
-                        return;
-                    };
-                    let change = idle_change(
-                        [&threshold.read(), &compress_to.read(), &top.read(), &bottom.read()],
-                        width,
-                        height,
-                    );
+                    let change = idle_change([
+                        &threshold.read(),
+                        &compress_to.read(),
+                        &top.read(),
+                        &bottom.read(),
+                    ]);
                     add_filter(loaded, on_result, IDLE_FAILED_PREFIX, change);
                 },
                 {APPLY_IDLE_LABEL}
@@ -853,10 +845,10 @@ fn idle_rows(document: &Option<Document>) -> Vec<(usize, String)> {
 
 /// Reads the four fields of the idle panel: the threshold and the compressed
 /// length in seconds, and the rows to ignore at the top and at the bottom.
-/// The screen has `width` columns and `height` rows. The answer is the idle
-/// compression of the whole timeline to add, or the reason why the fields do
-/// not make one.
-fn idle_change(fields: [&str; 4], width: u16, height: u16) -> Result<AppliedFilter, String> {
+/// The answer is the idle compression of the whole timeline to add, or the
+/// reason why the fields do not make one. The render of the project refuses
+/// more rows to ignore than the recording has.
+fn idle_change(fields: [&str; 4]) -> Result<AppliedFilter, String> {
     let [threshold, compress_to, top, bottom] = fields;
     let threshold: f64 = threshold
         .trim()
@@ -868,9 +860,9 @@ fn idle_change(fields: [&str; 4], width: u16, height: u16) -> Result<AppliedFilt
         .map_err(|_| COMPRESS_TO_NOT_A_NUMBER)?;
     let top: u16 = top.trim().parse().map_err(|_| TOP_ROWS_NOT_A_COUNT)?;
     let bottom: u16 = bottom.trim().parse().map_err(|_| BOTTOM_ROWS_NOT_A_COUNT)?;
-    let settings = IdleCompression::new(threshold, compress_to, width, height)
-        .and_then(|settings| settings.ignoring_rows(top, bottom))
-        .map_err(|error| error.to_string())?;
+    let settings = IdleCompression::new(threshold, compress_to)
+        .map_err(|error| error.to_string())?
+        .ignoring_rows(top, bottom);
     Ok(idle_compression::applied(FilterRegion::All, settings))
 }
 

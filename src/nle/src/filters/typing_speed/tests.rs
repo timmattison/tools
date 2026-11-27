@@ -419,10 +419,8 @@ fn a_mark_that_idle_compression_puts_inside_the_region_moves_with_the_keys() {
         ],
     };
     let mut project = EditProject::from_recording(Arc::new(recording)).unwrap();
-    let compression = idle_compression::applied(
-        FilterRegion::All,
-        IdleCompression::new(1.0, 0.5, 80, 24).unwrap(),
-    );
+    let compression =
+        idle_compression::applied(FilterRegion::All, IdleCompression::new(1.0, 0.5).unwrap());
     project.filters = vec![compression];
     let compressed = filters::registry().render_with_marks(&project).unwrap();
     // After idle compression, the keys are at 1 s and 2 s, and the marks are

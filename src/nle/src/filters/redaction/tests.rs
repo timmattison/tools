@@ -949,7 +949,7 @@ fn a_mark_of_an_earlier_filter_keeps_its_time_through_a_redaction() {
     let mut project = EditProject::from_recording(Arc::new(recording)).unwrap();
     project.filters = vec![idle_compression::applied(
         FilterRegion::All,
-        IdleCompression::new(1.0, 0.5, 80, 24).unwrap(),
+        IdleCompression::new(1.0, 0.5).unwrap(),
     )];
     let compressed = filters::registry().render_with_marks(&project).unwrap();
     assert!(
