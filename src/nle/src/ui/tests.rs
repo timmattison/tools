@@ -1138,3 +1138,26 @@ async fn play_at_the_end_starts_again_from_the_beginning() {
     assert_eq!(window.play_label(), "Pause");
     window.click(window.play_button());
 }
+
+#[tokio::test]
+async fn a_new_recording_opens_stopped() {
+    let fakes = Fakes::new()
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())))
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())));
+    let mut window = Window::open(&fakes);
+    window.click(window.open_button());
+    window.settle().await;
+    let [_, play, _] = window.newest[..] else {
+        panic!("the open render made {:?}", window.newest)
+    };
+    window.click(play);
+    assert_eq!(window.play_label(), "Pause");
+
+    window.click(window.open_button());
+    window.settle().await;
+
+    assert_eq!(window.play_label(), "Play");
+    assert_eq!(window.readout(), READOUT_AT_ZERO);
+}
