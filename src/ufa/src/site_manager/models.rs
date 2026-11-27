@@ -73,11 +73,13 @@ impl ReportedState {
     /// of the three.
     pub fn firmware(&self) -> Option<&str> {
         self.firmware_version.as_deref().or_else(|| {
-            [SNAKE_FIRMWARE_KEY, VERSION_KEY].into_iter().find_map(|key| {
-                self.other_fields
-                    .get(key)
-                    .and_then(serde_json::Value::as_str)
-            })
+            [SNAKE_FIRMWARE_KEY, VERSION_KEY]
+                .into_iter()
+                .find_map(|key| {
+                    self.other_fields
+                        .get(key)
+                        .and_then(serde_json::Value::as_str)
+                })
         })
     }
 }
