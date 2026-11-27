@@ -356,35 +356,29 @@ impl Parser {
         match next {
             '[' if !at_end => self.csi(),
             'O' if !at_end => self.ss3(),
-            ']' if !at_end => self.skip_osc(),
-            'P' | '_' if !at_end => self.skip_string(),
+            ']' if self.skip_string(true) => {}
+            'P' | '_' if self.skip_string(false) => {}
             c if c.is_control() => self.push_control(c, Mods::NONE.with_alt()),
             ' ' => self.push_special(Mods::NONE.with_alt().label(SPACE)),
             c => self.push_special(modified_label(Mods::NONE.with_alt(), c)),
         }
     }
 
-    /// Skip an OSC sequence: up to BEL, or up to `ESC \`, or to the end.
-    fn skip_osc(&mut self) {
-        while let Some(c) = self.next_char() {
-            if c == BEL {
-                return;
+    /// Skip an OSC, DCS, or APC string up to its terminator, `ESC \`, or BEL
+    /// when `bel_ends` is true. Answer false and move nothing when the data
+    /// holds no terminator: then the start of the string is an Alt key.
+    fn skip_string(&mut self, bel_ends: bool) -> bool {
+        let rest = self.chars.get(self.pos..).unwrap_or_default();
+        let end = rest.iter().enumerate().find_map(|(index, &c)| {
+            if bel_ends && c == BEL {
+                Some(index + 1)
+            } else if c == ESC && rest.get(index + 1) == Some(&STRING_TERMINATOR) {
+                Some(index + 2)
+            } else {
+                None
             }
-            if c == ESC && self.peek() == Some(STRING_TERMINATOR) {
-                self.pos += 1;
-                return;
-            }
-        }
-    }
-
-    /// Skip a DCS or APC sequence: up to `ESC \`, or to the end.
-    fn skip_string(&mut self) {
-        while let Some(c) = self.next_char() {
-            if c == ESC && self.peek() == Some(STRING_TERMINATOR) {
-                self.pos += 1;
-                return;
-            }
-        }
+        });
+        end.inspect(|length| self.pos += length).is_some()
     }
 
     /// Parse an SS3 sequence. The parser has read `ESC O`.
