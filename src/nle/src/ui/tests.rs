@@ -1470,6 +1470,19 @@ async fn applying_a_color_scheme_adds_a_row_and_recolors_the_preview() {
 }
 
 #[tokio::test]
+async fn the_color_scheme_panel_starts_at_the_default_of_each_menu() {
+    let mut window = open_recording().await;
+    let [start, end] = window.color_fields();
+    window.type_into(start, "1");
+    window.type_into(end, "2");
+
+    window.click(window.apply_color_button());
+
+    let page = window.html();
+    assert!(page.contains(&color_row("1 s to 2 s: Auto")), "{page}");
+}
+
+#[tokio::test]
 async fn a_row_names_each_option_that_is_not_the_default() {
     let mut window = open_recording().await;
 
