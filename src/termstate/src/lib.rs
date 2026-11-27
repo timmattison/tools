@@ -446,6 +446,7 @@ impl Clone for TerminalState {
     fn clone(&self) -> Self {
         Self {
             grid: self.grid.clone(),
+            changed_rows: self.changed_rows.clone(),
             cursor_x: self.cursor_x,
             cursor_y: self.cursor_y,
             width: self.width,
@@ -515,6 +516,9 @@ impl Default for Cell {
 pub struct TerminalState {
     /// The screen grid, one `Vec` of cells for each row.
     pub grid: Vec<Vec<Cell>>,
+    /// One flag for each row. A flag is `true` when the emulator changed a cell
+    /// of that row since the last call of `take_changed_rows`.
+    changed_rows: Vec<bool>,
     /// The cursor column, counted from zero.
     pub cursor_x: usize,
     /// The cursor row, counted from zero.
@@ -603,6 +607,7 @@ impl TerminalState {
 
         Self {
             grid,
+            changed_rows: vec![false; height],
             cursor_x: 0,
             cursor_y: 0,
             width,
@@ -670,6 +675,20 @@ impl TerminalState {
         }
         self.parser = parser;
         Ok(())
+    }
+
+    /// Returns the rows whose cells changed since the last call, in order,
+    /// counted from zero. The call clears the marks. A write to `grid` from
+    /// outside the emulator does not mark its row.
+    pub fn take_changed_rows(&mut self) -> Vec<usize> {
+        let rows = self
+            .changed_rows
+            .iter()
+            .enumerate()
+            .filter_map(|(row, changed)| changed.then_some(row))
+            .collect();
+        self.changed_rows.fill(false);
+        rows
     }
 
     /// Returns the screen grid, one `Vec` of cells for each row.
@@ -836,6 +855,20 @@ impl TerminalState {
         }
     }
 
+    /// Marks one row as changed. A row outside the screen is ignored.
+    fn mark_row(&mut self, row: usize) {
+        if let Some(flag) = self.changed_rows.get_mut(row) {
+            *flag = true;
+        }
+    }
+
+    /// Marks the rows from `first` to `last`, both included, as changed.
+    fn mark_rows(&mut self, first: usize, last: usize) {
+        for row in first..=last {
+            self.mark_row(row);
+        }
+    }
+
     fn put_char(&mut self, ch: char) {
         // A character after the last column goes to the start of the next row.
         if self.wrap_pending {
@@ -882,6 +915,7 @@ impl TerminalState {
         if self.cursor_y < self.height && self.cursor_x < self.width {
             let x = self.cursor_x;
             let cells = if width >= 2 { 2 } else { 1 };
+            self.mark_row(self.cursor_y);
             self.split_wide_pairs_around(x, cells);
             let cell = Cell {
                 ch: display_char,
@@ -953,6 +987,7 @@ impl TerminalState {
     /// continuation cell that does not follow a wide character becomes blank,
     /// and a wide character that no continuation cell follows becomes blank.
     fn repair_wide_pairs(&mut self) {
+        self.mark_row(self.cursor_y);
         let blank = self.blank_cell();
         let Some(row) = self.grid.get_mut(self.cursor_y) else {
             return;
@@ -977,6 +1012,7 @@ impl TerminalState {
     }
 
     fn scroll_up(&mut self) {
+        self.mark_rows(self.scroll_top, self.scroll_bottom);
         // Only scroll within the scrolling region
         for y in (self.scroll_top + 1)..=self.scroll_bottom {
             for x in 0..self.width {
@@ -997,6 +1033,7 @@ impl TerminalState {
 
     fn clear_line(&mut self, line: usize) {
         if line < self.height {
+            self.mark_row(line);
             for x in 0..self.width {
                 self.grid[line][x] = Cell {
                     ch: ' ',
@@ -1009,6 +1046,7 @@ impl TerminalState {
     }
 
     fn clear_screen(&mut self) {
+        self.mark_rows(0, self.height.saturating_sub(1));
         for y in 0..self.height {
             for x in 0..self.width {
                 self.grid[y][x] = Cell {
@@ -1497,6 +1535,7 @@ impl TerminalState {
                 match mode {
                     0 => {
                         // Clear from cursor to end of screen
+                        self.mark_row(self.cursor_y);
                         for x in self.cursor_x..self.width {
                             self.grid[self.cursor_y][x] = Cell {
                                 ch: ' ',
@@ -1511,6 +1550,7 @@ impl TerminalState {
                     }
                     1 => {
                         // Clear from start of screen to cursor
+                        self.mark_row(self.cursor_y);
                         for y in 0..self.cursor_y {
                             self.clear_line(y);
                         }
@@ -1543,6 +1583,7 @@ impl TerminalState {
                 match mode {
                     0 => {
                         // Clear from cursor to end of line
+                        self.mark_row(self.cursor_y);
                         for x in self.cursor_x..self.width {
                             self.grid[self.cursor_y][x] = Cell {
                                 ch: ' ',
@@ -1554,6 +1595,7 @@ impl TerminalState {
                     }
                     1 => {
                         // Clear from start of line to cursor
+                        self.mark_row(self.cursor_y);
                         for x in 0..=self.cursor_x {
                             self.grid[self.cursor_y][x] = Cell {
                                 ch: ' ',
@@ -1618,6 +1660,7 @@ impl TerminalState {
             'T' => {
                 // Scroll down: shift content DOWN within scroll region, clear top
                 let count = count_param(params, 0);
+                self.mark_rows(self.scroll_top, self.scroll_bottom);
                 for _ in 0..count {
                     for y in (self.scroll_top + 1..=self.scroll_bottom).rev() {
                         for x in 0..self.width {
@@ -1630,6 +1673,7 @@ impl TerminalState {
             'L' => {
                 // Insert lines
                 let count = count_param(params, 0);
+                self.mark_rows(self.cursor_y, self.height.saturating_sub(1));
                 for _ in 0..count {
                     // Move lines down from current cursor position
                     for y in (self.cursor_y + 1..self.height).rev() {
@@ -1645,6 +1689,7 @@ impl TerminalState {
             'M' => {
                 // Delete lines
                 let count = count_param(params, 0);
+                self.mark_rows(self.cursor_y, self.height.saturating_sub(1));
                 for _ in 0..count {
                     // Move lines up from current cursor position
                     for y in self.cursor_y..(self.height - 1) {
@@ -1660,6 +1705,7 @@ impl TerminalState {
                 let raw_count = count_param(params, 0);
                 let count = raw_count.min(self.width.saturating_sub(self.cursor_x));
                 let start_x = self.cursor_x;
+                self.mark_row(self.cursor_y);
                 for x in start_x..self.width.saturating_sub(count) {
                     self.grid[self.cursor_y][x] = self.grid[self.cursor_y][x + count].clone();
                 }
@@ -1678,6 +1724,7 @@ impl TerminalState {
                 let raw_count = count_param(params, 0);
                 let count = raw_count.min(self.width.saturating_sub(self.cursor_x));
                 let start_x = self.cursor_x;
+                self.mark_row(self.cursor_y);
                 for x in (start_x..self.width.saturating_sub(count)).rev() {
                     self.grid[self.cursor_y][x + count] = self.grid[self.cursor_y][x].clone();
                 }
@@ -1694,6 +1741,7 @@ impl TerminalState {
             'X' => {
                 // Erase characters
                 let count = count_param(params, 0);
+                self.mark_row(self.cursor_y);
                 for i in 0..count {
                     if self.cursor_x + i < self.width {
                         self.grid[self.cursor_y][self.cursor_x + i] = Cell {
@@ -1746,6 +1794,7 @@ impl TerminalState {
             b'M' => {
                 // Reverse Index (RI) - move cursor up, scroll if at top
                 if self.cursor_y == self.scroll_top {
+                    self.mark_rows(self.scroll_top, self.scroll_bottom);
                     // Scroll down by moving lines down and clearing the top
                     for y in (self.scroll_top + 1..=self.scroll_bottom).rev() {
                         for x in 0..self.width {

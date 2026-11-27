@@ -948,3 +948,109 @@ fn an_insert_that_cuts_a_wide_character_blanks_the_rest_of_it() {
 
     assert_eq!(cells_of(&state, 0, 0, 5), vec!['a', ' ', ' ', ' ', 'b']);
 }
+
+/// Ten columns and six rows, each row full of one letter. The cursor ends on
+/// the last row, in the last column, with a wrap pending.
+const MARK_BASE: &str =
+    "AAAAAAAAAA\r\nBBBBBBBBBB\r\nCCCCCCCCCC\r\nDDDDDDDDDD\r\nEEEEEEEEEE\r\nFFFFFFFFFF";
+
+#[test]
+fn each_change_of_a_cell_marks_its_row() {
+    // (name, setup, sequence). The setup follows `MARK_BASE`.
+    let cases: &[(&str, &str, &str)] = &[
+        ("print", "\x1b[2;3H", "x"),
+        ("wrap", "\x1b[2;10Hy", "z"),
+        ("wrap on the last row, a scroll", "", "z"),
+        ("wide character", "\x1b[3;2H", "日"),
+        (
+            "print over the head of a wide character",
+            "\x1b[3;2H日",
+            "\x1b[3;2Hq",
+        ),
+        (
+            "print over the tail of a wide character",
+            "\x1b[3;2H日",
+            "\x1b[3;3Hq",
+        ),
+        ("LF on the last row", "\x1b[6;1H", "\n"),
+        ("ED 0", "\x1b[3;4H", "\x1b[J"),
+        ("ED 1", "\x1b[3;4H", "\x1b[1J"),
+        ("ED 2", "\x1b[3;4H", "\x1b[2J"),
+        ("EL 0", "\x1b[3;4H", "\x1b[K"),
+        ("EL 1", "\x1b[3;4H", "\x1b[1K"),
+        ("EL 2", "\x1b[3;4H", "\x1b[2K"),
+        ("ECH", "\x1b[3;4H", "\x1b[3X"),
+        ("DCH", "\x1b[3;4H", "\x1b[2P"),
+        (
+            "DCH that cuts a wide character",
+            "\x1b[3;1H日日",
+            "\x1b[3;2H\x1b[P",
+        ),
+        ("ICH", "\x1b[3;4H", "\x1b[2@"),
+        ("IL", "\x1b[3;1H", "\x1b[L"),
+        ("DL", "\x1b[3;1H", "\x1b[M"),
+        ("SU", "", "\x1b[2S"),
+        ("SD", "", "\x1b[2T"),
+        ("RI on the top row", "\x1b[H", "\x1bM"),
+        ("IND on the last row", "\x1b[6;1H", "\x1bD"),
+        ("NEL on the last row", "\x1b[6;1H", "\x1bE"),
+        ("RIS", "", "\x1bc"),
+        ("DECSTBM and LF at its bottom", "\x1b[2;4r\x1b[4;1H", "\n"),
+        ("SU in a scrolling region", "\x1b[2;4r", "\x1b[S"),
+        ("SD in a scrolling region", "\x1b[2;4r", "\x1b[T"),
+        (
+            "RI at the top of a scrolling region",
+            "\x1b[2;4r\x1b[2;1H",
+            "\x1bM",
+        ),
+        ("CSI 2 J after text", "\x1b[3;3Hhello", "\x1b[2J"),
+    ];
+    for (name, setup, sequence) in cases {
+        let mut state = TerminalState::new(10, 6, TerminalTheme::auto());
+        state.process_output(MARK_BASE).unwrap();
+        state.process_output(setup).unwrap();
+        state.take_changed_rows();
+        let before = state.grid.clone();
+        state.process_output(sequence).unwrap();
+        let marked = state.take_changed_rows();
+        let changed: Vec<usize> = before
+            .iter()
+            .zip(state.grid.iter())
+            .enumerate()
+            .filter_map(|(row, (old, new))| (old != new).then_some(row))
+            .collect();
+        assert!(
+            !changed.is_empty(),
+            "{name} ({sequence:?}) must change a cell, or the case proves nothing"
+        );
+        for row in &changed {
+            assert!(
+                marked.contains(row),
+                "{name} ({sequence:?}) changed row {row}, marked rows: {marked:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_move_of_the_cursor_or_a_change_of_the_pen_marks_no_row() {
+    for sequence in ["\x1b[3;4H", "\x1b[31m", "\x1b]2;title\x07", "\x1b[?25l"] {
+        let mut state = TerminalState::new(10, 6, TerminalTheme::auto());
+        state.process_output(MARK_BASE).unwrap();
+        state.take_changed_rows();
+        state.process_output(sequence).unwrap();
+        assert_eq!(
+            state.take_changed_rows(),
+            Vec::<usize>::new(),
+            "{sequence:?}"
+        );
+    }
+}
+
+#[test]
+fn take_changed_rows_clears_the_marks() {
+    let mut state = TerminalState::new(10, 6, TerminalTheme::auto());
+    state.process_output("a\r\nb").unwrap();
+    assert_eq!(state.take_changed_rows(), vec![0, 1]);
+    assert_eq!(state.take_changed_rows(), Vec::<usize>::new());
+}
