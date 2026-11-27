@@ -114,10 +114,31 @@ const SUB: u8 = 0x1A;
 /// The segment of the visible text.
 const VISIBLE: usize = 0;
 
-/// The OSC command numbers whose text is base64 data: the clipboard (52) and
-/// the iTerm2 commands (1337), which carry images. A text search cannot read
-/// the data, and a match corrupts it.
-const ENCODED_OSC_COMMANDS: [u32; 2] = [52, 1337];
+/// The OSC command number of the clipboard. Its text is base64 data, which a
+/// text search cannot read, and a match corrupts the data.
+const CLIPBOARD_OSC: u32 = 52;
+
+/// The OSC command number of the iTerm2 commands. Its text is `Key=value` or
+/// `Key`. The shell integration of iTerm2 writes `RemoteHost=user@host` and
+/// `CurrentDir=/Users/user` at each prompt, and these values are plain text.
+const ITERM2_OSC: u32 = 1337;
+
+/// The iTerm2 keys whose value holds base64 data, for example the image of
+/// `File` and the variable of `SetUserVar`. The iTerm2 documentation of the
+/// escape codes and of the badges names them. The value of each other key is
+/// text.
+const ITERM2_ENCODED_KEYS: [&[u8]; 10] = [
+    b"Copy",
+    b"File",
+    b"FilePart",
+    b"MultipartFile",
+    b"OpenURL",
+    b"ReportVariable",
+    b"SetBackgroundImageFile",
+    b"SetBadgeFormat",
+    b"SetProfileProperty",
+    b"SetUserVar",
+];
 
 /// Cut the joined string into runs of text. Escape sequences are not text.
 /// The text of an OSC sequence is a run of its own segment. `event_type` is
@@ -204,8 +225,9 @@ fn escape_sequence(
 /// `Ps ; Pt`, where `Ps` is the command number, and only `Pt` is text. Thus a
 /// match never changes the kind of the sequence. A payload with no `;` after
 /// its number has no text, for example `104`, which resets the colors. The
-/// numbers of [`ENCODED_OSC_COMMANDS`] have no text either. A terminal reads
-/// leading zeros, thus `01337` is 1337.
+/// clipboard, [`CLIPBOARD_OSC`], has no text either. The text of an iTerm2
+/// command, [`ITERM2_OSC`], is the value of its key, see [`iterm2_value`]. A
+/// terminal reads leading zeros, thus `01337` is 1337.
 fn osc_text(bytes: &[u8], payload: Range<usize>) -> Option<Range<usize>> {
     let content = bytes.get(payload.clone())?;
     let digits = content
@@ -215,12 +237,28 @@ fn osc_text(bytes: &[u8], payload: Range<usize>) -> Option<Range<usize>> {
     if content.get(digits) != Some(&b';') {
         return None;
     }
-    let encoded = content
+    let text = payload.start + digits + 1..payload.end;
+    let number = content
         .get(..digits)
         .and_then(|number| std::str::from_utf8(number).ok())
-        .and_then(|number| number.parse::<u32>().ok())
-        .is_some_and(|number| ENCODED_OSC_COMMANDS.contains(&number));
-    (!encoded).then_some(payload.start + digits + 1..payload.end)
+        .and_then(|number| number.parse::<u32>().ok());
+    match number {
+        Some(CLIPBOARD_OSC) => None,
+        Some(ITERM2_OSC) => iterm2_value(bytes, text),
+        _ => Some(text),
+    }
+}
+
+/// The range of the value in the iTerm2 text at `text`, which is `Key=value`
+/// or `Key`. The key and its `=` are not text, thus a match never changes the
+/// command. A text with no `=` has no value, for example `SetMark`. The keys
+/// of [`ITERM2_ENCODED_KEYS`] have no text either. The comparison keeps the
+/// case of the key, thus `file` is not `File`.
+fn iterm2_value(bytes: &[u8], text: Range<usize>) -> Option<Range<usize>> {
+    let content = bytes.get(text.clone())?;
+    let key_length = content.iter().position(|&byte| byte == b'=')?;
+    let key = content.get(..key_length)?;
+    (!ITERM2_ENCODED_KEYS.contains(&key)).then_some(text.start + key_length + 1..text.end)
 }
 
 /// Find the end of an OSC payload or a control string that starts at `start`.

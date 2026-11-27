@@ -25,7 +25,12 @@
 //!   The command number `Ps` and its `;` are not text, thus a match never
 //!   changes the kind of the sequence. `Pt` is text, and it is a segment of
 //!   its own. A payload with no `;` after its number has no text. The base64
-//!   data of OSC 52 (the clipboard) and OSC 1337 (iTerm2 images) is not text.
+//!   data of OSC 52 (the clipboard) is not text.
+//! - OSC 1337 holds the iTerm2 commands `Key=value`. The key and its `=` are
+//!   not text. The value is text, for example the user, the host, and the
+//!   directory that the shell integration writes as `RemoteHost=user@host`
+//!   and `CurrentDir=/Users/user`. The value of a key that holds base64
+//!   data, for example the image of `File`, is not text.
 //! - `ESC P`, `ESC X`, `ESC ^`, and `ESC _` start a DCS, SOS, PM, or APC
 //!   string. Nothing in it is text, because it can hold image data.
 //! - An OSC sequence or a string ends where a terminal ends it: at `ESC \`, at

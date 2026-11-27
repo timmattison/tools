@@ -6291,9 +6291,13 @@ sequences:
   match never crosses from the visible text into an OSC sequence. The text
   starts after the number of the sequence and its `;`, thus a search for `0`
   does not change the title sequence `ESC ] 0 ;`. Image data (DCS and APC
-  strings, and the iTerm2 sequence OSC 1337) is not searched. The clipboard
-  data of OSC 52 is not searched either, because it is base64, and a text
-  search cannot read it.
+  strings) is not searched. The clipboard data of OSC 52 is not searched
+  either, because it is base64, and a text search cannot read it.
+- The iTerm2 sequence OSC 1337 holds a command `Key=value`. The value is
+  searched, thus a redaction of a user name also changes the host and the
+  directory that the shell integration writes as `RemoteHost=user@host` and
+  `CurrentDir=/Users/user`. The key is not searched. The base64 value of a
+  key such as `File` (an image) or `SetUserVar` is not searched.
 - A mask keeps the control characters of a match, for example a line feed, so
   the layout of the screen stays the same.
 - In a regular expression, a capture group named `redact` replaces only its
