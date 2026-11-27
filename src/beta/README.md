@@ -202,6 +202,9 @@ beta export video demo.json -o demo.mp4 --fps 60 --resolution 1920x1080 --theme 
 
 # Web-optimized MP4
 beta export video demo.json -o demo.mp4 --optimize-web --theme solarized-dark
+
+# Render with exactly one font file, and skip the system fonts
+beta export video demo.json -o demo.mp4 --font ~/fonts/SourceCodePro-Regular.ttf
 ```
 
 **Font Requirements for Video Export:**
@@ -215,6 +218,8 @@ beta export video demo.json -o demo.mp4 --optimize-web --theme solarized-dark
 **Fallback Options:**
 - macOS: Monaco or Menlo (pre-installed)
 - Linux: `sudo apt install fonts-dejavu fonts-liberation`
+
+**One font file:** `--font <PATH>` renders with exactly that TTF or OTF file and skips the system fonts. The frames then do not depend on the fonts of the machine.
 
 ## Technical Details
 

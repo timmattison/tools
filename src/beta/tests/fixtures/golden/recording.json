@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "width": 12,
+  "height": 4,
+  "timestamp": 1700000000.0,
+  "duration": 0.5,
+  "command": "sh",
+  "title": "golden",
+  "env": {},
+  "events": [
+    {"time": 0.0, "type": "o", "data": "\u001b[1;31mbold red\u001b[0m\r\n"},
+    {"time": 0.0, "type": "i", "data": "x"},
+    {"time": 0.0, "type": "o", "data": "\u001b[92mgreen\u001b[0m \u001b[4mul\u001b[0m\r\n"},
+    {"time": 0.0, "type": "o", "data": "\u001b[38;5;208m208\u001b[48;2;10;20;30m rgb\u001b[0m\r\n"},
+    {"time": 0.0, "type": "o", "data": "\u001b]4;1;#123456\u0007\u001b[38;5;1mpal\u001b[0m $ "}
+  ]
+}

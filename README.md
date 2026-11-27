@@ -176,18 +176,6 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
       moving lots of files is shitty. Much simpler than `find ... -exec mv`, especially for common tasks like moving
       all files of a certain type. Collision-safe by default and handles moves across volumes (where `rename` fails).
     - To install: `cargo install --git https://github.com/timmattison/tools bm`
-- localnext
-    - Runs statically compiled NextJS applications locally. You'll need to build your code and get the magic `out`
-      directory by adding `output: 'export'` to your `next.config.mjs` file. This was written to work with [the
-      templates I was testing at the time](https://github.com/timmattison/material-ui-react-templates). Run it from
-      the project directory or from inside `out`; either way it serves the same directory. Extensionless routes
-      resolve to their `.html` file, and anything it cannot find falls back to `index.html`. The listening port is
-      derived automatically (the same algorithm as `portplz`): inside a git repository from the repository name, the
-      branch, and the current user — the project directory plays no part there — or, outside one, from the directory
-      basename and the current user; either way it stays stable across runs. Two exports from the same repository on
-      the same branch derive the same port, so the second one needs `-p/--port`. Binds `127.0.0.1`. Answers HTTP
-      byte-range requests, so an exported `<video>`/`<audio>` element seeks instead of re-downloading the whole file.
-    - To install: `cargo install --git https://github.com/timmattison/tools localnext`
 - unescapeboard
     - Waits for text with `\\"` in it to be put on the clipboard and then unescapes one level of it.
     - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
@@ -239,6 +227,10 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
       so a given project always serves on a stable port and two users on one machine don't collide; override it with
       `-p/--port`. Binds `127.0.0.1` by default — use `--bind 0.0.0.0` to expose it on the LAN. Answers HTTP
       byte-range requests, so a served `<video>`/`<audio>` file seeks instead of re-downloading from the start.
+    - `sirn` does not try `<path>.html` when `<path>` does not exist, thus a static Next.js export (the `out`
+      directory of `output: 'export'`) needs a server that does, for example
+      `pnpm dlx serve out --listen tcp://127.0.0.1:3000`. Without `--listen`, `serve` binds every interface and puts
+      the export on the LAN.
     - To install: `cargo install --git https://github.com/timmattison/tools sirn`
 - uuidplz
     - Generates UUIDs. With no input it prints a random v4 UUID. Given a string or a file it seeds a name-based
@@ -5554,6 +5546,8 @@ The transcript of a session stays on disk after the stop, so `crap` takes that s
 
 Count which tools of this workspace you really use. `wdid` reads the whole shell history through atuin. It gives each tool a use count, the date of the first use and of the last use, and the way you ran it. It also lists the tools that you never used, and the tools that you stopped using.
 
+`wdid defs` gives a second report: one row for each alias and each function of your shell. See [wdid defs: the aliases and the functions](#wdid-defs-the-aliases-and-the-functions).
+
 `atuin stats` cannot answer this question. It ranks the first word of each command. A tool that you run through an alias (`wtm`), through a function (`wt`), after a pipe, or after `sudo` has no count under its own name. `wdid` parses each command line, finds each word in command position, and follows aliases and functions down to the tool.
 
 ### How it reads the history
@@ -5567,7 +5561,7 @@ atuin search --filter-mode global --include-duplicates --print0 --timezone +0 \
 
 It does not use `atuin history list`. That command obeys `filter_mode` of your atuin config, and a config with `filter_mode = "session"` gives one row. The search above always gives every row. The times are in UTC.
 
-`wdid` reads the aliases and the functions from your interactive shell (`$SHELL`, zsh or bash). It starts `$SHELL -i -c` with a script that prints them between two unique markers, so text from your startup files does no damage. The shell has 30 seconds. `--no-shell` skips this step.
+`wdid` reads the aliases and the functions from your interactive shell (`$SHELL`, zsh or bash). It starts `$SHELL -i -c` with a script that prints them between two unique markers, so text from your startup files does no damage. The shell has 30 seconds. `--no-shell` skips this step. zsh starts with a temporary `ZDOTDIR` that records the file of each alias, and your startup files run as before (see [The origin and my definitions](#the-origin-and-my-definitions)).
 
 ### What counts
 
@@ -5594,6 +5588,7 @@ wdid --since 2026-01-01
 wdid --unparsed
 wdid --repo ~/code/tools --no-shell
 cd ~ && wdid   # the workspace that the installed wdid came from
+wdid defs      # the aliases and the functions, in any directory
 ```
 
 ### Options
@@ -5607,6 +5602,8 @@ cd ~ && wdid   # the workspace that the installed wdid came from
 - `--idle-days <DAYS>`: A tool is idle when its last use is older than this. Defaults to 180.
 - `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
 - `-h`, `--help`: Print the usage.
+
+These options are for the tools report. `wdid defs` has its own options (see [wdid defs](#wdid-defs-the-aliases-and-the-functions)).
 
 The table fits `COLUMNS` when that variable is set, else the width of the terminal. An error prints `wdid: <reason>` on standard error and exits 1. A usage error exits 2.
 
@@ -5685,7 +5682,6 @@ Never used, old (added 90 or more days ago):
   sirn
 Never used, new (added less than 90 days ago):
   faulte (added 2026-09-18)
-  localnext (added 2026-09-04)
   occ (added 2026-08-14)
 Idle (no use in the last 180 days):
   update-aws-credentials (218 uses, last use 2025-11-13)
@@ -5696,6 +5692,218 @@ Shell: 276 aliases, 1,267 functions (24 did not parse).
 ```
 
 The excerpt leaves out rows of the table and entries of the groups. The run was before `wdid` named its workspace, thus it has no `Workspace:` line. `si` is a shell function that runs `nwt -b <branch>`, so each `si` is a use of `nwt`.
+
+### wdid defs: the aliases and the functions
+
+`wdid defs` reports on each alias and each function of your interactive shell. Use it to find the definitions that you use, the definitions that you can remove, and the definitions that you forgot. The tools report shows an alias or a function only through a tool of the workspace that it runs. `wdid defs` shows each of your definitions, also an alias that runs `git` and a definition with zero uses.
+
+A definition that the shell runs without a typed name, for example a `precmd` hook or the function of a widget that a key starts, gets the state "runs without typing" with its reason. It does not show in "Never used". See [What runs without typing](#what-runs-without-typing).
+
+Each definition gets its origin: the file that defined it. By default, the text report shows only your own definitions. A shell with oh-my-zsh has hundreds of aliases and functions from its plugins and its `lib` files, and those are not yours. `--all` shows each definition, and groups the others by the file that defined them.
+
+`wdid defs` reads the history and the shell definitions as the tools report does. It needs no cargo workspace, and it starts no `cargo` process and no `git` process. Thus it runs in any directory.
+
+```bash
+wdid defs
+wdid defs --all
+wdid defs --json
+wdid defs --since 2026-01-01 --idle-days 90
+```
+
+#### What counts
+
+- A typed alias or a typed function. A zsh global alias counts in each word position where zsh expands it. A zsh suffix alias counts with its marker as its name (`*.md`).
+- An alias at the start of the value of an alias. With `alias wtf='wt -f'` and `alias wt=cwt`, a typed `wtf` is a typed use of `wtf` and a use of `wt` through `wtf`.
+- A function that a function calls, to any depth. With `myf() { helper "$@" }`, a typed `myf` is a typed use of `myf` and a use of `helper` through `myf`. The walk visits each function one time, thus a cycle stops.
+- A function that an alias calls. With `alias g='myf --x'`, a typed `g` is a use of `myf` through `g`.
+
+A use through other definitions names the definition that you typed. With `a` that calls `b` and `b` that calls `c`, a typed `a` gives `c` a use through `a`.
+
+#### What does not count
+
+- An alias in the body of a function. zsh and bash expand each alias in a function body when they read the definition. Thus the body that `wdid` gets holds the value of the alias, not its name, and the alias gets no use from the function.
+- A name in quoted text, a row with exit code 127, and a line that does not parse, as in the tools report.
+- A function whose name starts with `_`. The completion system makes these functions by the hundred, and nobody types them. Only `--all` shows them. A call through such a function still counts: with `f() { _helper }` and `_helper() { g }`, a typed `f` is a use of `g` through `f`.
+
+#### What runs without typing
+
+zsh and bash run some definitions when nobody types their names. The history has no row for these runs. Thus `wdid` asks the shell for each such start. Each definition that a start reaches gets the state "runs without typing" and its reasons. Such a definition does not show in "Never used" or in "Idle", whatever its uses. Its typed uses still count in the table.
+
+The starts of zsh:
+
+- **A hook function.** The functions `precmd`, `preexec`, `chpwd`, `periodic`, `zshaddhistory`, and `zshexit`, and each name in the arrays `precmd_functions` thru `zshexit_functions`. `add-zsh-hook` fills these arrays. The reason is the hook, for example `precmd hook`.
+- **A trap function.** `TRAPINT`, `TRAPEXIT`, and each other `TRAP` name of a signal in `$signals`. The reason is the signal, for example `INT trap`. A function such as `TRAPPED` is not a trap, because `PED` is not a signal.
+- **The handler of a command that zsh does not find**, `command_not_found_handler`. The reason is `command not found`.
+- **The function of a widget that a key starts.** `zle -lL` gives the function of each widget, and `bindkey -M <keymap> -L` gives the keys of each keymap. The reason is the widget and its keys, for example `widget atuin-search, key ^R`. A key in two keymaps is one key. The space key shows as `" "`.
+- **The function of a special widget**, which zle runs at an event of its own: `zle-line-init`, `zle-line-finish`, `zle-keymap-select`, `zle-isearch-exit`, `zle-isearch-update`, `zle-line-pre-redraw`, and `zle-history-line-set`. A widget that `add-zle-hook-widget` adds to one of them runs at the same event. The reason is the special widget, for example `widget zle-line-init`.
+
+The starts of bash:
+
+- **`PROMPT_COMMAND`**, a text or an array. The reason is `PROMPT_COMMAND`.
+- **The code of a trap**, from `trap -p`. The reason is the signal without `SIG`, for example `EXIT trap`. `wdid` lists the traps before it removes the `DEBUG` trap for its own script.
+- **The command of a `bind -x` key**, from `bind -X`. The reason is the key, for example `bind -x, key \C-x\C-r`. bash has `bind -X` from version 4.3 on. The bash of macOS is 3.2, thus it gives no key.
+
+`wdid` reads the code of a bash start as a typed line. Each function and each alias that the code names runs, also a function that such an alias calls.
+
+Each function that a start runs passes its reason to each function that it calls, to any depth. The reason then names the definition that the start runs, for example `precmd hook, through omz_termsupport_precmd`. The walk visits each function one time, thus a cycle stops. A function whose name starts with `_` passes its reason too, also when the report does not show it.
+
+A widget function that no key starts gets the reason `widget, no key`. Only a typed `zle` call or `execute-named-cmd` starts it. Thus it keeps the state that its uses give, and it can show in "Never used" with that reason.
+
+`wdid` does not find these starts:
+
+- A function in a prompt string, for example `$(git_prompt_info)` in `PROMPT` with `prompt_subst`.
+- A zsh trap that `trap 'code' SIGNAL` sets. Only a `TRAP` function counts in zsh.
+- The bash function `command_not_found_handle`.
+
+The groups of a run with a `precmd` hook, its callee, a widget with a key, and a widget with no key:
+
+```text
+Never used:
+  lonelyfn (function, widget, no key)
+Idle (no use in the last 180 days): none
+Runs without typing:
+  precmd (function, precmd hook)
+  prompt_helper (function, precmd hook, through precmd)
+  searchfn (function, widget history-search, key ^R)
+```
+
+#### The origin and my definitions
+
+The origin of an alias is `file:line`. The origin of a function is its file.
+
+- **A zsh function.** zsh keeps the file of each function in `$functions_source`. A function from an `eval` gets the file that holds the `eval`. A function from `source <(…)` gets `/dev/fd/N` on macOS and `/proc/self/fd/N` on Linux. `wdid` loads each autoloaded function first, and a loaded function gets its file too. For a function whose name starts with `_`, `autoload -Ur` finds the file and loads no body.
+- **A zsh alias.** zsh keeps no origin for an alias. Thus `wdid` starts zsh with `ZDOTDIR` set to a new temporary directory. The `.zshenv` of that directory defines a shell function named `alias`. For each definition, the function records the file and the line of the call (`$funcfiletrace`), and then it runs `builtin alias "$@"`. Then the file sets `ZDOTDIR` back to its value in your environment, or removes it when your environment has none, and it sources your real `.zshenv`. zsh then reads your other startup files from your real `ZDOTDIR`, also when your `.zshenv` changes `ZDOTDIR`. Before `wdid` lists the aliases, it removes the function. The temporary directory has a unique name, and `wdid` removes it after the run, also after an error or a timeout.
+- **An alias from `builtin alias`.** This command goes around the function, thus its origin is unknown.
+- **bash.** `shopt -s extdebug` and `declare -F` give the file of each function. bash keeps no origin for an alias, thus the origin of each bash alias is unknown.
+
+An origin that is not an absolute path is unknown, for example `(eval)`, or `environment` for a bash function from the environment.
+
+A definition is mine when its origin is unknown, when its file is under `$ZSH_CUSTOM`, or when its file is under `$HOME` and not under the oh-my-zsh directory (`$ZSH`). `wdid` reads `HOME`, `ZSH`, and `ZSH_CUSTOM` from the shell, after your startup files ran. Thus:
+
+- A definition in `~/.zshrc`, in a file under `$HOME` that `~/.zshrc` sources, or in `$ZSH_CUSTOM` is mine.
+- A definition that an `eval` in `~/.zshrc` makes is mine, for example a function from `eval "$(tsm shell-init)"`. Your file chose to run it.
+- A definition with an unknown origin is mine, so that the default report never hides it. zsh itself defines the aliases `run-help` and `which-command`, which have no file.
+- A definition from `$ZSH`, from `/usr/share/zsh`, from `/dev/fd` or `/proc/self/fd`, or from a different file outside `$HOME` is not mine. A definition from `source <(tsm shell-init)` is in `/dev/fd` on macOS and in `/proc/self/fd` on Linux, thus it is not mine.
+
+#### The report
+
+Three header lines start the report. The first line gives the history rows, the rows with exit code 127, and the rows that did not parse. The second line gives the shell, the number of aliases, and the number of functions. The third line gives the number of my definitions and the number of the others.
+
+The table has one row for each of my definitions, the most used first:
+
+- `Name`: the name. A suffix alias has its marker (`*.md`).
+- `Kind`: `alias`, `global alias`, `suffix alias`, or `function`.
+- `Uses`: the typed uses plus the uses through other definitions.
+- `Typed`: the uses where you typed the name.
+- `Through`: the definitions that gave the other uses, each with its count. When `COLUMNS` or the terminal gives a width, a cell longer than 30 columns wraps. With no width, the cell is one line.
+- `First use` and `Last use`: the dates of the first and the last counted use.
+- `Origin`: the origin, with `~` for your home directory: `file:line` for an alias, the file for a function, or `-` when the origin is unknown.
+- `Definition`: the value of an alias, or the first line of a function body. The cell is one line. When `COLUMNS` or the terminal gives a width, `wdid` cuts the cell to fit that width and ends it with `…`.
+
+An alias and a function can have the same name. They are two rows.
+
+With `--all`, the table of my definitions gets the heading `Mine` and a count. After it, the report has one table for each file that defined the others, in path order. The heading of each table is the file and its count of definitions, for example `~/.oh-my-zsh/plugins/git/git.plugin.zsh: 208 definitions`. The tables also hold the functions whose names start with `_`. Each completion function has a file of its own, thus a shell with the completion system gives one table for each completion function.
+
+Three groups follow the tables:
+
+- **Never used.** The definitions with zero uses, each with its kind, but not a definition that runs without typing.
+- **Idle.** The definitions whose last use is older than `--idle-days` days, each with its kind, its uses, and the date of its last use, but not a definition that runs without typing.
+- **Runs without typing.** The definitions that the shell runs without a typed name, each with its kind and its reasons. `; ` divides two reasons. See [What runs without typing](#what-runs-without-typing).
+
+A widget function that no key starts ends its entry in "Never used" or in "Idle" with its reason, `widget, no key`.
+
+Without `--all`, the three groups hold only my definitions. With `--all`, they hold each definition.
+
+#### Options of wdid defs
+
+- `--since <YYYY-MM-DD>`: Count only the rows from this date on. A row on this date counts.
+- `--all`: Show each definition. The text report also shows the others, grouped by the file that defined them, and the functions whose names start with `_`.
+- `--json`: Print the report as one JSON document. `definitions` holds each definition, also the ones with zero uses and the ones that are not mine, and its `definition` is never cut. Each entry has `origin` and `mine`. `origin` holds `file` and `line`, or it is `null` when the origin is unknown. A function has no line, thus its `line` is `null`. `shell.mine` and `shell.others` give the two counts. Each entry has `reasons`, the text of each of its reasons as the text report writes it. The list is empty for most entries. `never_used`, `idle`, and `runs_without_typing` hold the name and the kind of each entry of the three groups, also the entries that are not mine. With `--all`, the document also holds the functions whose names start with `_`.
+- `--idle-days <DAYS>`: A definition is idle when its last use is older than this. Defaults to 180.
+
+The options of the tools report (`--repo`, `--no-shell`, `--unparsed`, `--new-days`) do not apply. An option of the tools report before `defs` is a usage error.
+
+#### Example of wdid defs
+
+A run on a small history, with a stand-in of oh-my-zsh in `~/.oh-my-zsh`. Its git plugin defines `gst` and `gco`. zsh itself defines `run-help` and `which-command`.
+
+```text
+History: 14 rows. 1 not counted (exit 127). 0 did not parse.
+Shell: /bin/zsh, 9 aliases, 3 functions (0 did not parse).
+Definitions: 10 mine, 2 others (--all shows the others).
+
+┌───────────────┬──────────────┬──────┬───────┬─────────┬────────────┬────────────┬────────────┬─────────────────────────┐
+│ Name          ┆ Kind         ┆ Uses ┆ Typed ┆ Through ┆ First use  ┆ Last use   ┆ Origin     ┆ Definition              │
+╞═══════════════╪══════════════╪══════╪═══════╪═════════╪════════════╪════════════╪════════════╪═════════════════════════╡
+│ wt            ┆ alias        ┆    4 ┆     1 ┆ wtf 3   ┆ 2026-11-23 ┆ 2026-11-25 ┆ ~/.zshrc:2 ┆ cwt                     │
+│ gs            ┆ alias        ┆    3 ┆     3 ┆         ┆ 2026-11-20 ┆ 2026-11-22 ┆ ~/.zshrc:3 ┆ git status              │
+│ wtf           ┆ alias        ┆    3 ┆     3 ┆         ┆ 2026-11-23 ┆ 2026-11-25 ┆ ~/.zshrc:4 ┆ wt -f                   │
+│ *.md          ┆ suffix alias ┆    1 ┆     1 ┆         ┆ 2026-11-24 ┆ 2026-11-24 ┆ ~/.zshrc:5 ┆ glow                    │
+│ G             ┆ global alias ┆    1 ┆     1 ┆         ┆ 2026-11-23 ┆ 2026-11-23 ┆ ~/.zshrc:6 ┆ | grep                  │
+│ helper        ┆ function     ┆    1 ┆     0 ┆ myf 1   ┆ 2026-11-25 ┆ 2026-11-25 ┆ ~/.zshrc   ┆ echo "helping $1"       │
+│ myf           ┆ function     ┆    1 ┆     1 ┆         ┆ 2026-11-25 ┆ 2026-11-25 ┆ ~/.zshrc   ┆ helper "$@"             │
+│ oldfn         ┆ function     ┆    1 ┆     1 ┆         ┆ 2026-03-21 ┆ 2026-03-21 ┆ ~/.zshrc   ┆ tar czf backup.tgz "$@" │
+│ run-help      ┆ alias        ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ -          ┆ man                     │
+│ which-command ┆ alias        ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ -          ┆ whence                  │
+└───────────────┴──────────────┴──────┴───────┴─────────┴────────────┴────────────┴────────────┴─────────────────────────┘
+
+Never used:
+  run-help (alias)
+  which-command (alias)
+Idle (no use in the last 180 days):
+  oldfn (function, 1 use, last use 2026-03-21)
+Runs without typing: none
+```
+
+The same run with `--all` adds a table for the git plugin after the table of my definitions. This excerpt leaves out rows of the first table:
+
+```text
+Definitions: 10 mine, 2 others.
+
+Mine: 10 definitions
+┌───────────────┬──────────────┬──────┬───────┬─────────┬────────────┬────────────┬────────────┬─────────────────────────┐
+│ Name          ┆ Kind         ┆ Uses ┆ Typed ┆ Through ┆ First use  ┆ Last use   ┆ Origin     ┆ Definition              │
+╞═══════════════╪══════════════╪══════╪═══════╪═════════╪════════════╪════════════╪════════════╪═════════════════════════╡
+│ wt            ┆ alias        ┆    4 ┆     1 ┆ wtf 3   ┆ 2026-11-23 ┆ 2026-11-25 ┆ ~/.zshrc:2 ┆ cwt                     │
+└───────────────┴──────────────┴──────┴───────┴─────────┴────────────┴────────────┴────────────┴─────────────────────────┘
+
+~/.oh-my-zsh/plugins/git/git.plugin.zsh: 2 definitions
+┌──────┬───────┬──────┬───────┬─────────┬────────────┬────────────┬───────────────────────────────────────────┬──────────────┐
+│ Name ┆ Kind  ┆ Uses ┆ Typed ┆ Through ┆ First use  ┆ Last use   ┆ Origin                                    ┆ Definition   │
+╞══════╪═══════╪══════╪═══════╪═════════╪════════════╪════════════╪═══════════════════════════════════════════╪══════════════╡
+│ gst  ┆ alias ┆    2 ┆     2 ┆         ┆ 2026-11-26 ┆ 2026-11-26 ┆ ~/.oh-my-zsh/plugins/git/git.plugin.zsh:1 ┆ git status   │
+│ gco  ┆ alias ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ ~/.oh-my-zsh/plugins/git/git.plugin.zsh:2 ┆ git checkout │
+└──────┴───────┴──────┴───────┴─────────┴────────────┴────────────┴───────────────────────────────────────────┴──────────────┘
+
+Never used:
+  gco (alias)
+  run-help (alias)
+  which-command (alias)
+Idle (no use in the last 180 days):
+  oldfn (function, 1 use, last use 2026-03-21)
+Runs without typing: none
+```
+
+One entry of the `--json` document:
+
+```json
+{
+  "name": "wt",
+  "kind": "alias",
+  "definition": "cwt",
+  "uses": 4,
+  "typed": 1,
+  "through": [{ "name": "wtf", "uses": 3 }],
+  "first_use": "2026-11-23",
+  "last_use": "2026-11-25",
+  "classification": "used",
+  "origin": { "file": "/Users/me/.zshrc", "line": 2 },
+  "mine": true,
+  "reasons": []
+}
+```
+
+`kind` is `alias`, `global_alias`, `suffix_alias`, or `function`. `classification` is `used`, `idle`, `never_used`, or `runs_without_typing`.
 
 ### Install
 
@@ -6256,9 +6464,20 @@ cargo tauri build --no-bundle   # the binary is target/release/msgs
 ## nle (non-linear editor)
 
 A desktop application for the terminal recordings that `beta` writes. It opens
-a `.json` or `.json.gz` recording, makes an edit project of it, and shows its
-metadata. The timeline (issue #150) and the preview pane (issue #151) are
-placeholders.
+a `.json` or `.json.gz` recording, makes an edit project of it, shows its
+metadata, and plays the edited recording in its preview pane. The timeline
+(issue #150) is a placeholder with a playhead control.
+
+The preview pane draws the terminal of the edited recording at the playhead.
+Drag the playhead control under **Timeline** to go to a time. **Play** plays
+the recording from the playhead, and the same button then says **Pause**.
+**Stop** stops playback and goes back to the start. Playback stops at the end,
+and **Play** at the end starts again from the beginning. The readout shows the
+time of the playhead and the duration of the edited recording. The **Theme**
+menu selects one of the palettes of `beta export --theme`: Auto, Dracula,
+Monokai, Solarized Dark, or Solarized Light. The terminal grows or shrinks to
+fit the pane, and each edit shows in the preview at once. A new recording opens
+stopped, at time zero.
 
 The speed panel under the metadata changes the speed of a region. Type the
 start and the end of the region in seconds and a speed, then click
@@ -6271,11 +6490,46 @@ speed changes above it. The panel shows the duration of the edited recording.
 The panel refuses a change after which the recording does not render, and it
 shows the reason in the banner.
 
+The redaction panel under the speed panel finds text on the whole timeline and
+replaces it, for example to remove API keys, tokens, hostnames, or user names
+from a recording. **Find** takes an exact text, a regular expression, or a
+preset: email addresses, IP addresses, AWS keys, tokens, or hostnames.
+**Replace with** takes asterisks or blocks (`█`), one for each terminal column
+of the match, or a text. **Events** selects the output events, or the output
+and the input events. Then click **Apply Redaction**. Each redaction gets a row
+with a **Remove** button.
+
+A redaction does not change the time of an event, and it knows escape
+sequences:
+
+- A match can cross events and escape sequences, because the terminal can
+  split a word across writes, or color part of it.
+- An escape sequence never changes, and a search never matches inside one. A
+  search for `31` does not change the color code `ESC [ 31 m`.
+- The text of an OSC sequence, for example a window title, is searched, but a
+  match never crosses from the visible text into an OSC sequence. The text
+  starts after the number of the sequence and its `;`, thus a search for `0`
+  does not change the title sequence `ESC ] 0 ;`. Image data (DCS and APC
+  strings) is not searched. The clipboard data of OSC 52 is not searched
+  either, because it is base64, and a text search cannot read it.
+- The iTerm2 sequence OSC 1337 holds a command `Key=value`. The value is
+  searched, thus a redaction of a user name also changes the host and the
+  directory that the shell integration writes as `RemoteHost=user@host` and
+  `CurrentDir=/Users/user`. The key is not searched. The base64 value of a
+  key such as `File` (an image) or `SetUserVar` is not searched.
+- A mask keeps the control characters of a match, for example a line feed, so
+  the layout of the screen stays the same.
+- In a regular expression, a capture group named `redact` replaces only its
+  own text. The AWS key preset uses it to keep the name of a key visible, and
+  the token preset uses it to keep the word `Bearer`.
+
+The timeline (issue #150) does not show where the redactions are yet.
+
 The application is one Rust crate on Dioxus 0.7, with the desktop (webview)
 renderer. Its components call the Rust code directly, and the open project is
 Dioxus state, thus no IPC layer and no frontend package exist.
 
-The editing engine of the crate has four parts:
+The editing engine of the crate has five parts:
 
 - **Edit project** (`EditProject`): clips of source recordings, placed on the
   tracks of the timeline, and the filters that apply to the result. An edit
@@ -6286,21 +6540,100 @@ The editing engine of the crate has four parts:
   registered by kind. The filters of a project run in order, each on the whole
   timeline or on a range of it. An event filter,
   `Fn(&[Event], &FilterOptions) -> Vec<Event>`, gets the events of its region,
-  and the later events move by the change in the time of its last event. A
+  and the later events move by the change in the time of its last event. An
+  in-place filter (`register_in_place`) also gets the length of its region and
+  whether anything comes after it. It rewrites its region and moves nothing. A
   span filter (`register_span`) also gets the length of its region and answers
   a new length, and the later events move by the change in the length.
-  `filters::registry()` holds the filters that ship: time dilation
-  (`time-dilation`, issue #153) is a span filter. Issues #152 to #168 add the
-  others.
+  `filters::registry()` holds the filters that ship. The cursor filter is an
+  in-place filter, and each other one is a span filter:
+  - `cursor` (`visibility`, `shape`, `blink`, `color`, issue #168): sets how
+    the cursor looks. [The cursor filter](#the-cursor-filter) below gives its
+    options.
+  - `time-dilation` (`speed`, issue #153): plays its region faster or slower.
+  - `redaction` (`find`, `replace`, `input`, issue #156): replaces text in the
+    data of the events and keeps each time. The paragraphs on the redaction
+    panel above give its rules.
+  - `typing-speed` (`chars_per_second`, `pause`, `jitter`, issue #155): plays
+    each burst of typing at one rate. The paragraph on this filter below gives
+    its rules.
+  - `pause-removal` (`threshold`, `max_pause`, issue #154): each gap between two
+    events that is longer than `threshold` becomes `max_pause` long.
+  - `pause-insertion` (`at`, `duration`, issue #154): each event at or after
+    `at` moves later by `duration`, and so do the events after a range and the
+    end of the timeline. An `at` past the end of the region by more than a
+    microsecond is an error.
+  - `auto-trim` (`leading`, `trailing`, both on when not set, issue #154):
+    removes the time before the first input event and the time after the last
+    output event.
+
+  The filters of issue #154 parse their options as a Rust type, so the render
+  refuses a missing option, a value of the wrong type, and a key that the
+  filter does not know. The window cannot add them yet (issue #150). Issues
+  #152 and #157 to #167 add more filters.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
   undo and redo history.
+- **Preview** (`preview::Preview`): replays the events of the rendered
+  recording through the terminal emulator of `termstate`, which the video
+  export of `beta` also uses. On the way it keeps snapshots of the terminal,
+  about one for each second of the recording, so a seek replays only from the
+  nearest snapshot and not from time zero. The number of snapshots has a
+  limit that depends on the size of the grid.
+
+The typing speed filter plays each burst of typing at one rate. Its option
+`chars_per_second` sets the rate, and each input event counts as one
+character. A gap between two keys that is longer than `pause` (2 s when the
+option is missing) keeps its length, and so does the gap after a key that
+holds a line end. Thus each hesitation inside a command goes away, and each
+pause between two commands stays. An output keeps its delay after the key
+before it, so the echo of a key follows the key. When the gap to the next key
+becomes shorter, the delay becomes shorter by the same ratio. The option
+`jitter` (0 when missing, and below 1) changes each interval by up to that
+fraction, so the typing does not look mechanical. Each render gives the same
+times. The window cannot add the filter to a project yet.
 
 The crate also has functions that save the rendered recording
 (`Editor::save_recording`), list the recordings in a directory, and export a
 recording through the `beta` CLI as a video or a web player. The window does
 not call them yet.
+
+### The cursor filter
+
+The `cursor` filter sets how the cursor looks in the rendered recording. It
+rewrites the escape sequences that set the cursor in the output events. Thus
+`beta play` and the web export of `beta` show the result as a terminal shows
+it. The video export of `beta` draws only a block cursor, shown or hidden, thus
+it shows the visibility but not the shape, the blink, or the color.
+
+The window has no control for filters yet. A project file names the filter in
+its `filters` list:
+
+```json
+{
+  "kind": "cursor",
+  "region": "All",
+  "options": { "visibility": "smart", "shape": "bar", "blink": false, "color": "#ffcc00" }
+}
+```
+
+| Option | Values | What it does |
+|---|---|---|
+| `visibility` | `honor` (the default), `always-visible`, `always-hidden`, `smart` | `honor` obeys the DECTCEM sequences (`CSI ? 25 h` and `CSI ? 25 l`) of the recording. `always-visible` and `always-hidden` drop them and set the cursor. `smart` obeys the recording, but hides the cursor during a burst of output. |
+| `burst_gap` | seconds, above zero, 0.1 by default | For `smart` only. A burst is two or more output events, each less than `burst_gap` after the one before it, with no input event between them. Thus the echo of typed keys is not a burst. |
+| `shape` | `block`, `underline`, `bar` | Sets the shape through DECSCUSR (`CSI Ps SP q`). The blink of the recording stays, unless `blink` is set. |
+| `blink` | `true`, `false` | Sets the blink through DECSCUSR, and drops mode 12 of the recording. The shape of the recording stays, unless `shape` is set. |
+| `color` | `#rrggbb` | Sets the color through OSC 12, and drops each cursor color of the recording: OSC 12, OSC 112, and the cursor slot of an OSC 10 or 11 list. |
+
+An option that the options do not name obeys the recording. An unknown key or
+value fails the render, and the message names it.
+
+On a range, the filter sets the cursor at the start of the range, and it sets
+the state of the recording back at the end. The filter sees only its range,
+thus it takes the state before the range to be the default of a terminal: a
+visible cursor, DECSCUSR 0, and the default color. After a reset of the
+terminal (RIS or DECSTR) in the recording, the filter sets the cursor again.
 
 The export functions run `beta` with the PATH of the app, then
 `$CARGO_HOME/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.

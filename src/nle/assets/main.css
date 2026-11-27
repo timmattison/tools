@@ -66,9 +66,49 @@ body,
   grid-area: preview;
   background: #1e1e2e;
   display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
+
+.preview-pane > .placeholder {
+  margin: auto;
+}
+
+.preview-screen {
+  flex: 1;
+  min-height: 0;
+  container-type: size;
+  display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
+}
+
+.terminal {
+  font-family: "JetBrains Mono", Monaco, Menlo, "Ubuntu Mono", "DejaVu Sans Mono", monospace;
+  line-height: 1.2;
+  white-space: pre;
+  /* Fit the grid into the pane: a monospace cell is about 0.6em wide and 1.2em high. */
+  font-size: min(calc(100cqw / (var(--columns) * 0.6)), calc(100cqh / (var(--rows) * 1.2)));
+}
+
+.terminal-row {
+  height: 1.2em;
+  width: calc(var(--columns) * 1ch);
+  overflow: hidden;
+}
+
+.terminal .cell {
+  display: inline-block;
+  width: 1ch;
+  overflow: visible;
+}
+
+.playhead {
+  width: 100%;
+  margin-bottom: 8px;
 }
 
 .timeline {
@@ -133,17 +173,20 @@ h3 {
   margin-bottom: 8px;
 }
 
-.speed-panel {
+.speed-panel,
+.redaction-panel {
   margin-top: 16px;
 }
 
-.speed-hint {
+.speed-hint,
+.redaction-hint {
   color: #6c7086;
   font-size: 12px;
   margin-bottom: 8px;
 }
 
-.speed-field {
+.speed-field,
+.redaction-field {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -152,7 +195,9 @@ h3 {
   font-size: 12px;
 }
 
-.speed-field input {
+.speed-field input,
+.redaction-field input,
+.redaction-field select {
   width: 100%;
   background: #1e1e2e;
   color: #cdd6f4;
@@ -162,11 +207,45 @@ h3 {
   font-size: 13px;
 }
 
-.speed-row {
+.speed-row,
+.redaction-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
   padding: 6px 0;
   border-bottom: 1px solid #313244;
   font-size: 13px;
+}
+
+.preview-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: #181825;
+  border-bottom: 1px solid #313244;
+}
+
+.preview-time {
+  font-family: monospace;
+  font-size: 13px;
+  color: #a6adc8;
+}
+
+.preview-theme {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #a6adc8;
+}
+
+.preview-theme select {
+  background: #1e1e2e;
+  color: #cdd6f4;
+  border: 1px solid #585b70;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 12px;
 }

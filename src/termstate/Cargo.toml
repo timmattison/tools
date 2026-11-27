@@ -1,0 +1,13 @@
+[package]
+name = "termstate"
+version = "0.1.0"
+edition.workspace = true
+description = "The terminal emulator of beta: a VT100/ANSI screen grid and its theme palettes"
+license = "MIT"
+
+[dependencies]
+anyhow.workspace = true
+vte = "0.15.0"
+
+[lints]
+workspace = true
