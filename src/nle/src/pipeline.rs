@@ -331,6 +331,13 @@ impl FilterRegistry {
         }
 
         let kind = applied.kind.as_str();
+        // The end of the region on the timeline, and the view of the region
+        // that an in-place, a screen, and a span filter get.
+        let top = region_end.min(*end).max(start);
+        let view = RegionView {
+            length: top - start,
+            open: after.is_empty() && region_end >= *end,
+        };
         // The answer, the view of an in-place filter, the latest time on the
         // timeline that the answer can get, and how far the events after the
         // region move.
@@ -341,12 +348,6 @@ impl FilterRegistry {
                 (answer, None, f64::INFINITY, shift)
             }
             Registered::InPlace(filter) => {
-                // The end of the region on the timeline.
-                let top = region_end.min(*end).max(start);
-                let view = RegionView {
-                    length: top - start,
-                    open: after.is_empty() && region_end >= *end,
-                };
                 let answer = filter(&inside, view, &applied.options).map_err(|message| {
                     NleError::RenderError(format!("filter \"{kind}\" failed: {message}"))
                 })?;
@@ -354,11 +355,6 @@ impl FilterRegistry {
                 (answer, Some(view), top, 0.0)
             }
             Registered::Screen(filter) => {
-                let top = region_end.min(*end).max(start);
-                let view = RegionView {
-                    length: top - start,
-                    open: after.is_empty() && region_end >= *end,
-                };
                 let Some(current) = *size else {
                     return Err(NleError::RenderError(format!(
                         "filter \"{kind}\" needs the size of the screen, and only FilterRegistry::render gives it"
@@ -392,7 +388,7 @@ impl FilterRegistry {
                 (answer.events, Some(view), top, 0.0)
             }
             Registered::Span(filter) => {
-                let length = (region_end.min(*end) - start).max(0.0);
+                let length = view.length;
                 let span = Span {
                     events: inside,
                     length,
