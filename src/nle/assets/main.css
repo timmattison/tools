@@ -201,6 +201,7 @@ h3 {
 .speed-field input,
 .redaction-field input,
 .redaction-field select,
+.color-scheme-field input,
 .color-scheme-field select {
   width: 100%;
   background: #1e1e2e;
