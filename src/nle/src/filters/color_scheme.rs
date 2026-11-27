@@ -45,10 +45,12 @@
 use serde_json::Value;
 use termstate::TerminalTheme;
 
+use super::splice::{SequenceEditor, Splicer, ST};
+use crate::ansi::Sequence;
 use crate::pipeline::{FilterRegistry, RegionView};
-use crate::preview::screen::Rgb;
+use crate::preview::screen::{hex, Rgb};
 use crate::preview::PreviewTheme;
-use crate::types::{AppliedFilter, Event, FilterKind, FilterOptions, FilterRegion};
+use crate::types::{AppliedFilter, Event, EventType, FilterKind, FilterOptions, FilterRegion};
 
 /// The kind of the color scheme filter.
 pub const KIND: &str = "color-scheme";
@@ -672,12 +674,119 @@ pub fn register(registry: &mut FilterRegistry) {
 }
 
 /// The color scheme filter.
+///
+/// It sets the default colors of the theme at the start of its region, and
+/// then it reads the output events with one `Scanner`. Each SGR color is
+/// rewritten in the event where its sequence completes. Each other byte
+/// stays in its event.
 fn filter(
     events: &[Event],
-    _region: RegionView,
-    _options: &FilterOptions,
+    region: RegionView,
+    options: &FilterOptions,
 ) -> Result<Vec<Event>, String> {
-    Ok(events.to_vec())
+    let scheme = ColorScheme::parse(options)?;
+    // An event at the start of such a region sets nothing that a frame
+    // shows.
+    if events.is_empty() && (region.open || region.length <= 0.0) {
+        return Ok(Vec::new());
+    }
+    let mut editor = SchemeEditor::new(&scheme);
+    let start = editor.wanted();
+    let mut splicer = Splicer::new();
+    for event in events {
+        match event.event_type {
+            EventType::Input => splicer.pass(event),
+            EventType::Output => {
+                let index = splicer.open_output(event.time);
+                splicer.read(index, &event.data, &mut editor);
+            }
+        }
+    }
+    Ok(splicer.finish(
+        start,
+        |open| {
+            let mut text = if open { editor.wanted() } else { String::new() };
+            if !region.open {
+                text.push_str(&editor.restore());
+            }
+            text
+        },
+        region.length,
+    ))
+}
+
+/// The color scheme that the filter follows while a `Splicer` rewrites the
+/// events of one region.
+struct SchemeEditor {
+    converter: Converter,
+    /// The default foreground that the filter sets.
+    wanted_foreground: Rgb,
+    /// The default background that the filter sets.
+    wanted_background: Rgb,
+    /// The default foreground that the answer set last, or `None` when it is
+    /// not known.
+    shown_foreground: Option<Rgb>,
+    /// The default background that the answer set last, or `None` when it is
+    /// not known.
+    shown_background: Option<Rgb>,
+}
+
+impl SchemeEditor {
+    fn new(scheme: &ColorScheme) -> Self {
+        Self {
+            converter: Converter::new(scheme),
+            wanted_foreground: scheme.foreground(),
+            wanted_background: scheme.background(),
+            shown_foreground: None,
+            shown_background: None,
+        }
+    }
+
+    /// The OSC 10 and OSC 11 that bring the answer to the default colors of
+    /// the theme, for each color that the answer does not show yet.
+    fn wanted(&mut self) -> String {
+        let mut text = String::new();
+        if self.shown_foreground != Some(self.wanted_foreground) {
+            text.push_str(&default_color_sequence(10, self.wanted_foreground));
+            self.shown_foreground = Some(self.wanted_foreground);
+        }
+        if self.shown_background != Some(self.wanted_background) {
+            text.push_str(&default_color_sequence(11, self.wanted_background));
+            self.shown_background = Some(self.wanted_background);
+        }
+        text
+    }
+
+    /// The sequences for the end of a region that is not open.
+    fn restore(&self) -> String {
+        String::new()
+    }
+}
+
+/// The OSC `number` (10 or 11) that sets a default color to `color`.
+fn default_color_sequence(number: u8, color: Rgb) -> String {
+    format!("\x1b]{number};{}{ST}", hex(color))
+}
+
+impl SequenceEditor for SchemeEditor {
+    fn rewrite(&mut self, sequence: &Sequence) -> Option<String> {
+        match sequence {
+            Sequence::Csi {
+                params,
+                intermediates,
+                final_char: 'm',
+                controls,
+            } if intermediates.is_empty() && !params.starts_with(|c| ('<'..='?').contains(&c)) => {
+                let new = self.converter.rewrite(params)?;
+                Some(format!("{controls}\x1b[{new}m"))
+            }
+            _ => None,
+        }
+    }
+
+    fn settle(&mut self) -> String {
+        self.wanted()
+    }
 }
 
 #[cfg(test)]
