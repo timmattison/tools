@@ -232,9 +232,11 @@ pub(super) fn TimelineView(loaded: ReadSignal<Option<Document>>, view: Signal<Vi
                     }
                 }
             }
-            for mark in marks {
+            // Two marks can share one place, so the key is the position in
+            // the list.
+            for (index, mark) in marks.into_iter().enumerate() {
                 div {
-                    key: "{mark.x}",
+                    key: "{index}",
                     class: "size-mark",
                     style: "left: {mark.x}px;",
                     span {
