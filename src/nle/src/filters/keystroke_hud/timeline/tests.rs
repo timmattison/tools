@@ -101,6 +101,55 @@ fn enter_alone_makes_a_box() {
 }
 
 #[test]
+fn keys_at_the_time_of_an_enter_stay_in_its_box() {
+    // One input event such as the paste "ls\rpwd\r" gives each key one time.
+    let line = timeline(
+        &[
+            (1.0, text("ls")),
+            (1.0, special("Enter")),
+            (1.0, text("pwd")),
+            (1.0, special("Enter")),
+        ],
+        no_fade(1.0),
+    );
+    assert_eq!(
+        pieces(line.at(1.5)),
+        vec![
+            piece_text("ls"),
+            piece_special("Enter", 1),
+            piece_text("pwd"),
+            piece_special("Enter", 1),
+        ]
+    );
+}
+
+#[test]
+fn two_enters_at_one_time_count_two() {
+    let line = timeline(
+        &[(1.0, special("Enter")), (1.0, special("Enter"))],
+        no_fade(1.0),
+    );
+    assert_eq!(pieces(line.at(1.5)), vec![piece_special("Enter", 2)]);
+}
+
+#[test]
+fn a_key_after_an_enter_at_one_time_still_starts_a_new_box() {
+    let line = timeline(
+        &[
+            (1.0, text("ls")),
+            (1.0, special("Enter")),
+            (1.1, text("cd")),
+        ],
+        no_fade(1.0),
+    );
+    assert_eq!(
+        pieces(line.at(1.05)),
+        vec![piece_text("ls"), piece_special("Enter", 1)]
+    );
+    assert_eq!(pieces(line.at(1.15)), vec![piece_text("cd")]);
+}
+
+#[test]
 fn a_held_key_counts_its_presses() {
     let line = timeline(
         &[

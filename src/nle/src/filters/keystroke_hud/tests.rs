@@ -136,6 +136,8 @@ fn special_keys_show_their_labels() {
             "↓ ×3",
         ),
         (vec![inp(1.0, "ls"), inp(1.1, "\r")], "ls Enter"),
+        (vec![inp(1.0, "ls\rpwd\r")], "ls Enter pwd Enter"),
+        (vec![inp(1.0, "\r\r")], "Enter ×2"),
     ];
     for (presses, label) in cases {
         let result = hud(&ended(presses), &plain(), WIDE);
