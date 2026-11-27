@@ -885,6 +885,14 @@ fn the_help_texts_name_defs_and_the_flags_of_defs() {
         "the help of defs names each group of the report: {text}"
     );
     assert!(
+        text.contains("duplicates and shadows"),
+        "the help of defs names the group of the findings: {text}"
+    );
+    assert!(
+        text.contains("each finding"),
+        "the help of --all says that it shows each finding: {text}"
+    );
+    assert!(
         text.contains("ZSH_CUSTOM"),
         "the help of --all names each place that Places::is_mine calls mine: {text}"
     );
