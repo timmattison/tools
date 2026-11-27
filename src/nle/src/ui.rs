@@ -421,28 +421,11 @@ fn SpeedPanel(
             button {
                 onclick: move |_| {
                     let change = speed_change(&start.read(), &end.read(), &speed.read());
-                    let outcome = change.and_then(|filter| {
-                        edit_document(loaded, |project| Edit::AddFilter {
-                            index: project.filters.len(),
-                            filter,
-                        })
-                    });
-                    report(on_result, SPEED_FAILED_PREFIX, outcome);
+                    add_filter(loaded, on_result, SPEED_FAILED_PREFIX, change);
                 },
                 {APPLY_SPEED_LABEL}
             }
-            for (index, text) in rows {
-                div { class: "speed-row", key: "{index}",
-                    span { "{text}" }
-                    button {
-                        onclick: move |_| {
-                            let outcome = edit_document(loaded, |_| Edit::RemoveFilter { index });
-                            report(on_result, SPEED_FAILED_PREFIX, outcome);
-                        },
-                        {REMOVE_LABEL}
-                    }
-                }
-            }
+            {filter_rows(loaded, on_result, "speed-row", SPEED_FAILED_PREFIX, rows)}
             div { class: "metadata-item",
                 span { class: "metadata-label", {EDITED_DURATION_LABEL} }
                 span { class: "metadata-value", "{edited}" }
@@ -527,28 +510,11 @@ fn RedactionPanel(
                         &replacement.read(),
                         &events.read(),
                     );
-                    let outcome = change.and_then(|filter| {
-                        edit_document(loaded, |project| Edit::AddFilter {
-                            index: project.filters.len(),
-                            filter,
-                        })
-                    });
-                    report(on_result, REDACTION_FAILED_PREFIX, outcome);
+                    add_filter(loaded, on_result, REDACTION_FAILED_PREFIX, change);
                 },
                 {APPLY_REDACTION_LABEL}
             }
-            for (index, text) in rows() {
-                div { class: "redaction-row", key: "{index}",
-                    span { "{text}" }
-                    button {
-                        onclick: move |_| {
-                            let outcome = edit_document(loaded, |_| Edit::RemoveFilter { index });
-                            report(on_result, REDACTION_FAILED_PREFIX, outcome);
-                        },
-                        {REMOVE_LABEL}
-                    }
-                }
-            }
+            {filter_rows(loaded, on_result, "redaction-row", REDACTION_FAILED_PREFIX, rows())}
         }
     }
 }
@@ -577,6 +543,51 @@ fn edit_document(
 /// with `prefix`.
 fn report(on_result: EventHandler<Result<(), String>>, prefix: &str, outcome: Result<(), String>) {
     on_result.call(outcome.map_err(|reason| format!("{prefix}: {reason}")));
+}
+
+/// Adds the filter of `change` at the end of the filter list of the open
+/// document, and sends the outcome to `on_result` with `prefix`. A `change`
+/// that is an error adds nothing, and its text goes to the banner.
+fn add_filter(
+    loaded: Signal<Option<Document>>,
+    on_result: EventHandler<Result<(), String>>,
+    prefix: &str,
+    change: Result<AppliedFilter, String>,
+) {
+    let outcome = change.and_then(|filter| {
+        edit_document(loaded, |project| Edit::AddFilter {
+            index: project.filters.len(),
+            filter,
+        })
+    });
+    report(on_result, prefix, outcome);
+}
+
+/// The rows of the filters of one panel. Each row shows its text and a
+/// Remove button that removes the filter at its index in the project.
+/// `class` is the class of each row, and `prefix` starts the banner text of
+/// a remove that fails.
+fn filter_rows(
+    loaded: Signal<Option<Document>>,
+    on_result: EventHandler<Result<(), String>>,
+    class: &'static str,
+    prefix: &'static str,
+    rows: Vec<(usize, String)>,
+) -> Element {
+    rsx! {
+        for (index, text) in rows {
+            div { class: "{class}", key: "{index}",
+                span { "{text}" }
+                button {
+                    onclick: move |_| {
+                        let outcome = edit_document(loaded, |_| Edit::RemoveFilter { index });
+                        report(on_result, prefix, outcome);
+                    },
+                    {REMOVE_LABEL}
+                }
+            }
+        }
+    }
 }
 
 /// One row for each time dilation filter of the project: the index of the
