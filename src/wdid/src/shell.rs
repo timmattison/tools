@@ -98,6 +98,22 @@ const KEYMAP_LABEL: &str = "KEYMAP";
 /// one space, and the widget follow this text.
 const ZLE_HOOK_LABEL: &str = "ZLE_HOOK";
 
+/// The text that follows the marker on the line that starts the output of
+/// the bash `trap -p`.
+const TRAPS_LABEL: &str = "TRAPS";
+
+/// The text that follows the marker on the line that starts one element of
+/// the bash `PROMPT_COMMAND`.
+const PROMPT_COMMAND_LABEL: &str = "PROMPT_COMMAND";
+
+/// The text that follows the marker on the line that starts the output of
+/// the bash `bind -X`.
+const KEY_COMMANDS_LABEL: &str = "KEY_COMMANDS";
+
+/// The loop variable of the loop of the bash script over the elements of
+/// `PROMPT_COMMAND`.
+const CODE_VARIABLE: &str = "__wdid_code";
+
 /// The loop variable of the outer loops of the zsh script that list the
 /// starts: the hooks, the keymaps, and the special widgets.
 const OUTER_VARIABLE: &str = "__wdid_outer";
@@ -273,8 +289,16 @@ impl Marker {
 /// Each script gives the origin of each function, and the home directory. The
 /// zsh script also gives the origin of each alias that the wrapper function
 /// recorded, and the oh-my-zsh directories. Bash keeps no origin for an alias.
+/// Each script also gives the code that the shell runs without a typed name.
+/// The zsh script gives its hooks, its trap functions, its handler of a
+/// command that it does not find, its widgets and their keys, and the widgets
+/// of `add-zle-hook-widget` (see [`zsh_starts`]). The bash script gives the
+/// code of each trap, each element of `PROMPT_COMMAND`, and each `bind -x`
+/// key. A bash older than 4.3 has no `bind -X`, thus it gives no key.
+///
 /// The bash script turns off the `DEBUG` trap before `extdebug`, because
-/// `extdebug` skips the next command when that trap fails.
+/// `extdebug` skips the next command when that trap fails. It lists the traps
+/// before that.
 #[must_use]
 pub fn script(kind: ShellKind, marker: &Marker) -> String {
     let marker = marker.as_str();
@@ -307,6 +331,14 @@ pub fn script(kind: ShellKind, marker: &Marker) -> String {
             "printf '%s\\n' '{marker} {ALIASES_LABEL}'\n\
              alias -p\n\
              printf '%s\\n' \"{marker} {HOME_LABEL} ${{HOME-}}\"\n\
+             printf '%s\\n' '{marker} {TRAPS_LABEL}'\n\
+             trap -p\n\
+             for {CODE_VARIABLE} in ${{PROMPT_COMMAND+\"${{PROMPT_COMMAND[@]}}\"}}; do\n\
+             \x20 printf '%s\\n' '{marker} {PROMPT_COMMAND_LABEL}'\n\
+             \x20 printf '%s\\n' \"${CODE_VARIABLE}\"\n\
+             done\n\
+             printf '%s\\n' '{marker} {KEY_COMMANDS_LABEL}'\n\
+             bind -X 2>/dev/null || :\n\
              trap - DEBUG\n\
              shopt -s extdebug\n\
              for {LOOP_VARIABLE} in $(compgen -A function); do\n\
@@ -501,17 +533,27 @@ enum Record<'a> {
     /// A special widget and a widget that `add-zle-hook-widget` added to it,
     /// divided by one space.
     ZleHook(&'a str),
+    /// The start of the output of the bash `trap -p`.
+    Traps,
+    /// The start of one element of the bash `PROMPT_COMMAND`.
+    PromptCommand,
+    /// The start of the output of the bash `bind -X`.
+    KeyCommands,
 }
 
 /// Reads `line` as a record of `marker`. Gives `None` for a line that is not
 /// a record: the marker, one space, a label, then one space and the value.
-/// The end record and the start of the output of `zle -lL` have no value.
+/// The end record and the start of each listing that holds lines have no
+/// value.
 fn record<'a>(line: &'a str, marker: &str) -> Option<Record<'a>> {
     let rest = line.strip_prefix(marker)?.strip_prefix(' ')?;
     let Some((label, value)) = rest.split_once(' ') else {
         return match rest {
             END_LABEL => Some(Record::End),
             WIDGETS_LABEL => Some(Record::Widgets),
+            TRAPS_LABEL => Some(Record::Traps),
+            PROMPT_COMMAND_LABEL => Some(Record::PromptCommand),
+            KEY_COMMANDS_LABEL => Some(Record::KeyCommands),
             _ => None,
         };
     };
@@ -550,6 +592,20 @@ enum Section<'a> {
     /// The output of `bindkey -L` for one keymap: one `bindkey` command for
     /// each key.
     Keys,
+    /// The output of `trap -p` and its lines so far. The code of one trap can
+    /// hold more than one line.
+    Traps {
+        /// The lines so far.
+        lines: Vec<&'a str>,
+    },
+    /// One element of `PROMPT_COMMAND` and its lines so far.
+    PromptCommand {
+        /// The lines so far.
+        lines: Vec<&'a str>,
+    },
+    /// The output of `bind -X`: the key and the command of each `bind -x`
+    /// binding.
+    KeyCommands,
     /// A function and the lines of its body so far.
     Function {
         /// The name of the function.
@@ -562,14 +618,17 @@ enum Section<'a> {
 impl<'a> Section<'a> {
     /// Adds a line that is not a record. The alias listing reads it as an
     /// alias line, and a function adds it to its body. A listing of the
-    /// widgets or of the keys reads it as a widget or a key. The origin of an
-    /// alias has no more lines, thus it ignores the line.
+    /// widgets, the keys, or the key commands reads it as one of them. The
+    /// traps and an element of `PROMPT_COMMAND` add it to their lines. The
+    /// origin of an alias has no more lines, thus it ignores the line.
     fn push(&mut self, line: &'a str, definitions: &mut Definitions) {
         match self {
             Self::Aliases => read_alias_line(line, definitions),
             Self::AliasOrigin { .. } => {}
             Self::Widgets => definitions.starts.read_widget_line(line),
             Self::Keys => definitions.starts.read_key_line(line),
+            Self::KeyCommands => definitions.starts.read_key_command_line(line),
+            Self::Traps { lines } | Self::PromptCommand { lines } => lines.push(line),
             Self::Function { body, .. } => body.push(line),
         }
     }
@@ -578,7 +637,12 @@ impl<'a> Section<'a> {
     /// that is not known, and an origin in the alias listing, change nothing.
     fn set_origin(&self, text: &str, definitions: &mut Definitions) {
         match self {
-            Self::Aliases | Self::Widgets | Self::Keys => {}
+            Self::Aliases
+            | Self::Widgets
+            | Self::Keys
+            | Self::Traps { .. }
+            | Self::PromptCommand { .. }
+            | Self::KeyCommands => {}
             Self::AliasOrigin { name, suffix } => {
                 if let Some(origin) = Origin::from_trace(text) {
                     let table = if *suffix {
@@ -599,10 +663,20 @@ impl<'a> Section<'a> {
         }
     }
 
-    /// Ends the section. A function reads its body.
+    /// Ends the section. A function reads its body. The traps and an element
+    /// of `PROMPT_COMMAND` read their lines as one text.
     fn finish(self, definitions: &mut Definitions) {
-        if let Self::Function { name, body } = self {
-            read_function(name, &body.join("\n"), definitions);
+        match self {
+            Self::Function { name, body } => read_function(name, &body.join("\n"), definitions),
+            Self::Traps { lines } => definitions.starts.read_traps(&lines.join("\n")),
+            Self::PromptCommand { lines } => definitions
+                .starts
+                .add_code(Trigger::PromptCommand, &lines.join("\n")),
+            Self::Aliases
+            | Self::AliasOrigin { .. }
+            | Self::Widgets
+            | Self::Keys
+            | Self::KeyCommands => {}
         }
     }
 }
@@ -683,6 +757,9 @@ pub fn parse_output(stdout: &str, marker: &Marker) -> Result<Definitions, ShellE
             }
             Record::Widgets => Section::Widgets,
             Record::Keymap => Section::Keys,
+            Record::Traps => Section::Traps { lines: Vec::new() },
+            Record::PromptCommand => Section::PromptCommand { lines: Vec::new() },
+            Record::KeyCommands => Section::KeyCommands,
         };
         std::mem::replace(&mut section, next).finish(&mut definitions);
     }

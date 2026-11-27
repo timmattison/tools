@@ -61,6 +61,27 @@ const BINDKEY_COMMAND: &str = "bindkey";
 /// The option of `bindkey` that binds a key to a string, not to a widget.
 const STRING_BINDING_OPTION: &str = "-s";
 
+/// The command of each line that `trap -p` writes.
+const TRAP_COMMAND: &str = "trap";
+
+/// The word that ends the options of `trap`.
+const END_OF_OPTIONS: &str = "--";
+
+/// The start of the name of a signal in the output of the bash `trap -p`, for
+/// example `SIGINT`.
+const SIGNAL_PREFIX: &str = "SIG";
+
+/// The quote around the key and around the command in the output of
+/// `bind -X`.
+const DOUBLE_QUOTE: char = '"';
+
+/// The character that escapes the next character in the output of `bind -X`.
+const BACKSLASH: char = '\\';
+
+/// The character after the key in the output of `bind -X` of a bash older
+/// than 5.3.
+const KEY_END: char = ':';
+
 /// One event of the shell that runs code without a typed name.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Trigger {
@@ -122,6 +143,48 @@ fn one_call(line: &str, command: &str) -> Option<CommandWord> {
     }
 }
 
+/// Reads one text in double quotes at the start of `text`. Gives the text
+/// between the quotes, with each backslash and the character after it as they
+/// are, and the rest of `text` after the closing quote. Gives `None` when
+/// `text` does not start with a quote or has no closing quote.
+fn double_quoted(text: &str) -> Option<(&str, &str)> {
+    let inner = text.strip_prefix(DOUBLE_QUOTE)?;
+    let mut escaped = false;
+    for (index, character) in inner.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if character == BACKSLASH {
+            escaped = true;
+        } else if character == DOUBLE_QUOTE {
+            let rest = inner.get(index + DOUBLE_QUOTE.len_utf8()..)?;
+            return Some((inner.get(..index)?, rest));
+        }
+    }
+    None
+}
+
+/// Removes one level of backslashes from `text`: a backslash before a
+/// backslash or a quote goes away. A different backslash stays.
+fn unescape(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut characters = text.chars();
+    while let Some(character) = characters.next() {
+        if character != BACKSLASH {
+            result.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some(next) if next == BACKSLASH || next == DOUBLE_QUOTE => result.push(next),
+            Some(next) => {
+                result.push(BACKSLASH);
+                result.push(next);
+            }
+            None => result.push(BACKSLASH),
+        }
+    }
+    result
+}
+
 impl Starts {
     /// Keeps the function `name` that `trigger` runs. An empty name changes
     /// nothing.
@@ -180,5 +243,52 @@ impl Starts {
             .entry(widget.clone())
             .or_default()
             .insert(key.clone());
+    }
+
+    /// Keeps the code `text` that `trigger` runs. A text that holds only
+    /// blanks changes nothing.
+    pub(crate) fn add_code(&mut self, trigger: Trigger, text: &str) {
+        if !text.trim().is_empty() {
+            self.code.push((trigger, text.to_owned()));
+        }
+    }
+
+    /// Reads the output of the bash `trap -p`: one `trap -- 'code' SIGNAL`
+    /// command for each signal. The code of each signal is one text, and the
+    /// name of the signal loses its `SIG`. A text that does not parse changes
+    /// nothing.
+    pub(crate) fn read_traps(&mut self, text: &str) {
+        let Parsed::Words(words) = command_words(text, &Aliases::new()) else {
+            return;
+        };
+        for word in words.into_iter().filter(|word| word.word == TRAP_COMMAND) {
+            let args = match word.args.split_first() {
+                Some((first, rest)) if first == END_OF_OPTIONS => rest,
+                _ => word.args.as_slice(),
+            };
+            let Some((code, signals)) = args.split_first() else {
+                continue;
+            };
+            for signal in signals {
+                let name = signal.strip_prefix(SIGNAL_PREFIX).unwrap_or(signal);
+                self.add_code(Trigger::Trap(name.to_owned()), code);
+            }
+        }
+    }
+
+    /// Reads one line of the bash `bind -X`: the key and the command, each in
+    /// double quotes. bash 5.3 divides them with a space, and an older bash
+    /// with a colon and a space. The key stays as bash writes it, and the
+    /// command loses one level of backslashes. A line of a different form
+    /// changes nothing.
+    pub(crate) fn read_key_command_line(&mut self, line: &str) {
+        let Some((key, rest)) = double_quoted(line) else {
+            return;
+        };
+        let rest = rest.strip_prefix(KEY_END).unwrap_or(rest).trim_start();
+        let Some((command, _)) = double_quoted(rest) else {
+            return;
+        };
+        self.add_code(Trigger::KeyCommand(key.to_owned()), &unescape(command));
     }
 }
