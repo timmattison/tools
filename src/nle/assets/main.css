@@ -199,7 +199,8 @@ h3 {
   font-size: 12px;
 }
 
-.edit-field input {
+.edit-field input,
+.edit-field select {
   width: 100%;
   background: #1e1e2e;
   color: #cdd6f4;

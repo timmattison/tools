@@ -7606,6 +7606,7 @@ dependencies = [
  "dioxus-ssr",
  "flate2",
  "gitscratch",
+ "regex",
  "rfd 0.17.2",
  "serde",
  "serde_json",
