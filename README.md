@@ -6485,9 +6485,10 @@ becomes `h`, `e`, and the `e` comes at the time of the `r`.
 The filter removes keys only when the screen proves that the removal changes
 nothing that a viewer sees after it. The filter keeps a model of the screen,
 the emulator of the `termstate` crate. It compares the screen after the erase
-with the screen before the typed key, in each cell, in the cursor, and in each
-mode. Thus output that writes backspaces with no erase key before it stays, for
-example a progress bar. A full-screen program in which Backspace does a
+with the screen before the typed key. It compares each cell, the cursor, and the
+other state of the emulator, for example the pen and the visibility of the
+cursor. Thus output that writes backspaces with no erase key before it stays,
+for example a progress bar. A full-screen program in which Backspace does a
 different thing also stays, because its screen does not come back.
 
 | Key | Data | What goes |
