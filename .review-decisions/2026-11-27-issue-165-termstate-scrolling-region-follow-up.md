@@ -29,9 +29,30 @@ A defect that this branch adds or changes is not older. Fix it on this branch.
 
 ## Recorded defects
 
-No defect is recorded yet. Give each entry these parts:
+Give each entry these parts:
 
 - the finding ID,
 - the location in `src/termstate/src/lib.rs`,
 - the reproduction: the screen size, the bytes, the result of `termstate`,
   and the result of xterm.
+
+Each row number below starts at 0, as `scroll_region()` gives it.
+
+### 1. RIS keeps the scrolling region
+
+- **Finding:** R-20261127T195703Z#N1.
+- **Location:** `src/termstate/src/lib.rs:1995-2015`, the arm `b'c'` (RIS) of
+  the escape dispatch. The arm resets the pen, the attributes, autowrap, the
+  pending wrap and the line-drawing set, but not `scroll_top` and
+  `scroll_bottom`.
+- **Reproduction:** a screen of 80 columns and 6 rows. The bytes are
+  `ESC [ 2 ; 4 r`, `ESC c`, `ESC [ 4 ; 1 H` and `LF`. In `termstate`,
+  `scroll_region()` gives `(1, 3)` after `ESC c`, and the line feed on row 3
+  scrolls rows 1 to 3. In xterm, RIS sets the margins to the full screen, and
+  the line feed moves the cursor to row 4.
+- **Effect on the output of `nle`:** the restore of the viewport filter
+  (`src/nle/src/filters/viewport.rs:510-515`) writes `scroll_region()` with
+  DECSTBM. Thus a range after RIS writes the stale region to the real
+  terminal.
+- **Fix:** in the RIS arm, set `scroll_top` to 0 and `scroll_bottom` to the
+  last row.
