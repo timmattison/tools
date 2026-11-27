@@ -30,7 +30,7 @@
 //! Each event keeps its data, its type, and its place in the list.
 
 use crate::error::NleError;
-use crate::pipeline::{FilterRegistry, Span};
+use crate::pipeline::{FilterRegistry, Span, SpanContext};
 use crate::types::{
     AppliedFilter, Event, EventType, FilterKind, FilterOptions, FilterRegion, Seconds,
 };
@@ -184,7 +184,11 @@ impl Normalization {
 
 /// Put the keys of each burst at the rate, and move the other events with
 /// them, by the rules of the module doc.
-fn normalize(span: Span, options: &FilterOptions) -> Result<Span, String> {
+fn normalize(
+    span: Span,
+    _context: SpanContext<'_>,
+    options: &FilterOptions,
+) -> Result<Span, String> {
     let settings = Normalization::from_options(options)?;
     let keys = new_keys(&span.events, &settings);
     let length = new_time(span.length, keys.last().copied(), None);
