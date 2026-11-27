@@ -649,8 +649,7 @@ impl Parser {
         if final_char == 'M' && params.is_empty() && intermediates.is_empty() {
             // An X10 mouse report: three more characters. When the data ends
             // before them and more data follows, the report waits for its rest.
-            if self.chars.len().saturating_sub(self.pos) < X10_REPORT_LENGTH
-                && self.defer(start, 0)
+            if self.chars.len().saturating_sub(self.pos) < X10_REPORT_LENGTH && self.defer(start, 0)
             {
                 return;
             }
