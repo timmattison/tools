@@ -68,8 +68,8 @@ The name sits between two NUL bytes at the head of the hash input. No unnamed
 input can start with a NUL:
 
 - A user id is decimal digits.
-- The crate removes each NUL from a login name, also from a name that a caller
-  builds by hand.
+- The crate removes each NUL from a login name, also from a `UserSalt::Name`
+  that a caller builds by hand.
 - An empty login name puts the `\n` separator first.
 
 Thus a named derivation never hashes the same input as an unnamed one. The
