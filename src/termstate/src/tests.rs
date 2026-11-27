@@ -1369,19 +1369,30 @@ fn the_theme_counts_although_only_a_palette_color_differs() {
 }
 
 #[test]
-fn an_attribute_of_the_pen_counts_although_the_screen_is_the_same() {
-    assert!(feed_text("ab") != feed_text("ab\x1b[7m"));
+fn each_attribute_of_the_pen_counts_although_the_screen_is_the_same() {
+    for (on, _, _, _) in attributes() {
+        assert!(
+            feed_text("ab") != feed_text(&format!("ab\x1b[{on}m")),
+            "SGR {on}"
+        );
+    }
 }
 
 #[test]
-fn the_source_of_a_pen_color_counts_although_its_rgb_is_the_same() {
+fn the_source_of_each_pen_color_counts_although_its_rgb_is_the_same() {
     // A base color and a 24-bit color of the same RGB value paint the same
     // cell, but a later change of the theme changes only the base color.
     let (r, g, b) = TerminalTheme::auto().red;
+
     let base = feed_text("ab\x1b[31m");
     let rgb = feed_text(&format!("ab\x1b[38;2;{r};{g};{b}m"));
     assert_eq!(base.current_fg, rgb.current_fg);
-    assert!(base != rgb);
+    assert!(base != rgb, "foreground");
+
+    let base = feed_text("ab\x1b[41m");
+    let rgb = feed_text(&format!("ab\x1b[48;2;{r};{g};{b}m"));
+    assert_eq!(base.current_bg, rgb.current_bg);
+    assert!(base != rgb, "background");
 }
 
 #[test]
