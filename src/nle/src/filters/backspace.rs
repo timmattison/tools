@@ -12,12 +12,15 @@ pub const KIND: &str = "backspace-removal";
 /// The data of the Backspace key of most terminals (DEL).
 const DEL: &str = "\x7f";
 
+/// The data of the Ctrl+H key (BS). Many terminals send it for Backspace.
+const BS: &str = "\x08";
+
 /// What the data of an input event is, for this filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Key {
     /// One printable character.
     Typed,
-    /// The Backspace key.
+    /// The Backspace key, as DEL or as BS.
     EraseChar,
     /// Any other input. It ends the line that the filter follows.
     Other,
@@ -25,7 +28,7 @@ enum Key {
 
 /// The key that `data`, the data of an input event, is.
 fn key_of(data: &str) -> Key {
-    if data == DEL {
+    if data == DEL || data == BS {
         return Key::EraseChar;
     }
     let mut chars = data.chars();
