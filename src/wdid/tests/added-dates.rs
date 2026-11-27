@@ -48,6 +48,37 @@ fn an_alias_command_defines_each_of_its_names() {
         defined_names("alias -s md=glow txt=less"),
         vec![Defined::alias("*.md"), Defined::alias("*.txt")]
     );
+    let braces = [
+        ("alias -s {md,txt}=glow", vec!["*.md", "*.txt"]),
+        ("alias {a1,a2}=y", vec!["a1", "a2"]),
+        ("alias {b=1,c=2}", vec!["b", "c"]),
+        ("alias x{p,{q,r}}=z", vec!["xp", "xq", "xr"]),
+        ("alias {a,\"b c\"}=w", vec!["a", "b c"]),
+        ("alias x={a,b}", vec!["x"]),
+    ];
+    for (line, names) in braces {
+        let expected: Vec<Defined> = names.into_iter().map(Defined::alias).collect();
+        assert_eq!(defined_names(line), expected, "{line}");
+    }
+}
+
+/// Only the shell knows the name of a word that holds an expansion, a glob,
+/// or a brace sequence, thus such a word defines nothing. A brace list that
+/// grows past the cap of 1024 words defines nothing too, which bounds the
+/// work for one line of a dotfile.
+#[test]
+fn an_alias_name_that_the_shell_must_expand_defines_nothing() {
+    let too_long = format!("alias {}=x", "{a,b}".repeat(11));
+    let lines = [
+        "alias $x=y",
+        "alias \"$p\"=y",
+        "alias *x=y",
+        "alias {1..3}=n",
+        too_long.as_str(),
+    ];
+    for line in lines {
+        assert_eq!(defined_names(line), Vec::<Defined>::new(), "{line}");
+    }
 }
 
 #[test]
@@ -224,13 +255,16 @@ fn each_name_of_an_alias_command_gets_the_date() {
         "alias c1=x # c2=y",
         "alias s1=x; s2=y",
         "alias q1='open q2=z",
+        "alias -s {jpg,png}=open",
+        "alias {a1,a2}=y",
     ];
     let hunk: String = added.iter().map(|line| format!("+{line}\n")).collect();
-    let log = format!("\u{0}2025-01-01\n\ndiff --git a/f b/f\n@@ -0,0 +1,8 @@\n{hunk}");
+    let log = format!("\u{0}2025-01-01\n\ndiff --git a/f b/f\n@@ -0,0 +1,10 @@\n{hunk}");
     let dates = added_dates(&log);
     let names: BTreeSet<Defined> = dates.keys().cloned().collect();
     let expected: BTreeSet<Defined> = [
-        "gs", "gd", "G", "L", "*.md", "*.txt", "gp", "h", "w", "c1", "s1", "q1",
+        "gs", "gd", "G", "L", "*.md", "*.txt", "gp", "h", "w", "c1", "s1", "q1", "*.jpg", "*.png",
+        "a1", "a2",
     ]
     .into_iter()
     .map(Defined::alias)
