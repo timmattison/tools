@@ -353,6 +353,9 @@ pub(crate) struct Painter {
     clean: TerminalState,
     /// The screen as the viewer sees it.
     shown: TerminalState,
+    /// The number of times that `paint` scanned the grid.
+    #[cfg(test)]
+    scans: usize,
 }
 
 impl Painter {
@@ -366,6 +369,8 @@ impl Painter {
         Some(Self {
             clean: TerminalState::new(width, height, replay_theme()),
             shown: TerminalState::new(width, height, replay_theme()),
+            #[cfg(test)]
+            scans: 0,
         })
     }
 
@@ -379,6 +384,10 @@ impl Painter {
     /// `overlay` on top, or `None` when the viewer sees that already. The
     /// painter feeds this output to its own copy of the screen of the viewer.
     pub(crate) fn paint(&mut self, overlay: Option<&Overlay>) -> Option<String> {
+        #[cfg(test)]
+        {
+            self.scans += 1;
+        }
         let mut body = String::new();
         let mut any_cell = false;
         // The position and the style of the cell that was written last.

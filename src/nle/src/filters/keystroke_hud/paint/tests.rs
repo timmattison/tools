@@ -417,3 +417,57 @@ fn the_repair_selects_a_character_set_only_when_the_sets_differ() {
     assert!(!repair.contains("\x1b("), "{repair:?}");
     rig.assert_viewer_is_reference();
 }
+
+#[test]
+fn a_paint_with_no_box_scans_nothing_while_the_replays_agree() {
+    let screen = size(20, 8);
+    let mut rig = Rig::new(screen, &TerminalTheme::auto());
+    for _ in 0..100 {
+        rig.feed("line\r\n");
+        assert!(rig.paint(None).is_none());
+    }
+    assert_eq!(rig.painter.scans, 0);
+    let overlay = box_of(screen, Position::TopRight, "ls");
+    assert!(rig.paint(Some(&overlay)).is_some());
+    rig.paint(None);
+    rig.feed("y");
+    rig.paint(None);
+    let scans = rig.painter.scans;
+    for _ in 0..100 {
+        rig.feed("z");
+        rig.paint(None);
+    }
+    assert_eq!(rig.painter.scans, scans);
+    rig.assert_viewer_is_reference();
+}
+
+#[test]
+fn a_restore_of_the_program_after_the_replays_agree_is_repaired() {
+    let screen = size(20, 8);
+    let mut rig = Rig::new(screen, &TerminalTheme::auto());
+    let overlay = box_of(screen, Position::TopRight, "ls");
+    rig.feed("\x1b[5;5H\x1b7\x1b[1;1H");
+    assert!(rig.paint(Some(&overlay)).is_some());
+    rig.paint(None);
+    rig.feed("y");
+    rig.paint(None);
+    rig.feed("\x1b8X");
+    rig.paint(None);
+    rig.assert_viewer_is_reference();
+}
+
+#[test]
+fn an_unfinished_sequence_of_the_program_keeps_the_scan() {
+    let screen = size(20, 8);
+    let mut rig = Rig::new(screen, &TerminalTheme::auto());
+    let overlay = box_of(screen, Position::TopRight, "ls");
+    rig.feed("ab");
+    assert!(rig.paint(Some(&overlay)).is_some());
+    rig.feed("\x1b[");
+    rig.paint(None);
+    rig.feed("");
+    rig.paint(None);
+    rig.feed("5;5HX");
+    rig.paint(None);
+    rig.assert_viewer_is_reference();
+}
