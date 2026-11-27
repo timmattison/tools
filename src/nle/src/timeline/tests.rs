@@ -427,6 +427,10 @@ fn a_ruler_never_holds_more_ticks_than_the_window_has_room_for() {
 
 #[test]
 fn a_ruler_at_the_smallest_zoom_has_no_tick_at_a_bad_place() {
-    let frame = View::default().frame(Extent::new(f64::MAX, 1200.0));
+    // At 1e-307 pixels per second, the label step grows past the range of
+    // `f64` before it leaves room for a label. The end of the window stays
+    // finite, so the ruler still looks for ticks.
+    let frame = View::default().frame(Extent::new(1e307, 1.0));
+    assert!(frame.end().is_finite());
     assert!(ruler_ticks(frame).iter().all(|tick| tick.x.is_finite()));
 }
