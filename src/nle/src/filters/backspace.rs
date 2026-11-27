@@ -1,6 +1,9 @@
 //! The backspace removal filter: it removes typing errors and the backspaces
 //! that erase them.
 
+use std::collections::VecDeque;
+use std::ops::Range;
+
 use termstate::{TerminalState, TerminalTheme};
 
 use crate::pipeline::{FilterRegistry, Span, SpanContext};
@@ -97,8 +100,7 @@ fn remove_backspacing(
 /// Walk `events` and mark the events that the filter removes. `screen` is the
 /// screen at the start of the events.
 fn mark_removed(events: &[Event], screen: &mut TerminalState) -> Result<Vec<bool>, String> {
-    let mut removed = vec![false; events.len()];
-    let mut stack: Vec<TypedKey> = Vec::new();
+    let mut walk = Walk::new(events.len());
     let mut index = 0;
     while let Some(event) = events.get(index) {
         if event.event_type == EventType::Output {
@@ -117,84 +119,104 @@ fn mark_removed(events: &[Event], screen: &mut TerminalState) -> Result<Vec<bool
         for output in events.get(index + 1..unit_end).unwrap_or_default() {
             feed(screen, output)?;
         }
+        let unit = index..unit_end;
         match (key, before) {
-            (Key::Typed, Some(before)) => stack.push(TypedKey {
-                first: index,
-                before,
-            }),
-            (Key::EraseChar, Some(before)) => match stack.last() {
-                Some(newest) if *screen == newest.before => {
-                    mark(&mut removed, newest.first, unit_end);
-                    stack.pop();
-                }
-                _ => erase_without_typed_key(
-                    &mut removed,
-                    &mut stack,
-                    index..unit_end,
-                    screen == &before,
-                ),
-            },
+            (Key::Typed, Some(before)) => walk.push(index, before),
+            (Key::EraseChar, Some(before)) => walk.erase_char(unit, screen, &before),
             (Key::EraseWord | Key::EraseLine, Some(before)) => {
-                erase_many(&mut removed, &mut stack, index..unit_end, screen, &before);
+                walk.erase_many(unit, screen, &before);
             }
-            _ => stack.clear(),
+            _ => walk.stack.clear(),
         }
         index = unit_end;
     }
-    Ok(removed)
+    Ok(walk.removed)
 }
 
-/// Mark the events from `from` up to `to` as removed.
-fn mark(removed: &mut [bool], from: usize, to: usize) {
-    if let Some(range) = removed.get_mut(from..to) {
-        range.fill(true);
-    }
+/// The state of the walk: the events marked as removed, and the typed keys of
+/// the current line. Each rule of a key is a method.
+struct Walk {
+    /// For each event, if the filter removes it.
+    removed: Vec<bool>,
+    /// The typed keys of the current line. The newest is at the back.
+    stack: VecDeque<TypedKey>,
 }
 
-/// The rule of an erase key that no typed key explains. If the key changed
-/// nothing on the screen, `unit` goes and the stack stays. Else the key
-/// changed text that no typed key wrote, so the unit stays and the stack ends.
-fn erase_without_typed_key(
-    removed: &mut [bool],
-    stack: &mut Vec<TypedKey>,
-    unit: std::ops::Range<usize>,
-    changed_nothing: bool,
-) {
-    if changed_nothing {
-        mark(removed, unit.start, unit.end);
-    } else {
-        stack.clear();
-    }
-}
-
-/// The rule of an erase key that can remove many typed keys. It looks for the
-/// typed keys whose screen before the key is the screen now.
-///
-/// - One match: the events from that typed key to the end of the unit go, and
-///   the stack keeps the keys before it.
-/// - More than one match: the filter cannot tell how many keys the erase
-///   removed. The unit stays and the stack ends.
-/// - No match: the rule of a key that no typed key explains.
-fn erase_many(
-    removed: &mut [bool],
-    stack: &mut Vec<TypedKey>,
-    unit: std::ops::Range<usize>,
-    screen: &TerminalState,
-    before: &TerminalState,
-) {
-    let mut matches = stack
-        .iter()
-        .enumerate()
-        .filter(|(_, typed)| typed.before == *screen)
-        .map(|(position, typed)| (position, typed.first));
-    let (first_match, second_match) = (matches.next(), matches.next());
-    match (first_match, second_match) {
-        (Some((position, first)), None) => {
-            mark(removed, first, unit.end);
-            stack.truncate(position);
+impl Walk {
+    /// A walk over `count` events, with no event removed and no typed key.
+    fn new(count: usize) -> Self {
+        Self {
+            removed: vec![false; count],
+            stack: VecDeque::new(),
         }
-        (Some(_), Some(_)) => stack.clear(),
-        (None, _) => erase_without_typed_key(removed, stack, unit, screen == before),
+    }
+
+    /// Put the typed key at event `first` on the stack. `before` is the screen
+    /// before the key.
+    fn push(&mut self, first: usize, before: TerminalState) {
+        self.stack.push_back(TypedKey { first, before });
+    }
+
+    /// Mark the events from `from` up to `to` as removed.
+    fn mark(&mut self, from: usize, to: usize) {
+        if let Some(range) = self.removed.get_mut(from..to) {
+            range.fill(true);
+        }
+    }
+
+    /// The rule of the Backspace key. `screen` is the screen after the unit,
+    /// and `before` is the screen before it.
+    ///
+    /// If the screen is the screen before the newest typed key, the events from
+    /// that key to the end of the unit go, and the key leaves the stack. Else
+    /// the rule of a key that no typed key explains applies.
+    fn erase_char(&mut self, unit: Range<usize>, screen: &TerminalState, before: &TerminalState) {
+        match self.stack.back() {
+            Some(newest) if *screen == newest.before => {
+                let first = newest.first;
+                self.mark(first, unit.end);
+                self.stack.pop_back();
+            }
+            _ => self.erase_without_typed_key(unit, screen == before),
+        }
+    }
+
+    /// The rule of an erase key that no typed key explains. If the key changed
+    /// nothing on the screen, `unit` goes and the stack stays. Else the key
+    /// changed text that no typed key wrote, so the unit stays and the stack
+    /// ends.
+    fn erase_without_typed_key(&mut self, unit: Range<usize>, changed_nothing: bool) {
+        if changed_nothing {
+            self.mark(unit.start, unit.end);
+        } else {
+            self.stack.clear();
+        }
+    }
+
+    /// The rule of an erase key that can remove many typed keys. It looks for
+    /// the typed keys whose screen before the key is the screen now.
+    ///
+    /// - One match: the events from that typed key to the end of the unit go,
+    ///   and the stack keeps the keys before it.
+    /// - More than one match: the filter cannot tell how many keys the erase
+    ///   removed. The unit stays and the stack ends.
+    /// - No match: the rule of a key that no typed key explains.
+    fn erase_many(&mut self, unit: Range<usize>, screen: &TerminalState, before: &TerminalState) {
+        let mut matches = self
+            .stack
+            .iter()
+            .enumerate()
+            .filter(|(_, typed)| typed.before == *screen)
+            .map(|(position, typed)| (position, typed.first));
+        let (first_match, second_match) = (matches.next(), matches.next());
+        match (first_match, second_match) {
+            (Some((position, first)), None) => {
+                self.mark(first, unit.end);
+                self.stack.truncate(position);
+            }
+            (Some(_), Some(_)) => self.stack.clear(),
+            (None, _) => self.erase_without_typed_key(unit, screen == before),
+        }
     }
 }
 
