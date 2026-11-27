@@ -5834,7 +5834,7 @@ Over time, a shell gets definitions that do the same thing as other definitions,
    Alias and function (git log): gl (alias, ~/.zshrc:7, 0 uses), glog (function, ~/.zshrc, 1 use)
    ```
 
-3. **Defined more than one time.** Your startup files define an alias name two or more times. The finding gives each `file:line` in order, and the last one is in effect. The wrapper function `alias` records each definition (see [The origin and my definitions](#the-origin-and-my-definitions)). Two definitions at the same `file:line` count one time, for example from a file that your startup files source two times. zsh keeps only the last definition of a function, and bash keeps no origin for an alias. Thus this kind covers zsh aliases only.
+3. **Defined more than one time.** Your startup files define an alias name two or more times. The finding gives each `file:line` in order, and the last one is in effect. The wrapper function `alias` records each definition (see [The origin and my definitions](#the-origin-and-my-definitions)). Two definitions at the same `file:line` count one time, for example from a file that your startup files source two times. Each definition at an unknown place counts, because `wdid` cannot tell if two unknown places are one place. zsh keeps only the last definition of a function, and bash keeps no origin for an alias. Thus this kind covers zsh aliases only.
 
    ```text
    Defined 2 times: ll (alias, 4 uses) at ~/.oh-my-zsh/lib/directories.zsh:30, ~/.zshrc:12 (in effect)

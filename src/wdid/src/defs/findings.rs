@@ -208,13 +208,16 @@ fn alias_and_function(definitions: &Definitions, entries: &Entries<'_>) -> Vec<F
     found
 }
 
-/// Gives `places` without each place that a later place repeats. The order
-/// stays, and the last occurrence of a place stays.
+/// Gives `places` without each known place that a later place repeats. The
+/// order stays, and the last occurrence of a place stays. Each unknown place
+/// stays, because two unknown places are not known to be the same place.
 fn last_occurrences(places: &[Option<Origin>]) -> Vec<Option<Origin>> {
     places
         .iter()
         .enumerate()
-        .filter(|(index, place)| !places.iter().skip(index + 1).any(|later| later == *place))
+        .filter(|(index, place)| {
+            place.is_none() || !places.iter().skip(index + 1).any(|later| later == *place)
+        })
         .map(|(_, place)| place.clone())
         .collect()
 }
