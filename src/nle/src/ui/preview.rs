@@ -135,8 +135,15 @@ pub(super) fn PreviewPane(
                 .insert(current.unwrap_or_else(|| Preview::new(Arc::clone(&recording.0), theme)));
             Some(Ok(Screen::of(preview.seek(at))))
         }
-        Some(Err(error)) => Some(Err(error.clone())),
-        None => None,
+        Some(Err(error)) => {
+            // The pane cannot show the old engine, so drop it and its snapshots.
+            engine.borrow_mut().take();
+            Some(Err(error.clone()))
+        }
+        None => {
+            engine.borrow_mut().take();
+            None
+        }
     };
     // The playhead held at or below the end, as the readout shows it.
     let shown = {
