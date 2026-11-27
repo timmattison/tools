@@ -42,7 +42,7 @@ const fn sgr_color_byte(param: u16) -> u8 {
 
 /// The colors of one terminal theme: the default background and foreground,
 /// and the 16 base ANSI colors.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalTheme {
     /// The default background color.
     pub background: (u8, u8, u8),
@@ -416,11 +416,72 @@ impl Clone for TerminalState {
     }
 }
 
+/// Two terminals are equal when each later byte has the same effect on both.
+///
+/// Thus they hold the same screen, cursor, pen, saved cursor, scroll region,
+/// character set, cursor visibility, palette, selection and override colors,
+/// theme, and size, and the same unfinished escape sequence.
+///
+/// The parser is not compared. By the argument on `Clone`, a parser is in the
+/// state that `Parser::new()` reaches after it reads `pending`, so two equal
+/// `pending` buffers give two parsers in the same state.
 impl PartialEq for TerminalState {
-    fn eq(&self, _other: &Self) -> bool {
-        false
+    fn eq(&self, other: &Self) -> bool {
+        // A destructure, so that a new field fails to compile until this
+        // comparison names it.
+        let Self {
+            grid,
+            cursor_x,
+            cursor_y,
+            width,
+            height,
+            theme,
+            current_fg,
+            current_bg,
+            bold,
+            italic,
+            underline,
+            parser: _,
+            pending,
+            saved_cursor_x,
+            saved_cursor_y,
+            scroll_top,
+            scroll_bottom,
+            use_acs,
+            cursor_visible,
+            dynamic_palette,
+            selection_fg,
+            selection_bg,
+            override_fg,
+            override_bg,
+        } = self;
+        *cursor_x == other.cursor_x
+            && *cursor_y == other.cursor_y
+            && *width == other.width
+            && *height == other.height
+            && *current_fg == other.current_fg
+            && *current_bg == other.current_bg
+            && *bold == other.bold
+            && *italic == other.italic
+            && *underline == other.underline
+            && *pending == other.pending
+            && *saved_cursor_x == other.saved_cursor_x
+            && *saved_cursor_y == other.saved_cursor_y
+            && *scroll_top == other.scroll_top
+            && *scroll_bottom == other.scroll_bottom
+            && *use_acs == other.use_acs
+            && *cursor_visible == other.cursor_visible
+            && *selection_fg == other.selection_fg
+            && *selection_bg == other.selection_bg
+            && *override_fg == other.override_fg
+            && *override_bg == other.override_bg
+            && *theme == other.theme
+            && *dynamic_palette == other.dynamic_palette
+            && *grid == other.grid
     }
 }
+
+impl Eq for TerminalState {}
 
 impl Default for Cell {
     fn default() -> Self {
