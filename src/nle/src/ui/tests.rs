@@ -1004,3 +1004,15 @@ async fn a_new_recording_starts_at_time_zero() {
     assert!(!page.contains(&x_run(2)), "{page}");
     assert!(page.contains("value=\"0\""), "{page}");
 }
+
+#[tokio::test]
+async fn a_playhead_past_the_end_stops_at_the_end() {
+    let mut window = open_recording().await;
+    let control = window.playhead_control();
+    window.type_into(control, "999");
+    let page = window.html();
+    assert!(page.contains("value=\"65.3\""), "{page}");
+    assert!(page.contains(&x_run(42)), "{page}");
+    window.type_into(control, "-1");
+    assert!(window.html().contains("value=\"65.3\""));
+}
