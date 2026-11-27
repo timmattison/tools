@@ -1,6 +1,6 @@
 //! The view of the timeline: the zoom buttons, the ruler, the tracks with a
-//! block for each clip, the event density of each clip, and the marks where
-//! the terminal size changes.
+//! block for each clip, the event density of each clip, the marks where the
+//! terminal size changes, and the chapter markers.
 //!
 //! The view shows project time, before the filters. `App` holds the zoom and
 //! the scroll, so a new recording opens with the whole project in the window.
@@ -22,7 +22,7 @@ use crate::timeline::{
     ClipEvents, EventCache, Extent, Frame, KeyAction, SizeMark, View, Wheel, WheelAction,
     WheelUnit, TILE_WIDTH, ZOOM_STEP,
 };
-use crate::types::{Clip, EditProject};
+use crate::types::{ChapterMarker, Clip, EditProject};
 
 /// The width of the view in pixels until the first resize event gives the
 /// real width. The window opens a little wider than this width.
@@ -85,6 +85,11 @@ pub(super) fn TimelineView(loaded: ReadSignal<Option<Document>>, view: Signal<Vi
     let marks: Vec<MarkRow> = size_marks(project)
         .iter()
         .filter_map(|mark| MarkRow::of(mark, frame))
+        .collect();
+    let chapters: Vec<ChapterRow> = project
+        .chapters
+        .iter()
+        .filter_map(|chapter| ChapterRow::of(chapter, frame))
         .collect();
 
     // Each handler reads the width when the event comes, so a resize that
@@ -249,6 +254,19 @@ pub(super) fn TimelineView(loaded: ReadSignal<Option<Document>>, view: Signal<Vi
                     }
                 }
             }
+            for chapter in chapters {
+                div {
+                    key: "{chapter.key}",
+                    class: "chapter-mark",
+                    style: "left: {chapter.x}px;",
+                    span {
+                        class: "chapter-mark-label",
+                        title: "{chapter.description}",
+                        aria_label: "{chapter.description}",
+                        "{chapter.label}"
+                    }
+                }
+            }
         }
     }
 }
@@ -400,6 +418,36 @@ impl MarkRow {
                 to.1,
                 format_clock(mark.time, true)
             ),
+        })
+    }
+}
+
+/// A chapter marker as the view draws it.
+struct ChapterRow {
+    /// The identifier of the chapter, as the key of the element.
+    key: u64,
+    /// The place of the marker in the window, in pixels.
+    x: f64,
+    /// The label of the chapter.
+    label: String,
+    /// The chapter in one sentence, for the pointer and for a screen reader.
+    description: String,
+}
+
+impl ChapterRow {
+    /// The row of `chapter` in `frame`, or `None` for a chapter outside the
+    /// window.
+    fn of(chapter: &ChapterMarker, frame: Frame) -> Option<Self> {
+        let time = chapter.time.get();
+        let x = frame.x_of(time);
+        if !(0.0..=frame.width()).contains(&x) {
+            return None;
+        }
+        Some(Self {
+            key: chapter.id.0,
+            x,
+            label: chapter.label.clone(),
+            description: format!("Chapter {} at {}", chapter.label, format_clock(time, true)),
         })
     }
 }

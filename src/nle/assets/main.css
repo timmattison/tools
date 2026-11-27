@@ -291,6 +291,28 @@ body,
   pointer-events: auto;
 }
 
+.chapter-mark {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 4;
+  border-left: 1px solid #89b4fa;
+  pointer-events: none;
+}
+
+.chapter-mark-label {
+  position: absolute;
+  top: 0;
+  left: 2px;
+  padding: 0 3px;
+  border-radius: 2px;
+  background: #89b4fa;
+  color: #1e1e2e;
+  font-size: 10px;
+  white-space: nowrap;
+  pointer-events: auto;
+}
+
 .properties-panel {
   grid-area: properties;
   background: #181825;

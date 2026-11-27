@@ -6604,7 +6604,7 @@ A desktop application for the terminal recordings that `beta` writes. It opens
 a `.json` or `.json.gz` recording, makes an edit project of it, shows its
 metadata, shows its clips on a timeline, and plays the edited recording in its
 preview pane. The window can add, edit, and remove the chapter markers of the
-project.
+project, and the timeline shows them.
 
 The preview pane draws the terminal of the edited recording at the playhead.
 Drag the playhead control under **Timeline** to go to a time. **Play** plays
@@ -6623,6 +6623,7 @@ of its recording, and the lines in the block show how many events each part of
 the clip holds. The ruler above the tracks shows the time, and its labels
 adapt to the zoom. A dashed line marks the start of a clip whose terminal size
 differs from the size of the clip before it, with the new size as its label.
+A blue line marks the time of each chapter, with its label on the ruler.
 
 - Click **−** or **+** to zoom out or in, or click the tracks and press `-` or
   `+`.
@@ -6794,9 +6795,10 @@ rendered recording is not in it.
 
 `beta export web` shows the chapters of a rendered recording as markers on the
 progress bar. A click on a marker moves the player to that chapter.
-`beta export video` writes them into an MP4 as chapters. Markers on the
-timeline, and a click on a marker that moves the playhead to its chapter, wait
-for the timeline (issue #150). The chapter panel does not read or move the
+`beta export video` writes them into an MP4 as chapters. The timeline
+shows a marker at the time of each chapter, with its label. A click on a marker
+that moves the playhead to its chapter waits for the playhead on the timeline
+(issue #820). The chapter panel does not read or move the
 playhead. The playhead is a time of the edited recording, but the time of a
 chapter is before the filters.
 
