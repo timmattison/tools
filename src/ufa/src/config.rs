@@ -2366,6 +2366,33 @@ mod tests {
         assert_report_hides_the_key(&error, "line 3, column 37", &contents);
     }
 
+    /// An error at the end of a file that ends with a newline names the last
+    /// line, one column after its newline, as `toml_edit` names it. The final
+    /// newline does not start a line. Setup writes each file with a final
+    /// newline, and an open array or an open multi-line string on the last
+    /// line puts the error at the end of the text.
+    #[test]
+    fn a_parse_error_at_the_end_of_the_file_names_the_last_line() {
+        let open_string_line = format!("api_key = \"\"\"{PASTED_KEY}");
+        let open_string_column = open_string_line.chars().count().saturating_add(2);
+        for (contents, position) in [
+            (
+                format!("url = \"https://192.168.1.1\"\n{open_string_line}\n"),
+                format!("line 2, column {open_string_column}."),
+            ),
+            (
+                "url = [\"a\",\n".to_string(),
+                "line 1, column 13.".to_string(),
+            ),
+        ] {
+            let error = Config::default()
+                .written_over(&contents)
+                .expect_err("a config file that cannot be parsed is a fault");
+
+            assert_report_hides_the_key(&error, &position, &contents);
+        }
+    }
+
     /// A config file that a person wrote, with comments as in the sample of
     /// the README, and with a key that this version of `ufa` does not know.
     const HAND_WRITTEN_CONFIG: &str = "\
