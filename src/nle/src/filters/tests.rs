@@ -38,3 +38,8 @@ fn a_project_with_the_cursor_filter_renders_through_the_app_registry() {
         .collect();
     assert_eq!(data, vec![(0.0, "\x1b[?25l"), (1.0, "x")]);
 }
+
+#[test]
+fn the_app_registry_holds_the_color_scheme_filter() {
+    assert!(registry().contains(&color_scheme::kind()));
+}

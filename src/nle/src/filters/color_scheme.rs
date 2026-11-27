@@ -45,9 +45,10 @@
 use serde_json::Value;
 use termstate::TerminalTheme;
 
+use crate::pipeline::{FilterRegistry, RegionView};
 use crate::preview::screen::Rgb;
 use crate::preview::PreviewTheme;
-use crate::types::{AppliedFilter, FilterKind, FilterOptions, FilterRegion};
+use crate::types::{AppliedFilter, Event, FilterKind, FilterOptions, FilterRegion};
 
 /// The kind of the color scheme filter.
 pub const KIND: &str = "color-scheme";
@@ -663,6 +664,20 @@ impl Converter {
             .collect();
         changed.then(|| texts.join(";"))
     }
+}
+
+/// Register the color scheme filter under `KIND`.
+pub fn register(registry: &mut FilterRegistry) {
+    registry.register_in_place(kind(), filter);
+}
+
+/// The color scheme filter.
+fn filter(
+    events: &[Event],
+    _region: RegionView,
+    _options: &FilterOptions,
+) -> Result<Vec<Event>, String> {
+    Ok(events.to_vec())
 }
 
 #[cfg(test)]

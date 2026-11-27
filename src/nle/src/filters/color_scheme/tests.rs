@@ -3,6 +3,8 @@
 use serde_json::json;
 
 use super::*;
+use crate::error::NleError;
+use crate::types::{EventType, Seconds};
 
 /// The options that `value`, a JSON object, gives.
 fn options(value: serde_json::Value) -> FilterOptions {
@@ -515,5 +517,157 @@ fn the_texts_of_the_items_give_back_the_parameters() {
         "x;y",
     ] {
         assert_eq!(joined(params), params, "{params:?}");
+    }
+}
+
+// Tests of the stream.
+
+/// The OSC 10 and OSC 11 that set Solarized Light.
+const SOLARIZED_LIGHT_START: &str = "\x1b]10;#657b83\x1b\\\x1b]11;#fdf6e3\x1b\\";
+
+/// The SGR that sets the Solarized Light red as the foreground.
+const LIGHT_RED: &str = "\x1b[38;2;220;50;47m";
+
+/// An output event.
+fn out(time: f64, data: &str) -> Event {
+    Event {
+        time,
+        event_type: EventType::Output,
+        data: data.to_string(),
+    }
+}
+
+/// An input event.
+fn input(time: f64, data: &str) -> Event {
+    Event {
+        time,
+        event_type: EventType::Input,
+        data: data.to_string(),
+    }
+}
+
+fn range(start: f64, end: f64) -> FilterRegion {
+    FilterRegion::Range {
+        start: Seconds::new(start).unwrap(),
+        end: Seconds::new(end).unwrap(),
+    }
+}
+
+/// Run the color scheme filter with `options` on `region` of `events`.
+fn run(
+    events: Vec<Event>,
+    options: serde_json::Value,
+    region: FilterRegion,
+) -> Result<Vec<Event>, NleError> {
+    let mut registry = FilterRegistry::new();
+    register(&mut registry);
+    registry.run(
+        events,
+        &[AppliedFilter {
+            kind: kind(),
+            region,
+            options: self::options(options),
+        }],
+    )
+}
+
+/// The events of `run` with the Solarized Light theme, as (time, data).
+fn light(events: Vec<Event>, region: FilterRegion) -> Vec<(f64, String)> {
+    run(events, json!({ "theme": "solarized-light" }), region)
+        .unwrap()
+        .into_iter()
+        .map(|event| (event.time, event.data))
+        .collect()
+}
+
+#[test]
+fn the_answer_starts_with_the_default_colors_of_the_theme() {
+    let answer = light(vec![out(1.0, "hi")], FilterRegion::All);
+
+    assert_eq!(
+        answer,
+        vec![
+            (0.0, SOLARIZED_LIGHT_START.to_string()),
+            (1.0, "hi".to_string())
+        ]
+    );
+}
+
+#[test]
+fn an_sgr_color_becomes_the_color_of_the_theme_in_the_same_event() {
+    let answer = light(vec![out(1.0, "\x1b[31mred")], FilterRegion::All);
+
+    assert_eq!(answer.get(1), Some(&(1.0, format!("{LIGHT_RED}red"))));
+}
+
+#[test]
+fn text_other_sequences_and_input_events_stay() {
+    let events = vec![
+        out(1.0, "a\x1b[1;4mb\x1b[2J\x1b[?25l"),
+        input(1.5, "\x1b[31m"),
+        out(2.0, "c"),
+    ];
+
+    let answer = light(events, FilterRegion::All);
+
+    assert_eq!(
+        answer,
+        vec![
+            (0.0, SOLARIZED_LIGHT_START.to_string()),
+            (1.0, "a\x1b[1;4mb\x1b[2J\x1b[?25l".to_string()),
+            (1.5, "\x1b[31m".to_string()),
+            (2.0, "c".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn an_sgr_split_over_two_events_gives_its_replacement_in_the_second() {
+    let answer = light(
+        vec![out(1.0, "ab\x1b[3"), out(2.0, "1mx")],
+        FilterRegion::All,
+    );
+
+    assert_eq!(
+        answer,
+        vec![
+            (0.0, SOLARIZED_LIGHT_START.to_string()),
+            (1.0, "ab".to_string()),
+            (2.0, format!("{LIGHT_RED}x")),
+        ]
+    );
+}
+
+#[test]
+fn swap_writes_the_background_in_osc_10_and_the_foreground_in_osc_11() {
+    let answer = run(
+        vec![out(1.0, "hi")],
+        json!({ "theme": "solarized-light", "swap": true }),
+        FilterRegion::All,
+    )
+    .unwrap();
+
+    assert_eq!(
+        answer.first().map(|event| event.data.as_str()),
+        Some("\x1b]10;#fdf6e3\x1b\\\x1b]11;#657b83\x1b\\")
+    );
+}
+
+#[test]
+fn an_empty_region_of_all_gives_no_event() {
+    assert_eq!(light(Vec::new(), FilterRegion::All), vec![]);
+}
+
+#[test]
+fn bad_options_fail_the_render_with_the_kind_in_the_message() {
+    let result = run(
+        vec![out(0.0, "hi")],
+        json!({ "theme": "no-such-theme" }),
+        FilterRegion::All,
+    );
+
+    match result {
+        Err(NleError::RenderError(message)) => assert!(message.contains("color-scheme")),
+        other => panic!("expected a RenderError, got {other:?}"),
     }
 }

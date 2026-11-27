@@ -15,6 +15,7 @@ use crate::pipeline::FilterRegistry;
 pub fn registry() -> FilterRegistry {
     let mut registry = FilterRegistry::new();
     cursor::register(&mut registry);
+    color_scheme::register(&mut registry);
     time_dilation::register(&mut registry);
     typing_speed::register(&mut registry);
     registry
