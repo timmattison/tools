@@ -1,6 +1,7 @@
 //! Tests of the shell definitions: the kind of the shell, the marker, the
 //! script, the parse of the output, the read of a real shell, and the resolver.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -12,6 +13,7 @@ use wdid::origin::{Origin, Places};
 use wdid::shell::{
     parse_output, read, script, Definitions, Marker, Resolver, ShellError, ShellKind,
 };
+use wdid::starts::{Starts, Trigger};
 use wdid::tool::{ToolName, ToolNames};
 
 #[test]
@@ -1600,5 +1602,231 @@ fn a_bash_shell_gets_no_temporary_zdotdir() {
     assert_eq!(
         std::fs::read_to_string(&record).unwrap(),
         "/nowhere/zdotdir"
+    );
+}
+
+/// Parses `lines` between the markers of `M` and gives the starts.
+fn starts_of(lines: &[&str]) -> Starts {
+    let definitions = parsed(&records(lines));
+    assert!(
+        definitions.unparsed_aliases.is_empty(),
+        "a line of a start is not an alias line: {:?}",
+        definitions.unparsed_aliases
+    );
+    definitions.starts
+}
+
+/// Makes a map of text to text from pairs.
+fn text_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+    pairs
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect()
+}
+
+/// Makes a set of text.
+fn text_set(items: &[&str]) -> BTreeSet<String> {
+    items.iter().map(|item| (*item).to_owned()).collect()
+}
+
+/// A hook record names the hook and the function, a trap record names the
+/// signal and the function, and the handler record names the handler.
+#[test]
+fn the_hook_trap_and_handler_records_give_their_functions() {
+    let starts = starts_of(&[
+        "M HOOK precmd precmd",
+        "M HOOK chpwd mychpwd",
+        "M TRAP INT TRAPINT",
+        "M NOT_FOUND command_not_found_handler",
+    ]);
+    assert_eq!(
+        starts.functions,
+        [
+            (Trigger::Hook("precmd".into()), "precmd".to_owned()),
+            (Trigger::Hook("chpwd".into()), "mychpwd".to_owned()),
+            (Trigger::Trap("INT".into()), "TRAPINT".to_owned()),
+            (
+                Trigger::CommandNotFound,
+                "command_not_found_handler".to_owned()
+            ),
+        ]
+    );
+}
+
+/// `zle -lL` writes one `zle` command for each widget. The function of `-N`
+/// is the widget itself when the line names no function, and the function of
+/// `-C` comes after the completion widget.
+#[test]
+fn the_widget_lines_give_the_function_of_each_widget() {
+    let starts = starts_of(&[
+        "M WIDGETS",
+        "zle -N lonely",
+        "zle -N my-widget myw",
+        "zle -N zle-keymap-select azhw:zle-keymap-select",
+        "zle -C mycomp complete-word _mycomp",
+        "zle -N 'odd widget' oddfn",
+        "zle -N",
+        "echo $(",
+    ]);
+    assert_eq!(
+        starts.widgets,
+        text_map(&[
+            ("lonely", "lonely"),
+            ("my-widget", "myw"),
+            ("zle-keymap-select", "azhw:zle-keymap-select"),
+            ("mycomp", "_mycomp"),
+            ("odd widget", "oddfn"),
+        ])
+    );
+}
+
+/// `bindkey -M <keymap> -L` writes one `bindkey` command for each key. The
+/// key is the word before the widget, without its quotes. A key in two
+/// keymaps is one key. A string binding (`-s`) starts no widget.
+#[test]
+fn the_keymap_lines_give_the_keys_of_each_widget() {
+    let starts = starts_of(&[
+        "M WIDGETS",
+        "zle -N my-widget myw",
+        "M KEYMAP emacs",
+        "bindkey -M emacs \"^R\" my-widget",
+        "bindkey -s \"^Xa\" \"abc\"",
+        "bindkey -R -M emacs \"a\"-\"z\" self-insert",
+        "M KEYMAP vicmd",
+        "bindkey -a \"^X^E\" my-widget",
+        "bindkey -a \"-\" vi-up-line-or-history",
+        "M KEYMAP main",
+        "bindkey \"^R\" my-widget",
+        "bindkey \" \" my-widget",
+    ]);
+    let expected: BTreeMap<String, BTreeSet<String>> = [
+        ("my-widget", text_set(&["^R", "^X^E", " "])),
+        ("self-insert", text_set(&["a-z"])),
+        ("vi-up-line-or-history", text_set(&["-"])),
+    ]
+    .into_iter()
+    .map(|(widget, keys)| (widget.to_owned(), keys))
+    .collect();
+    assert_eq!(starts.keys, expected);
+    assert_eq!(starts.widgets, text_map(&[("my-widget", "myw")]));
+}
+
+/// A record of `add-zle-hook-widget` names the special widget and the widget
+/// that it runs, in the order that the shell gives.
+#[test]
+fn the_zle_hook_records_give_the_widgets_of_each_special_widget() {
+    let starts = starts_of(&[
+        "M ZLE_HOOK zle-keymap-select kmsel",
+        "M ZLE_HOOK zle-line-init user:zle-line-init",
+        "M ZLE_HOOK zle-line-init other",
+    ]);
+    let expected: BTreeMap<String, Vec<String>> = [
+        ("zle-keymap-select", vec!["kmsel".to_owned()]),
+        (
+            "zle-line-init",
+            vec!["user:zle-line-init".to_owned(), "other".to_owned()],
+        ),
+    ]
+    .into_iter()
+    .map(|(special, widgets)| (special.to_owned(), widgets))
+    .collect();
+    assert_eq!(starts.hook_widgets, expected);
+}
+
+/// A function record after the starts still reads its body, and a start
+/// record with no value gives nothing.
+#[test]
+fn a_function_after_the_starts_keeps_its_body() {
+    let definitions = parsed(&records(&[
+        "M WIDGETS",
+        "zle -N w f",
+        "M HOOK precmd",
+        "M FUNCTION f",
+        "\tprcp x",
+    ]));
+    assert_eq!(definitions.starts.widgets, text_map(&[("w", "f")]));
+    assert!(definitions.starts.functions.is_empty());
+    assert_eq!(
+        definitions.functions["f"],
+        vec![CommandWord::new("prcp", ["x"])]
+    );
+}
+
+/// The `.zshrc` of the test of the starts of a real zsh. `ERR_EXIT` and
+/// `NO_UNSET` must not stop the script, also when a hook array is not set.
+const STARTS_ZSHRC: &str = "setopt ERR_EXIT NO_UNSET\n\
+precmd() { prompt_helper }\n\
+prompt_helper() { true }\n\
+mychpwd() { true }\n\
+autoload -Uz add-zsh-hook\n\
+add-zsh-hook chpwd mychpwd\n\
+TRAPINT() { return 128 }\n\
+TRAPPED() { true }\n\
+command_not_found_handler() { return 127 }\n\
+searchfn() { true }\n\
+zle -N history-search-wdid searchfn\n\
+bindkey '^R' history-search-wdid\n\
+bindkey -M vicmd '^X^E' history-search-wdid\n\
+lonelyfn() { true }\n\
+zle -N lonely-widget lonelyfn\n\
+kmsel() { true }\n\
+autoload -Uz add-zle-hook-widget\n\
+add-zle-hook-widget keymap-select kmsel\n";
+
+/// A real zsh gives its hooks, its trap functions, its handler, its widgets,
+/// the keys of each widget, and the widgets of `add-zle-hook-widget`.
+#[test]
+fn a_real_zsh_gives_its_hooks_traps_and_widgets() {
+    let Some(zsh) = find_shell("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    write_file(home.path(), ".zshrc", STARTS_ZSHRC);
+    let definitions = read(
+        real_shell(&zsh, home.path()),
+        ShellKind::Zsh,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let starts = &definitions.starts;
+    for (trigger, name) in [
+        (Trigger::Hook("precmd".into()), "precmd"),
+        (Trigger::Hook("chpwd".into()), "mychpwd"),
+        (Trigger::Trap("INT".into()), "TRAPINT"),
+        (Trigger::CommandNotFound, "command_not_found_handler"),
+    ] {
+        assert!(
+            starts.functions.contains(&(trigger.clone(), name.to_owned())),
+            "{trigger:?} {name}: {:?}",
+            starts.functions
+        );
+    }
+    assert!(
+        !starts.functions.iter().any(|(_, name)| name == "TRAPPED"),
+        "PED is no signal: {:?}",
+        starts.functions
+    );
+    assert_eq!(
+        starts.widgets.get("history-search-wdid").map(String::as_str),
+        Some("searchfn")
+    );
+    assert_eq!(
+        starts.widgets.get("lonely-widget").map(String::as_str),
+        Some("lonelyfn")
+    );
+    assert_eq!(
+        starts.keys.get("history-search-wdid"),
+        Some(&text_set(&["^R", "^X^E"]))
+    );
+    assert_eq!(starts.keys.get("lonely-widget"), None);
+    assert_eq!(
+        starts.hook_widgets.get("zle-keymap-select"),
+        Some(&vec!["kmsel".to_owned()])
+    );
+    assert!(starts.code.is_empty(), "{:?}", starts.code);
+    assert_eq!(
+        definitions.functions["precmd"],
+        vec![CommandWord::new("prompt_helper", [] as [&str; 0])]
     );
 }
