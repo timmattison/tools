@@ -6643,9 +6643,10 @@ panel for the filter yet. A project holds it in its list of filters:
 
 A redaction of input events (issue #156) must come before the HUD in the list
 of filters of the project. Then the HUD does not show the hidden keys, for
-example a password. A redaction after the HUD reads the boxes only as output.
-It can mask a box whose text matches. A box whose text does not match shows the
-keys, for example the first keys of a password.
+example a password. A redaction after the HUD does not protect the keys. It
+finds a match in the text that the output writes, but a draw of a box writes
+only the cells that change. Thus a box can show all of the hidden keys, for
+example a whole password.
 
 The limits of the HUD:
 

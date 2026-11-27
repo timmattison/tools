@@ -31,9 +31,10 @@
 //!
 //! A redaction of input events (issue #156) must run before this filter, in the
 //! list of filters of the project. Then the HUD does not show the hidden keys.
-//! A redaction after this filter reads the boxes only as output. It can mask a
-//! box whose text matches. A box whose text does not match shows the keys, for
-//! example the first keys of a password.
+//! A redaction after this filter does not protect the keys. It finds a match in
+//! the text that the output writes, but a draw of a box writes only the cells
+//! that change. Thus a box can show all of the hidden keys, for example a whole
+//! password.
 //!
 //! The limits:
 //! - A modifier key alone (Ctrl, Alt, Shift) shows nothing. A terminal sends
