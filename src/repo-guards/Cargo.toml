@@ -19,6 +19,11 @@ toml.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
+# The hook tests write the check script and a stub cargo-machete into each
+# fixture with `gitscratch::testing::executable::write_executable`, because a
+# process runs each of them. They copy the helper that the check script sources
+# with `fs::copy`, because no process runs it.
+gitscratch = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 
 [lints]

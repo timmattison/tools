@@ -25,6 +25,14 @@
 //!   answer into it. A test of a tool that asks a question only when a person
 //!   can answer it needs this shape.
 //!
+//! Each shape also gives the child a terminal type. A child whose command
+//! states no `TERM` sees `TERM=xterm-256color`, the value of [`Pty::TERM`]. A
+//! tool that draws a display reads `TERM` first, and draws nothing for `dumb`
+//! or for no `TERM`. A test that inherits the `TERM` of the run thus passes in
+//! a terminal and fails on a GitHub runner, which sets no `TERM`. A `TERM` that
+//! the command sets or removes wins, so a test of a `dumb` terminal or of no
+//! terminal type states that on its command.
+//!
 //! A pseudo-terminal that nobody sized reports zero columns, and the
 //! `TIOCGWINSZ` ioctl succeeds on it. Every terminal here therefore arrives
 //! sized, and the size arrives with the `openpty` call so that no window of the
@@ -40,6 +48,9 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Output, Stdio};
 use std::ptr;
+
+/// The name of the variable that holds the type of a terminal.
+const TERM_VARIABLE: &str = "TERM";
 
 /// A pseudo-terminal of a size that a test chose.
 ///
@@ -70,6 +81,14 @@ impl Pty {
     /// zero rows carries no window, and `termsize` refuses such a terminal. A
     /// tool then falls back to its default width.
     pub const ROWS: u16 = 24;
+
+    /// The terminal type that the child sees when its command states no
+    /// `TERM`.
+    ///
+    /// The type names a terminal that draws color and moves the cursor, as the
+    /// terminal of a person does. A tool that reads the type therefore draws
+    /// what it draws for a person.
+    pub const TERM: &'static str = "xterm-256color";
 
     /// Open a pseudo-terminal `columns` columns wide, which gives back each
     /// byte as the child wrote it.
@@ -109,13 +128,19 @@ impl Pty {
         // and to ask for no name of the slave device. The last pointer is the
         // size of the window, and it points at a live local variable that
         // outlives the call.
+        //
+        // The size goes in as a raw `*mut` pointer, not as `&mut size`. The
+        // `libc` crate declares that parameter `*mut winsize` on macOS and
+        // `*const winsize` on Linux. A `*mut` pointer converts to both, but a
+        // `&mut` reference to a `*const` parameter makes clippy report
+        // `unnecessary_mut_passed` on Linux.
         let result = unsafe {
             libc::openpty(
                 &mut master,
                 &mut slave,
                 ptr::null_mut(),
                 ptr::null_mut(),
-                &mut size,
+                ptr::from_mut(&mut size),
             )
         };
         assert_eq!(
@@ -190,6 +215,14 @@ impl Pty {
     /// session also drops the terminal that the child inherited, so the child
     /// never reaches the terminal of whoever started the run.
     ///
+    /// When the command states no `TERM`, the method sets `TERM` to
+    /// [`Pty::TERM`]. A command states `TERM` when it sets it or removes it, so
+    /// the value of the caller wins, and a removal stays a removal. The
+    /// environment of the run never decides the type: a command that inherits
+    /// everything still gets [`Pty::TERM`], and so does a command that cleared
+    /// its environment and set no `TERM`. A change that the caller makes to the
+    /// command after this call wins too.
+    ///
     /// The command keeps a copy of the slave end of its own for the claim. So
     /// the claim reads a descriptor that is open when the child starts, and a
     /// caller that drops this value too early cannot aim the claim at a
@@ -198,12 +231,18 @@ impl Pty {
     /// alive.
     ///
     /// # Arguments
-    /// * `command` - The command to start the child from. The caller sets every
-    ///   other part of it.
+    /// * `command` - The command to start the child from. This method sets its
+    ///   `TERM` when it states none, and the caller sets every other part of
+    ///   it.
     ///
     /// # Panics
     /// Panics when the system gives no copy of the slave end.
     pub fn give_as_controlling_terminal(&self, command: &mut Command) {
+        let states_term = command.get_envs().any(|(name, _)| name == TERM_VARIABLE);
+        if !states_term {
+            command.env(TERM_VARIABLE, Self::TERM);
+        }
+
         let slave = self
             .slave
             .try_clone()
@@ -270,7 +309,8 @@ impl Pty {
     ///
     /// # Arguments
     /// * `command` - The command to start the child from. This method sets its
-    ///   three standard streams, and the caller sets every other part of it.
+    ///   three standard streams, and its `TERM` when it states none. The
+    ///   caller sets every other part of it.
     ///
     /// # Returns
     /// The exit status of the child, every byte it wrote to the terminal, and
@@ -346,7 +386,8 @@ impl Pty {
     ///
     /// # Arguments
     /// * `command` - The command to start the child from. This method sets its
-    ///   three standard streams, and the caller sets every other part of it.
+    ///   three standard streams, and its `TERM` when it states none. The
+    ///   caller sets every other part of it.
     ///
     /// # Returns
     /// The exit status of the child, and every byte it wrote to the terminal
@@ -383,7 +424,8 @@ impl Pty {
     ///
     /// # Arguments
     /// * `command` - The command to start the child from. This method sets its
-    ///   three standard streams, and the caller sets every other part of it.
+    ///   three standard streams, and its `TERM` when it states none. The
+    ///   caller sets every other part of it.
     /// * `typed` - The bytes that a person types into the terminal, for
     ///   example `b"y\n"`.
     ///

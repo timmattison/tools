@@ -23,6 +23,7 @@ termgfx.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
+gitscratch = { workspace = true, features = ["testing"] }
 libc.workspace = true
 serde_json.workspace = true
 

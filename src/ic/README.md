@@ -10,6 +10,7 @@ A fast Rust-based terminal image display utility
 - Image resizing with aspect ratio preservation
 - Support for reading from files or stdin
 - Video playback support (experimental)
+- A pixel-by-pixel diff of two images
 - Kitty terminal support (experimental)
 
 ## Installation
@@ -134,7 +135,44 @@ The flag decodes the picture, fits it inside the box of `WIDTHxHEIGHT` pixels, a
 
 Each side of the box takes 1 to 4096 pixels. A picture that fits the box keeps its size, because a larger copy holds no detail that the file did not hold.
 
-`--emit-rgba` reads no terminal and writes nothing to the terminal, thus a terminal that draws no image, tmux, and mosh do not change the result. Do not combine it with a display option (`--width`, `--height`, `--scale`, `--no-newline`, `--protocol`, or a video option), with `--monitor`, or with `--will-display`. The flag ignores `IC_PROTOCOL`, because it draws no picture. It takes one file or `--stdin`. A video gives an error, because the flag prints one picture.
+`--emit-rgba` reads no terminal and writes nothing to the terminal, thus a terminal that draws no image, tmux, and mosh do not change the result. Do not combine it with a display option (`--width`, `--height`, `--scale`, `--no-newline`, `--protocol`, or a video option), with `--monitor`, or with `--will-display`. The flag ignores `IC_PROTOCOL`, because it draws no picture. It takes one file or `--stdin`, or the two files of [`--diff`](#show-the-differences-between-two-images). A video gives an error, because the flag prints one picture.
+
+### Show the differences between two images:
+
+```bash
+ic --diff before.png after.png                          # a red highlight (the default)
+ic --diff --diff-mode boxes before.png after.png
+ic --diff --diff-mode mask before.png after.png
+```
+
+`--diff` compares two images pixel by pixel and shows one picture of the differences. `ic` decodes both images to RGBA with 8 bits for each channel. A pixel differs when one or more of its four channels differ. The compare has no tolerance.
+
+In Claude Code, the [`ic-inline` plugin](../../plugins/ic-inline/README.md#show-the-differences-between-two-images) shows the same picture in the transcript: `/ic diff before.png after.png` for you, and the tool `show_diff` for Claude.
+
+Above the picture, `ic` prints two lines:
+
+```text
+before.png vs after.png
+3 regions differ (1204 pixels)
+```
+
+When no pixel differs, the second line is `the images are the same`, and `ic` still shows the picture. The auto-fit counts the rows of the two lines, thus the picture and the prompt fit below them.
+
+`--diff-mode` selects how the picture shows the differences. Red is RGBA `(255, 0, 0, 255)`.
+
+| `--diff-mode`         | A pixel that is the same | A pixel that differs                                    |
+| --------------------- | ------------------------ | ------------------------------------------------------- |
+| `boxes`               | the second image         | the second image, with a red outline around each region |
+| `highlight` (default) | the first image          | opaque red                                              |
+| `mask`                | opaque black             | opaque red                                              |
+
+In `boxes`, two pixels that differ are in one region when they touch, also at a corner. The line of each outline is `max(2, ceil(L / 400))` pixels thick, where `L` is the longer side of the picture. Thus a terminal that shrinks a large screenshot still shows the line. The box of each region has a margin of the line thickness plus 2 pixels, thus the line covers no pixel that differs, except at the edge of the picture. When two boxes overlap or touch, `ic` draws one box around both. The header counts these boxes as the regions, in each mode.
+
+`ic` does not scale an image of a different size. The two images share the upper-left corner, and the picture has the larger width and the larger height of the two. A pixel outside an image is blank: RGBA `(0, 0, 0, 0)`. Thus a strip that only one image covers is a difference, unless that image is fully transparent there. A pixel outside both images stays blank in each mode. The picture holds at most 134,217,728 pixels (512 MiB of RGBA), and a larger picture gives an error.
+
+`--width`, `--height`, `--scale`, `--preserve-aspect`, `--no-newline`, and `--protocol` apply to the picture as they apply to a still image. With `--emit-rgba WIDTHxHEIGHT`, `ic` prints the picture as the JSON of [`--emit-rgba`](#give-the-pixels-to-a-program-that-draws-the-picture-itself), and it prints no header.
+
+`--diff` takes exactly two image files. A video, a text file, `--stdin`, `--monitor`, `--will-display`, or a video option gives an error that names the cause. A file is text when its extension names no image format and its first bytes start no image, thus a screenshot with no extension works. When the first bytes are text, the header of the format that they name must also read, so a note that starts with `BM` or `P1` is still a text file. `--diff-mode` without `--diff` gives an error.
 
 ## Command Line Options
 
@@ -147,6 +185,8 @@ Each side of the box takes 1 to 4096 pixels. A picture that fits the box keeps i
 - `-n, --no-newline` - Leave the cursor to the caller and write only the image (see [Where the Cursor Ends](#where-the-cursor-ends))
 - `--will-display` - Report whether this session can display an image, then exit (0 = yes, 1 = no with the reason on stderr)
 - `--emit-rgba <WIDTHxHEIGHT>` - Print the picture, fitted inside the box, as one line of JSON with base64 RGBA pixels, then exit. It writes nothing to the terminal (see [Give the pixels to a program that draws the picture itself](#give-the-pixels-to-a-program-that-draws-the-picture-itself))
+- `--diff` - Compare two image files pixel by pixel, and show one picture of the differences (see [Show the differences between two images](#show-the-differences-between-two-images))
+- `--diff-mode <boxes|highlight|mask>` - How the picture of `--diff` shows the differences (default: `highlight`). It needs `--diff`
 - `--protocol <auto|sixel|kitty|iterm2>` - Force an image protocol in place of the one that `ic` selects for the terminal (default: the value of `IC_PROTOCOL`, else `auto`). A forced protocol also skips the checks that refuse a session. See [Forcing a Protocol](#forcing-a-protocol). The `IC_PROTOCOL` environment variable does the same.
 - `-h, --help` - Print help information
 - `-V, --version` - Print version information
@@ -218,8 +258,9 @@ image. Video playback uses that mode, because it puts the cursor where it wants
 it before every frame.
 
 The auto-fit size also pays for the rows that `ic` prints above the image. The
-file name rows, the image, and the row that the shell prompt returns to together
-fit inside the height of the terminal. A long file name is wider than the
+header rows (the file name, or the two lines of `--diff`), the image, and the
+row that the shell prompt returns to together fit inside the height of the
+terminal. A long file name is wider than the
 terminal, and the terminal then wraps it onto more than one row. `ic` measures
 the display width of each header line and counts the rows that the line takes,
 so a wrapped name pays for every row that it occupies.

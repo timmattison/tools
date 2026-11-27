@@ -495,7 +495,13 @@ fn workspace_root_with_repo_refuses_a_directory_without_cargo_toml() {
         matches!(error, CatalogError::NotAWorkspace { .. }),
         "{error}"
     );
-    assert!(error.to_string().contains("--repo <path>"), "{error}");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "{} is not a cargo workspace (it has no Cargo.toml)",
+            canonical(empty.path()).display()
+        )
+    );
 }
 
 #[test]
@@ -540,7 +546,10 @@ fn workspace_root_outside_any_work_tree_is_not_a_work_tree() {
         matches!(error, CatalogError::NotAWorkTree { .. }),
         "{error}"
     );
-    assert!(error.to_string().contains("--repo <path>"), "{error}");
+    assert_eq!(
+        error.to_string(),
+        format!("{} is not in a git work tree", dir.path().display())
+    );
 }
 
 #[test]
@@ -574,8 +583,7 @@ impl StubCargo {
             env!("CARGO")
         );
         let path = dir.path().join("cargo");
-        std::fs::write(&path, script).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        gitscratch::testing::executable::write_executable(&path, script).unwrap();
         Self { dir }
     }
 

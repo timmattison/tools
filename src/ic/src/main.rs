@@ -22,6 +22,7 @@ use termion::input::TermRead;
 use termion::raw::IntoRawMode;
 use unicode_width::UnicodeWidthStr;
 
+mod diff;
 mod emit;
 
 use emit::PixelBox;
@@ -247,6 +248,16 @@ struct Args {
     /// flag wins over it.
     #[clap(long, value_enum)]
     protocol: Option<ProtocolArg>,
+
+    /// Compare two still images pixel by pixel, and show one picture of the
+    /// differences. Give exactly two image files, FIRST and SECOND. Neither
+    /// image is scaled, and the two share the upper-left corner
+    #[clap(long, conflicts_with_all = ["stdin", "monitor", "will_display", "loop_video", "fps", "do_not_drop_frames", "memory_cleanup_frequency", "max_fps", "adaptive_fps"])]
+    diff: bool,
+
+    /// How the picture of --diff shows the differences (default: highlight)
+    #[clap(long, value_enum, value_name = "MODE", requires = "diff")]
+    diff_mode: Option<diff::Mode>,
 }
 
 fn main() -> Result<()> {
@@ -254,7 +265,9 @@ fn main() -> Result<()> {
 
     validate_arguments(&args)?;
 
-    if let Some(pixel_box) = args.emit_rgba {
+    if args.diff {
+        show_diff(&args)?;
+    } else if let Some(pixel_box) = args.emit_rgba {
         emit_picture(&args, pixel_box)?;
     } else if args.will_display {
         report_display_readiness(&args)?;
@@ -283,6 +296,7 @@ fn main() -> Result<()> {
 }
 
 fn validate_arguments(args: &Args) -> Result<()> {
+    validate_diff(args)?;
     validate_input_modes(args)?;
     validate_emit(args)?;
     validate_dimensions(args)?;
@@ -314,18 +328,54 @@ fn validate_input_modes(args: &Args) -> Result<()> {
     Ok(())
 }
 
-/// Refuse a run of `--emit-rgba` over more than one file.
+/// Refuse a run of `--diff` over any count of files but two.
+///
+/// Clap refuses the flag beside the other input modes and beside the options
+/// of a video. This check holds the one rule that clap cannot state: the count
+/// of files. It runs first, so `ic --diff` with no file gets this message and
+/// not the message about a missing input.
+///
+/// # Errors
+/// An error that says the flag takes exactly two files, when the count is
+/// another number.
+fn validate_diff(args: &Args) -> Result<()> {
+    if args.diff && args.files.len() != 2 {
+        return Err(diff_file_count_error(args.files.len()));
+    }
+
+    Ok(())
+}
+
+/// The error of a run of `--diff` over `count` files, when `count` is not two.
+///
+/// [`validate_diff`] gives it, and [`show_diff`] gives the same text when its
+/// slice pattern finds another count, so the two refusals cannot drift apart.
+///
+/// # Arguments
+/// * `count` - The number of files on the command line.
+///
+/// # Returns
+/// An error that says the flag takes exactly two files, and names `count`.
+fn diff_file_count_error(count: usize) -> anyhow::Error {
+    anyhow::anyhow!(
+        "--diff compares two images, thus it takes exactly two files, and it got {count}"
+    )
+}
+
+/// Refuse a run of `--emit-rgba` over more than one picture.
 ///
 /// The flag prints one JSON document, and a reader of it parses one picture.
 /// Clap refuses the flag beside every option of a display, and this check
-/// holds the one rule that clap cannot state: the count of files.
+/// holds the one rule that clap cannot state: the count of files. With
+/// `--diff` the two files make one picture, so that run can name two files.
 ///
 /// # Errors
-/// An error that says the flag takes one picture, when it has more than one.
+/// An error that says the flag takes one picture, when it has more than one
+/// file and no `--diff`.
 fn validate_emit(args: &Args) -> Result<()> {
-    if args.emit_rgba.is_some() && args.files.len() > 1 {
+    if args.emit_rgba.is_some() && !args.diff && args.files.len() > 1 {
         anyhow::bail!(
-            "--emit-rgba prints one picture, thus it takes one picture: give one file or --stdin"
+            "--emit-rgba prints one picture, thus it takes one picture: give one file, --stdin, or --diff with two files"
         );
     }
 
@@ -2184,6 +2234,113 @@ fn decode_picture(source: &[u8], name: &Path) -> Result<DynamicImage> {
     Ok(reader.with_guessed_format()?.decode()?)
 }
 
+/// Compare two still images, and show one picture of the differences.
+///
+/// The run checks both paths before it decodes either one, so a bad second
+/// path does not wait for a slow decode of the first. A video or a text file
+/// is no still image, and the error names it. A file is text when its extension
+/// names no image format and its first bytes start no image. The picture comes
+/// from [`diff::compare`] in the mode of `--diff-mode`, or `highlight` when none
+/// is given.
+///
+/// With `--emit-rgba`, the run prints the picture as JSON and prints no
+/// header. Otherwise it prints a header of two lines, the two paths and the
+/// summary of the differences, and then it shows the picture as it shows a
+/// still image.
+///
+/// # Arguments
+/// * `args` - The command line arguments. `validate_diff` has checked that
+///   `files` holds two paths.
+///
+/// # Returns
+/// Nothing when the picture is out.
+///
+/// # Errors
+/// An error when a file is missing, a video, a text file, or not an image,
+/// when the two images make a canvas over the limit, or when the output
+/// fails. Each decode error names its path.
+fn show_diff(args: &Args) -> Result<()> {
+    let [first_path, second_path] = args.files.as_slice() else {
+        return Err(diff_file_count_error(args.files.len()));
+    };
+    for path in [first_path, second_path] {
+        ensure_file_exists(path)?;
+        if is_video_file(path) {
+            anyhow::bail!(
+                "--diff compares two still images, and {} is a video",
+                path.display()
+            );
+        }
+        if is_text_file(path) && starts_no_image(path) {
+            anyhow::bail!(
+                "--diff compares two still images, and {} is a text file",
+                path.display()
+            );
+        }
+    }
+
+    let first = load_still_image(first_path)?;
+    let second = load_still_image(second_path)?;
+    let diff = diff::compare(first, second, args.diff_mode.unwrap_or_default())?;
+    let summary = diff.summary();
+    let picture = DynamicImage::ImageRgba8(diff.picture);
+
+    if let Some(pixel_box) = args.emit_rgba {
+        return emit::write_rgba_json(&picture, pixel_box, &mut io::stdout().lock());
+    }
+
+    let header = [
+        format!("{} vs {}", first_path.display(), second_path.display()),
+        summary,
+    ];
+    display_image_with_header(args, &header, |_capabilities| Ok((picture, None)))
+}
+
+/// Read and decode one image file of `--diff`.
+///
+/// # Arguments
+/// * `path` - The path of the image file.
+///
+/// # Errors
+/// An error that names the path, when the file does not open or holds no
+/// image.
+fn load_still_image(path: &Path) -> Result<DynamicImage> {
+    with_image_file(path, |source| decode_picture(&source, path))
+}
+
+/// Whether the file at `path` opens, and its first bytes start no image.
+///
+/// [`is_text_file`] reads only the extension. A screenshot with no extension,
+/// or a format that the decoder reads and `ic` does not list, is still a
+/// picture, and [`decode_picture`] reads it. The first block of the file
+/// starts an image when it names an image format. When the block is also
+/// plain text, the header of that format must read too, because the
+/// signatures `BM` and `P1` to `P7` start many lines of text. A binary image
+/// thus costs one read of its first block, and `--diff` still checks both
+/// paths before it decodes either one.
+///
+/// # Arguments
+/// * `path` - The path of the file.
+///
+/// # Returns
+/// `false` also when the file does not open, because that file is not text.
+/// The decode then reports the failure with its cause.
+fn starts_no_image(path: &Path) -> bool {
+    let mut block = Vec::new();
+    let read =
+        fs::File::open(path).and_then(|file| file.take(FIRST_BLOCK_BYTES).read_to_end(&mut block));
+    if read.is_err() {
+        return false;
+    }
+    if image::guess_format(&block).is_err() {
+        return true;
+    }
+    first_block_can_be_text(&block)
+        && image::ImageReader::open(path)
+            .and_then(image::ImageReader::with_guessed_format)
+            .is_ok_and(|reader| reader.into_dimensions().is_err())
+}
+
 /// Make a picture out of the bytes of an image file, and keep the bytes when
 /// this terminal sends them as they stand.
 ///
@@ -2352,7 +2509,8 @@ fn read_new_text_file(path: &Path) -> io::Result<Option<String>> {
 }
 
 /// The number of bytes at the start of a file that the text rule of monitor
-/// mode reads before it reads the rest.
+/// mode reads before it reads the rest. The text check of `--diff`
+/// ([`starts_no_image`]) reads the same block.
 ///
 /// [`read_text_to_show`] decides on this first block, and it reads the rest of
 /// the file only when the block is text. The start of a binary file, such as
@@ -5334,5 +5492,32 @@ mod tests {
         // row for each column of the line.
         let lines = header_lines(&["abc"]);
         assert_eq!(header_rows(&lines, 0).0, 3);
+    }
+
+    // =========================================================================
+    // Tests for the help of --diff-mode
+    // =========================================================================
+
+    #[test]
+    fn diff_mode_help_names_the_default_mode() {
+        // The help states the default by hand, thus it must name the mode
+        // that `#[default]` puts on `diff::Mode`.
+        use clap::{CommandFactory, ValueEnum};
+
+        let default_mode = diff::Mode::default()
+            .to_possible_value()
+            .expect("each diff mode has a name on the command line");
+        let expected = format!("(default: {})", default_mode.get_name());
+        let command = Args::command();
+        let help = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "diff_mode")
+            .and_then(clap::Arg::get_help)
+            .expect("--diff-mode has a help text")
+            .to_string();
+        assert!(
+            help.contains(&expected),
+            "the help of --diff-mode is {help:?}, and it must hold {expected:?}"
+        );
     }
 }

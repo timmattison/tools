@@ -17,8 +17,7 @@ use install_bin::install_binary;
 
 /// Write `content` to `path` and mark it executable (mode `0o755`).
 fn write_executable(path: &Path, content: &str) {
-    fs::write(path, content).expect("write file");
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod");
+    gitscratch::testing::executable::write_executable(path, content).expect("write file");
 }
 
 #[test]

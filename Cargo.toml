@@ -225,7 +225,38 @@ windows-sys = { version = "0.60", features = [
 ] }
 
 # Tauri
-tauri = "2"
+#
+# The `~2.9` pins hold msgs on the Tauri 2.9 line. One Cargo.lock cannot hold
+# webkit2gtk 2.0.1 and 2.0.2, and the lock includes the Linux targets:
+#
+# - nle uses dioxus-desktop 0.7, which needs wry 0.53 and webkit2gtk =2.0.1.
+# - tauri 2.10 and later need wry 0.54 or later, and webkit2gtk =2.0.2.
+#
+# tauri 2.9 uses tauri-runtime-wry 2.9, which uses wry 0.53. Two crates under
+# tauri accept versions that do not compile with tauri 2.9.5, so each one has
+# its own pin, and msgs names each one only to apply that pin:
+#
+# - tauri-runtime-wry 2.9.3 accepts tauri-runtime ^2.9.2, but it does not
+#   compile against tauri-runtime 2.11.3 (E0046). The pin holds tauri-runtime
+#   on the 2.9 line of tauri-runtime-wry.
+# - tauri 2.9.5 accepts tauri-macros ^2.5.2, but it does not compile against
+#   tauri-macros 2.7.6 (E0599). The 2.7 line of tauri-macros, tauri-codegen,
+#   tauri-build, and tauri-plugin needs tauri-utils ~2.10, so the tauri-utils
+#   pin holds all four on 2.6.
+#
+# tauri-plugin-dialog 2.7 and later need tauri ^2.10, so the tauri pin also
+# holds the dialog plugin on 2.6.
+#
+# src/msgs/frontend/package.json pins @tauri-apps/api to ~2.9 and
+# @tauri-apps/plugin-dialog to ~2.6, because the Tauri CLI refuses a build
+# when a crate and its npm package differ in the minor version.
+# src/msgs/tests/tauri-versions.rs holds that rule.
+#
+# Remove the pins and the two npm pins when a stable dioxus-desktop uses
+# wry >= 0.54.
+tauri = "~2.9"
+tauri-runtime = "~2.9"
+tauri-utils = "~2.9"
 tauri-build = "2"
 tauri-plugin-dialog = "2"
 
@@ -264,6 +295,7 @@ shellsetup = { path = "src/shellsetup" }
 termbar = { path = "src/termbar" }
 termgfx = { path = "src/termgfx" }
 termsize = { path = "src/termsize" }
+termstate = { path = "src/termstate" }
 termwindow = { path = "src/termwindow" }
 testcolor = { path = "src/testcolor" }
 textfit = { path = "src/textfit" }

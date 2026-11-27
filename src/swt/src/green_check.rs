@@ -417,9 +417,7 @@ mod tests {
     /// `.swt-check` at their repo root.
     #[cfg(unix)]
     fn executable_script(path: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        fs::write(path, body).expect("check script");
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("make executable");
+        gitscratch::testing::executable::write_executable(path, body).expect("check script");
     }
 
     /// The body of a check script that succeeds after marking its own cwd.
@@ -736,14 +734,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_config_root_with_a_space_and_a_quote_runs_under_sh_c() {
-        use std::os::unix::fs::PermissionsExt;
-
         let holder = fixture(&[]);
         let config_root = holder.path().join("wei'rd $config root");
         fs::create_dir_all(&config_root).expect("weird config root");
         let script = config_root.join(OVERRIDE_FILE);
-        fs::write(&script, "#!/bin/sh\nexit 7\n").expect("override script");
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("make executable");
+        gitscratch::testing::executable::write_executable(&script, "#!/bin/sh\nexit 7\n")
+            .expect("override script");
 
         let target = fixture(&[CARGO]);
         let plan =

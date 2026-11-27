@@ -1,14 +1,13 @@
 //! Guard: the behavior of `scripts/dev.ts` that a person only sees when it goes wrong.
 //!
-//! Three things it must get right:
+//! Two things it must get right:
 //!
-//! - The Rust toolchain, the Tauri CLI, `portplz` and `pnpm` are per-account
-//!   installs. On a shared machine the account at the keyboard is not always the
-//!   account that owns the checkout, and the raw failure then reads as
-//!   "no such command: `tauri`", which names neither the account nor the repair.
-//! - The frontend dependencies must be installed before the dev server starts.
-//! - Vite and Tauri must agree on one port. Vite binds it and Tauri loads it, so
-//!   a port that reaches only one of them gives a window that never loads.
+//! - `dx` (the Dioxus CLI) and `portplz` are per-account installs. On a shared
+//!   machine the account at the keyboard is not always the account that owns
+//!   the checkout, and the raw failure reads as "command not found", which
+//!   names neither the account nor the repair.
+//! - `dx serve` must run in `src/nle` on the port that `portplz` chose, and the
+//!   script must give back the exit status of `dx serve`.
 //!
 //! Each test runs the script with shims on `PATH` instead of the real tools.
 //! The script runs under the real `node`, which strips the types itself.
@@ -33,21 +32,21 @@ const DEFAULT_PORT: &str = "34567";
 /// The one file that every shim appends to.
 const LOG_FILE: &str = "calls.log";
 
-/// The text of the message about a missing `cargo`.
-const NO_CARGO: &str = "cargo is not on the PATH of the account";
+/// The text of the message about a missing `dx`.
+const NO_DX: &str = "dx is not on the PATH of the account";
 
 /// The text of the message about a missing `portplz`.
 const NO_PORTPLZ: &str = "portplz is not on the PATH of the account";
 
-/// The text of the message about a missing `pnpm`.
-const NO_PNPM: &str = "pnpm is not on the PATH of the account";
+/// The one command that the message about a missing `dx` must give, alone on its line.
+const DX_INSTALL_COMMAND: &str = "cargo install dioxus-cli";
 
 /// A shim environment: a directory of fake tools plus the variables that steer them.
 struct Shims {
     dir: PathBuf,
     port_answer: String,
-    tauri_installed: bool,
-    cargo_exit: i32,
+    version_exit: i32,
+    serve_exit: i32,
 }
 
 impl Shims {
@@ -56,15 +55,9 @@ impl Shims {
         Self {
             dir: unique_dir(label),
             port_answer: String::from(DEFAULT_PORT),
-            tauri_installed: true,
-            cargo_exit: 0,
+            version_exit: 0,
+            serve_exit: 0,
         }
-    }
-
-    /// Make `cargo tauri --version` report the subcommand as missing.
-    fn without_tauri_cli(mut self) -> Self {
-        self.tauri_installed = false;
-        self
     }
 
     /// Make `portplz` print this text instead of a port.
@@ -73,41 +66,36 @@ impl Shims {
         self
     }
 
-    /// Make `cargo` exit with this status for any call but `cargo tauri --version`.
-    fn with_cargo_exit(mut self, code: i32) -> Self {
-        self.cargo_exit = code;
+    /// Make `dx --version` exit with this status.
+    fn with_version_exit(mut self, code: i32) -> Self {
+        self.version_exit = code;
         self
     }
 
-    /// Write the `cargo` shim, and the `pnpm` and `portplz` shims when asked.
-    fn install(&self, install_pnpm: bool, install_portplz: bool) {
+    /// Make `dx` exit with this status for any call but `dx --version`.
+    fn with_serve_exit(mut self, code: i32) -> Self {
+        self.serve_exit = code;
+        self
+    }
+
+    /// Write the `dx` shim and the `portplz` shim when asked.
+    fn install(&self, install_dx: bool, install_portplz: bool) {
         let log = self.dir.join(LOG_FILE);
         let log = log.display();
-        if install_pnpm {
-            write_executable(
-                &self.dir.join("pnpm"),
-                &format!("#!/bin/sh\necho \"pnpm $* @ $(pwd -P)\" >> \"{log}\"\nexit 0\n"),
+        if install_dx {
+            write_shim(
+                &self.dir.join("dx"),
+                &format!(
+                    "#!/bin/sh\n\
+                     if [ \"$1\" = \"--version\" ]; then echo \"dioxus 0.7.10\"; exit {}; fi\n\
+                     echo \"dx $* @ $(pwd -P)\" >> \"{log}\"\n\
+                     exit {}\n",
+                    self.version_exit, self.serve_exit
+                ),
             );
         }
-        let tauri_branch = if self.tauri_installed {
-            "echo \"tauri-cli 2.0.0\"; exit 0"
-        } else {
-            "echo \"error: no such command: \\`tauri\\`\" >&2; exit 101"
-        };
-        write_executable(
-            &self.dir.join("cargo"),
-            &format!(
-                "#!/bin/sh\n\
-                 if [ \"$1\" = \"tauri\" ] && [ \"$2\" = \"--version\" ]; then\n\
-                 {tauri_branch}\n\
-                 fi\n\
-                 echo \"cargo $* @ $(pwd -P)\" >> \"{log}\"\n\
-                 exit {}\n",
-                self.cargo_exit
-            ),
-        );
         if install_portplz {
-            write_executable(
+            write_shim(
                 &self.dir.join("portplz"),
                 &format!(
                     "#!/bin/sh\necho \"portplz @ $(pwd -P)\" >> \"{log}\"\necho '{}'\n",
@@ -115,6 +103,18 @@ impl Shims {
                 ),
             );
         }
+    }
+
+    /// Write a `pnpm` shim that logs each call, to prove that the script never runs it.
+    fn install_logging_pnpm(&self) {
+        let log = self.dir.join(LOG_FILE);
+        write_shim(
+            &self.dir.join("pnpm"),
+            &format!(
+                "#!/bin/sh\necho \"pnpm $* @ $(pwd -P)\" >> \"{}\"\nexit 0\n",
+                log.display()
+            ),
+        );
     }
 
     /// Run the real script with only these shims and the system utilities on `PATH`.
@@ -141,19 +141,6 @@ impl Drop for Shims {
     }
 }
 
-/// Puts a directory back to mode 0o755 when it goes out of scope, also on a panic.
-struct RestoreMode(PathBuf);
-
-impl Drop for RestoreMode {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755)).ok();
-        }
-    }
-}
-
 /// Build a temporary directory whose name no concurrent test run can collide with.
 fn unique_dir(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -165,15 +152,17 @@ fn unique_dir(label: &str) -> PathBuf {
     dir
 }
 
-/// Write a file and give it the execute bit.
-fn write_executable(path: &Path, body: &str) {
-    fs::write(path, body).unwrap_or_else(|e| panic!("cannot write {}: {e}", path.display()));
+/// Write a shim and give it the execute bit.
+///
+/// On Unix, the writer of `gitscratch` writes the file from a child process.
+/// Thus this process holds no write descriptor that a fork on another test
+/// thread can copy, and Linux does not refuse the run of the shim (`ETXTBSY`).
+fn write_shim(path: &Path, body: &str) {
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-            .unwrap_or_else(|e| panic!("cannot make {} executable: {e}", path.display()));
-    }
+    gitscratch::testing::executable::write_executable(path, body)
+        .unwrap_or_else(|e| panic!("cannot write {}: {e}", path.display()));
+    #[cfg(not(unix))]
+    fs::write(path, body).unwrap_or_else(|e| panic!("cannot write {}: {e}", path.display()));
 }
 
 /// The directory of the nle crate.
@@ -240,21 +229,35 @@ fn starts_through_tsx_and_is_executable() {
 }
 
 #[test]
-fn reports_a_missing_rust_toolchain() {
-    let output = run_script(&real_script(), SYSTEM_PATH);
+fn reports_a_missing_dx() {
+    let shims = Shims::new("no-dx");
+    shims.install(false, true);
+    let output = shims.run();
     let stderr = stderr_of(&output);
 
     assert_eq!(
         output.status.code(),
         Some(1),
-        "the script must stop with exit 1 when cargo is missing. stderr was: {stderr}"
+        "the script must stop with exit 1 when dx is missing. stderr was: {stderr}"
     );
-    assert!(stderr.contains(NO_CARGO), "stderr was: {stderr}");
+    assert!(stderr.contains(NO_DX), "stderr was: {stderr}");
+    let install_line = stderr
+        .lines()
+        .find(|line| line.trim() == DX_INSTALL_COMMAND)
+        .unwrap_or_else(|| {
+            panic!("the message must give the command that installs dx. stderr was: {stderr}")
+        });
+    assert_eq!(
+        install_line.trim(),
+        DX_INSTALL_COMMAND,
+        "the command must be the plain one, with no version pin and no flags to retype. \
+         stderr was: {stderr}"
+    );
 }
 
 #[test]
-fn reports_a_missing_tauri_cli() {
-    let shims = Shims::new("no-tauri").without_tauri_cli();
+fn reports_a_dx_that_fails_its_version_check() {
+    let shims = Shims::new("dx-version").with_version_exit(3);
     shims.install(true, true);
     let output = shims.run();
     let stderr = stderr_of(&output);
@@ -262,19 +265,11 @@ fn reports_a_missing_tauri_cli() {
     assert_eq!(
         output.status.code(),
         Some(1),
-        "the script must stop with exit 1 when the Tauri CLI is missing. stderr was: {stderr}"
+        "the script must stop with exit 1 when dx --version fails. stderr was: {stderr}"
     );
-    let install_line = stderr
-        .lines()
-        .find(|line| line.contains("cargo install tauri-cli"))
-        .unwrap_or_else(|| {
-            panic!("the message must give the command that installs the CLI. stderr was: {stderr}")
-        });
-    assert_eq!(
-        install_line.trim(),
-        "cargo install tauri-cli",
-        "the command must be the plain one, with no version pin and no flags to retype. \
-         stderr was: {stderr}"
+    assert!(
+        stderr.contains("dx --version failed with exit status 3"),
+        "stderr was: {stderr}"
     );
 }
 
@@ -310,70 +305,10 @@ fn refuses_an_answer_from_portplz_that_is_not_a_port() {
 }
 
 #[test]
-fn reports_a_missing_pnpm() {
-    let shims = Shims::new("no-pnpm");
-    shims.install(false, true);
-    let output = shims.run();
-    let stderr = stderr_of(&output);
-
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "the script must stop with exit 1 when pnpm is missing. stderr was: {stderr}"
-    );
-    assert!(stderr.contains(NO_PNPM), "stderr was: {stderr}");
-}
-
-#[test]
-fn reports_a_checkout_the_account_cannot_write() {
-    let shims = Shims::new("read-only");
-    shims.install(true, true);
-
-    let root = unique_dir("read-only-checkout");
-    let nle = root.join("nle");
-    let scripts = nle.join("scripts");
-    fs::create_dir_all(&scripts).expect("can create the copy of the scripts directory");
-    let source = crate_dir().join("scripts");
-    for entry in fs::read_dir(&source).expect("can list the scripts directory") {
-        let path = entry.expect("can read an entry").path();
-        if path.is_file() {
-            let name = path.file_name().expect("a file has a name");
-            fs::copy(&path, scripts.join(name)).expect("can copy a script");
-        }
-    }
-
-    #[cfg(unix)]
-    let output = {
-        use std::os::unix::fs::PermissionsExt;
-        let _restore = RestoreMode(nle.clone());
-        fs::set_permissions(&nle, fs::Permissions::from_mode(0o555))
-            .expect("can make the directory read-only");
-        run_script(
-            &scripts.join("dev.ts"),
-            &format!("{}:{SYSTEM_PATH}", shims.dir.display()),
-        )
-    };
-    #[cfg(not(unix))]
-    let output = run_script(
-        &scripts.join("dev.ts"),
-        &format!("{}:{SYSTEM_PATH}", shims.dir.display()),
-    );
-    // The guard has dropped here and restored the mode, so the cleanup can run.
-    fs::remove_dir_all(&root).ok();
-    let stderr = stderr_of(&output);
-
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "the script must stop with exit 1 in a checkout it cannot write. stderr was: {stderr}"
-    );
-    assert!(stderr.contains("cannot write to"), "stderr was: {stderr}");
-}
-
-#[test]
-fn installs_the_frontend_then_hands_the_port_to_vite_and_tauri() {
+fn starts_dx_serve_in_src_nle_on_the_port_of_portplz() {
     let shims = Shims::new("wiring");
     shims.install(true, true);
+    shims.install_logging_pnpm();
     let output = shims.run();
     let stderr = stderr_of(&output);
     assert_eq!(
@@ -384,41 +319,23 @@ fn installs_the_frontend_then_hands_the_port_to_vite_and_tauri() {
 
     let calls = shims.calls();
     let nle = fs::canonicalize(crate_dir()).expect("can resolve the crate directory");
-    let frontend = nle.join("frontend");
-    let install_at = calls
-        .iter()
-        .position(|line| *line == format!("pnpm install @ {}", frontend.display()))
-        .unwrap_or_else(|| {
-            panic!("pnpm install must run in the frontend. The calls were: {calls:?}")
-        });
-    let dev_at = calls
-        .iter()
-        .position(|line| line.starts_with("cargo tauri dev"))
-        .unwrap_or_else(|| {
-            panic!("the script must start cargo tauri dev. The calls were: {calls:?}")
-        });
-    assert!(
-        install_at < dev_at,
-        "the install must come before the launch. The calls were: {calls:?}"
-    );
-    let dev = &calls[dev_at];
-    assert!(
-        dev.ends_with(&format!("@ {}", nle.display())),
-        "cargo tauri dev must run in src/nle. It ran: {dev}"
+    let expected = format!(
+        "dx serve --desktop --port {DEFAULT_PORT} @ {}",
+        nle.display()
     );
     assert!(
-        dev.contains(&format!("http://localhost:{DEFAULT_PORT}")),
-        "Tauri must load the port portplz chose. It ran: {dev}"
+        calls.contains(&expected),
+        "the calls must hold the line '{expected}'. The calls were: {calls:?}"
     );
     assert!(
-        dev.contains(&format!("--port {DEFAULT_PORT} --strictPort")),
-        "Vite must bind the port portplz chose. It ran: {dev}"
+        !calls.iter().any(|line| line.starts_with("pnpm")),
+        "the script must run no pnpm command. The calls were: {calls:?}"
     );
 }
 
 #[test]
-fn forwards_the_exit_status_of_tauri_dev() {
-    let shims = Shims::new("exit-status").with_cargo_exit(7);
+fn forwards_the_exit_status_of_dx_serve() {
+    let shims = Shims::new("exit-status").with_serve_exit(7);
     shims.install(true, true);
     let output = shims.run();
     let stderr = stderr_of(&output);
@@ -426,7 +343,7 @@ fn forwards_the_exit_status_of_tauri_dev() {
     assert_eq!(
         output.status.code(),
         Some(7),
-        "the script must exit with the status of cargo tauri dev. stderr was: {stderr}"
+        "the script must exit with the status of dx serve. stderr was: {stderr}"
     );
 }
 

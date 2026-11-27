@@ -17,11 +17,26 @@ export type IcInlineShown = {
   path: string
 }
 
+/**
+ * The two images that one `show_diff` call compared, kept by its
+ * `tool_use_id`, so the result row of that call can draw the picture of their
+ * differences again after a hot reload.
+ */
+export type IcInlineDiffed = {
+  /** The first image as `ic` reads it: the model's path with a leading `~` expanded. */
+  first: string
+  /** The second image, read the same way. */
+  second: string
+  /** The `--diff-mode` of the call, or absent for the default mode of `ic`. */
+  mode?: 'boxes' | 'highlight' | 'mask'
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'ic-inline': {
       pixels: IcInlinePixels
       shown: StateFamily<IcInlineShown>
+      diffed: StateFamily<IcInlineDiffed>
     }
   }
 }

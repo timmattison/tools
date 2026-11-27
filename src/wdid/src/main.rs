@@ -1,5 +1,6 @@
 //! `wdid` — "what do i do": counts which tools of this workspace the atuin
-//! history uses.
+//! history uses. `wdid defs` reports on each alias and each function of the
+//! interactive shell.
 
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
@@ -8,12 +9,14 @@ use std::process::ExitCode;
 
 use buildinfo::version_string;
 use chrono::NaiveDate;
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use wdid::catalog::{self, CatalogError, Programs};
+use wdid::defs;
 use wdid::history::{self, HistoryError};
 use wdid::render;
 use wdid::shell::{self, Definitions, Resolver, ShellError, ShellKind};
 use wdid::tally::{tally, Window};
+use wdid::workspace::{self, WorkspaceError};
 
 /// The one-line description that `--help` shows.
 const ABOUT: &str = "What do I do: count which tools of this workspace the atuin history uses";
@@ -52,10 +55,20 @@ const EXIT_ERROR: u8 = 1;
 
 /// The command line of `wdid`.
 #[derive(Parser)]
-#[command(version = version_string!(), about = ABOUT)]
+#[command(
+    version = version_string!(),
+    about = ABOUT,
+    args_conflicts_with_subcommands = true
+)]
 struct Cli {
+    /// The report to give. Without a subcommand, wdid reports on the tools of
+    /// a cargo workspace.
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// The cargo workspace to report on. Without this flag, wdid uses the git
-    /// work tree of the current directory.
+    /// work tree of the current directory when it holds a Cargo.toml, else the
+    /// workspace that the installed wdid came from.
     #[arg(long, value_name = "PATH")]
     repo: Option<PathBuf>,
 
@@ -87,6 +100,42 @@ struct Cli {
     idle_days: u32,
 }
 
+/// The subcommands of `wdid`.
+#[derive(Subcommand)]
+enum Command {
+    /// Report on each alias and each function of the interactive shell: the
+    /// file that defined it, the uses, the definitions that gave the other
+    /// uses, and the definitions never used, idle, or run without a typed
+    /// name. Needs no cargo workspace.
+    Defs(DefsArgs),
+}
+
+/// The flags of `wdid defs`.
+#[derive(Args)]
+struct DefsArgs {
+    /// Count only the history rows from this date on. A row on this date
+    /// counts.
+    #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_date)]
+    since: Option<NaiveDate>,
+
+    /// Print the report as one JSON document.
+    #[arg(long)]
+    json: bool,
+
+    /// A definition is idle when its last use is older than this many days.
+    #[arg(long, value_name = "DAYS", default_value = DEFAULT_IDLE_DAYS)]
+    idle_days: u32,
+
+    /// Show each definition. Without this flag, the text report shows only
+    /// my definitions. A definition is mine when its origin is unknown, or
+    /// when its file is under `ZSH_CUSTOM`. It is also mine when its file is
+    /// under HOME and not under `ZSH`, the oh-my-zsh directory. With this
+    /// flag, the text report also shows the others, grouped by the file that
+    /// defined them, and the functions whose name starts with `_`.
+    #[arg(long)]
+    all: bool,
+}
+
 /// Reads a date in the form `YYYY-MM-DD`.
 fn parse_date(text: &str) -> Result<NaiveDate, String> {
     NaiveDate::parse_from_str(text, DATE_FORMAT)
@@ -99,15 +148,24 @@ enum Error {
     /// The system does not give the current directory.
     #[error("cannot read the current directory: {0}")]
     CurrentDirectory(#[source] std::io::Error),
-    /// The workspace or its catalog cannot be read.
+    /// The workspace cannot be found: `--repo` is not a cargo workspace, git
+    /// does not start, or no step gives a workspace.
+    #[error(transparent)]
+    Workspace(#[from] WorkspaceError),
+    /// The catalog of the workspace cannot be read.
     #[error(transparent)]
     Catalog(#[from] CatalogError),
     /// The history cannot be read.
     #[error(transparent)]
     History(#[from] HistoryError),
-    /// The aliases and the functions cannot be read.
+    /// The aliases and the functions cannot be read for the tools report. The
+    /// text names `--no-shell`, the flag of the tools report that skips them.
+    #[error("{0} (wdid --no-shell skips the aliases and functions)")]
+    Shell(#[source] ShellError),
+    /// The aliases and the functions cannot be read for `wdid defs`. That
+    /// report has no flag that skips them, thus the text names no flag.
     #[error(transparent)]
-    Shell(#[from] ShellError),
+    DefsShell(ShellError),
 }
 
 /// Reads the aliases and the functions of the interactive shell.
@@ -124,18 +182,19 @@ fn run(cli: &Cli) -> Result<String, Error> {
     let today = chrono::Utc::now().date_naive();
     let cwd = std::env::current_dir().map_err(Error::CurrentDirectory)?;
     let programs = Programs::default();
-    let root = catalog::workspace_root(cli.repo.as_deref(), &cwd, &programs)?;
     let search_path = std::env::var_os(PATH_VARIABLE);
     let home = std::env::var_os(HOME_VARIABLE).map(PathBuf::from);
     let install_root = std::env::var_os(INSTALL_ROOT_VARIABLE);
     let cargo_home = std::env::var_os(CARGO_HOME_VARIABLE);
-    let cargo_bin = catalog::cargo_bin(&catalog::InstallLocation {
+    let location = catalog::InstallLocation {
         install_root: install_root.as_deref(),
         cargo_home: cargo_home.as_deref(),
         home: home.as_deref(),
-    });
+    };
+    let workspace = workspace::find(cli.repo.as_deref(), &cwd, &programs, &location, TOOL)?;
+    let cargo_bin = catalog::cargo_bin(&location);
     let catalog = catalog::read(
-        &root,
+        &workspace.root,
         &programs,
         search_path.as_deref().map(OsStr::new),
         cargo_bin.as_deref(),
@@ -144,7 +203,7 @@ fn run(cli: &Cli) -> Result<String, Error> {
     let definitions = if cli.no_shell {
         Definitions::default()
     } else {
-        definitions(std::env::var_os(SHELL_VARIABLE))?
+        definitions(std::env::var_os(SHELL_VARIABLE)).map_err(Error::Shell)?
     };
     let resolver = Resolver::new(&definitions, &catalog.names());
     let window = Window {
@@ -155,7 +214,7 @@ fn run(cli: &Cli) -> Result<String, Error> {
     };
     let tally = tally(&entries, &definitions, &resolver, &catalog, &window);
     Ok(if cli.json {
-        render::json(&tally, &window)
+        render::json(&tally, &window, &workspace)
     } else if cli.unparsed {
         render::unparsed(&tally)
     } else {
@@ -163,7 +222,38 @@ fn run(cli: &Cli) -> Result<String, Error> {
             std::env::var(WIDTH_VARIABLE).ok().as_deref(),
             termsize::controlling_columns(),
         );
-        render::text(&tally, &window, width)
+        render::text(&tally, &window, &workspace, width)
+    })
+}
+
+/// Runs the report of `wdid defs` and gives the text for standard output.
+///
+/// The report reads only the atuin history and the interactive shell. It
+/// starts no cargo process and no git process, and it needs no workspace.
+fn run_defs(args: &DefsArgs) -> Result<String, Error> {
+    let today = chrono::Utc::now().date_naive();
+    let entries = history::read(OsStr::new(history::ATUIN))?;
+    let shell = std::env::var_os(SHELL_VARIABLE);
+    let shell_text = shell
+        .as_deref()
+        .map(|shell| shell.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let definitions = definitions(shell).map_err(Error::DefsShell)?;
+    let window = defs::Window {
+        today,
+        since: args.since,
+        idle_days: args.idle_days,
+        all: args.all,
+    };
+    let tally = defs::tally(&entries, &definitions, &window);
+    Ok(if args.json {
+        defs::render::json(&tally, &window, &shell_text)
+    } else {
+        let width = render::table_width(
+            std::env::var(WIDTH_VARIABLE).ok().as_deref(),
+            termsize::controlling_columns(),
+        );
+        defs::render::text(&tally, &window, &shell_text, width)
     })
 }
 
@@ -188,7 +278,11 @@ fn write_output(output: &str) -> ExitCode {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(&cli) {
+    let result = match &cli.command {
+        None => run(&cli),
+        Some(Command::Defs(args)) => run_defs(args),
+    };
+    match result {
         Ok(output) => write_output(&output),
         Err(error) => {
             eprintln!("{TOOL}: {error}");

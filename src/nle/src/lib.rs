@@ -1,30 +1,26 @@
-#[cfg(test)]
-mod bindings_check;
-mod commands;
-mod error;
-mod types;
+mod ansi;
+pub mod commands;
+pub mod editor;
+pub mod error;
+pub mod filters;
+mod format;
+mod json_file;
+pub mod pipeline;
+pub mod preview;
+mod project;
+pub mod types;
+mod ui;
 
 use buildinfo::version_string;
-use commands::{export_video, export_web, list_recordings, load_recording, save_recording};
 
-/// Run the Tauri application.
+/// Run the NLE desktop application.
 ///
-/// # Panics
-/// Panics if the Tauri application fails to initialize.
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// It opens the Dioxus desktop window and returns when the user closes it.
 pub fn run() {
     eprintln!("nle {}", version_string!());
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![
-            load_recording,
-            save_recording,
-            list_recordings,
-            export_video,
-            export_web,
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+    dioxus::LaunchBuilder::desktop()
+        .with_cfg(ui::window_config())
+        .with_context(ui::Services::desktop())
+        .launch(ui::App);
 }

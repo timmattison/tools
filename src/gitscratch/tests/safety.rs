@@ -508,8 +508,6 @@ const PLANTED_HOOKS: [&str; 4] = [
 #[cfg(unix)]
 #[test]
 fn never_fires_a_hook_from_the_developer_s_repository() {
-    use std::os::unix::fs::PermissionsExt;
-
     let repo = conflicting_repo();
 
     // Hooks and their evidence both hang off the common dir: hooks because that
@@ -531,7 +529,7 @@ fn never_fires_a_hook_from_the_developer_s_repository() {
         // operation, and an aborted replay proves nothing about hooks - the
         // sentinel has to be the only trace, so the replay is free to run to
         // completion and still be caught.
-        std::fs::write(
+        gitscratch::testing::executable::write_executable(
             &script,
             format!(
                 "#!/bin/sh\ntouch \"{}/{hook}\"\nexit 0\n",
@@ -539,8 +537,6 @@ fn never_fires_a_hook_from_the_developer_s_repository() {
             ),
         )
         .unwrap_or_else(|e| panic!("plant the {hook} hook: {e}"));
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-            .unwrap_or_else(|e| panic!("make the {hook} hook executable: {e}"));
     }
 
     // Control: prove the hooks are actually armed before proving the replay

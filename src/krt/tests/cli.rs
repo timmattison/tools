@@ -24,9 +24,16 @@
     reason = "each unwrap here is an assertion about the harness, not an unhandled error: the spawn of the freshly built binary, and the decode of the output that binary wrote. A failure of either one is a broken harness, and a panic names it at once"
 )]
 
+use std::process::Command;
+
+// Only the macOS tests write a recorded file, thus only they use these.
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
-use std::process::{self, Command};
+#[cfg(target_os = "macos")]
+use std::process;
+#[cfg(target_os = "macos")]
 use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(target_os = "macos")]
 use std::{env, fs};
 
 /// The text before the commit hash of the build string.
@@ -73,9 +80,11 @@ const PASSING_STATE_MARKERS: [&str; 7] = [
 const EXIT_FAILURE: i32 = 1;
 
 /// The exit code of a run whose recorded file did not take a record.
+#[cfg(target_os = "macos")]
 const EXIT_WRITE_FAILED: i32 = 3;
 
 /// The exit code of a run whose tracer stopped.
+#[cfg(target_os = "macos")]
 const EXIT_TRACER_FAILED: i32 = 4;
 
 /// A literal address of ip version 4.
@@ -85,6 +94,7 @@ const EXIT_TRACER_FAILED: i32 = 4;
 const AN_IPV4_ADDRESS: &str = "1.2.3.4";
 
 /// The loopback address of ip version 4. Every machine holds a route to it.
+#[cfg(target_os = "macos")]
 const LOOPBACK: &str = "127.0.0.1";
 
 /// The flag that names the address the probes leave from.
@@ -94,6 +104,7 @@ const LOOPBACK: &str = "127.0.0.1";
 /// address of this flag at its first step, so it asks no service and opens no
 /// socket. Every test that drives a whole trace therefore names this flag, and
 /// a test that forgets it reaches the internet without saying so.
+#[cfg(target_os = "macos")]
 const FLAG_SOURCE: &str = "--source";
 
 /// The flag that asks for ip version 6.
@@ -103,6 +114,7 @@ const FLAG_VERSION_6: &str = "-6";
 const IPV6_IN_THE_MESSAGE: &str = "ipv6";
 
 /// A last TTL that `krt` takes and the tracer refuses. The tracer stops at 254.
+#[cfg(target_os = "macos")]
 const TTL_ABOVE_THE_TRACER: &str = "255";
 
 /// A recorded file that no test makes.
@@ -348,6 +360,7 @@ fn a_destination_that_names_no_address_of_the_family_prints_the_block_and_stops(
 ///
 /// The name keys on the process and on the moment, so two copies of one test
 /// that run at the same time never share a file. `CLAUDE.md` demands it.
+#[cfg(target_os = "macos")]
 fn temp_path(name: &str) -> PathBuf {
     let moment = SystemTime::now()
         .duration_since(UNIX_EPOCH)

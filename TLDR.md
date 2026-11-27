@@ -21,7 +21,9 @@ A one-line description of every program documented in the [README](./README.md),
 | `dirc` | Copies the current directory to the clipboard, or emits a `cd` from a clipboard path. |
 | `dirhash` | SHA256 hash of a directory tree's contents to compare directories for equality. |
 | `diskhog` | Live terminal UI of per-process disk I/O on macOS (IOPS with sudo). |
+| `drun` | Docker run on the least busy host — runs a container on the Docker context with the most free memory and CPU, then finds it again with `ps`, `status`, `logs`, `wait`, `exec`, `cp`, and `rm`. `drun buildx create` puts a builder there too, and other commands go to the local docker. |
 | `faulte` | Fault rate — ranks every process of a Mac by the page faults it makes per second, with the swap traffic of the sample and one total line for the Claude Code sessions. `faulte check` says in seconds if the system time is high, and if memory churn or process churn occurs at the same time. `faulte kill` shows the old idle Claude Code sessions and stops them after a question. `faulte tui` is a live view with a history. macOS only. |
+| `ff` | Finds files by name across a whole machine, as `find / -iname` does, but does an interrupted system call again instead of abandoning the walk. Walks the data volume of macOS one time through the firmlink map, skips the File Provider directories unless `--include-cloud`, and ends with a summary of each subtree it could not read (exit 1 when there is one). |
 | `freeport` | Finds a free TCP port on localhost, cross-platform. |
 | `gitdiggin` | Recursively searches git repos for commits containing a string (messages and diffs). |
 | `gitnuke` | Removes a git worktree and deletes its branch; `--force` is required for worktrees with submodules checked out (which `git worktree remove` refuses outright) or uncommitted changes. It asks before it deletes a branch that no recent commit names, `--yes` skips the question, and without a terminal it refuses with exit code 10. |
@@ -37,17 +39,16 @@ A one-line description of every program documented in the [README](./README.md),
 | `ha` | Hot actions — shows the GitHub Actions runs and merge queues of many repositories and owners in one self-refreshing terminal view, with the list-price cost of each job and run, and a box for the Actions billing of each account. |
 | `hexfind` | Searches for a hex string in a binary file and shows a hex dump with offsets. |
 | `htmlboard` | Pretty-prints HTML on the clipboard and puts it back. |
-| `ic` | Fast terminal image/video display utility (an `imgcat` alternative; video needs ffmpeg). |
+| `ic` | Fast terminal image/video display utility (an `imgcat` alternative; video needs ffmpeg). `ic --diff` shows the differences between two images as red boxes, a red highlight, or a mask. |
 | `idear` | IDEA Reaper — cleans up orphaned `.idea` directories left by JetBrains IDEs. |
 | `install-bin` | Installs a locally built binary onto a fresh inode so macOS's signature cache can't SIGKILL it, then verifies it execs. |
 | `inscribe` | Generates git commit messages from staged changes using Claude AI. |
 | `jsonboard` | Pretty-prints JSON on the clipboard and puts it back. |
 | `kitchen-sync` | Installs every Rust binary from a git repo with one command. |
 | `krt` | Knights of the Round Trip — records the network path to a destination, hop by hop, into an append-only JSONL file, and draws the live table of that path under a terminal. `krt replay` folds one run of a recorded file into one table of the path. `krt hunt` looks for the longest path it can find: it draws random addresses, traces a pool of them at once, and prints the shortest, longest, fastest, and slowest path it found, and `--mine` probes a few addresses near each destination that sets a record, to find whether a neighbor gives a longer path. |
-| `localnext` | Serves a statically exported Next.js app from its `out` directory, on a port derived from the project and the git branch. |
 | `msgs` | A macOS desktop app to browse, search, and export iMessage conversations. It reads `chat.db` read-only. |
 | `ng` | Navel-Gaze — watches JS/TS files and re-runs `pnpm lint` (or `--typecheck`) on change. |
-| `nle` | Non-Linear Editor — a desktop editor for `beta` terminal recordings. The scaffold opens a recording and shows its metadata. |
+| `nle` | Non-Linear Editor — a Dioxus desktop editor for `beta` terminal recordings. It opens a recording into an edit project of clips, tracks, and filters, with undo and redo, shows its metadata, changes the speed of regions with its speed panel, replaces text such as keys, tokens, and hostnames with its redaction panel, and plays the edited recording in a terminal preview with a playhead, Play/Pause/Stop, and the themes of `beta`. Its `cursor` filter sets the visibility, the shape, the blink, and the color of the cursor. Run it with `src/nle/scripts/dev.ts` (`dx serve`), and build it with `dx bundle --desktop`. |
 | `nodenuke` | Removes `node_modules` directories and lock files throughout a repo. |
 | `nodeup` | Updates npm/pnpm/yarn packages across all `package.json` directories. |
 | `nwt` | New Worktree — creates a git worktree with a random Docker-style name, links the child repositories of a container into it, and can leave a heavy tracked directory out of it. |
@@ -86,7 +87,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `update-aws-credentials` | Writes AWS SSO clipboard credentials into your AWS config file. |
 | `uuidplz` | Prints a random v4 UUID, or a repeatable v5 UUID seeded from a string, a file's contents, or stdin. |
 | `vpn-tunnel` | Generates Docker-based gluetun + ProtonVPN + WireGuard tunnels with helper scripts. |
-| `wdid` | What do I do — counts which tools of this workspace the atuin history uses, through aliases, functions, pipes and wrappers, and lists the tools never used and the tools idle for a long time. |
+| `wdid` | What do I do — counts which tools of this workspace the atuin history uses, through aliases, functions, pipes and wrappers, and lists the tools never used and the tools idle for a long time. It reports on `--repo`, else the cargo workspace of the current git work tree, else the checkout that the installed `wdid` came from, so it runs in any directory. `wdid defs` reports on each alias and each function of the shell: the file that defined it, its uses, the definitions that gave them, and the definitions never used, idle, or run without a typed name. It shows only your own definitions, and `--all` shows the others too. It needs no workspace. |
 | `whyslow` | Why slow — one 1 s sample names the likely cause when a Mac is slow: which resource is short, and the groups of processes (Claude Code, compilers by worktree, Spotlight, each other name) that use it. macOS only. |
 | `wifiqr` | Generates WiFi QR codes (with optional logo) for automatic device connection. |
 | `wl` | Shows which process is listening on a given port, and says so when it cannot see the owner. |

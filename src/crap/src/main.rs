@@ -299,15 +299,71 @@ fn self_projects(home: &Path) -> UserProjects {
 
 /// A sibling user's `~/.claude/projects` root, resolved as `users_parent/name`.
 ///
-/// `is_self` is set when `name` equals `self_name` (the invoking user), so a
-/// `--user` that names the current account is treated as a same-user hit. Like
-/// [`self_projects`], every input is explicit so the mapping is tempdir-testable.
+/// `is_self` is set when `name` names the tree of `self_name` (the invoking
+/// user), so a `--user` that names the current account is treated as a
+/// same-user hit. One home can answer to several names: a case variant on a
+/// case-insensitive filesystem (`Tim` for `tim` on the macOS default, or on an
+/// ext4 casefold, CIFS or ntfs3 home on Linux), or a symlinked alias. A name
+/// compare misses both, and sent such a hit down the cross-user fork path, past
+/// the live-session guard of an in-place resume (issue #314). So when the names
+/// differ, the two trees are compared on their identity (see [`tree_key`]): the
+/// device and the inode, the same key that [`enumerate_user_projects`] dedupes
+/// on. A tree that does not exist has no inode, so the compare then falls back
+/// to the plain name test. Like [`self_projects`], every input is explicit so
+/// the mapping is tempdir-testable.
 fn user_projects(users_parent: &Path, name: &str, self_name: &str) -> UserProjects {
+    let dir = projects_dir(&users_parent.join(name));
+    let is_self = name == self_name
+        || tree_key(&dir) == tree_key(&projects_dir(&users_parent.join(self_name)));
     UserProjects {
         user: name.to_string(),
-        projects_dir: projects_dir(&users_parent.join(name)),
-        is_self: name == self_name,
+        projects_dir: dir,
+        is_self,
     }
+}
+
+/// The identity of one directory tree, which is the same for each name of it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum TreeKey {
+    /// The device and the inode of a directory that exists (`st_dev`,
+    /// `st_ino`).
+    #[cfg(unix)]
+    Inode {
+        /// The device that holds the directory.
+        dev: u64,
+        /// The inode of the directory on that device.
+        ino: u64,
+    },
+    /// The canonical path, for a directory that has no inode to read (see
+    /// [`canonical_or_verbatim`]).
+    Path(PathBuf),
+}
+
+/// The identity of the tree at `path`, to find two names of one tree.
+///
+/// On unix the identity is the device and the inode of the directory, which
+/// the filesystem gives each name of it. A canonical path is not sufficient.
+/// macOS `realpath` gives the on-disk name of each component, but glibc
+/// `realpath` keeps the spelling of each component that is not a symlink. Thus
+/// on a case-insensitive Linux home (ext4 casefold, CIFS, ntfs3), `/home/Tim`
+/// and `/home/tim` give two canonical paths for one tree.
+///
+/// When the read of the metadata fails, usually because the tree does not
+/// exist, and on a platform with no inode, the identity is the canonical path.
+/// Two names of a tree that does not exist then match only when they are the
+/// same path.
+fn tree_key(path: &Path) -> TreeKey {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            return TreeKey::Inode {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+            };
+        }
+    }
+    TreeKey::Path(canonical_or_verbatim(path))
 }
 
 /// The canonical form of `path`, falling back to `path` verbatim when it cannot
@@ -337,8 +393,8 @@ fn canonical_or_verbatim(path: &Path) -> PathBuf {
 /// ordered after self by account name so the result never depends on the order
 /// the filesystem happens to list the parent directory in.
 ///
-/// Roots are then deduped on their *canonical* `projects_dir` (see
-/// [`canonical_or_verbatim`]) rather than on account name, because one home can
+/// Roots are then deduped on the identity of their `projects_dir` (see
+/// [`tree_key`]) rather than on account name, because one home can
 /// answer to several names: a symlinked alias (`/Users/me-alias -> /Users/me`),
 /// or a `HOME` whose case differs from the on-disk directory on a
 /// case-insensitive filesystem. Name comparison misses both, so the same tree
@@ -360,11 +416,17 @@ fn enumerate_user_projects(users_parent: &Path, self_name: &str) -> Vec<UserProj
             let Some(name) = name.to_str() else {
                 continue;
             };
-            let root = user_projects(users_parent, name, self_name);
+            let dir = projects_dir(&users_parent.join(name));
             // Only accounts that have actually run Claude are search roots;
             // `is_dir` follows symlinks, so a symlinked home still counts.
-            if root.projects_dir.is_dir() {
-                others.push(root);
+            if dir.is_dir() {
+                // Foreign by construction, with no alias compare per entry:
+                // a sibling that names the tree of self is dropped below.
+                others.push(UserProjects {
+                    user: name.to_string(),
+                    projects_dir: dir,
+                    is_self: false,
+                });
             }
         }
     }
@@ -373,14 +435,16 @@ fn enumerate_user_projects(users_parent: &Path, self_name: &str) -> Vec<UserProj
     others.sort_by(|a, b| a.user.cmp(&b.user));
 
     let mut roots = Vec::with_capacity(others.len() + 1);
-    // Self goes in first and unconditionally, claiming its canonical tree, so it
-    // stays root zero and is the only entry that can ever carry `is_self`.
+    // Self goes in first and unconditionally, claiming the key of its tree, so it
+    // stays root zero and is the only entry that can ever carry `is_self`. A
+    // sibling that names this tree, by the name of self or by an alias, has the
+    // same tree key, so the dedupe below drops it.
     let me = user_projects(users_parent, self_name, self_name);
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    seen.insert(canonical_or_verbatim(&me.projects_dir));
+    let mut seen: HashSet<TreeKey> = HashSet::new();
+    seen.insert(tree_key(&me.projects_dir));
     roots.push(me);
     for root in others {
-        if seen.insert(canonical_or_verbatim(&root.projects_dir)) {
+        if seen.insert(tree_key(&root.projects_dir)) {
             roots.push(root);
         }
     }
@@ -4168,6 +4232,120 @@ mod tests {
         assert!(!other.is_self);
     }
 
+    /// Makes the upper-case form of `name` a second name for the home
+    /// `<parent>/<name>`, and returns that form.
+    ///
+    /// On a case-insensitive filesystem (the macOS default) the upper-case form
+    /// names the same directory already, so the function adds nothing. On a
+    /// case-sensitive filesystem it adds a symlink of that name, so the test gets
+    /// the same aliasing on each filesystem.
+    #[cfg(unix)]
+    fn case_variant_of(parent: &Path, name: &str) -> String {
+        let variant = name.to_uppercase();
+        assert_ne!(variant, name, "the variant must differ from {name:?}");
+        let alias = parent.join(&variant);
+        if fs::symlink_metadata(&alias).is_err() {
+            std::os::unix::fs::symlink(parent.join(name), &alias).unwrap();
+        }
+        variant
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_projects_treats_a_case_variant_of_self_as_self() {
+        // `--user ME` names the current account `me` on a case-insensitive
+        // filesystem. The names differ but the tree is the same, so the root is
+        // the current user's own (issue #314).
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        fs::create_dir_all(parent.join("me").join(".claude").join("projects")).unwrap();
+        let variant = case_variant_of(parent, "me");
+
+        let root = user_projects(parent, &variant, "me");
+        assert_eq!(root.user, variant);
+        assert!(
+            root.is_self,
+            "--user {variant} names the tree of `me`, so it is a same-user root"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_projects_treats_a_symlinked_alias_of_self_as_self() {
+        // A symlinked home alias (`me-alias -> me`) is the same tree as the
+        // current user's own, whatever the filesystem does with case.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        fs::create_dir_all(parent.join("me").join(".claude").join("projects")).unwrap();
+        std::os::unix::fs::symlink(parent.join("me"), parent.join("me-alias")).unwrap();
+
+        let root = user_projects(parent, "me-alias", "me");
+        assert!(
+            root.is_self,
+            "--user me-alias names the tree of `me`, so it is a same-user root"
+        );
+    }
+
+    #[test]
+    fn user_projects_keeps_a_distinct_account_foreign() {
+        // Two real homes with two real trees are two accounts, also when both
+        // trees resolve. Only the same tree makes a same-user root.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        for user in ["me", "other"] {
+            fs::create_dir_all(parent.join(user).join(".claude").join("projects")).unwrap();
+        }
+
+        assert!(!user_projects(parent, "other", "me").is_self);
+    }
+
+    /// The root of the data volume, which a firmlink joins to each top-level
+    /// folder of the system volume (`/private`, `/Users`, `/Volumes`).
+    #[cfg(target_os = "macos")]
+    const DATA_VOLUME: &str = "/System/Volumes/Data";
+
+    /// Makes a second name for the home `<parent>/<name>` that `realpath` does
+    /// not fold to the first, and returns that name.
+    ///
+    /// The second name is a symlink to the same home through the firmlink of
+    /// the data volume. `realpath` resolves the symlink but keeps the
+    /// [`DATA_VOLUME`] prefix, so the two names give two canonical paths for
+    /// one directory. glibc `realpath` does the same to a case variant on a
+    /// case-insensitive Linux home (ext4 casefold, CIFS, ntfs3), which a test
+    /// cannot make without root.
+    #[cfg(target_os = "macos")]
+    fn unfolded_alias_of(parent: &Path, name: &str) -> String {
+        let home = fs::canonicalize(parent.join(name)).unwrap();
+        let through_data_volume = Path::new(DATA_VOLUME).join(home.strip_prefix("/").unwrap());
+        let alias = format!("{name}-data");
+        std::os::unix::fs::symlink(&through_data_volume, parent.join(&alias)).unwrap();
+        let resolved = fs::canonicalize(parent.join(&alias))
+            .expect("the temp dir must sit on the data volume, under a firmlink");
+        assert_ne!(
+            resolved, home,
+            "realpath must keep two spellings of one home, else this test proves nothing"
+        );
+        alias
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn user_projects_treats_a_name_that_realpath_does_not_fold_as_self() {
+        // `realpath` gives two paths for the two names, but the tree is one
+        // directory. The root is the current user's own, as it is for
+        // `--user Tim` on a case-insensitive Linux home of `tim`.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        fs::create_dir_all(parent.join("me").join(".claude").join("projects")).unwrap();
+        let alias = unfolded_alias_of(parent, "me");
+
+        let root = user_projects(parent, &alias, "me");
+        assert!(
+            root.is_self,
+            "--user {alias} names the tree of `me`, so it is a same-user root"
+        );
+    }
+
     #[test]
     fn self_projects_marks_the_current_users_tree() {
         let home = Path::new("/Users/timmattison");
@@ -4464,8 +4642,8 @@ mod tests {
 
         let roots = enumerate_user_projects(parent, "me");
         let users: Vec<&str> = roots.iter().map(|r| r.user.as_str()).collect();
-        // Only the real self root survives: the alias resolves to the same
-        // canonical projects dir and is deduped away.
+        // Only the real self root survives: the alias reaches the same
+        // projects dir (one tree key), so the dedupe drops it.
         assert_eq!(users, ["me"]);
         assert!(roots[0].is_self);
         assert_eq!(roots.iter().filter(|r| r.is_self).count(), 1);
@@ -4488,6 +4666,23 @@ mod tests {
         assert_eq!(users, ["me", "alice"]);
         assert!(roots[0].is_self);
         assert!(roots[1..].iter().all(|r| !r.is_self));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn enumerate_user_projects_drops_a_home_name_that_realpath_does_not_fold() {
+        // A second name of the home of self is one tree, also when `realpath`
+        // gives it a different path. A search of it is a second search of the
+        // tree of self, under the label of another user.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        fs::create_dir_all(parent.join("me").join(".claude").join("projects")).unwrap();
+        unfolded_alias_of(parent, "me");
+
+        let roots = enumerate_user_projects(parent, "me");
+        let users: Vec<&str> = roots.iter().map(|r| r.user.as_str()).collect();
+        assert_eq!(users, ["me"]);
+        assert!(roots[0].is_self);
     }
 
     #[test]
@@ -5574,8 +5769,6 @@ mod tests {
     /// the same tick and collide, letting one run clobber the other's fakes.
     #[cfg(unix)]
     fn run_shell_function(args: &str) -> (String, bool) {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp = tempfile::TempDir::new().unwrap();
         let dir = temp.path();
 
@@ -5602,8 +5795,7 @@ mod tests {
             ("c", fake_claude),
         ] {
             let path = dir.join(name);
-            fs::write(&path, body).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            gitscratch::testing::executable::write_executable(&path, body).unwrap();
         }
 
         let script = format!("{SHELL_CODE}\ncrap {args}\n");
@@ -5734,8 +5926,6 @@ mod tests {
         launchers: Launchers,
         save_fork: bool,
     ) -> ForkShellRun {
-        use std::os::unix::fs::PermissionsExt;
-
         let wire_file = dir.join("crap_wire");
         let saved_fork = dir.join("saved_fork");
         let args_file = dir.join("claude_args");
@@ -5792,8 +5982,7 @@ mod tests {
         }
         for (name, body) in tools {
             let path = dir.join(name);
-            fs::write(&path, body).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            gitscratch::testing::executable::write_executable(&path, body).unwrap();
         }
 
         let script = format!("{SHELL_CODE}\ncrap {args}\n");
@@ -6143,8 +6332,6 @@ mod tests {
     /// `tempfile::TempDir`.
     #[cfg(unix)]
     fn run_zsh_with_a_c_alias(alias_flags: &str, crap_launcher: Option<&str>) -> Vec<ZshAliasRun> {
-        use std::os::unix::fs::PermissionsExt;
-
         let mut runs = Vec::new();
         for (path, claude_argv) in [("here", &FORK_ARGV[..]), ("resume", &RESUME_ARGV[..])] {
             let temp = tempfile::TempDir::new().unwrap();
@@ -6180,8 +6367,7 @@ mod tests {
                 ("claude", recorder(&claude_file)),
             ] {
                 let fake = dir.join(name);
-                fs::write(&fake, body).unwrap();
-                fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+                gitscratch::testing::executable::write_executable(&fake, body).unwrap();
             }
 
             // An alias value that ends in a space makes zsh expand the next

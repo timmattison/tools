@@ -2,8 +2,8 @@
 //! with a fake `op` on PATH and runs the real `op-cache` binary against it.
 //! The process environment of the test is never changed.
 
+use gitscratch::testing::executable::write_executable;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use tempfile::TempDir;
@@ -37,8 +37,7 @@ impl Fixture {
     /// Writes an executable `#!/bin/sh` script named `name` into `<fixture>/bin`.
     fn install_script(&self, name: &str, body: &str) {
         let script = self.path("bin").join(name);
-        fs::write(&script, format!("#!/bin/sh\n{body}\n")).expect("write script");
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod script");
+        write_executable(&script, format!("#!/bin/sh\n{body}\n")).expect("write script");
     }
 
     fn install_fake_op(&self, body: &str) {
@@ -300,8 +299,7 @@ fn unstartable_op_writes_spawn_error_pairs() {
     let fixture = Fixture::new();
     let interpreter = unique_token("interpreter");
     let script = fixture.path("bin").join("op");
-    fs::write(&script, format!("#!/nonexistent/{interpreter}\n")).expect("write script");
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod script");
+    write_executable(&script, format!("#!/nonexistent/{interpreter}\n")).expect("write script");
 
     let output = fixture.read(REFERENCE);
 

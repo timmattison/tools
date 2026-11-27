@@ -1,5 +1,6 @@
-// What ic gives: the arguments of `ic --emit-rgba`, the reading of what it
-// printed, and the decodes kept for the rows that draw a picture again.
+// What ic gives: the arguments of `ic --emit-rgba` for one image or for the
+// differences of two, the reading of what it printed, and the decodes kept for
+// the rows that draw a picture again.
 //
 // Pure: register.tsx runs ic through the engine and hands the result here.
 // The engine follows `$` into no module but the hooks module, so every call
@@ -27,6 +28,28 @@ export type Loaded = { isLoaded: true; picture: Picture } | { isLoaded: false; r
 /** How one run of ic ended, as `$.process.run` resolves it. */
 export type IcRun = { exitCode: number; stdout: string; stderr: string }
 
+/** How the picture of `ic --diff` shows the differences: `--diff-mode`. */
+export type DiffMode = 'boxes' | 'highlight' | 'mask'
+
+/** The modes of `ic --diff-mode`, in the order that a message names them. */
+export const DIFF_MODES: readonly DiffMode[] = ['boxes', 'highlight', 'mask']
+
+/** The modes as a sentence names them: `boxes, highlight or mask`. */
+export const DIFF_MODE_NAMES = `${DIFF_MODES.slice(0, -1).join(', ')} or ${DIFF_MODES.at(-1) ?? ''}`
+
+/** Whether `value` is one of the modes of `ic --diff-mode`. */
+export function isDiffMode(value: unknown): value is DiffMode {
+  return DIFF_MODES.some(mode => mode === value)
+}
+
+/**
+ * What one run of ic decodes: one image file, or the picture of the
+ * differences of two. A diff with no mode takes the default mode of ic.
+ */
+export type Subject =
+  | { kind: 'image'; path: string }
+  | { kind: 'diff'; first: string; second: string; mode: DiffMode | undefined }
+
 /**
  * The box that ic fits every picture inside, in pixels.
  *
@@ -49,23 +72,28 @@ const KEPT_DECODES = 16
 /** The bytes of one RGBA pixel. */
 const BYTES_PER_PIXEL = 4
 
-/** How to put an ic that knows --emit-rgba on this machine. */
+/** How to put an ic that knows --emit-rgba and --diff on this machine. */
 const UPDATE_IC = 'cargo install --git https://github.com/timmattison/tools ic'
 
-/** What clap prints when ic does not know the flag. */
-const UNKNOWN_FLAG = /unexpected argument '--emit-rgba'/
+/** What clap prints when ic does not know a flag. The flag is the group. */
+const UNKNOWN_FLAG = /unexpected argument '(--[a-z-]+)'/
 
 /**
- * The argument vector that decodes `path` with the ic at `icPath`.
+ * The argument vector that decodes `subject` with the ic at `icPath`.
  *
- * The path goes after `--`, so a path that starts with `-` stays a path and
- * clap does not read it as options.
+ * Each path goes after `--`, so a path that starts with `-` stays a path and
+ * clap does not read it as options. A diff gives `--diff-mode` only when it
+ * names a mode, so ic applies its own default.
  *
  * @param icPath the ic executable
- * @param path the file, absolute or relative to the session's directory
+ * @param subject the file, or the two files to compare, each absolute or
+ *   relative to the session's directory
  */
-export function icArguments(icPath: string, path: string): string[] {
-  return [icPath, '--emit-rgba', DECODE_BOX, '--', path]
+export function icArguments(icPath: string, subject: Subject): string[] {
+  if (subject.kind === 'image') return [icPath, '--emit-rgba', DECODE_BOX, '--', subject.path]
+
+  const mode = subject.mode === undefined ? [] : ['--diff-mode', subject.mode]
+  return [icPath, '--diff', ...mode, '--emit-rgba', DECODE_BOX, '--', subject.first, subject.second]
 }
 
 /**
@@ -76,8 +104,9 @@ export function icArguments(icPath: string, path: string): string[] {
  */
 export function loadedFrom(run: IcRun, icPath: string): Loaded {
   if (run.exitCode !== 0) {
-    if (UNKNOWN_FLAG.test(run.stderr)) {
-      return { isLoaded: false, reason: `this ${icPath} does not know --emit-rgba. Update it: ${UPDATE_IC}` }
+    const flag = UNKNOWN_FLAG.exec(run.stderr)?.[1]
+    if (flag !== undefined) {
+      return { isLoaded: false, reason: `this ${icPath} does not know ${flag}. Update it: ${UPDATE_IC}` }
     }
     return { isLoaded: false, reason: oneLine(run.stderr) || `${icPath} exited with ${run.exitCode}` }
   }
@@ -100,23 +129,24 @@ export function notRun(icPath: string, error: unknown): Loaded {
 }
 
 /**
- * The decodes kept for the rows of the transcript.
+ * The decodes kept for the rows of the transcript, by the argument vector of
+ * the run of ic that made each one: the ic, the mode, and the paths.
  *
  * A row draws again when the width of the window changes and after a hot
  * reload, and each draw asks for the same picture. A request of the person or
- * of the model decodes again, because the file can have changed. A failure is
- * not kept: the file can appear, or the run can have been cut short.
+ * of the model decodes again, because a file can have changed. A failure is
+ * not kept: a file can appear, or the run can have been cut short.
  */
 export class Decodes {
-  /** The decodes, newest last, by the ic and the path that made them. */
+  /** The decodes, newest last, by the key of their argument vector. */
   private readonly kept = new Map<string, Promise<Loaded>>()
 
   /**
-   * The kept decode of `path` by `icPath`, now the newest, or `undefined`
-   * when none is kept.
+   * The kept decode of the run `argv`, now the newest, or `undefined` when
+   * none is kept.
    */
-  held(icPath: string, path: string): Promise<Loaded> | undefined {
-    const key = keyOf(icPath, path)
+  held(argv: readonly string[]): Promise<Loaded> | undefined {
+    const key = keyOf(argv)
     const held = this.kept.get(key)
     if (held !== undefined) {
       this.kept.delete(key)
@@ -126,12 +156,12 @@ export class Decodes {
   }
 
   /**
-   * Keep `loading` as the decode of `path` by `icPath`, in place of any
-   * other. The oldest decode goes when there are too many, and `loading`
-   * goes again if it fails.
+   * Keep `loading` as the decode of the run `argv`, in place of any other.
+   * The oldest decode goes when there are too many, and `loading` goes again
+   * if it fails.
    */
-  keep(icPath: string, path: string, loading: Promise<Loaded>): void {
-    const key = keyOf(icPath, path)
+  keep(argv: readonly string[], loading: Promise<Loaded>): void {
+    const key = keyOf(argv)
     this.kept.delete(key)
     this.kept.set(key, loading)
     for (const oldest of this.kept.keys()) {
@@ -144,9 +174,9 @@ export class Decodes {
   }
 }
 
-/** The key of the decode of `path` by `icPath`. */
-function keyOf(icPath: string, path: string): string {
-  return `${icPath}\u0000${path}`
+/** The key of the run `argv`. No argument holds a NUL, so no two runs share one. */
+function keyOf(argv: readonly string[]): string {
+  return argv.join('\u0000')
 }
 
 /**

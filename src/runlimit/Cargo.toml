@@ -10,6 +10,7 @@ wait-timeout.workspace = true
 
 [dev-dependencies]
 childenv.workspace = true
+gitscratch = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 
 [lints]

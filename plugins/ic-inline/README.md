@@ -3,11 +3,13 @@
 A Claude Code plugin that shows pictures inline in the transcript. [`ic`](../../src/ic/README.md) decodes them.
 
 - `/ic <image file>` shows a picture to you, under the command.
+- `/ic diff [--mode MODE] <first> <second>` shows you one picture of the differences between two images, under the command.
 - `show_image` is a tool for Claude. Claude uses it to show you a picture that it made or found: a chart, a diagram, a screenshot. The picture shows in the result row of the call.
+- `show_diff` is a tool for Claude. Claude uses it to show you what changed between two images, for example a screenshot before and after a change. The picture shows in the result row of the call.
 
 ## Install
 
-Install an `ic` that knows `--emit-rgba` (`ic --help` lists it). The plugin needs that flag:
+Install an `ic` that knows `--emit-rgba` and `--diff` (`ic --help` lists them). The plugin needs `--emit-rgba` for each picture, and `--diff` for the differences:
 
 ```bash
 cargo install --git https://github.com/timmattison/tools ic
@@ -26,6 +28,42 @@ To run it from a checkout, give the folder to Claude Code:
 ```bash
 claude --plugin-dir ~/code/tools/plugins/ic-inline
 ```
+
+## Show the differences between two images
+
+```
+/ic diff before.png after.png
+/ic diff --mode boxes before.png after.png
+/ic diff --mode mask "~/shots/before change.png" ~/shots/after.png
+```
+
+The plugin runs `ic --diff [--diff-mode MODE] --emit-rgba 720x720 -- <first> <second>`, and it draws that picture the same way as `/ic` draws one image. The caption names the two files: `before.png vs after.png · 800×600`. When the two files have the same name, the caption shows the two paths: `old/shot.png vs new/shot.png`. [`ic --diff`](../../src/ic/README.md#show-the-differences-between-two-images) compares the two images pixel by pixel, with no tolerance, and it scales neither one.
+
+`--mode` selects how the picture shows the differences. With no `--mode`, the plugin gives no `--diff-mode` to `ic`, thus `ic` applies its default, `highlight`. Red is RGBA `(255, 0, 0, 255)`.
+
+| `--mode`              | A pixel that is the same | A pixel that differs                                    |
+| --------------------- | ------------------------ | ------------------------------------------------------- |
+| `boxes`               | the second image         | the second image, with a red outline around each region |
+| `highlight` (default) | the first image          | opaque red                                              |
+| `mask`                | opaque black             | opaque red                                              |
+
+The rules of the command form:
+
+- The first word is `diff`. Thus `/ic diff.png` and `/ic "diff"` still show one image.
+- A path that holds a space must be in double quotes. A single quote is part of a path, thus `Tim's.png` needs no quotes.
+- A path that starts with `~/` starts at your home directory, also in double quotes, the same as for `/ic`.
+- `--mode MODE` or `--mode=MODE` can come before, between, or after the two paths.
+- After the word `--`, each word is a path. Put `--` before a path that starts with `--`.
+
+The command refuses each of these with a message that names the cause, and it runs no `ic`:
+
+- A count of paths that is not two.
+- A mode that is not `boxes`, `highlight`, or `mask`, and a `--mode` with no mode.
+- A `--mode` that occurs two times.
+- An option other than `--mode`.
+- A double quote that is not closed, and an empty path (`""`).
+
+`show_diff` takes `first`, `second`, and an optional `mode`, which is one of the three modes of the table. It runs the same `ic` command, and it refuses a call with the same cause: a path that is absent, empty, or not text, and a mode that is not one of the three.
 
 ## How it draws
 
@@ -54,15 +92,15 @@ Set these in `/config`, or in `settings.json` under `pluginConfigs["ic-inline"]`
 
 ## What Claude sees
 
-`show_image` gives Claude the size of the picture and not its content. To look at a picture, Claude uses `Read`. A failure, such as a missing file or a file that holds no picture, comes back to Claude as an error with the reason that `ic` gave.
+`show_image` and `show_diff` give Claude the size of the picture and not its content. To look at a picture, Claude uses `Read`. A failure, such as a missing file or a file that holds no picture, comes back to Claude as an error with the reason that `ic` gave.
 
-If Claude Code asks your permission for `show_image`, add `mcp__ic-inline__show_image` to `permissions.allow` in your settings to stop the question.
+If Claude Code asks your permission for a tool, add `mcp__ic-inline__show_image` or `mcp__ic-inline__show_diff` to `permissions.allow` in your settings to stop the question.
 
 ## Errors
 
 | Message | Cause |
 | --- | --- |
-| `this ic does not know --emit-rgba` | The `ic` on your `PATH` is older than the flag. Install it again (see [Install](#install)). |
+| `this ic does not know --emit-rgba`, `this ic does not know --diff` | The `ic` on your `PATH` is older than the flag. Install it again (see [Install](#install)). |
 | `could not run ic` | No `ic` is on the `PATH` of Claude Code. Install it, or set `icPath`. |
 | `File not found`, `Failed to open image file` | `ic` read no picture at that path. Relative paths start at the working directory of the session. |
 
@@ -81,8 +119,8 @@ claude plugin test plugins/ic-inline
 
 | Module | What it holds |
 | --- | --- |
-| `picture.ts` | The arguments of `ic`, the reading of its JSON and its errors, and the decodes kept for rows that draw again. |
+| `picture.ts` | The modes of `--diff`, the arguments of `ic` for one image or for a diff, the reading of its JSON and its errors, and the decodes kept for rows that draw again. |
 | `cells.ts` | The size of a picture in cells, and the half-block cells of a `Raster`. |
 | `draw.tsx` | The tree of one picture and its caption. |
-| `argument.ts` | Paths: quotes, spaces, and `~`. |
+| `argument.ts` | The text after `/ic`: one path, or the diff form with its words, its `--mode`, and its refusals. Paths: quotes, spaces, and `~`. |
 | `options.ts` | The options, in range. |
