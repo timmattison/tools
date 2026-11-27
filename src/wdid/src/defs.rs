@@ -3,11 +3,13 @@
 //!
 //! [`tally`] reads the history rows and the definitions of the shell. It gives
 //! one [`Usage`] for each alias and for each function. It counts a typed use
-//! and a use through another definition. It classifies each definition by the
-//! date of its last use. The function is pure: it starts no process and reads
-//! no file.
+//! and a use through another definition. It finds each definition that the
+//! shell runs without a typed name, with its [`Reason`]. It classifies each
+//! other definition by the date of its last use. The function is pure: it
+//! starts no process and reads no file.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 
 use chrono::NaiveDate;
 
@@ -15,8 +17,10 @@ use crate::command_words::{parse_line, AliasKind, CommandWord, Line};
 use crate::history::HistoryEntry;
 use crate::origin::{Origin, Places};
 use crate::shell::Definitions;
+use crate::starts::Trigger;
 use crate::tally::days_since;
 
+mod reasons;
 pub mod render;
 
 /// The label of a regular alias.
@@ -93,6 +97,55 @@ pub enum Classification {
     Idle,
     /// The definition never ran.
     NeverUsed,
+    /// The shell runs the definition without a typed name, for example at
+    /// each prompt. The state does not depend on the uses.
+    RunsWithoutTyping,
+}
+
+/// Why the shell runs a definition without a typed name, or why it does not
+/// run a widget function.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Reason {
+    /// `trigger` runs the definition.
+    Runs {
+        /// The event of the shell.
+        trigger: Trigger,
+        /// The definition that `trigger` runs, when `trigger` reaches this
+        /// definition through a call. `None` when `trigger` runs it directly.
+        through: Option<String>,
+    },
+    /// The function implements a widget, and no key starts the widget. Only a
+    /// typed `zle` call or `execute-named-cmd` starts it.
+    WidgetWithoutKey,
+}
+
+impl Reason {
+    /// Says if the shell runs the definition without a typed name for this
+    /// reason. A widget that no key starts does not run.
+    #[must_use]
+    pub const fn runs_without_typing(&self) -> bool {
+        matches!(self, Self::Runs { .. })
+    }
+}
+
+impl fmt::Display for Reason {
+    /// Writes the text of the reason that a report shows: the text of the
+    /// trigger, then `, through` and the name when the trigger reaches the
+    /// definition through a call. A widget that no key starts has the text
+    /// `widget, no key`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Runs {
+                trigger,
+                through: None,
+            } => write!(formatter, "{trigger}"),
+            Self::Runs {
+                trigger,
+                through: Some(name),
+            } => write!(formatter, "{trigger}, through {name}"),
+            Self::WidgetWithoutKey => formatter.write_str("widget, no key"),
+        }
+    }
 }
 
 /// The uses of one definition.
@@ -122,6 +175,9 @@ pub struct Usage {
     pub origin: Option<Origin>,
     /// True when the definition is mine (see [`Places::is_mine`]).
     pub mine: bool,
+    /// Why the shell runs the definition without a typed name, sorted. It is
+    /// empty for most definitions.
+    pub reasons: Vec<Reason>,
 }
 
 /// The counts about the history and about the shell.
@@ -204,6 +260,7 @@ fn empty_usages(definitions: &Definitions, all: bool) -> Vec<Usage> {
             classification: Classification::NeverUsed,
             mine: definitions.places.is_mine(origin.as_ref()),
             origin,
+            reasons: Vec::new(),
         })
         .collect()
 }
@@ -230,40 +287,76 @@ impl Counts {
     }
 }
 
-/// The counts of every entry, by name and kind, with the names that the walk
-/// needs.
-struct Counter<'a> {
-    definitions: &'a Definitions,
+/// The names of the definitions of the shell, which each walk needs.
+struct Names<'a> {
     /// The kind of each alias, by name.
     alias_kinds: HashMap<String, Kind>,
     /// The names of all functions, also the private ones and the unparsed ones.
-    function_names: HashSet<&'a str>,
-    counts: HashMap<(String, Kind), Counts>,
+    functions: HashSet<&'a str>,
 }
 
-impl<'a> Counter<'a> {
-    /// Makes a counter with one empty count for each entry of `usages`.
-    fn new(definitions: &'a Definitions, usages: &[Usage]) -> Self {
+impl<'a> Names<'a> {
+    /// Gives the names of `definitions`.
+    fn new(definitions: &'a Definitions) -> Self {
         let alias_kinds = definitions
             .aliases
             .definitions()
             .into_iter()
             .map(|alias| (alias.name, Kind::from(alias.kind)))
             .collect();
-        let function_names = definitions
+        let functions = definitions
             .functions
             .keys()
             .chain(definitions.unparsed_functions.iter())
             .map(String::as_str)
             .collect();
+        Self {
+            alias_kinds,
+            functions,
+        }
+    }
+}
+
+/// Gives each function that the body of the function `start` calls, to any
+/// depth, one time each, in walk order. The walk visits each function one
+/// time, thus a cycle ends. `start` is not in the list, also when a cycle
+/// calls it.
+fn callees<'a>(definitions: &'a Definitions, names: &Names<'_>, start: &str) -> Vec<&'a str> {
+    let mut visited: HashSet<&str> = HashSet::from([start]);
+    let mut pending: Vec<&str> = vec![start];
+    let mut found = Vec::new();
+    while let Some(current) = pending.pop() {
+        let Some(body) = definitions.functions.get(current) else {
+            continue;
+        };
+        for callee in body.iter().map(|call| call.word.as_str()) {
+            if names.functions.contains(callee) && visited.insert(callee) {
+                found.push(callee);
+                pending.push(callee);
+            }
+        }
+    }
+    found
+}
+
+/// The counts of every entry, by name and kind, with the names that the walk
+/// needs.
+struct Counter<'a> {
+    definitions: &'a Definitions,
+    names: Names<'a>,
+    counts: HashMap<(String, Kind), Counts>,
+}
+
+impl<'a> Counter<'a> {
+    /// Makes a counter with one empty count for each entry of `usages`.
+    fn new(definitions: &'a Definitions, usages: &[Usage]) -> Self {
         let counts = usages
             .iter()
             .map(|usage| ((usage.name.clone(), usage.kind), Counts::default()))
             .collect();
         Self {
             definitions,
-            alias_kinds,
-            function_names,
+            names: Names::new(definitions),
             counts,
         }
     }
@@ -279,7 +372,7 @@ impl<'a> Counter<'a> {
     /// Counts the uses that one parsed line makes on `date`.
     fn count_line(&mut self, line: &Line, date: NaiveDate) {
         for alias_use in &line.aliases {
-            let Some(kind) = self.alias_kinds.get(&alias_use.name).copied() else {
+            let Some(kind) = self.names.alias_kinds.get(&alias_use.name).copied() else {
                 continue;
             };
             if let Some(entry) = self.counts.get_mut(&(alias_use.name.clone(), kind)) {
@@ -296,30 +389,30 @@ impl<'a> Counter<'a> {
     /// once for each word, and the start of the walk never counts itself.
     fn count_word(&mut self, word: &CommandWord, date: NaiveDate) {
         let name = word.word.as_str();
-        if !self.function_names.contains(name) {
+        if !self.names.functions.contains(name) {
             return;
         }
         self.use_function(name, word.alias.as_deref(), date);
         let via = word.alias.as_deref().unwrap_or(name);
-        let mut visited: HashSet<&str> = HashSet::from([name]);
-        let mut pending: Vec<&str> = vec![name];
-        while let Some(current) = pending.pop() {
-            let Some(body) = self.definitions.functions.get(current) else {
-                continue;
-            };
-            for callee in body.iter().map(|call| call.word.as_str()) {
-                if self.function_names.contains(callee) && visited.insert(callee) {
-                    self.use_function(callee, Some(via), date);
-                    pending.push(callee);
-                }
-            }
+        for callee in callees(self.definitions, &self.names, name) {
+            self.use_function(callee, Some(via), date);
         }
     }
 }
 
-/// Classifies one definition. A definition with no use never ran. A definition
-/// whose last use is older than `idle_days` days is idle.
-fn classify(uses: u64, last_use: Option<NaiveDate>, window: &Window) -> Classification {
+/// Classifies one definition. A definition that the shell runs without a
+/// typed name has that state, whatever its uses. A definition with no use
+/// never ran. A definition whose last use is older than `idle_days` days is
+/// idle.
+fn classify(
+    reasons: &[Reason],
+    uses: u64,
+    last_use: Option<NaiveDate>,
+    window: &Window,
+) -> Classification {
+    if reasons.iter().any(Reason::runs_without_typing) {
+        return Classification::RunsWithoutTyping;
+    }
     match last_use {
         Some(last) if uses > 0 => {
             if days_since(window.today, last) > i64::from(window.idle_days) {
@@ -342,10 +435,18 @@ fn classify(uses: u64, last_use: Option<NaiveDate>, window: &Window) -> Classifi
 /// does not count, because the shell did not find the command. An alias in the
 /// body of a function does not count, because the shell expanded it when it
 /// read the function.
+///
+/// Each entry also gets the reasons that the shell runs it without a typed
+/// name (see [`Definitions::starts`]). A reason goes to each function that a
+/// hook, a trap, or a widget with a key runs, to each function that such a
+/// function calls, to any depth, and to each alias that the code of a bash
+/// start names. Such an entry has the state
+/// [`Classification::RunsWithoutTyping`].
 #[must_use]
 pub fn tally(entries: &[HistoryEntry], definitions: &Definitions, window: &Window) -> Tally {
     let mut usages = empty_usages(definitions, window.all);
     let mut counter = Counter::new(definitions, &usages);
+    let mut reasons = reasons::find(definitions, &counter.names);
     let mut cache: HashMap<&str, Option<Line>> = HashMap::new();
     let mut before_since: u64 = 0;
     let mut not_found: u64 = 0;
@@ -380,7 +481,11 @@ pub fn tally(entries: &[HistoryEntry], definitions: &Definitions, window: &Windo
         usage.through = through;
         usage.first_use = counts.first_use;
         usage.last_use = counts.last_use;
-        usage.classification = classify(usage.uses, counts.last_use, window);
+        usage.reasons = reasons
+            .remove(&(usage.name.clone(), usage.kind))
+            .map(Vec::from_iter)
+            .unwrap_or_default();
+        usage.classification = classify(&usage.reasons, usage.uses, counts.last_use, window);
     }
     usages.sort_by(|left, right| {
         right

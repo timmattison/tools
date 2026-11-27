@@ -105,8 +105,8 @@ struct Cli {
 enum Command {
     /// Report on each alias and each function of the interactive shell: the
     /// file that defined it, the uses, the definitions that gave the other
-    /// uses, and the definitions never used or idle. Needs no cargo
-    /// workspace.
+    /// uses, and the definitions never used, idle, or run without a typed
+    /// name. Needs no cargo workspace.
     Defs(DefsArgs),
 }
 

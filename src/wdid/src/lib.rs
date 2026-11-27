@@ -18,6 +18,8 @@
 //!   commands that did not parse.
 //! - [`rules`] gives the runs that one command word makes.
 //! - [`shell`] gets the aliases and the functions of the interactive shell.
+//! - [`starts`] holds the code that the shell runs without a typed name: the
+//!   hooks, the traps, and the widgets.
 //! - [`tally`] counts the uses of each tool.
 //! - [`tool`] holds the names of the tools of the workspace.
 //! - [`workspace`] finds the workspace to report on, and the step that found
@@ -31,6 +33,7 @@ pub mod origin;
 pub mod render;
 pub mod rules;
 pub mod shell;
+pub mod starts;
 pub mod tally;
 pub mod tool;
 pub mod workspace;
