@@ -1223,3 +1223,57 @@ fn a_screen_view_says_whether_the_region_is_all() {
 
     assert_eq!(*seen.lock().unwrap(), vec![true, false]);
 }
+
+#[test]
+fn register_screen_and_each_other_form_replace_each_other_under_one_kind() {
+    // Each row registers one filter of another form under the kind "f".
+    type Register = fn(&mut FilterRegistry);
+    let forms: [(&str, Register); 3] = [
+        ("event", |registry| {
+            registry.register(kind("f"), add_one());
+        }),
+        ("in-place", |registry| {
+            registry.register_in_place(kind("f"), |events, _, _| Ok(events.to_vec()));
+        }),
+        ("span", |registry| {
+            registry.register_span(kind("f"), scale_span(2.0));
+        }),
+    ];
+
+    for (name, register_other) in forms {
+        // The screen filter comes first. The other form replaces it, thus the
+        // screen filter does not run and the header size stays.
+        let seen = TestArc::new(Mutex::new(Vec::new()));
+        let mut registry = FilterRegistry::new();
+        register_screen_spy(&mut registry, "f", size(40, 10), &seen);
+        register_other(&mut registry);
+        let rendered = registry.render(&one_clip_project(vec![all("f")])).unwrap();
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "the {name} form did not replace the screen filter"
+        );
+        assert_eq!(
+            (rendered.width, rendered.height),
+            (100, 30),
+            "the {name} form did not replace the screen filter"
+        );
+
+        // The screen filter comes last. It replaces the other form, thus it
+        // runs once and its size is in the header.
+        let seen = TestArc::new(Mutex::new(Vec::new()));
+        let mut registry = FilterRegistry::new();
+        register_other(&mut registry);
+        register_screen_spy(&mut registry, "f", size(40, 10), &seen);
+        let rendered = registry.render(&one_clip_project(vec![all("f")])).unwrap();
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "the screen filter did not replace the {name} form"
+        );
+        assert_eq!(
+            (rendered.width, rendered.height),
+            (40, 10),
+            "the screen filter did not replace the {name} form"
+        );
+    }
+}
