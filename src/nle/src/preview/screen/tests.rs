@@ -172,10 +172,11 @@ fn the_background_of_the_screen_follows_an_osc_11_change() {
 
 #[test]
 fn each_pair_of_cell_colors_resolves_one_time() {
+    // The cursor is hidden, because the cell under it swaps its colors.
     let state = terminal(
         200,
         60,
-        "\x1b[31mred\x1b[0m plain \x1b[42mgreen\x1b[0m\r\n\x1b[1;34mblue\x1b[0m",
+        "\x1b[?25l\x1b[31mred\x1b[0m plain \x1b[42mgreen\x1b[0m\r\n\x1b[1;34mblue\x1b[0m",
     );
     let pairs: std::collections::HashSet<_> = state
         .get_grid()
@@ -183,6 +184,11 @@ fn each_pair_of_cell_colors_resolves_one_time() {
         .flatten()
         .map(|cell| (cell.fg_color, cell.bg_color))
         .collect();
+    let foregrounds: std::collections::HashSet<_> = pairs.iter().map(|&(fg, _)| fg).collect();
+    assert!(
+        foregrounds.len() < pairs.len(),
+        "the grid holds one foreground on two backgrounds"
+    );
     let mut colors = Colors::new(&state);
     let screen = Screen::of_with(&mut colors);
     // The `+ 1` is the blank cell that gives the background of the screen.
@@ -192,5 +198,21 @@ fn each_pair_of_cell_colors_resolves_one_time() {
         colors.resolutions(),
         pairs.len()
     );
-    assert_eq!(screen, Screen::of(&state));
+    assert_eq!(screen.rows.len(), state.get_grid().len());
+    for (row_index, (cells, row)) in state.get_grid().iter().zip(&screen.rows).enumerate() {
+        let drawn: Vec<ColorPair> = row
+            .runs
+            .iter()
+            .flat_map(|run| {
+                run.text
+                    .chars()
+                    .map(move |_| (run.style.foreground, run.style.background))
+            })
+            .collect();
+        let resolved: Vec<ColorPair> = cells
+            .iter()
+            .map(|cell| state.resolve_cell_colors(cell))
+            .collect();
+        assert_eq!(drawn, resolved, "the colors of row {row_index}");
+    }
 }
