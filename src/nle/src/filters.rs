@@ -13,7 +13,7 @@ pub mod typing_speed;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
-use crate::pipeline::{FilterRegistry, Span};
+use crate::pipeline::{FilterRegistry, Mark, Span};
 use crate::types::{Event, EventType, FilterKind, FilterOptions, Seconds};
 
 /// The kind of the filter that shortens the long pauses between events.
@@ -22,14 +22,15 @@ use crate::types::{Event, EventType, FilterKind, FilterOptions, Seconds};
 /// events that is longer than `threshold` becomes `max_pause` long.
 /// `max_pause` must not be greater than `threshold`. A gap that crosses the
 /// start or the end of the region stays, and so does the time after the last
-/// event.
+/// event. A mark of an earlier filter keeps its place in its gap in
+/// proportion, so a mark in a shortened gap shrinks with it.
 pub const PAUSE_REMOVAL: &str = "pause-removal";
 
 /// The kind of the filter that puts a pause into the timeline.
 ///
 /// Options: `at` and `duration`, in seconds. `at` is relative to the start of
-/// the region. Each event at or after `at` moves later by `duration`, so a
-/// pause at the time of a key comes before that key. The region gets longer
+/// the region. Each event and each mark at or after `at` moves later by
+/// `duration`, so a pause at the time of a key comes before that key. The region gets longer
 /// by `duration`, so the events after a range and the end of the timeline move
 /// later by `duration` too, also when no event of the region moves. The normal
 /// region is `All`.
@@ -62,7 +63,8 @@ const END_TOLERANCE: f64 = 1e-6;
 /// timeline when it comes first. A region with no input event keeps its
 /// start, and a region with no output event keeps its end. The region gets
 /// shorter by the silence, so on `All` the end of the timeline comes back, and
-/// on a range the events after the range keep their gap from its end.
+/// on a range the events after the range keep their gap from its end. A mark
+/// of an earlier filter moves as an event at its time does.
 pub const AUTO_TRIM: &str = "auto-trim";
 
 /// A registry that holds every filter that ships with the app, under its
@@ -150,7 +152,8 @@ impl TryFrom<PauseRemovalFile> for PauseRemoval {
 /// The gaps are measured in time order. The first event keeps its time, and
 /// each later event moves earlier by the time that the gaps before it lost.
 /// The answer keeps the time from the last event to the end of the region, so
-/// the region gets shorter by the time that the gaps lost.
+/// the region gets shorter by the time that the gaps lost. Each mark moves by
+/// `moved_time`.
 fn remove_pauses(span: Span, options: &PauseRemoval) -> Span {
     let Span {
         mut events,
@@ -160,6 +163,8 @@ fn remove_pauses(span: Span, options: &PauseRemoval) -> Span {
     // A stable sort: events at one time keep their order.
     events.sort_by(|a, b| a.time.total_cmp(&b.time));
     let mut removed = 0.0;
+    // The old and the new time of each event, in time order.
+    let mut moves = Vec::with_capacity(events.len());
     // The old and the new time of the event before.
     let mut previous: Option<(f64, f64)> = None;
     for event in &mut events {
@@ -178,15 +183,49 @@ fn remove_pauses(span: Span, options: &PauseRemoval) -> Span {
         };
         event.time = new;
         previous = Some((old, new));
+        moves.push((old, new));
     }
     // The time after the last event, added to its new time. It is never
     // below zero, so the new length is never below the new last time.
     let length = previous.map_or(length, |(old, new)| (length - old) + new);
+    let marks = marks
+        .into_iter()
+        .map(|mark| Mark {
+            time: moved_time(mark.time, &moves),
+            ..mark
+        })
+        .collect();
     Span {
         events,
         length,
         marks,
     }
+}
+
+/// The new time of a mark at `time` after pause removal. `moves` holds the
+/// old and the new time of each event, in time order.
+///
+/// A mark before the first event keeps its time, as that event does. A mark
+/// in a gap keeps its place in the gap in proportion, so a mark in a
+/// shortened gap shrinks with it, and a mark at the time of an event moves
+/// with that event. A mark after the last event keeps its distance from that
+/// event, as the end of the region does, so it never comes after the new
+/// length.
+fn moved_time(time: f64, moves: &[(f64, f64)]) -> f64 {
+    let next = moves.partition_point(|&(old, _)| old <= time);
+    let Some(&(before_old, before_new)) = next.checked_sub(1).and_then(|index| moves.get(index))
+    else {
+        return time;
+    };
+    let delay = time - before_old;
+    let Some(&(after_old, after_new)) = moves.get(next) else {
+        return delay + before_new;
+    };
+    // The event after the mark is later than the event before it, so the old
+    // gap is above zero.
+    let ratio = (after_new - before_new) / (after_old - before_old);
+    // `max` and `min`, not `clamp`: `clamp` panics when its bounds cross.
+    (before_new + delay * ratio).max(before_new).min(after_new)
 }
 
 /// The options of pause insertion.
@@ -206,7 +245,8 @@ struct PauseInsertion {
 /// of the region by more than `END_TOLERANCE` is an error, because that shift
 /// also moves the events after the region and the end of the timeline, which
 /// are before the point. A point past the length by `END_TOLERANCE` or less
-/// is the length, so an event at the end of the region moves.
+/// is the length, so an event at the end of the region moves. Each mark at or
+/// after the point moves later by the duration too.
 fn insert_pause(span: Span, options: &PauseInsertion) -> Result<Span, String> {
     let (at, duration) = (options.at.get(), options.duration.get());
     if at > span.length + END_TOLERANCE {
@@ -227,7 +267,14 @@ fn insert_pause(span: Span, options: &PauseInsertion) -> Result<Span, String> {
             })
             .collect(),
         length: span.length + duration,
-        marks: span.marks,
+        marks: span
+            .marks
+            .into_iter()
+            .map(|mark| Mark {
+                time: later(mark.time),
+                ..mark
+            })
+            .collect(),
     })
 }
 
@@ -258,25 +305,32 @@ fn times_of<'a>(events: &'a [Event], event_type: &'a EventType) -> impl Iterator
 ///
 /// The leading cut makes the length shorter by the time of the first input
 /// event. The trailing cut makes the length the time of the last output
-/// event.
+/// event. Each mark moves as an event at its time does.
 fn trim_silence(span: Span, options: &AutoTrim) -> Span {
     let Span {
         mut events,
         mut length,
-        marks,
+        mut marks,
     } = span;
     if options.leading {
         if let Some(first_input) = times_of(&events, &EventType::Input).min_by(f64::total_cmp) {
+            let earlier = |time: f64| (time - first_input).max(0.0);
             for event in &mut events {
-                event.time = (event.time - first_input).max(0.0);
+                event.time = earlier(event.time);
             }
-            length = (length - first_input).max(0.0);
+            for mark in &mut marks {
+                mark.time = earlier(mark.time);
+            }
+            length = earlier(length);
         }
     }
     if options.trailing {
         if let Some(last_output) = times_of(&events, &EventType::Output).max_by(f64::total_cmp) {
             for event in &mut events {
                 event.time = event.time.min(last_output);
+            }
+            for mark in &mut marks {
+                mark.time = mark.time.min(last_output);
             }
             length = last_output;
         }

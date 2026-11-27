@@ -6487,14 +6487,15 @@ The editing engine of the crate has five parts:
     each burst of typing at one rate. The paragraph on this filter below gives
     its rules.
   - `pause-removal` (`threshold`, `max_pause`, issue #154): each gap between two
-    events that is longer than `threshold` becomes `max_pause` long.
-  - `pause-insertion` (`at`, `duration`, issue #154): each event at or after
-    `at` moves later by `duration`, and so do the events after a range and the
-    end of the timeline. An `at` past the end of the region by more than a
+    events that is longer than `threshold` becomes `max_pause` long. A mark in
+    a shortened gap shrinks with it in proportion.
+  - `pause-insertion` (`at`, `duration`, issue #154): each event and each mark
+    at or after `at` moves later by `duration`, and so do the events after a
+    range and the end of the timeline. An `at` past the end of the region by more than a
     microsecond is an error.
   - `auto-trim` (`leading`, `trailing`, both on when not set, issue #154):
     removes the time before the first input event and the time after the last
-    output event.
+    output event. A mark moves as an event at its time does.
   - `idle-compression` (`threshold`, `compress_to`, `width`, `height`,
     `ignore_top_rows`, `ignore_bottom_rows`, issue #167): compresses each idle
     stretch, and marks the start of each one. It replays the output through
