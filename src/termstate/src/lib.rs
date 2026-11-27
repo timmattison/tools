@@ -278,6 +278,22 @@ impl TerminalTheme {
     }
 }
 
+/// Where a color came from. The emulator keeps it next to each RGB value, so a
+/// writer can say the color again in the form that the source used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColorSource {
+    /// The default color of the theme. SGR 0, RIS, and a cleared cell give it.
+    #[default]
+    Default,
+    /// One of the 16 base colors, from 0 to 15. SGR 30-37 and 40-47 give 0 to
+    /// 7. SGR 90-97 and 100-107 give 8 to 15.
+    Base(u8),
+    /// A color of the 256-color palette, from SGR 38;5;n or 48;5;n.
+    Indexed(u8),
+    /// A 24-bit color, from SGR 38;2;r;g;b or 48;2;r;g;b.
+    Rgb(u8, u8, u8),
+}
+
 /// One character cell of the screen grid, with its colors and attributes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
@@ -287,6 +303,10 @@ pub struct Cell {
     pub fg_color: (u8, u8, u8),
     /// The background color.
     pub bg_color: (u8, u8, u8),
+    /// The source of the foreground color.
+    pub fg_source: ColorSource,
+    /// The source of the background color.
+    pub bg_source: ColorSource,
     /// Whether the character is bold.
     pub bold: bool,
     /// Whether the character is italic. The emulator tracks it, and `beta` does
@@ -396,6 +416,8 @@ impl Clone for TerminalState {
             theme: self.theme.clone(),
             current_fg: self.current_fg,
             current_bg: self.current_bg,
+            current_fg_source: self.current_fg_source,
+            current_bg_source: self.current_bg_source,
             bold: self.bold,
             italic: self.italic,
             underline: self.underline,
@@ -422,6 +444,8 @@ impl Default for Cell {
             ch: ' ',
             fg_color: (255, 255, 255),
             bg_color: (0, 0, 0),
+            fg_source: ColorSource::Default,
+            bg_source: ColorSource::Default,
             bold: false,
             italic: false,
             underline: false,
@@ -448,6 +472,10 @@ pub struct TerminalState {
     pub current_fg: (u8, u8, u8),
     /// The background color that the next printed character gets.
     pub current_bg: (u8, u8, u8),
+    /// The source of `current_fg`.
+    pub current_fg_source: ColorSource,
+    /// The source of `current_bg`.
+    pub current_bg_source: ColorSource,
     /// Whether the next printed character is bold.
     pub bold: bool,
     /// Whether the next printed character is italic.
@@ -510,6 +538,8 @@ impl TerminalState {
             height,
             current_fg: theme.foreground,
             current_bg: theme.background,
+            current_fg_source: ColorSource::Default,
+            current_bg_source: ColorSource::Default,
             bold: false,
             italic: false,
             underline: false,
@@ -712,6 +742,8 @@ impl TerminalState {
                 ch: display_char,
                 fg_color: self.current_fg,
                 bg_color: self.current_bg,
+                fg_source: ColorSource::Default,
+                bg_source: ColorSource::Default,
                 bold: self.bold,
                 italic: self.italic,
                 underline: self.underline,
