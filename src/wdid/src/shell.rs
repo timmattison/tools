@@ -18,7 +18,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use wait_timeout::ChildExt;
 
-use crate::command_words::{command_words, Aliases, CommandWord, Parsed};
+use crate::command_words::{command_words, AliasDefinition, Aliases, CommandWord, Parsed};
+use crate::origin::{Origin, Places};
 use crate::rules::{runs, Run};
 use crate::tool::{ToolName, ToolNames};
 
@@ -197,6 +198,30 @@ pub struct Definitions {
     pub unparsed_functions: Vec<String>,
     /// The alias lines that did not parse, in output order.
     pub unparsed_aliases: Vec<String>,
+    /// The origin of each regular and each global alias, by name. An alias
+    /// that this map does not hold has an unknown origin.
+    pub alias_origins: BTreeMap<String, Origin>,
+    /// The origin of each suffix alias, by its suffix (`md` for `*.md`).
+    pub suffix_origins: BTreeMap<String, Origin>,
+    /// The origin of each function, by name. A function that this map does
+    /// not hold has an unknown origin.
+    pub function_origins: BTreeMap<String, Origin>,
+    /// The directories that the shell gave after its start.
+    pub places: Places,
+}
+
+impl Definitions {
+    /// Gives the origin of `alias`.
+    #[must_use]
+    pub fn alias_origin(&self, _alias: &AliasDefinition) -> Option<&Origin> {
+        None
+    }
+
+    /// Gives the origin of the function `name`.
+    #[must_use]
+    pub fn function_origin(&self, _name: &str) -> Option<&Origin> {
+        None
+    }
 }
 
 /// The reasons that the aliases and the functions cannot be read.
