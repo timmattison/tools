@@ -117,16 +117,25 @@ fn draw(screen: &Screen<'_>, span: Span, options: &FilterOptions) -> Result<Vec<
     let mut events = span.events;
     // The pipeline gives no order inside a region.
     events.sort_by(|a, b| a.time.total_cmp(&b.time));
-    let presses = events
+    let mut reader = keys::KeyReader::new();
+    let mut presses: Vec<Press> = Vec::new();
+    for event in events
         .iter()
         .filter(|event| event.event_type == EventType::Input)
-        .flat_map(|event| {
-            keys::parse(&event.data).into_iter().map(|key| Press {
-                time: event.time,
-                key,
-            })
-        })
-        .collect();
+    {
+        presses.extend(
+            reader
+                .feed(event.time, &event.data)
+                .into_iter()
+                .map(|(time, key)| Press { time, key }),
+        );
+    }
+    presses.extend(
+        reader
+            .finish()
+            .into_iter()
+            .map(|(time, key)| Press { time, key }),
+    );
     let timeline = Timeline::new(
         presses,
         Timing {

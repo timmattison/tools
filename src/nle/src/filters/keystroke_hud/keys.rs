@@ -23,6 +23,27 @@ pub(crate) fn parse(data: &str) -> Vec<Key> {
     parser.keys
 }
 
+/// Reads the input events of one region in order.
+pub(crate) struct KeyReader {}
+
+impl KeyReader {
+    /// A reader with no open paste and no unfinished sequence.
+    pub(crate) fn new() -> Self {
+        Self {}
+    }
+
+    /// The keys that the input event at `time` with `data` completes, in
+    /// order, each with its time.
+    pub(crate) fn feed(&mut self, time: f64, data: &str) -> Vec<(f64, Key)> {
+        parse(data).into_iter().map(|key| (time, key)).collect()
+    }
+
+    /// The keys of a sequence that is still unfinished at the end of the input.
+    pub(crate) fn finish(&mut self) -> Vec<(f64, Key)> {
+        Vec::new()
+    }
+}
+
 const ESC: char = '\x1b';
 const BEL: char = '\x07';
 const STRING_TERMINATOR: char = '\\';

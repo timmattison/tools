@@ -1,6 +1,6 @@
 //! Tests of the keystroke parser.
 
-use super::{parse, Key};
+use super::{parse, Key, KeyReader};
 
 fn text(s: &str) -> Key {
     Key::Text(s.to_string())
@@ -298,4 +298,67 @@ fn incomplete_and_oversized_sequences_do_not_panic() {
         ("\x1b[99999999999999999999~", vec![special("Home")]),
         ("\x1b[1;4294967295A", vec![special("Ctrl+Alt+Super+↑")]),
     ]);
+}
+
+/// Feed each (time, data) event to one reader, then finish it.
+fn read(events: &[(f64, &str)]) -> Vec<(f64, Key)> {
+    let mut reader = KeyReader::new();
+    let mut keys = Vec::new();
+    for (time, data) in events {
+        keys.extend(reader.feed(*time, data));
+    }
+    keys.extend(reader.finish());
+    keys
+}
+
+#[test]
+fn a_paste_split_over_three_events_is_one_paste() {
+    assert_eq!(
+        read(&[
+            (1.0, "\x1b[200~line one\r"),
+            (1.0001, "line two\r\x03"),
+            (1.0002, "end\x1b[201~ls"),
+        ]),
+        vec![(1.0, special("Paste")), (1.0002, text("ls"))]
+    );
+}
+
+#[test]
+fn a_paste_end_marker_split_over_two_events_ends_the_paste() {
+    assert_eq!(
+        read(&[(1.0, "\x1b[200~abc\x1b[20"), (1.0001, "1~x")]),
+        vec![(1.0, special("Paste")), (1.0001, text("x"))]
+    );
+}
+
+#[test]
+fn an_open_paste_has_no_time_limit() {
+    assert_eq!(
+        read(&[(1.0, "\x1b[200~abc"), (9.0, "def\x1b[201~y")]),
+        vec![(1.0, special("Paste")), (9.0, text("y"))]
+    );
+}
+
+#[test]
+fn a_csi_split_over_two_events_is_one_key() {
+    assert_eq!(
+        read(&[(1.0, "\x1b["), (1.0001, "1;5A")]),
+        vec![(1.0001, special("Ctrl+↑"))]
+    );
+}
+
+#[test]
+fn a_lone_esc_and_a_later_key_after_the_timeout_are_two_keys() {
+    assert_eq!(
+        read(&[(1.0, "\x1b"), (1.5, "[")]),
+        vec![(1.0, special("Esc")), (1.5, text("["))]
+    );
+}
+
+#[test]
+fn finish_gives_a_lone_esc_that_ends_the_input() {
+    assert_eq!(
+        read(&[(1.0, "a\x1b")]),
+        vec![(1.0, text("a")), (1.0, special("Esc"))]
+    );
 }

@@ -372,3 +372,21 @@ fn bad_options_fail_the_render_and_name_the_option() {
         .to_string();
     assert!(error.contains("position"), "{error}");
 }
+
+#[test]
+fn a_paste_over_several_input_events_shows_as_one_paste() {
+    let events = ended(vec![
+        inp(1.0, "\x1b[200~secret"),
+        inp(1.0001, "word\r"),
+        inp(1.0002, "\x1b[201~"),
+    ]);
+    let result = hud(&events, &plain(), WIDE);
+    let screen = replay(&result, 1.1, WIDE);
+    assert_eq!(text(&screen, 2, 30, 39), "│ Paste │");
+    for row in 0..10 {
+        assert!(
+            !text(&screen, row, 0, 40).contains("word"),
+            "row {row} shows pasted text"
+        );
+    }
+}
