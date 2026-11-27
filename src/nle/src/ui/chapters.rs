@@ -2,8 +2,9 @@
 //! markers of the project, a search field, and a form to add, edit, and remove
 //! markers.
 //!
-//! The time of a marker comes from a text field, because the timeline and the
-//! playhead are not part of the window yet.
+//! The time of a marker comes from a text field, and it is on the timeline
+//! before the filters. The panel does not read the playhead, because the
+//! playhead is a time of the edited recording.
 
 use dioxus::prelude::*;
 

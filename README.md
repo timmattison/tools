@@ -6481,8 +6481,10 @@ rendered recording is not in it.
 `beta export web` shows the chapters of a rendered recording as markers on the
 progress bar. A click on a marker moves the player to that chapter.
 `beta export video` writes them into an MP4 as chapters. Markers on the
-timeline, and a jump of the preview to a chapter, wait for the timeline
-(issue #150) and the preview pane (issue #151).
+timeline, and a click on a marker that moves the playhead to its chapter, wait
+for the timeline (issue #150). The chapter panel does not read or move the
+playhead. The playhead is a time of the edited recording, but the time of a
+chapter is before the filters.
 
 The crate also has functions that save the rendered recording
 (`Editor::save_recording`), list the recordings in a directory, and export a
