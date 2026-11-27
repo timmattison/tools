@@ -25,6 +25,10 @@ const CTRL_W: &str = "\x17";
 /// The data of the Ctrl+U key. It erases the line before the cursor.
 const CTRL_U: &str = "\x15";
 
+/// The most cells that the screen of the filter may have. A larger terminal
+/// fails the render, because the filter holds many copies of the screen.
+const MAX_CELLS: usize = 1 << 20;
+
 /// What the data of an input event is, for this filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Key {

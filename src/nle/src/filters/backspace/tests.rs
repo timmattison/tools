@@ -456,3 +456,10 @@ fn a_terminal_of_no_rows_fails_the_render() {
     let message = render_error_message(render(80, 0, vec![out(0.0, "x")]));
     assert!(message.contains("80 by 0"), "{message}");
 }
+
+#[test]
+fn a_terminal_of_more_than_the_cell_limit_fails_the_render() {
+    let message = render_error_message(render(2048, 1024, vec![out(0.0, "x")]));
+    assert!(message.contains("2048 by 1024"), "{message}");
+    assert!(message.contains(&MAX_CELLS.to_string()), "{message}");
+}
