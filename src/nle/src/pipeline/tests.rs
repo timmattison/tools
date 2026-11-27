@@ -1187,3 +1187,17 @@ fn a_span_filter_may_answer_a_mark_at_its_length() {
 
     assert_eq!(mark_times(&marks), vec![10.0]);
 }
+
+#[test]
+fn a_mark_inside_or_after_the_region_of_an_in_place_filter_keeps_its_time() {
+    let (mut registry, _seen) = in_place_spy(|view| view.length);
+    registry.register_span(kind("inside"), marker(3.0, "inside"));
+    registry.register_span(kind("after"), marker(8.0, "after"));
+
+    let marks = rendered_marks(
+        &registry,
+        vec![all("inside"), all("after"), range("spot", 2.0, 6.0)],
+    );
+
+    assert_eq!(mark_times(&marks), vec![3.0, 8.0]);
+}
