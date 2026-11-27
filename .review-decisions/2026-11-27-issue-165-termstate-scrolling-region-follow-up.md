@@ -57,3 +57,21 @@ Each row number below starts at 0, as `scroll_region()` gives it.
   terminal.
 - **Fix:** in the RIS arm, set `scroll_top` to 0 and `scroll_bottom` to the
   last row.
+
+### 2. IL and DL ignore the scrolling region
+
+- **Finding:** R-20261127T201651Z#N3.
+- **Location:** `src/termstate/src/lib.rs:1855-1884`, the arms `'L'` (IL) and
+  `'M'` (DL) of the CSI dispatch. They move the rows down to, or up from, the
+  last row of the screen, and they ignore `scroll_bottom`.
+- **Reproduction:** a screen of 80 columns and 6 rows, with text on each row.
+  The bytes are `ESC [ 2 ; 4 r`, `ESC [ 2 ; 1 H` and `ESC [ M`. `termstate`
+  moves rows 2 to 5 up by one row and clears row 5. Thus row 4 gets the text
+  of row 5. xterm moves only rows 2 and 3 up and clears row 3. Rows 4 and 5 do
+  not change. xterm also ignores IL and DL when the cursor is outside the
+  region.
+- **Tests:** the cases IL and DL of `each_change_of_a_cell_marks_its_row`
+  (`src/termstate/src/tests.rs`) set no region. The fix also changes the rows
+  that IL and DL mark.
+- **Fix:** limit IL and DL to the rows from the cursor to `scroll_bottom`, and
+  do nothing when the cursor is outside the region.
