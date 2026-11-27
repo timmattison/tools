@@ -287,19 +287,18 @@ impl FilterRegistry {
             if mark.time < start {
                 marks_before.push(mark);
             } else if mark.time < region_end {
-                marks_inside.push(Mark {
-                    time: mark.time - start,
-                    ..mark
-                });
+                marks_inside.push(mark);
             } else {
                 marks_after.push(mark);
             }
         }
 
         let kind = applied.kind.as_str();
-        // The answer, its marks, the view of an in-place filter, the latest
-        // time on the timeline that the answer can get, and how far the events
-        // after the region move.
+        // The answer, its marks on the timeline, the view of an in-place
+        // filter, the latest time on the timeline that the answer can get, and
+        // how far the events after the region move. Only a span filter sees
+        // the marks, so only its marks go to the relative time and back. A
+        // round trip can move a time by one step of an f64.
         let (answer, answer_marks, view, ceiling, shift) = match filter {
             Registered::Events(filter) => {
                 let answer = filter(&inside, &applied.options);
@@ -324,7 +323,13 @@ impl FilterRegistry {
                 let span = Span {
                     events: inside,
                     length,
-                    marks: marks_inside,
+                    marks: marks_inside
+                        .into_iter()
+                        .map(|mark| Mark {
+                            time: mark.time - start,
+                            ..mark
+                        })
+                        .collect(),
                 };
                 let answer = filter(span, &applied.options).map_err(|message| {
                     NleError::RenderError(format!("filter \"{kind}\" failed: {message}"))
@@ -347,7 +352,15 @@ impl FilterRegistry {
                     }
                 }
                 let shift = answer.length - length;
-                (answer.events, answer.marks, None, f64::INFINITY, shift)
+                let marks = answer
+                    .marks
+                    .into_iter()
+                    .map(|mark| Mark {
+                        time: mark.time + start,
+                        ..mark
+                    })
+                    .collect();
+                (answer.events, marks, None, f64::INFINITY, shift)
             }
         };
         for event in &answer {
@@ -392,10 +405,7 @@ impl FilterRegistry {
         end = end.max(last_time(&result)).max(0.0);
 
         let mut marks = marks_before;
-        marks.extend(answer_marks.into_iter().map(|mark| Mark {
-            time: mark.time + start,
-            ..mark
-        }));
+        marks.extend(answer_marks);
         marks.extend(marks_after.into_iter().map(|mark| Mark {
             time: mark.time + shift,
             ..mark
