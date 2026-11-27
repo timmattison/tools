@@ -11,6 +11,7 @@
 # Claude Code plugins live in scripts/plugin-checks.sh. CI runs both scripts.
 # Each script is the one list of its checks: add a new check there, not here.
 # The header of each script gives its checks and the reason for each one.
+# CLAUDE.md, "Checks in an issue-fleet Step", says why a step skips this hook.
 #
 # The trigger regex also matches rustfmt.toml and rust-toolchain.toml at the
 # repo root: a commit that bumps the toolchain or style config is the scenario
