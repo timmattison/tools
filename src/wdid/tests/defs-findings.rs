@@ -344,3 +344,52 @@ fn a_suffix_alias_defined_twice_is_a_finding() {
     assert_eq!(finding.definitions[0].kind, Kind::SuffixAlias);
     assert_eq!(finding.places.len(), 2);
 }
+
+/// An alias and a function with the same name are one finding.
+#[test]
+fn an_alias_that_hides_a_function_is_one_finding() {
+    let mut defs = empty();
+    alias(&mut defs, "wdx", "echo x", ZSHRC, 7);
+    function(&mut defs, "wdx", "\techo y", GIT_PLUGIN);
+    let found = findings(&[row("wdx")], &defs);
+    assert_eq!(
+        found,
+        vec![Finding {
+            kind: FindingKind::AliasHidesFunction,
+            definitions: vec![
+                member("wdx", Kind::Alias, Some(origin(ZSHRC, Some(7))), 1, true),
+                member(
+                    "wdx",
+                    Kind::Function,
+                    Some(origin(GIT_PLUGIN, None)),
+                    0,
+                    false
+                ),
+            ],
+            words: Vec::new(),
+            places: Vec::new(),
+            program: None,
+        }]
+    );
+}
+
+/// A global alias that hides a function is a finding too.
+#[test]
+fn a_global_alias_that_hides_a_function_is_a_finding() {
+    let mut defs = empty();
+    defs.aliases.insert_global("wdg", "echo x");
+    function(&mut defs, "wdg", "\techo y", ZSHRC);
+    let found = findings(&[], &defs);
+    let finding = only(&found, FindingKind::AliasHidesFunction).unwrap();
+    assert_eq!(finding.definitions[0].kind, Kind::GlobalAlias);
+}
+
+/// An alias that starts with its own name runs the function, thus it hides
+/// nothing.
+#[test]
+fn an_alias_that_wraps_its_own_function_is_not_a_finding() {
+    let mut defs = empty();
+    alias(&mut defs, "wdy", "wdy --color", ZSHRC, 8);
+    function(&mut defs, "wdy", "\techo y", ZSHRC);
+    assert_eq!(findings(&[], &defs), Vec::new());
+}
