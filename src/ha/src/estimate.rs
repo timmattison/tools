@@ -14,9 +14,9 @@
 //! run. The end of a run is the latest end of any of its jobs, in any state.
 //! The mean tail of the newest passed runs is the tail of the name.
 //!
-//! Each job of the active run gives one term: the time from now to the end of
-//! the run, if this job is the last one. The latest term is the estimate of the
-//! run.
+//! Each job of the active run that passed, runs, or waits gives one term: the
+//! time from now to the end of the run, if this job is the last one. A job in
+//! any other state gives no term. The latest term is the estimate of the run.
 
 use std::collections::HashMap;
 use std::time::Duration;
