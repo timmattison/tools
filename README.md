@@ -6382,6 +6382,13 @@ speed changes above it. The panel shows the duration of the edited recording.
 The panel refuses a change after which the recording does not render, and it
 shows the reason in the banner.
 
+The color scheme panel under the speed panel plays the recording in the colors
+of another theme. Pick a **Target theme** and the options, then click
+**Apply Color Scheme**. Leave both times empty for the whole timeline, or type
+the start and the end of a range in seconds. Each color scheme gets a row with
+a **Remove** button. See [The color scheme filter](#the-color-scheme-filter)
+for the options.
+
 The application is one Rust crate on Dioxus 0.7, with the desktop (webview)
 renderer. Its components call the Rust code directly, and the open project is
 Dioxus state, thus no IPC layer and no frontend package exist.
@@ -6403,9 +6410,12 @@ The editing engine of the crate has five parts:
   span filter (`register_span`) also gets the length of its region and answers
   a new length, and the later events move by the change in the length.
   `filters::registry()` holds the filters that ship: the cursor filter
-  (`cursor`, issue #168) is an in-place filter, and time dilation
-  (`time-dilation`, issue #153) and typing speed (`typing-speed`, issue #155)
-  are span filters. Issues #152 to #167 add the others.
+  (`cursor`, issue #168) and the color scheme filter (`color-scheme`, issue
+  #166) are in-place filters, and time dilation (`time-dilation`, issue #153)
+  and typing speed (`typing-speed`, issue #155) are span filters. Issues #152
+  to #167 add the others. The two in-place filters read the escape sequences
+  with one reader, and one splicer (`filters/splice.rs`) puts each rewritten
+  sequence back into the event where it ends.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
@@ -6469,6 +6479,50 @@ the state of the recording back at the end. The filter sees only its range,
 thus it takes the state before the range to be the default of a terminal: a
 visible cursor, DECSCUSR 0, and the default color. After a reset of the
 terminal (RIS or DECSTR) in the recording, the filter sets the cursor again.
+
+### The color scheme filter
+
+The `color-scheme` filter plays a recording in the colors of another theme.
+For example, it plays a recording made in Dracula in the colors of Solarized
+Light. It rewrites the SGR color parameters in the output events, and it sets
+the default foreground and background of the theme through OSC 10 and OSC 11.
+The events keep their times. Thus the preview, `beta play`, and the web and
+video exports of `beta` show the colors of the theme, with each `--theme`.
+
+The color scheme panel adds the filter. A project file names it in its
+`filters` list:
+
+```json
+{
+  "kind": "color-scheme",
+  "region": "All",
+  "options": { "theme": "solarized-light", "swap": false, "cube": "nearest", "grayscale": "invert", "truecolor": "invert-lightness" }
+}
+```
+
+| Option | Values | What it does |
+|---|---|---|
+| `theme` | `auto`, `dracula`, `monokai`, `solarized-dark`, `solarized-light` | Necessary. The 16 base colors (`30`-`37`, `40`-`47`, `90`-`97`, `100`-`107`, and `38;5;n`, `48;5;n`, `58;5;n` with n below 16) become the 24-bit colors of this theme. The default foreground and background become the colors of this theme. These are the palettes of `beta export --theme`. |
+| `swap` | `true`, `false` (the default) | `true` swaps the default foreground and the default background of the theme. The panel calls it **Default colors**. |
+| `cube` | `keep` (the default), `nearest` | For the 6x6x6 cube, the indexes 16 to 231. `nearest` gives the nearest of the 16 colors of the theme, by the distance in RGB. |
+| `grayscale` | `keep` (the default), `invert` | For the grayscale ramp, the indexes 232 to 255. `invert` swaps the ends of the ramp, thus 232 becomes 255. Use it for a change between a dark and a light theme. |
+| `truecolor` | `keep` (the default), `invert-lightness` | For a 24-bit color. `invert-lightness` changes the lightness L of the color to 1 - L, and it keeps the hue and the saturation. Use it for a change between a dark and a light theme. |
+
+An unknown key or value fails the render, and the message names it. The filter
+also reads the colon form of a color (`38:2::r:g:b`), and it writes each new
+color in the semicolon form, which the emulator of `termstate` reads. It drops
+each default color that the recording sets: OSC 10, OSC 11, OSC 110, OSC 111,
+and the default-color values of an OSC 10 or 11 list. After a reset of the
+terminal (RIS) in the recording, it sets the default colors of the theme
+again.
+
+On a range, the filter writes OSC 110 and OSC 111 at the end, then the default
+colors and the SGR colors that the recording set inside the range. Thus the
+text after the range has the colors of the recording. The filter sees only its
+range, thus a color that the recording set before the start of the range stays
+as the recording wrote it, until the next SGR in the range. The filter does not
+read OSC 4. A terminal that shows bold text in the bright colors does not do so
+for a converted base color, because that color is a 24-bit color.
 
 The export functions run `beta` with the PATH of the app, then
 `$CARGO_HOME/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.
