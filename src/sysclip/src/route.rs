@@ -162,8 +162,8 @@ impl<N: Native> Router<N> {
 mod tests {
     use super::*;
     use crate::{COPY_COMMAND, PASTE_COMMAND};
+    use gitscratch::testing::executable::write_executable;
     use std::cell::RefCell;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::rc::Rc;
 
@@ -198,8 +198,7 @@ mod tests {
 
     fn install(dir: &Path, name: &str, body: &str) {
         let path = dir.join(name);
-        std::fs::write(&path, body).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable(&path, body).unwrap();
     }
 
     /// A search path that holds the stubs `(name, body)` and the files that

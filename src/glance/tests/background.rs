@@ -15,13 +15,13 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::Barrier;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use gitscratch::testing::executable::write_executable;
 use tempfile::TempDir;
 
 /// The life of each status item that a test starts, in seconds after it is
@@ -157,9 +157,7 @@ impl Home {
         let bin = dir.path().join(FAKE_BIN);
         fs::create_dir(&bin).expect("make the directory of the fake ssh");
         let ssh = bin.join("ssh");
-        fs::write(&ssh, FAKE_SSH).expect("write the fake ssh");
-        fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755))
-            .expect("make the fake ssh executable");
+        write_executable(&ssh, FAKE_SSH).expect("write the fake ssh");
         Self {
             dir,
             started: Vec::new(),
