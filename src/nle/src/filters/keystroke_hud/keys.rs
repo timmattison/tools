@@ -1,4 +1,8 @@
-//! The parser that turns the data of one input event into keys.
+//! The parser that turns the data of input events into keys. A `KeyReader`
+//! reads the input events of one region in order. It keeps an open bracketed
+//! paste and an unfinished escape sequence across the input events, because
+//! beta records its input in reads of 4096 bytes, and one paste or one
+//! sequence can span two reads.
 
 /// One key in the data of an input event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,36 +16,117 @@ pub(crate) enum Key {
 
 /// The keys in the data of one input event, in order. Each run of printable
 /// characters is one `Key::Text`. A byte sequence that is not a key (a mouse
-/// report, an answer of the terminal) gives no key.
+/// report, an answer of the terminal) gives no key. The data is the whole
+/// input: nothing follows it, so an unfinished sequence at its end is read as
+/// it stands.
+#[cfg(test)]
 pub(crate) fn parse(data: &str) -> Vec<Key> {
-    let mut parser = Parser {
-        chars: data.chars().collect(),
-        pos: 0,
-        keys: Vec::new(),
-    };
-    parser.run();
-    parser.keys
+    let mut reader = KeyReader::new();
+    reader
+        .feed(0.0, data)
+        .into_iter()
+        .chain(reader.finish())
+        .map(|(_, key)| key)
+        .collect()
 }
 
-/// Reads the input events of one region in order.
-pub(crate) struct KeyReader {}
+/// The longest gap, in seconds, between the two input events that one escape
+/// sequence spans. beta reads its input in reads of 4096 bytes and sleeps 10 ms
+/// when a read finds nothing, so the rest of a split sequence comes well inside
+/// this gap. A person who presses Esc and then another key takes longer. Vim
+/// and Neovim use 50 to 100 ms for the same choice.
+const SEQUENCE_TIMEOUT: f64 = 0.05;
+
+/// The length of the tail of an open paste that the reader keeps: the end
+/// marker without its last character, which is the longest part of the marker
+/// that one event can hold.
+const PASTE_TAIL_LENGTH: usize = PASTE_END.len() - 1;
+
+/// Reads the input events of one region, in order. It keeps two kinds of state
+/// across the events: an open bracketed paste, and an escape sequence that the
+/// data of an event leaves unfinished.
+pub(crate) struct KeyReader {
+    /// The last characters of the open paste, when a paste is open.
+    paste_tail: Option<Vec<char>>,
+    /// The time and the characters of an unfinished sequence.
+    pending: Option<(f64, Vec<char>)>,
+}
 
 impl KeyReader {
     /// A reader with no open paste and no unfinished sequence.
     pub(crate) fn new() -> Self {
-        Self {}
+        Self {
+            paste_tail: None,
+            pending: None,
+        }
     }
 
     /// The keys that the input event at `time` with `data` completes, in
-    /// order, each with its time.
+    /// order, each with its time. A sequence that the data leaves unfinished
+    /// waits for the next event. It joins that event when the gap is at most
+    /// `SEQUENCE_TIMEOUT`. An open paste has no time limit, because a
+    /// terminal always sends the end marker.
     pub(crate) fn feed(&mut self, time: f64, data: &str) -> Vec<(f64, Key)> {
-        parse(data).into_iter().map(|key| (time, key)).collect()
+        let mut keys = Vec::new();
+        let mut chars: Vec<char> = data.chars().collect();
+        if let Some(tail) = self.paste_tail.take() {
+            let mut joined = tail;
+            joined.extend(chars);
+            match find_paste_end(&joined) {
+                Some(end) => chars = joined.split_off(end),
+                None => {
+                    self.paste_tail = Some(last_chars(&joined, PASTE_TAIL_LENGTH));
+                    return keys;
+                }
+            }
+        } else if let Some((pending_time, mut joined)) = self.pending.take() {
+            if time - pending_time <= SEQUENCE_TIMEOUT {
+                joined.extend(chars);
+                chars = joined;
+            } else {
+                keys.extend(parse_final(pending_time, joined));
+            }
+        }
+        let parser = Parser::run_on(chars, false);
+        keys.extend(parser.keys.into_iter().map(|key| (time, key)));
+        self.paste_tail = parser.paste_tail;
+        self.pending = parser.unfinished.map(|chars| (time, chars));
+        keys
     }
 
     /// The keys of a sequence that is still unfinished at the end of the input.
     pub(crate) fn finish(&mut self) -> Vec<(f64, Key)> {
-        Vec::new()
+        self.paste_tail = None;
+        match self.pending.take() {
+            Some((time, chars)) => parse_final(time, chars),
+            None => Vec::new(),
+        }
     }
+}
+
+/// The keys of `chars` as the whole of the input, each with `time`.
+fn parse_final(time: f64, chars: Vec<char>) -> Vec<(f64, Key)> {
+    Parser::run_on(chars, true)
+        .keys
+        .into_iter()
+        .map(|key| (time, key))
+        .collect()
+}
+
+/// The index after the first end marker of a paste in `chars`.
+fn find_paste_end(chars: &[char]) -> Option<usize> {
+    chars
+        .windows(PASTE_END.len())
+        .position(|window| window == PASTE_END)
+        .map(|offset| offset + PASTE_END.len())
+}
+
+/// The last `count` characters of `chars`.
+fn last_chars(chars: &[char], count: usize) -> Vec<char> {
+    chars
+        .get(chars.len().saturating_sub(count)..)
+        .unwrap_or_default()
+        .to_vec()
 }
 
 const ESC: char = '\x1b';
@@ -302,14 +387,48 @@ struct Parser {
     chars: Vec<char>,
     pos: usize,
     keys: Vec<Key>,
+    /// True when nothing follows the data. Then an unfinished sequence at its
+    /// end is read as it stands.
+    final_input: bool,
+    /// The characters of a sequence that the end of the data leaves
+    /// unfinished. Only set when `final_input` is false.
+    unfinished: Option<Vec<char>>,
+    /// The last characters of a paste that the data does not end.
+    paste_tail: Option<Vec<char>>,
 }
 
 impl Parser {
+    /// Parse all of `chars`.
+    fn run_on(chars: Vec<char>, final_input: bool) -> Self {
+        let mut parser = Self {
+            chars,
+            pos: 0,
+            keys: Vec::new(),
+            final_input,
+            unfinished: None,
+            paste_tail: None,
+        };
+        parser.run();
+        parser
+    }
+
+    /// Stop at an unfinished sequence that starts at `start`, and keep its
+    /// characters. Answer false, and do nothing, when the end of the data is
+    /// final.
+    fn defer(&mut self, start: usize) -> bool {
+        if self.final_input {
+            return false;
+        }
+        self.unfinished = Some(self.chars.get(start..).unwrap_or_default().to_vec());
+        self.pos = self.chars.len();
+        true
+    }
+
     /// Parse all of the data.
     fn run(&mut self) {
         while let Some(c) = self.next_char() {
             match c {
-                ESC => self.escape(),
+                ESC => self.escape(self.pos.saturating_sub(1)),
                 '\r' => {
                     if self.peek() == Some('\n') {
                         self.pos += 1;
@@ -362,9 +481,13 @@ impl Parser {
         }
     }
 
-    /// Parse what follows an `ESC` that the parser has read.
-    fn escape(&mut self) {
+    /// Parse what follows an `ESC` that the parser has read. The `ESC` is at
+    /// index `start`.
+    fn escape(&mut self, start: usize) {
         let Some(next) = self.peek() else {
+            if self.defer(start) {
+                return;
+            }
             self.push_special(ESCAPE_LABEL.to_string());
             return;
         };
@@ -374,8 +497,11 @@ impl Parser {
         }
         self.pos += 1;
         let at_end = self.peek().is_none();
+        if at_end && matches!(next, '[' | 'O') && self.defer(start) {
+            return;
+        }
         match next {
-            '[' if !at_end => self.csi(),
+            '[' if !at_end => self.csi(start),
             'O' if !at_end => self.ss3(),
             ']' if self.skip_string(true) => {}
             'P' | '_' if self.skip_string(false) => {}
@@ -424,13 +550,18 @@ impl Parser {
         taken
     }
 
-    /// Parse a CSI sequence. The parser has read `ESC [`.
-    fn csi(&mut self) {
+    /// Parse a CSI sequence. The parser has read `ESC [`, and the `ESC` is at
+    /// index `start`.
+    fn csi(&mut self, start: usize) {
         let params = self.take_while(|c| ('\u{30}'..='\u{3f}').contains(&c));
         let intermediates = self.take_while(|c| ('\u{20}'..='\u{2f}').contains(&c));
         let Some(final_char) = self.peek().filter(|c| ('\u{40}'..='\u{7e}').contains(c)) else {
             // The data ends, or the next character is not part of a sequence.
-            // The characters read so far give no key.
+            // The characters read so far give no key. At the end of data that
+            // more data follows, the sequence waits for its rest.
+            if self.peek().is_none() {
+                self.defer(start);
+            }
             return;
         };
         self.pos += 1;
@@ -485,7 +616,10 @@ impl Parser {
             .position(|window| window == PASTE_END);
         self.pos = match end {
             Some(offset) => self.pos + offset + PASTE_END.len(),
-            None => self.chars.len(),
+            None => {
+                self.paste_tail = Some(last_chars(rest, PASTE_TAIL_LENGTH));
+                self.chars.len()
+            }
         };
     }
 
