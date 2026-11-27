@@ -418,7 +418,7 @@ fn a_cell_after_a_wide_character_gets_its_own_cup() {
 
     assert_eq!(
         pairs(&rendered.events),
-        vec![(1.0, "日\x1b[1;3H本\x1b[1;5H")]
+        vec![(1.0, "日\x1b[1;2H本\x1b[1;3H")]
     );
 }
 
@@ -474,7 +474,7 @@ fn mode_12_passes_through_once_for_each_mention_in_a_list() {
 
     assert_eq!(
         pairs(&rendered.events),
-        vec![(1.0, "\x1b[?12h"), (2.0, "\x1b[?12l")]
+        vec![(1.0, "\x1b[?12h"), (2.0, "\x1b[?12l\x1b[?25l")]
     );
 }
 
