@@ -94,8 +94,8 @@ const ALL_ARGUMENTS: &str = "\"$@\"";
 
 /// The entries of the report, with the aliases that have an entry.
 struct Entries<'a> {
-    /// Each function entry, sorted by name.
-    functions: Vec<&'a Usage>,
+    /// Each function entry, by name.
+    functions: BTreeMap<&'a str, &'a Usage>,
     /// Each alias of the table that has an entry, with its entry, sorted by
     /// name, then by kind.
     aliases: Vec<(AliasDefinition, &'a Usage)>,
@@ -117,11 +117,11 @@ impl<'a> Entries<'a> {
                 Some((alias, usage))
             })
             .collect();
-        let mut functions: Vec<&Usage> = usages
+        let functions = usages
             .iter()
             .filter(|usage| usage.kind == Kind::Function)
+            .map(|usage| (usage.name.as_str(), usage))
             .collect();
-        functions.sort_by(|left, right| left.name.cmp(&right.name));
         Self { functions, aliases }
     }
 }
@@ -172,7 +172,7 @@ fn passed_on_words(body: &str) -> Option<Vec<String>> {
 /// on its arguments. A suffix alias takes no part.
 fn alias_and_function(definitions: &Definitions, entries: &Entries<'_>) -> Vec<Finding> {
     let mut found = Vec::new();
-    for function in &entries.functions {
+    for function in entries.functions.values() {
         let Some(shared) = definitions
             .function_bodies
             .get(&function.name)
@@ -235,6 +235,35 @@ fn defined_more_than_once(definitions: &Definitions, entries: &Entries<'_>) -> V
         .collect()
 }
 
+/// Says if the alias `alias` starts with its own name. zsh does not expand
+/// such an alias again, thus its value runs the function or the program of
+/// that name.
+fn starts_with_own_name(alias: &AliasDefinition) -> bool {
+    split_words(&alias.value)
+        .and_then(|split| split.into_iter().next())
+        .is_some_and(|first| first == alias.name)
+}
+
+/// Finds each regular or global alias that has the name of a function. An
+/// alias that starts with its own name runs the function, and is no finding.
+fn alias_hides_function(entries: &Entries<'_>) -> Vec<Finding> {
+    entries
+        .aliases
+        .iter()
+        .filter(|(alias, _)| alias.kind != AliasKind::Suffix && !starts_with_own_name(alias))
+        .filter_map(|(alias, usage)| {
+            let function = entries.functions.get(alias.name.as_str())?;
+            Some(Finding {
+                kind: FindingKind::AliasHidesFunction,
+                definitions: vec![Member::of(usage), Member::of(function)],
+                words: Vec::new(),
+                places: Vec::new(),
+                program: None,
+            })
+        })
+        .collect()
+}
+
 /// Gives the findings among `usages`, sorted by kind, then by the name and the
 /// kind of the first definition. Pure.
 ///
@@ -245,6 +274,7 @@ pub(super) fn find(definitions: &Definitions, usages: &[Usage]) -> Vec<Finding> 
     let mut found = same_expansion(&entries);
     found.extend(alias_and_function(definitions, &entries));
     found.extend(defined_more_than_once(definitions, &entries));
+    found.extend(alias_hides_function(&entries));
     found.sort_by(|left, right| sort_key(left).cmp(&sort_key(right)));
     found
 }
