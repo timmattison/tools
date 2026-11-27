@@ -97,3 +97,8 @@ fn the_rendered_recording_is_shorter_by_the_removed_time() {
     assert_eq!(rendered.events, without_the_typo());
     assert_eq!(rendered.duration, 1.5);
 }
+
+#[test]
+fn ctrl_h_erases_like_the_backspace_key() {
+    assert_eq!(run(typo_then_backspace("\x08")), without_the_typo());
+}
