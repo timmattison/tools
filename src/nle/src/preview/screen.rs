@@ -4,6 +4,8 @@
 //! `日` and a zero-width mark. The UI draws a run with `single_cell` set in a
 //! box of one cell width, so the columns stay aligned.
 
+use unicode_width::UnicodeWidthChar;
+
 /// A color as red, green, and blue.
 pub type Rgb = (u8, u8, u8);
 
@@ -129,12 +131,16 @@ fn runs_of(
                 ..style
             };
         }
+        let ch = if cell.ch.is_control() { ' ' } else { cell.ch };
+        let single_cell = ch.width() != Some(1);
         match runs.last_mut() {
-            Some(run) if run.style == style && !run.single_cell => run.text.push(cell.ch),
+            Some(run) if run.style == style && !run.single_cell && !single_cell => {
+                run.text.push(ch);
+            }
             _ => runs.push(Run {
-                text: cell.ch.to_string(),
+                text: ch.to_string(),
                 style,
-                single_cell: false,
+                single_cell,
             }),
         }
     }
