@@ -65,8 +65,18 @@ const STRING_BINDING_OPTION: &str = "-s";
 /// The command of each line that `trap -p` writes.
 const TRAP_COMMAND: &str = "trap";
 
-/// The word that ends the options of `trap`.
+/// The word that ends the options of `trap` and of `zle`.
 const END_OF_OPTIONS: &str = "--";
+
+/// Gives `words` without its first word when that word is
+/// [`END_OF_OPTIONS`]. The shell writes that word before a word that starts
+/// with `-`.
+fn without_end_of_options(words: &[String]) -> &[String] {
+    match words.split_first() {
+        Some((first, rest)) if first == END_OF_OPTIONS => rest,
+        _ => words,
+    }
+}
 
 /// The start of the name of a signal in the output of the bash `trap -p`, for
 /// example `SIGINT`.
@@ -310,18 +320,20 @@ impl Starts {
     /// Reads one line of `zle -lL`. `zle -N widget` makes the function of the
     /// same name the function of the widget, and `zle -N widget function`
     /// names the function. `zle -C widget completion-widget function` names
-    /// the function after the completion widget. A line of a different form
-    /// changes nothing.
+    /// the function after the completion widget. A `--` after the option
+    /// comes before a widget whose name starts with `-`, and the read skips
+    /// it. A line of a different form changes nothing.
     pub(crate) fn read_widget_line(&mut self, line: &str) {
         let Some(call) = one_call(line, ZLE_COMMAND) else {
             return;
         };
-        let (widget, function) = match call.args.as_slice() {
-            [option, widget] if option == NEW_WIDGET_OPTION => (widget, widget),
-            [option, widget, function] if option == NEW_WIDGET_OPTION => (widget, function),
-            [option, widget, _, function] if option == COMPLETION_WIDGET_OPTION => {
-                (widget, function)
-            }
+        let Some((option, words)) = call.args.split_first() else {
+            return;
+        };
+        let (widget, function) = match (option.as_str(), without_end_of_options(words)) {
+            (NEW_WIDGET_OPTION, [widget]) => (widget, widget),
+            (NEW_WIDGET_OPTION, [widget, function])
+            | (COMPLETION_WIDGET_OPTION, [widget, _, function]) => (widget, function),
             _ => return,
         };
         self.widgets.insert(widget.clone(), function.clone());
@@ -364,11 +376,7 @@ impl Starts {
             return;
         };
         for word in words.into_iter().filter(|word| word.word == TRAP_COMMAND) {
-            let args = match word.args.split_first() {
-                Some((first, rest)) if first == END_OF_OPTIONS => rest,
-                _ => word.args.as_slice(),
-            };
-            let Some((code, signals)) = args.split_first() else {
+            let Some((code, signals)) = without_end_of_options(&word.args).split_first() else {
                 continue;
             };
             for signal in signals {
