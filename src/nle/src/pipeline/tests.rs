@@ -532,6 +532,87 @@ fn render_puts_a_hard_cut_at_the_start_of_each_clip_after_the_first() {
     assert_eq!(rendered.duration, 7.0);
 }
 
+/// A project with one clip on each track, in the order of `clips`.
+fn one_clip_per_track(clips: Vec<Clip>) -> EditProject {
+    let timeline = clips
+        .iter()
+        .map(|clip| track_of(clip.id.0, clip.id.0))
+        .collect();
+    EditProject {
+        clips,
+        timeline,
+        filters: Vec::new(),
+    }
+}
+
+#[test]
+fn render_cuts_an_earlier_clip_at_the_start_of_a_later_clip_on_another_track() {
+    let times: Vec<f64> = (0..10).map(f64::from).collect();
+    let project = one_clip_per_track(vec![
+        clip_of(1, texts("a", &times, 10.0), 0.0),
+        clip_of(2, texts("b", &[0.0, 1.0], 2.0), 4.0),
+    ]);
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    // The start of "b" at 4 cuts "a", with its event at 4. After "b" ends at
+    // 6, the rest of "a" does not play, so the recording ends at 6.
+    assert_eq!(
+        timed_data(&rendered),
+        vec![
+            (0.0, "a0"),
+            (1.0, "a1"),
+            (2.0, "a2"),
+            (3.0, "a3"),
+            (4.0, CUT),
+            (4.0, "b0"),
+            (5.0, "b1"),
+        ]
+    );
+    assert_eq!(rendered.duration, 6.0);
+}
+
+#[test]
+fn render_gives_a_tie_of_two_starts_to_the_clip_later_in_track_order() {
+    let project = one_clip_per_track(vec![
+        clip_of(1, texts("a", &[0.0, 1.0], 3.0), 0.0),
+        clip_of(2, texts("b", &[0.0, 1.0], 2.0), 0.0),
+    ]);
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    // The start of "b" cuts "a" at its start, so "a" plays nothing. Thus "b"
+    // plays first, with no cut, and it gives the header.
+    assert_eq!(timed_data(&rendered), vec![(0.0, "b0"), (1.0, "b1")]);
+    assert_eq!(rendered.title, "b");
+    assert_eq!(rendered.duration, 2.0);
+}
+
+#[test]
+fn render_puts_no_cut_at_a_clip_that_plays_nothing() {
+    let mut empty = clip_of(2, texts("e", &[0.0], 1.0), 5.0);
+    empty.out_point = Seconds::ZERO;
+    let project = EditProject {
+        clips: vec![
+            clip_of(1, texts("a", &[0.0], 2.0), 0.0),
+            empty,
+            clip_of(3, texts("c", &[0.0], 1.0), 8.0),
+        ],
+        timeline: vec![TimelineTrack {
+            id: TrackId(1),
+            clips: vec![ClipId(1), ClipId(2), ClipId(3)],
+        }],
+        filters: Vec::new(),
+    };
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    assert_eq!(
+        timed_data(&rendered),
+        vec![(0.0, "a0"), (8.0, CUT), (8.0, "c0")]
+    );
+}
+
 #[test]
 fn render_takes_the_header_from_the_clip_that_starts_first() {
     let project = two_clip_project();
