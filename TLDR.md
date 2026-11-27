@@ -49,7 +49,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `localnext` | Serves a statically exported Next.js app from its `out` directory, on a port derived from the project and the git branch. |
 | `msgs` | A macOS desktop app to browse, search, and export iMessage conversations. It reads `chat.db` read-only. |
 | `ng` | Navel-Gaze — watches JS/TS files and re-runs `pnpm lint` (or `--typecheck`) on change. |
-| `nle` | Non-Linear Editor — a Dioxus desktop editor for `beta` terminal recordings. It opens a recording into an edit project of clips, tracks, and filters, with undo and redo, shows its metadata, and changes the speed of regions with its speed panel. Run it with `src/nle/scripts/dev.ts` (`dx serve`), and build it with `dx bundle --desktop`. |
+| `nle` | Non-Linear Editor — a Dioxus desktop editor for `beta` terminal recordings. It opens a recording into an edit project of clips, tracks, and filters, with undo and redo, shows its metadata, changes the speed of regions with its speed panel, and compresses idle time with its idle panel, with a mark on the timeline for each compressed stretch. Run it with `src/nle/scripts/dev.ts` (`dx serve`), and build it with `dx bundle --desktop`. |
 | `nodenuke` | Removes `node_modules` directories and lock files throughout a repo. |
 | `nodeup` | Updates npm/pnpm/yarn packages across all `package.json` directories. |
 | `nwt` | New Worktree — creates a git worktree with a random Docker-style name, links the child repositories of a container into it, and can leave a heavy tracked directory out of it. |
