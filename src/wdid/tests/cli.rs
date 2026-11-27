@@ -881,6 +881,10 @@ fn the_help_texts_name_defs_and_the_flags_of_defs() {
     }
     assert!(!text.contains("--repo"), "{text}");
     assert!(
+        text.contains("run without a typed name"),
+        "the help of defs names each group of the report: {text}"
+    );
+    assert!(
         text.contains("ZSH_CUSTOM"),
         "the help of --all names each place that Places::is_mine calls mine: {text}"
     );
