@@ -48,8 +48,9 @@ const PASTE_TAIL_LENGTH: usize = PASTE_END.len() - 1;
 pub(crate) struct KeyReader {
     /// The last characters of the open paste, when a paste is open.
     paste_tail: Option<Vec<char>>,
-    /// The time and the characters of an unfinished sequence.
-    pending: Option<(f64, Vec<char>)>,
+    /// The time of the event that leaves a sequence unfinished, and the
+    /// sequence.
+    pending: Option<(f64, Unfinished)>,
     /// The sum of the `steps` of each parse that the reader ran.
     #[cfg(test)]
     steps: usize,
@@ -74,6 +75,7 @@ impl KeyReader {
     pub(crate) fn feed(&mut self, time: f64, data: &str) -> Vec<(f64, Key)> {
         let mut keys = Vec::new();
         let mut chars: Vec<char> = data.chars().collect();
+        let mut scan_from = 0;
         if let Some(tail) = self.paste_tail.take() {
             let mut joined = tail;
             joined.extend(chars);
@@ -84,18 +86,19 @@ impl KeyReader {
                     return keys;
                 }
             }
-        } else if let Some((pending_time, mut joined)) = self.pending.take() {
+        } else if let Some((pending_time, mut pending)) = self.pending.take() {
             if time - pending_time <= SEQUENCE_TIMEOUT {
-                joined.extend(chars);
-                chars = joined;
+                pending.chars.extend(chars);
+                chars = pending.chars;
+                scan_from = pending.scan_from;
             } else {
-                keys.extend(self.parse_final(pending_time, joined));
+                keys.extend(self.parse_final(pending_time, pending));
             }
         }
-        let parser = self.parse(chars, false);
+        let parser = self.parse(chars, scan_from, false);
         keys.extend(parser.keys.into_iter().map(|key| (time, key)));
         self.paste_tail = parser.paste_tail;
-        self.pending = parser.unfinished.map(|chars| (time, chars));
+        self.pending = parser.unfinished.map(|unfinished| (time, unfinished));
         keys
     }
 
@@ -103,29 +106,41 @@ impl KeyReader {
     pub(crate) fn finish(&mut self) -> Vec<(f64, Key)> {
         self.paste_tail = None;
         match self.pending.take() {
-            Some((time, chars)) => self.parse_final(time, chars),
+            Some((time, unfinished)) => self.parse_final(time, unfinished),
             None => Vec::new(),
         }
     }
 
-    /// The keys of `chars` as the whole of the input, each with `time`.
-    fn parse_final(&mut self, time: f64, chars: Vec<char>) -> Vec<(f64, Key)> {
-        self.parse(chars, true)
+    /// The keys of an unfinished sequence as the whole of the input, each
+    /// with `time`.
+    fn parse_final(&mut self, time: f64, unfinished: Unfinished) -> Vec<(f64, Key)> {
+        self.parse(unfinished.chars, unfinished.scan_from, true)
             .keys
             .into_iter()
             .map(|key| (time, key))
             .collect()
     }
 
-    /// Parse all of `chars`, and add the steps of the parse to `steps`.
-    fn parse(&mut self, chars: Vec<char>, final_input: bool) -> Parser {
-        let parser = Parser::run_on(chars, final_input);
+    /// Parse all of `chars`, and add the steps of the parse to `steps`. The
+    /// scan for the terminator of a string at index 0 starts at `scan_from`.
+    fn parse(&mut self, chars: Vec<char>, scan_from: usize, final_input: bool) -> Parser {
+        let parser = Parser::run_on(chars, scan_from, final_input);
         #[cfg(test)]
         {
             self.steps += parser.steps;
         }
         parser
     }
+}
+
+/// A sequence that the data of an input event leaves unfinished.
+struct Unfinished {
+    /// The characters of the sequence, from its `ESC`.
+    chars: Vec<char>,
+    /// The index in `chars` where the next scan for the terminator of a
+    /// string starts. The scans before it found no terminator before this
+    /// index. It is 0 when the sequence is not a string.
+    scan_from: usize,
 }
 
 /// The index after the first end marker of a paste in `chars`.
@@ -405,25 +420,31 @@ struct Parser {
     /// True when nothing follows the data. Then an unfinished sequence at its
     /// end is read as it stands.
     final_input: bool,
-    /// The characters of a sequence that the end of the data leaves
-    /// unfinished. Only set when `final_input` is false.
-    unfinished: Option<Vec<char>>,
+    /// The index where the scan for the terminator of a string that starts at
+    /// index 0 starts. The scans of the events before found no terminator
+    /// before this index.
+    string_scan_from: usize,
+    /// The sequence that the end of the data leaves unfinished. Only set when
+    /// `final_input` is false.
+    unfinished: Option<Unfinished>,
     /// The last characters of a paste that the data does not end.
     paste_tail: Option<Vec<char>>,
     /// The number of characters that the scans for the terminator of a string
-    /// read, and that `defer` copied.
+    /// read, and that `defer` moved in memory.
     #[cfg(test)]
     steps: usize,
 }
 
 impl Parser {
-    /// Parse all of `chars`.
-    fn run_on(chars: Vec<char>, final_input: bool) -> Self {
+    /// Parse all of `chars`. The scan for the terminator of a string at index
+    /// 0 starts at `string_scan_from`.
+    fn run_on(chars: Vec<char>, string_scan_from: usize, final_input: bool) -> Self {
         let mut parser = Self {
             chars,
             pos: 0,
             keys: Vec::new(),
             final_input,
+            string_scan_from,
             unfinished: None,
             paste_tail: None,
             #[cfg(test)]
@@ -434,18 +455,25 @@ impl Parser {
     }
 
     /// Stop at an unfinished sequence that starts at `start`, and keep its
-    /// characters. Answer false, and do nothing, when the end of the data is
-    /// final.
-    fn defer(&mut self, start: usize) -> bool {
+    /// characters. The next scan for the terminator of a string at `start`
+    /// starts `scan_from` characters after `start`. Answer false, and do
+    /// nothing, when the end of the data is final.
+    fn defer(&mut self, start: usize, scan_from: usize) -> bool {
         if self.final_input {
             return false;
         }
+        // A move, not a copy: a string that spans many events stays at
+        // index 0, and a copy for each event costs time in the square of its
+        // length.
+        let mut chars = std::mem::take(&mut self.chars);
+        let start = start.min(chars.len());
         #[cfg(test)]
-        {
-            self.steps += self.chars.len().saturating_sub(start);
+        if start > 0 {
+            self.steps += chars.len() - start;
         }
-        self.unfinished = Some(self.chars.get(start..).unwrap_or_default().to_vec());
-        self.pos = self.chars.len();
+        chars.drain(..start);
+        self.unfinished = Some(Unfinished { chars, scan_from });
+        self.pos = 0;
         true
     }
 
@@ -510,7 +538,7 @@ impl Parser {
     /// index `start`.
     fn escape(&mut self, start: usize) {
         let Some(next) = self.peek() else {
-            if self.defer(start) {
+            if self.defer(start, 0) {
                 return;
             }
             self.push_special(ESCAPE_LABEL.to_string());
@@ -522,7 +550,7 @@ impl Parser {
         }
         self.pos += 1;
         let at_end = self.peek().is_none();
-        if at_end && matches!(next, '[' | 'O') && self.defer(start) {
+        if at_end && matches!(next, '[' | 'O') && self.defer(start, 0) {
             return;
         }
         match next {
@@ -538,12 +566,18 @@ impl Parser {
 
     /// Skip an OSC, DCS, or APC string up to its terminator, `ESC \`, or BEL
     /// when `bel_ends` is true. The `ESC` of the string is at index `start`.
-    /// When the data holds no terminator and more data follows, the string
-    /// waits for its rest. When the data is final and holds no terminator,
-    /// answer false and move nothing: then the start of the string is an Alt
-    /// key.
+    /// The scan of a string at index 0 starts at `string_scan_from`, so each
+    /// event reads only its own characters. When the data holds no
+    /// terminator and more data follows, the string waits for its rest. When
+    /// the data is final and holds no terminator, answer false and move
+    /// nothing: then the start of the string is an Alt key.
     fn skip_string(&mut self, start: usize, bel_ends: bool) -> bool {
-        let rest = self.chars.get(self.pos..).unwrap_or_default();
+        let from = if start == 0 {
+            self.pos.max(self.string_scan_from)
+        } else {
+            self.pos
+        };
+        let rest = self.chars.get(from..).unwrap_or_default();
         let end = rest.iter().enumerate().find_map(|(index, &c)| {
             if bel_ends && c == BEL {
                 Some(index + 1)
@@ -559,10 +593,15 @@ impl Parser {
         }
         match end {
             Some(length) => {
-                self.pos += length;
+                self.pos = from + length;
                 true
             }
-            None => self.defer(start),
+            None => {
+                // The last character can be the `ESC` of a terminator whose
+                // `\` comes in the next event, so the next scan reads it again.
+                let scan_from = self.chars.len().saturating_sub(1).max(from);
+                self.defer(start, scan_from.saturating_sub(start))
+            }
         }
     }
 
@@ -598,7 +637,7 @@ impl Parser {
             // The characters read so far give no key. At the end of data that
             // more data follows, the sequence waits for its rest.
             if self.peek().is_none() {
-                self.defer(start);
+                self.defer(start, 0);
             }
             return;
         };
