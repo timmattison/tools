@@ -20,6 +20,14 @@ fn seconds_accepts_zero_and_a_positive_time() {
 }
 
 #[test]
+fn seconds_from_whole_seconds_gives_that_many_seconds() {
+    const TWO: Seconds = Seconds::from_whole_seconds(2);
+    assert_eq!(TWO.get(), 2.0);
+    assert_eq!(Seconds::from_whole_seconds(0), Seconds::ZERO);
+    assert_eq!(Seconds::from_whole_seconds(u32::MAX).get(), 4_294_967_295.0);
+}
+
+#[test]
 fn seconds_is_a_plain_json_number_and_refuses_a_negative_one() {
     assert_eq!(
         serde_json::to_string(&Seconds::new(1.5).unwrap()).unwrap(),

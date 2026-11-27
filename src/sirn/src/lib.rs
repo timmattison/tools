@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-// Content-type lookup and path confinement live in `httpfile`, shared with
-// `localnext`. Re-exported here so `sirn::content_type_for`,
+// Content-type lookup and path confinement live in `httpfile`. Re-exported
+// here so `sirn::content_type_for`,
 // `sirn::resolve_under_root`, and `sirn::PathResolution` keep working for
 // every existing caller.
 pub use httpfile::{content_type_for, resolve_under_root, PathResolution, Pool};

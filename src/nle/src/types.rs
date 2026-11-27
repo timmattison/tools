@@ -99,6 +99,14 @@ impl Seconds {
     /// The time zero.
     pub const ZERO: Seconds = Seconds(0.0);
 
+    /// Make a time from a whole number of seconds. A `u32` always gives a
+    /// finite time that is not below zero, so this constructor cannot fail,
+    /// and a `const` can use it.
+    #[must_use]
+    pub const fn from_whole_seconds(value: u32) -> Self {
+        Seconds(value as f64)
+    }
+
     /// Make a time from a number of seconds.
     ///
     /// # Errors
@@ -225,6 +233,14 @@ impl FilterOptions {
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&serde_json::Value> {
         self.0.get(key)
+    }
+
+    /// Parse the options as the type `O`.
+    ///
+    /// # Errors
+    /// Returns the error of `serde_json` when the options do not parse as `O`.
+    pub(crate) fn parse<O: serde::de::DeserializeOwned>(&self) -> Result<O, serde_json::Error> {
+        serde_json::from_value(serde_json::Value::Object(self.0.clone()))
     }
 }
 
