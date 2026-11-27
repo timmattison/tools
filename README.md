@@ -6849,9 +6849,10 @@ and the default-color values of an OSC 10 or 11 list. After a reset of the
 terminal (RIS) in the recording, it sets the default colors of the theme
 again.
 
-At the end of a range, the filter writes OSC 110, then the default foreground
-that the recording set, then OSC 111, then the default background that the
-recording set, and then the SGR colors that the recording set inside the range.
+At the end of a range that does not reach the end of the timeline, the filter
+writes OSC 110, then the default foreground that the recording set, then OSC
+111, then the default background that the recording set, and then the SGR
+colors that the recording set inside the range.
 Thus the text after the range has the colors of the recording. The filter sees
 only its range, thus a color that the recording set before the start of the
 range stays as the recording wrote it, until the next SGR in the range. The
