@@ -261,7 +261,11 @@ fn an_index_above_the_range_of_u16_is_refused_and_named() {
     for (value, option, number) in [
         (json!({ "hide_rows": [70000] }), "hide_rows", "70000"),
         (json!({ "hide_columns": [70000] }), "hide_columns", "70000"),
-        (json!({ "rows": { "start": 0, "end": 70000 } }), "rows", "70000"),
+        (
+            json!({ "rows": { "start": 0, "end": 70000 } }),
+            "rows",
+            "70000",
+        ),
         (
             json!({ "columns": { "start": 70000, "end": 70001 } }),
             "columns",
