@@ -1679,15 +1679,17 @@ impl TerminalState {
                 self.process_sgr_params(params);
             }
             'r' => {
-                // Set scrolling region (DECSTBM)
+                // Set scrolling region (DECSTBM). As CASE_DECSTBM in xterm's
+                // charproc.c, read a bottom that is missing, 0, or below the
+                // screen as the last row.
                 let top = count_param(params, 0);
                 let bottom = match params.iter().nth(1).and_then(|p| p.first().copied()) {
                     None | Some(0) => self.height,
-                    Some(n) => usize::from(n),
+                    Some(n) => usize::from(n).min(self.height),
                 };
 
-                // Validate and set scrolling region
-                if top > 0 && bottom <= self.height && top < bottom {
+                // xterm ignores a DECSTBM whose top is not above its bottom.
+                if top > 0 && top < bottom {
                     self.scroll_top = top - 1; // Convert to 0-based
                     self.scroll_bottom = bottom - 1;
 
