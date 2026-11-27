@@ -2470,6 +2470,34 @@ later_setting = \"kept\"
         );
     }
 
+    /// A save that makes a new config file writes the keys in the order of the
+    /// fields of `Config`, as the serializer wrote them before the save kept
+    /// the comments: `url` first, not the keys sorted by name.
+    #[test]
+    fn a_new_config_file_lists_the_keys_in_the_order_of_the_fields() {
+        let config = Config {
+            url: Some("https://192.168.1.1".to_string()),
+            insecure: Some(true),
+            op_path: Some("op://Private/ufa/key".to_string()),
+            sm_op_path: Some("op://Private/ufa/cloud".to_string()),
+            ..Config::default()
+        };
+
+        let text = config
+            .written_over("")
+            .expect("a save of a new file must succeed");
+
+        let keys: Vec<&str> = text
+            .lines()
+            .filter_map(|line| line.split_once(" = ").map(|(key, _)| key))
+            .collect();
+        assert_eq!(
+            keys,
+            ["url", "insecure", "op_path", "sm_op_path"],
+            "the keys must come in the order of the fields, got {text}"
+        );
+    }
+
     /// Load the settings file beside `directory` under the environment lock,
     /// read `name` back, and take it out again.
     ///
