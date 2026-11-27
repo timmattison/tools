@@ -12,6 +12,8 @@
 //! - [`command_words`] gives the command words of one command line.
 //! - [`defs`] counts the uses of each alias and each function of the shell.
 //! - [`history`] gets the full atuin history as a list of rows.
+//! - [`origin`] holds the file that defined each alias and each function, and
+//!   says which definitions are mine.
 //! - [`render`] writes the report as text, as JSON, and as a list of the
 //!   commands that did not parse.
 //! - [`rules`] gives the runs that one command word makes.
@@ -25,6 +27,7 @@ pub mod catalog;
 pub mod command_words;
 pub mod defs;
 pub mod history;
+pub mod origin;
 pub mod render;
 pub mod rules;
 pub mod shell;
