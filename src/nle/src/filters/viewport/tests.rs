@@ -424,6 +424,17 @@ fn the_sequences_that_change_no_cell_pass_through() {
 }
 
 #[test]
+fn a_sequence_that_is_near_a_pass_through_form_does_not_pass_through() {
+    // Mode 12 that is not private, a longer private mode that ends in 12, and
+    // a final q with no space (DECLL).
+    for data in ["\x1b[12h", "\x1b[?1012h", "\x1b[5q"] {
+        let rendered = render(vec![out(1.0, data)], json!({ "hide_rows": [23] }));
+
+        assert_eq!(pairs(&rendered.events), vec![], "{data:?}");
+    }
+}
+
+#[test]
 fn mode_12_passes_through_once_for_each_mention_in_a_list() {
     let rendered = render(
         vec![out(1.0, "\x1b[?12;25h"), out(2.0, "\x1b[?25;12l")],
