@@ -609,3 +609,29 @@ fn the_findings_are_sorted_by_kind_then_name() {
         ]
     );
 }
+
+/// A quoted literal and an expansion with the same text are not the same
+/// word, and neither are a quoted literal and an operator.
+#[test]
+fn a_quoted_literal_and_an_expansion_are_different_words() {
+    for (a, b) in [
+        ("echo $HOME", "echo '$HOME'"),
+        ("ls ~", "ls '~'"),
+        ("ls | less", "ls '|' less"),
+    ] {
+        let mut defs = empty();
+        alias(&mut defs, "a", a, ZSHRC, 1);
+        alias(&mut defs, "b", b, ZSHRC, 2);
+        assert_eq!(findings(&[], &defs), Vec::new(), "values {a:?} and {b:?}");
+    }
+}
+
+/// A function whose last word is the quoted text "$@" passes on no
+/// arguments, thus it does not do the same thing as the alias.
+#[test]
+fn a_function_that_ends_with_the_quoted_text_of_all_arguments_is_not_a_finding() {
+    let mut defs = empty();
+    alias(&mut defs, "gl", "git log", ZSHRC, 2);
+    function(&mut defs, "glog", "\tgit log '\"$@\"'", ZSHRC);
+    assert_eq!(kinds(&findings(&[], &defs)), Vec::new());
+}
