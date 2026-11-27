@@ -401,6 +401,45 @@ fn a_typo_inside_a_range_goes_and_the_events_after_the_range_move_earlier() {
 }
 
 #[test]
+fn a_range_that_ends_between_a_backspace_and_its_echo_keeps_the_backspace() {
+    // The end of the range cuts the echo of the Backspace from its input
+    // event. Inside the range the Backspace changes nothing, but its echo
+    // after the range erases the `r`. Thus the filter must keep it.
+    let events = vec![
+        out(0.0, "$ "),
+        input(1.0, "h"),
+        out(1.0, "h"),
+        input(1.5, "r"),
+        out(1.5, "r"),
+        input(1.99, "\x7f"),
+        out(2.0, "\x08 \x08"),
+        input(2.5, "e"),
+        out(2.5, "e"),
+    ];
+    let rendered = render_in(80, 24, events.clone(), range(1.0, 2.0)).unwrap();
+    assert_eq!(rendered.events, events);
+}
+
+#[test]
+fn a_range_that_ends_after_the_echo_of_a_backspace_removes_the_typo() {
+    // Mutant that was run: the filter keeps the last key of the range when
+    // any event comes after the range. Then the `r` and the Backspace stay and
+    // the test fails. The first event after this range is an input event, so
+    // the last key of the range has all of its output.
+    let rendered = render_in(80, 24, typo_then_backspace("\x7f"), range(1.0, 2.25)).unwrap();
+    assert_eq!(
+        rendered.events,
+        vec![
+            out(0.0, "$ "),
+            input(1.0, "h"),
+            out(1.0, "h"),
+            input(1.75, "e"),
+            out(1.75, "e"),
+        ]
+    );
+}
+
+#[test]
 fn a_black_cell_is_not_a_blank_cell() {
     // With `TerminalTheme::auto()`, black is the background, so the space on
     // `CSI 40 m` equals a blank cell. In another theme the viewer sees a black
