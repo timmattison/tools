@@ -1664,10 +1664,12 @@ impl Argument {
     /// `a1` and `a2`, and `{b=1,c=2}` gives `b` and `c`. A result gives no
     /// name when text that only the shell can expand comes before its first
     /// `=`: a parameter, a substitution, an arithmetic expansion, a tilde, an
-    /// ANSI-C string, or a glob. A brace sequence such as `{1..3}` gives no
-    /// name, because the parser loses the zero padding that the shell keeps. A
-    /// word that grows past [`MAX_BRACE_WORDS`] words gives no name. An
-    /// operator gives no name.
+    /// ANSI-C string, or a glob. A name that holds a brace sequence such as
+    /// `{1..3}` gives no name, because the parser loses the zero padding that
+    /// the shell keeps. A sequence in the value does not change the name, thus
+    /// `x=a{1..3}` gives `x`. A word that grows past [`MAX_BRACE_WORDS`] words
+    /// gives the name of its own text, thus a brace list in that name gives no
+    /// name. An operator gives no name.
     #[must_use]
     pub fn assignment_names(&self) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
@@ -1678,7 +1680,7 @@ impl Argument {
                 }
             }
             Self::Expansion(raw) => {
-                for word in brace_words(raw).unwrap_or_default() {
+                for word in brace_words(raw).unwrap_or_else(|| vec![raw.clone()]) {
                     names.extend(name_of_raw_word(&word));
                 }
             }
@@ -1757,9 +1759,16 @@ fn is_pattern(probe: &str) -> bool {
 /// words.
 const MAX_BRACE_WORDS: usize = 1024;
 
+/// The raw text that stands for each brace sequence in the words of
+/// [`brace_words`]. Only the name of a word counts, and [`is_pattern`] refuses
+/// a name that holds this text. Thus a sequence in the name gives no name, and
+/// a sequence in the value keeps the name.
+const SEQUENCE_STAND_IN: &str = "{1..2}";
+
 /// Gives the raw words that the brace lists of `raw` make, in the order of the
-/// shell. A word with no brace list gives itself. Gives `None` when the word
-/// holds a brace sequence or grows past [`MAX_BRACE_WORDS`] words.
+/// shell. A word with no brace list gives itself. Each brace sequence gives
+/// one word, [`SEQUENCE_STAND_IN`]. Gives `None` when the word grows past
+/// [`MAX_BRACE_WORDS`] words.
 fn brace_words(raw: &str) -> Option<Vec<String>> {
     match word::parse_brace_expansions(raw, &ParserOptions::default()) {
         Ok(Some(parts)) => expand_parts(&parts),
@@ -1768,7 +1777,8 @@ fn brace_words(raw: &str) -> Option<Vec<String>> {
 }
 
 /// Gives the product of `parts` in order: each result is the prefix, one word
-/// of each list, and the suffix. Gives `None` on a sequence or past the cap.
+/// of each list, and the suffix. A sequence is [`SEQUENCE_STAND_IN`]. Gives
+/// `None` past the cap.
 fn expand_parts(parts: &[BraceExpressionOrText]) -> Option<Vec<String>> {
     let mut words = vec![String::new()];
     for part in parts {
@@ -1781,7 +1791,10 @@ fn expand_parts(parts: &[BraceExpressionOrText]) -> Option<Vec<String>> {
                         BraceExpressionMember::Child(children) => {
                             union.extend(expand_parts(children)?);
                         }
-                        _ => return None,
+                        BraceExpressionMember::NumberSequence { .. }
+                        | BraceExpressionMember::CharSequence { .. } => {
+                            union.push(SEQUENCE_STAND_IN.to_string());
+                        }
                     }
                     if union.len() > MAX_BRACE_WORDS {
                         return None;
