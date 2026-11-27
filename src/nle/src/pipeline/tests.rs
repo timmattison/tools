@@ -1347,3 +1347,59 @@ fn register_span_and_register_replace_each_other_under_one_kind() {
     let out = registry.run(events(&[1.0, 2.0]), &[all("f")]).unwrap();
     assert_eq!(times(&out), vec![2.0, 4.0]);
 }
+
+// Tests of the chapters through the in-place form and the span form.
+
+#[test]
+fn an_in_place_filter_that_adds_events_moves_no_chapter() {
+    // The spy adds a mark at the end of its region, as the cursor filter does
+    // when it sets the state of the recording back.
+    let (registry, _seen) = in_place_spy(|view| view.length);
+    let project = chapter_project(
+        &[1.0, 2.0, 5.0, 8.0, 12.0],
+        15.0,
+        vec![marker(1, 4.0, "inside"), marker(2, 9.0, "late")],
+        vec![range("spot", 0.0, 10.0)],
+    );
+
+    let rendered = registry.render(&project).unwrap();
+
+    assert_close(&chapter_times(&rendered), &[4.0, 9.0]);
+}
+
+#[test]
+fn a_span_filter_scales_a_chapter_in_a_region_with_no_event() {
+    // A silent build step from 10 s to 20 s, at twice the speed.
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("halve"), scale_span(0.5));
+    let project = chapter_project(
+        &[1.0, 25.0],
+        30.0,
+        vec![
+            marker(1, 12.0, "build"),
+            marker(2, 15.0, "link"),
+            marker(3, 22.0, "deploy"),
+        ],
+        vec![range("halve", 10.0, 20.0)],
+    );
+
+    let rendered = registry.render(&project).unwrap();
+
+    assert_close(&chapter_times(&rendered), &[11.0, 12.5, 17.0]);
+}
+
+#[test]
+fn a_span_filter_scales_a_chapter_after_the_last_event_of_its_region() {
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("halve"), scale_span(0.5));
+    let project = chapter_project(
+        &[1.0, 11.0, 25.0],
+        30.0,
+        vec![marker(1, 10.5, "start"), marker(2, 16.0, "middle")],
+        vec![range("halve", 10.0, 20.0)],
+    );
+
+    let rendered = registry.render(&project).unwrap();
+
+    assert_close(&chapter_times(&rendered), &[10.25, 13.0]);
+}
