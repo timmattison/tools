@@ -724,3 +724,118 @@ fn a_full_reset_sets_the_colors_of_the_theme_again_right_after_it() {
         format!("a\x1bc{SOLARIZED_LIGHT_START}b")
     );
 }
+
+// Tests of the end of a range.
+
+/// The OSC 110 and OSC 111 that give the default colors back.
+const RESET_COLORS: &str = "\x1b]110\x1b\\\x1b]111\x1b\\";
+
+/// The answer for `events` and the range 0 s to 2 s, with the Solarized Light
+/// theme and `extra` options.
+fn restored(events: Vec<Event>, extra: serde_json::Value) -> Vec<(f64, String)> {
+    let mut value = json!({ "theme": "solarized-light" });
+    if let (Some(map), Some(more)) = (value.as_object_mut(), extra.as_object()) {
+        map.extend(more.clone());
+    }
+    run(events, value, range(0.0, 2.0))
+        .unwrap()
+        .into_iter()
+        .map(|event| (event.time, event.data))
+        .collect()
+}
+
+#[test]
+fn the_end_of_a_range_gives_the_colors_of_the_recording_back() {
+    let answer = restored(vec![out(0.0, "\x1b[31mA"), out(5.0, "B")], json!({}));
+
+    assert_eq!(
+        answer,
+        vec![
+            (0.0, SOLARIZED_LIGHT_START.to_string()),
+            (0.0, format!("{LIGHT_RED}A")),
+            (2.0, format!("{RESET_COLORS}\x1b[31m")),
+            (5.0, "B".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn the_restore_sets_the_default_colors_that_the_recording_set() {
+    let answer = restored(
+        vec![out(0.0, "\x1b]10;#123456\x07A"), out(5.0, "B")],
+        json!({}),
+    );
+
+    assert_eq!(
+        answer.get(2),
+        Some(&(
+            2.0,
+            "\x1b]110\x1b\\\x1b]10;#123456\x1b\\\x1b]111\x1b\\".to_string()
+        ))
+    );
+}
+
+#[test]
+fn the_restore_sets_the_background_that_the_recording_set() {
+    let answer = restored(
+        vec![out(0.0, "\x1b]11;#abcdef\x07A"), out(5.0, "B")],
+        json!({}),
+    );
+
+    assert_eq!(
+        answer.get(2),
+        Some(&(
+            2.0,
+            "\x1b]110\x1b\\\x1b]111\x1b\\\x1b]11;#abcdef\x1b\\".to_string()
+        ))
+    );
+}
+
+#[test]
+fn a_slot_that_the_recording_reset_or_set_with_a_kept_color_gets_no_sgr() {
+    let reset = restored(vec![out(0.0, "\x1b[31mA\x1b[0m"), out(5.0, "B")], json!({}));
+    let kept = restored(
+        vec![out(0.0, "\x1b[38;5;196mA"), out(5.0, "B")],
+        json!({ "cube": "keep" }),
+    );
+
+    assert_eq!(reset.get(2), Some(&(2.0, RESET_COLORS.to_string())));
+    assert_eq!(kept.get(2), Some(&(2.0, RESET_COLORS.to_string())));
+}
+
+#[test]
+fn the_restore_sets_the_foreground_background_and_underline_in_one_sgr() {
+    let answer = restored(
+        vec![out(0.0, "\x1b[58;5;1m\x1b[44m\x1b[31mA"), out(5.0, "B")],
+        json!({}),
+    );
+
+    assert_eq!(
+        answer.get(2),
+        Some(&(2.0, format!("{RESET_COLORS}\x1b[31;44;58;5;1m")))
+    );
+}
+
+#[test]
+fn a_range_that_reaches_the_end_of_the_recording_gives_no_restore() {
+    let answer = light(vec![out(0.0, "\x1b[31mA")], FilterRegion::All);
+    assert_eq!(answer.len(), 2);
+
+    let open = run(
+        vec![out(0.0, "\x1b[31mA")],
+        json!({ "theme": "solarized-light" }),
+        range(0.0, 2.0),
+    )
+    .unwrap();
+    assert_eq!(open.len(), 2);
+}
+
+#[test]
+fn a_sequence_open_at_the_end_of_a_range_gets_the_restore_before_it() {
+    let answer = restored(vec![out(0.0, "A\x1b[3"), out(5.0, "B")], json!({}));
+
+    assert_eq!(
+        answer.get(1),
+        Some(&(0.0, format!("A{RESET_COLORS}\x1b[3")))
+    );
+}
