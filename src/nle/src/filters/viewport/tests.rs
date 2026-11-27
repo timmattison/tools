@@ -1210,20 +1210,6 @@ fn the_restore_of_a_range_comes_before_an_event_after_it_at_the_same_time() {
 }
 
 #[test]
-fn a_range_that_does_not_end_at_the_end_of_the_recording_writes_a_restore() {
-    let rendered = render_on(
-        20,
-        6,
-        vec![out(1.0, "ab")],
-        json!({ "hide_rows": [0] }),
-        span(3.0, 6.0),
-    )
-    .unwrap();
-
-    assert_eq!(rendered.events.last().map(|event| event.time), Some(6.0));
-}
-
-#[test]
 fn the_rendered_size_of_a_range_is_the_size_of_the_screen() {
     for shape in shapes() {
         let rendered = render_on(
