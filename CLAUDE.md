@@ -1329,7 +1329,7 @@ does the work of CI a second time, and it slows each other step on the machine.
    checks:
    - When the change touches a crate that other crates of the workspace use,
      run the tests of each crate that depends on it. Do this also when that is
-     most of the workspace. `childenv` has 74 dependents, and `buildinfo` has
+     most of the workspace. `childenv` has 99 dependents, and `buildinfo` has
      88, of 115 members.
    - When the change touches a file that a guard of `repo-guards` reads, run
      `cargo test -p repo-guards`. The guards read each Rust file that cargo
@@ -1354,15 +1354,25 @@ does the work of CI a second time, and it slows each other step on the machine.
    `git commit --allow-empty`, and do not run the list by hand in its place.
    The CI run of the pull request ends the TDD run.
 
-This command tests a crate together with each workspace crate that names it in
-a dependency table:
+This command tests a crate together with each workspace crate that depends on
+it. A crate depends on it when it names the crate in a dependency table, or
+when it gets the crate through a normal or a build dependency on another
+member. `sysclip` has 5 crates of the first kind, and 5 more through
+`clipboardmon`. A dev-dependency does not pass the crate on, because the tests
+of a member do not build the dev-dependencies of its dependencies. In the
+filter, the kind `null` is a normal dependency.
 
 ```bash
 crate=childenv
 cargo metadata --format-version 1 --no-deps \
-  | jq -r --arg crate "$crate" '[.packages[]
-      | select(any(.dependencies[]; .name == $crate and .path != null))
-      | .name] | unique | .[] | ("-p", .)' \
+  | jq -r --arg crate "$crate" '
+      [.packages[] | {name, deps: [.dependencies[] | select(.path != null)]}] as $members
+      | def users($kinds): . as $set | [$members[]
+          | select(any(.deps[]; (.kind | IN($kinds[])) and (.name | IN($set[]))))
+          | .name] + $set | unique;
+      [$crate]
+      | until(users([null, "build"]) == .; users([null, "build"]))
+      | users([null, "build", "dev"]) - [$crate] | .[] | ("-p", .)' \
   | xargs cargo test -p "$crate"
 ```
 
