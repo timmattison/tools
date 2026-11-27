@@ -507,7 +507,7 @@ fn a_range_that_ends_after_the_echo_of_a_backspace_removes_the_typo() {
     // Mutant that was run: the filter keeps the last key of the range when
     // any event comes after the range. Then the `r` and the Backspace stay and
     // the test fails. The first event after this range is an input event, so
-    // the last key of the range has all of its output.
+    // the end of the range cuts no event of the unit of the Backspace.
     let rendered = render_in(80, 24, typo_then_backspace("\x7f"), range(1.0, 2.25)).unwrap();
     assert_eq!(
         rendered.events,

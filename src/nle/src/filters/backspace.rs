@@ -40,9 +40,11 @@
 //!   of the erase go, and the stack keeps the keys before it. If many entries
 //!   match, as with a prompt that echoes nothing, the filter cannot tell how many
 //!   keys the erase removed. The unit stays and the stack ends.
-//! - An erase key that no typed key explains goes with its output when it
-//!   changed nothing on the screen, for example a Backspace at the start of a
-//!   line that rings the bell. Else the unit stays and the stack ends.
+//! - An erase key that no typed key explains goes with its output when its
+//!   unit has output and it changed nothing on the screen, for example a
+//!   Backspace at the start of a line that rings the bell. Else the unit stays
+//!   and the stack ends. A unit with no output stays, because type-ahead can
+//!   put the echo of its key after the next key.
 //! - An other key stays and ends the stack. The filter follows one line.
 //! - The last unit of a range stays and ends the stack when the first event
 //!   after the range is an output event. The end of the range cuts the output
@@ -75,6 +77,9 @@
 //!   A typo near such output thus usually stays.
 //! - A prompt that echoes nothing keeps a Ctrl+W or a Ctrl+U, because many
 //!   entries match.
+//! - A typed key and a Backspace with no output in their units go together,
+//!   as at a prompt that echoes nothing. Type-ahead can give the same order,
+//!   and then their echoes stay.
 //! - The stack holds `SNAPSHOT_BUDGET / cells` keys, at least 1 and at most
 //!   `MAX_DEPTH`. A line of more typed keys than that depth keeps its oldest
 //!   keys.
@@ -344,12 +349,16 @@ impl Walk {
         }
     }
 
-    /// The rule of an erase key that no typed key explains. If the key changed
-    /// nothing on the screen, `unit` goes and the stack stays. Else the key
-    /// changed text that no typed key wrote, so the unit stays and the stack
-    /// ends.
+    /// The rule of an erase key that no typed key explains. `unit` is the input
+    /// event of the key and the output events after it.
+    ///
+    /// If the unit has output and the key changed nothing on the screen, the
+    /// unit goes and the stack stays. Else the unit stays and the stack ends:
+    /// the key changed text that no typed key wrote, or its echo can come
+    /// after the next key.
     fn erase_without_typed_key(&mut self, unit: Range<usize>, changed_nothing: bool) {
-        if changed_nothing {
+        let has_output = unit.len() > 1;
+        if changed_nothing && has_output {
             self.mark(unit.start, unit.end);
         } else {
             self.stack.clear();

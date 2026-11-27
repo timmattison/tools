@@ -6476,11 +6476,13 @@ different thing also stays, because its screen does not come back.
 | Ctrl+W | `\x17` | The typed keys that the erase removed from the screen, the Ctrl+W, and their output. |
 | Ctrl+U | `\x15` | The same as for Ctrl+W. |
 
-An erase key that changes nothing on the screen goes with its output, for
-example a Backspace at the start of a line that rings the bell. A key that is
-not a typed character or an erase key ends the line that the filter follows:
-for example Enter, Tab, an arrow, or a paste. An erase after such a key does not
-remove a typed key before it.
+An erase key that has output and changes nothing on the screen goes with that
+output, for example a Backspace at the start of a line that rings the bell. An
+erase key that no typed key explains and that has no output before the next key
+stays, because over a slow link its echo can come after the next key. A key
+that is not a typed character or an erase key ends the line that the filter
+follows: for example Enter, Tab, an arrow, or a paste. An erase after such a
+key does not remove a typed key before it.
 
 The filter takes no option. A project file names it in its `filters` list:
 
@@ -6503,6 +6505,9 @@ The limits:
 - At a prompt that echoes nothing, more than one typed key leaves the screen as
   a Ctrl+W or a Ctrl+U leaves it. The filter cannot tell how many keys the
   erase removed, so it keeps them all.
+- At a prompt that echoes nothing, a typed key and a Backspace with no output
+  go together. Type-ahead over a slow link can give the same order of events,
+  and then their echoes stay.
 - The filter keeps a copy of the screen for each typed key of a line: at most
   256 copies, and at most 4,194,304 cells for all copies. A line of more typed
   keys keeps its oldest keys. A terminal of more than 1,048,576 cells fails the
