@@ -900,14 +900,15 @@ fn is_light_color_terminal(color: (u8, u8, u8)) -> bool {
 }
 
 impl TerminalState {
-    /// Moves the cursor down one row. At the bottom of the scrolling region,
-    /// the region scrolls up.
+    /// Moves the cursor down one row. On the bottom row of the scrolling
+    /// region, the region scrolls up and the cursor stays. On the last row of
+    /// the screen below the region, the cursor stays and nothing scrolls, as
+    /// in xterm.
     fn line_feed(&mut self) {
-        self.cursor_y += 1;
-        // Check if we need to scroll within the scrolling region
-        if self.cursor_y > self.scroll_bottom {
+        if self.cursor_y == self.scroll_bottom {
             self.scroll_up();
-            self.cursor_y = self.scroll_bottom;
+        } else if self.cursor_y + 1 < self.height {
+            self.cursor_y += 1;
         }
     }
 
@@ -1837,21 +1838,13 @@ impl TerminalState {
                 self.cursor_y = self.saved_cursor_y;
             }
             b'D' => {
-                // Index (IND) - move cursor down, scroll if at bottom
-                self.cursor_y += 1;
-                if self.cursor_y > self.scroll_bottom {
-                    self.scroll_up();
-                    self.cursor_y = self.scroll_bottom;
-                }
+                // Index (IND) - a line feed
+                self.line_feed();
             }
             b'E' => {
-                // Next Line (NEL) - move to first column of next line
+                // Next Line (NEL) - the first column, then a line feed
                 self.cursor_x = 0;
-                self.cursor_y += 1;
-                if self.cursor_y > self.scroll_bottom {
-                    self.scroll_up();
-                    self.cursor_y = self.scroll_bottom;
-                }
+                self.line_feed();
             }
             b'M' => {
                 // Reverse Index (RI) - move cursor up, scroll if at top
