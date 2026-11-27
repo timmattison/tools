@@ -51,18 +51,27 @@
 //!   state of the terminal to the state of the emulator, in this order: the
 //!   cells that differ, the scrolling region (DECSTBM), the pen (one SGR),
 //!   the saved cursor position (a CUP, then `ESC 7`), the line-drawing
-//!   character set (`ESC ( 0`, when the emulator uses it), and the cursor
-//!   (a CUP, then mode 25). A range that is open has no restore.
+//!   character set (`ESC ( 0`, when the emulator uses it), the cursor (a CUP,
+//!   then mode 25), and last the start of the escape sequence that is open at
+//!   the end of the range. Thus an event after the range that finishes the
+//!   sequence finishes it in the real terminal too. A range that is open has
+//!   no restore.
+//!
+//! An escape sequence that the start of a range splits needs no such step.
+//! The first sequence that the filter writes in the range starts with ESC,
+//! and an ESC stops the open sequence in the real terminal. No character goes
+//! before it, because the cursor of the output is not known at the start.
 //!
 //! A `ESC 7` in a real terminal also saves the pen. The restore saves the
 //! position only, as `termstate` does.
 //!
-//! For each output event of the region, the filter first writes the sequences that do not
-//! change a cell, in their order: each OSC, each DECSCUSR, mode 12 (the blink
-//! of the cursor), and BEL. Then it writes the paint of the screen after the
-//! event. A `Scanner` reads the events before the range too, so a sequence that
-//! the start of the range splits is read correctly. It removes each other byte of the event, and it removes an output
-//! event whose new data is empty. An input event stays as it is.
+//! For each output event of the region, the filter first writes the
+//! sequences that do not change a cell, in their order: each OSC, each
+//! DECSCUSR, mode 12 (the blink of the cursor), and BEL. Then it writes the
+//! paint of the screen after the event. A `Scanner` reads the events before
+//! the range too, so a sequence that the start of the range splits is read
+//! correctly. The filter removes each other byte of the event, and it removes
+//! an output event whose new data is empty. An input event stays as it is.
 
 mod writer;
 
@@ -78,6 +87,8 @@ use crate::types::{Event, EventType, FilterKind, FilterOptions};
 
 /// The character BEL, which passes through.
 const BEL: char = '\x07';
+/// The character ESC, which starts an escape sequence.
+const ESC: char = '\x1b';
 /// The sequence that selects the ASCII character set.
 const ASCII_SET: &str = "\x1b(B";
 /// The sequence that selects the line-drawing character set.
@@ -267,7 +278,7 @@ enum Layout {
 /// terminal that shows the visible cells of it.
 struct Replay {
     terminal: TerminalState,
-    scanner: Scanner,
+    reader: Reader,
     layout: Layout,
     rows: Vec<usize>,
     columns: Vec<usize>,
@@ -281,7 +292,7 @@ impl Replay {
     fn moved(size: ScreenSize, rows: Vec<usize>, columns: Vec<usize>) -> Self {
         Self {
             terminal: new_terminal(size),
-            scanner: Scanner::new(),
+            reader: Reader::default(),
             layout: Layout::Moved,
             writer: Writer::blank(columns.len(), rows.len()),
             rows,
@@ -291,7 +302,7 @@ impl Replay {
 
     /// A replay for the region `Range` of a screen of `size`, with the visible
     /// `rows` and `columns`. It feeds the output events of `before` to the
-    /// emulator, and each character of them to the scanner. The output is
+    /// emulator, and each character of them to the reader. The output is
     /// what the emulator shows then.
     ///
     /// # Errors
@@ -304,13 +315,13 @@ impl Replay {
         before: &[Event],
     ) -> Result<Self, String> {
         let mut terminal = new_terminal(size);
-        let mut scanner = Scanner::new();
+        let mut reader = Reader::default();
         for event in before.iter().filter(|e| e.event_type == EventType::Output) {
             terminal
                 .process_output(&event.data)
                 .map_err(|error| error.to_string())?;
             for c in event.data.chars() {
-                scanner.feed(c);
+                reader.read(c);
             }
         }
         let pen = Look {
@@ -328,7 +339,7 @@ impl Replay {
         );
         Ok(Self {
             terminal,
-            scanner,
+            reader,
             layout: Layout::Masked,
             rows,
             columns,
@@ -438,6 +449,9 @@ impl Replay {
         } else {
             HIDE_CURSOR
         });
+        // The real terminal reads the start of the open sequence again, so
+        // the events after the range finish it.
+        data.push_str(self.reader.open());
         data
     }
 
@@ -463,11 +477,7 @@ impl Replay {
                 answer.push(event.clone());
                 continue;
             }
-            let mut data: String = event
-                .data
-                .chars()
-                .map(|c| pass_through(&self.scanner.feed(c), c))
-                .collect();
+            let mut data: String = event.data.chars().map(|c| self.reader.read(c)).collect();
             self.terminal
                 .process_output(&event.data)
                 .map_err(|error| error.to_string())?;
@@ -487,6 +497,48 @@ impl Replay {
             });
         }
         Ok(answer)
+    }
+}
+
+/// The reader of the escape sequences of the input. It keeps the text of the
+/// sequence that is open, so the restore at the end of a range can write it
+/// again.
+#[derive(Debug, Default)]
+struct Reader {
+    scanner: Scanner,
+    /// The characters of the open sequence, from its first character. A C0
+    /// control other than ESC inside it is not kept, because the emulator ran
+    /// it where it stood.
+    open: String,
+}
+
+impl Reader {
+    /// Read `c`. Return the part of the stream that passes through.
+    fn read(&mut self, c: char) -> String {
+        let step = self.scanner.feed(c);
+        if !self.scanner.is_pending() {
+            self.open.clear();
+        } else {
+            match step {
+                Step::Restarted => {
+                    self.open.clear();
+                    self.open.push(c);
+                }
+                Step::EscapeBreak(_) => {
+                    self.open.clear();
+                    self.open.push(ESC);
+                    self.open.push(c);
+                }
+                _ if c == ESC || !c.is_ascii_control() => self.open.push(c),
+                _ => {}
+            }
+        }
+        pass_through(&step, c)
+    }
+
+    /// The characters of the open sequence, or an empty string.
+    fn open(&self) -> &str {
+        &self.open
     }
 }
 

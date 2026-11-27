@@ -135,6 +135,14 @@ sets the state of the terminal back to the state of the emulator:
 4. The saved cursor position: CUP to it, then `ESC 7`.
 5. The line-drawing character set, with `ESC ( 0`, when the emulator uses it.
 6. The cursor position, with CUP, and the visibility, with mode 25.
+7. The start of the escape sequence that is open at the end of the range.
+   Thus an event after the range that finishes the sequence finishes it in
+   the real terminal too.
+
+A sequence that the start of a range splits needs no such step. The first
+sequence that the filter writes in the range starts with ESC, and an ESC stops
+the open sequence in the real terminal. No character goes before it, because
+the cursor of the output is not known at the start.
 
 At the start of the range, the filter writes `ESC ( B` when the emulator uses
 the line-drawing character set, because the filter writes each line-drawing
