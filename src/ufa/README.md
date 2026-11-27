@@ -400,8 +400,8 @@ Deleted 36 of 37 voucher(s)
 Error: Could not delete 1 of 37 voucher(s). The notes above name each voucher.
 ```
 
-When a deletion fails with no HTTP status — a timeout, a refused or reset connection, or a
-connection that breaks while the answer arrives — `ufa` stops. A controller that stops answering in the middle of a run (a reboot,
+When a deletion fails with no HTTP status — a timeout, or a refused or reset connection
+before the status arrives — `ufa` stops. A controller that stops answering in the middle of a run (a reboot,
 a dropped VPN) would otherwise make each remaining voucher wait the full 30-second request timeout.
 `ufa` does not send the vouchers after that failure, and a note gives their count:
 
@@ -412,7 +412,8 @@ Deleted 1 of 37 voucher(s)
 Error: Could not delete 1 of 37 voucher(s), and 35 voucher(s) were not attempted. The notes above name each voucher that failed.
 ```
 
-When the controller answers a deletion with a success status and `ufa` cannot read the answer, `ufa`
+When the controller answers a deletion with a success status and `ufa` cannot read the answer (a body
+that stops before its end counts too), `ufa`
 continues with the other vouchers, because the controller answered at once. A note names the voucher
 and says that `ufa` does not know if the controller deleted it. The closing note does not count that
 voucher, and the command exits with an error:

@@ -94,6 +94,25 @@ struct ApiErrorBody {
     message: String,
 }
 
+/// Why a body could not be read, when a lower layer says why.
+type ReadCause = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+/// The cause of an answer error, as the `source` of that error.
+///
+/// # Arguments
+///
+/// * `cause` - The cause that the error holds, if any.
+///
+/// # Returns
+///
+/// The cause, as a plain error reference.
+fn source_of(cause: Option<&ReadCause>) -> Option<&(dyn std::error::Error + 'static)> {
+    cause.map(|cause| {
+        let cause: &(dyn std::error::Error + 'static) = cause.as_ref();
+        cause
+    })
+}
+
 /// A UniFi API answered with a status that is not a success.
 ///
 /// The error keeps the status beside the message. A caller reads the status
@@ -104,6 +123,8 @@ struct StatusError {
     status: StatusCode,
     /// What the user reads.
     message: String,
+    /// Why the body could not be read, when the read broke.
+    source: Option<ReadCause>,
 }
 
 impl fmt::Display for StatusError {
@@ -112,7 +133,11 @@ impl fmt::Display for StatusError {
     }
 }
 
-impl std::error::Error for StatusError {}
+impl std::error::Error for StatusError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        source_of(self.source.as_ref())
+    }
+}
 
 /// The status of the answer that `error` reports, when a UniFi API answered
 /// a request with a status that is not a success. [`failed_answer`] tells the
@@ -124,7 +149,7 @@ impl std::error::Error for StatusError {}
 ///
 /// # Returns
 ///
-/// The status. `None` when the request failed before an answer arrived, and
+/// The status. `None` when the request failed before a status arrived, and
 /// when a successful answer could not be read.
 pub fn answered_status(error: &anyhow::Error) -> Option<StatusCode> {
     error
@@ -144,8 +169,8 @@ struct UnreadableAnswer {
     status: StatusCode,
     /// What the user reads.
     message: String,
-    /// Why the body could not be read, when a parser says why.
-    source: Option<serde_json::Error>,
+    /// Why the body could not be read, when a lower layer says why.
+    source: Option<ReadCause>,
 }
 
 impl fmt::Display for UnreadableAnswer {
@@ -156,22 +181,21 @@ impl fmt::Display for UnreadableAnswer {
 
 impl std::error::Error for UnreadableAnswer {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source
-            .as_ref()
-            .map(|cause| cause as &(dyn std::error::Error + 'static))
+        source_of(self.source.as_ref())
     }
 }
 
 /// How far a failed request to a UniFi API got.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailedAnswer {
-    /// No answer arrived: the connection failed, timed out, or broke during
-    /// the body.
+    /// No answer arrived: the connection failed or timed out before the
+    /// status arrived.
     Missing,
     /// The API answered with a status that is not a success.
     Refused(StatusCode),
     /// The API answered with a success status, and ufa could not read the
-    /// body.
+    /// body. The body was too large, broke before its end, or was not the
+    /// JSON that the caller expects.
     Unreadable(StatusCode),
 }
 
@@ -186,7 +210,7 @@ pub enum FailedAnswer {
 /// [`FailedAnswer::Refused`] when the API answered with a status that is not
 /// a success. [`FailedAnswer::Unreadable`] when it answered with a success
 /// status and ufa could not read the body. [`FailedAnswer::Missing`] when no
-/// answer arrived.
+/// status arrived.
 pub fn failed_answer(error: &anyhow::Error) -> FailedAnswer {
     if let Some(status) = answered_status(error) {
         return FailedAnswer::Refused(status);
@@ -531,7 +555,8 @@ async fn read_success_body(
 /// # Errors
 ///
 /// Returns an error if the body is larger than `limit`, or if the connection
-/// fails before the body is complete.
+/// fails or times out before the body is complete. Each error carries the
+/// status, as [`unread_answer`] says.
 async fn read_body(api: Api, mut response: reqwest::Response, limit: u64) -> Result<String> {
     let status = response.status();
     let ceiling = usize::try_from(limit).unwrap_or(usize::MAX);
@@ -546,7 +571,7 @@ async fn read_body(api: Api, mut response: reqwest::Response, limit: u64) -> Res
     while let Some(chunk) = response
         .chunk()
         .await
-        .context("Failed to read response body")?
+        .map_err(|cause| broken_body(api, status, cause))?
     {
         body.extend_from_slice(&chunk);
 
@@ -571,11 +596,9 @@ async fn read_body(api: Api, mut response: reqwest::Response, limit: u64) -> Res
 ///
 /// # Returns
 ///
-/// The error to raise. It carries `status`. A success status gives an
-/// [`UnreadableAnswer`]. Any other status gives a [`StatusError`], the same
-/// as a refusal with a short body, so [`answered_status`] reads a 401 back
-/// whatever the size of its body. A 401 or a 403 starts its message with the
-/// advice about the key that a short body gets, and then names the size.
+/// The error to raise, from [`unread_answer`]. A 401 or a 403 starts its
+/// message with the advice about the key that a short body gets, and then
+/// names the size.
 fn body_too_large(api: Api, status: StatusCode, size: u64, limit: u64) -> anyhow::Error {
     let size_text = format!(
         "{} answered HTTP {status} with a body of at least {size} bytes, over the {limit} bytes \
@@ -590,15 +613,66 @@ fn body_too_large(api: Api, status: StatusCode, size: u64, limit: u64) -> anyhow
         ),
     };
 
+    unread_answer(status, message, None)
+}
+
+/// Build the error for an answer whose status arrived and whose body ufa
+/// could not read.
+///
+/// # Arguments
+///
+/// * `status` - The status the API answered with.
+/// * `message` - What the user reads.
+/// * `source` - Why the body could not be read, if a lower layer says why.
+///
+/// # Returns
+///
+/// The error to raise. It carries `status`. A success status gives an
+/// [`UnreadableAnswer`]. Any other status gives a [`StatusError`], the same
+/// as a refusal with a short body, so [`answered_status`] reads a 401 back
+/// whatever the state of its body.
+fn unread_answer(status: StatusCode, message: String, source: Option<ReadCause>) -> anyhow::Error {
     if status.is_success() {
         anyhow::Error::new(UnreadableAnswer {
             status,
             message,
-            source: None,
+            source,
         })
     } else {
-        anyhow::Error::new(StatusError { status, message })
+        anyhow::Error::new(StatusError {
+            status,
+            message,
+            source,
+        })
     }
+}
+
+/// Build the error for a body whose read broke after the status arrived.
+///
+/// The connection closed or timed out before the body was complete.
+///
+/// # Arguments
+///
+/// * `api` - Which API answered.
+/// * `status` - The status it answered with.
+/// * `cause` - The error of the broken read. It stays the source of the error.
+///
+/// # Returns
+///
+/// The error to raise, from [`unread_answer`]. A 401 or a 403 starts its
+/// message with the advice about the key. The message has no full stop at
+/// its end, because `{:#}` puts the cause after it.
+fn broken_body(api: Api, status: StatusCode, cause: reqwest::Error) -> anyhow::Error {
+    let text = format!(
+        "{} answered HTTP {status}, and ufa could not read the whole body",
+        api.label()
+    );
+    let message = match api.key_refusal(status) {
+        Some(advice) => format!("{advice} {text}"),
+        None => text,
+    };
+
+    unread_answer(status, message, Some(Box::new(cause)))
 }
 
 /// Deserialize a successful response body as `T`.
@@ -628,7 +702,7 @@ where
                 api.label(),
                 truncate_for_display(body, ERROR_BODY_DISPLAY_CHARS)
             ),
-            source: Some(cause),
+            source: Some(Box::new(cause)),
         })
     })
 }
@@ -663,7 +737,11 @@ fn response_error(api: Api, status: StatusCode, body: &str) -> anyhow::Error {
         )
     };
 
-    anyhow::Error::new(StatusError { status, message })
+    anyhow::Error::new(StatusError {
+        status,
+        message,
+        source: None,
+    })
 }
 
 #[cfg(test)]
