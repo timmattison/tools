@@ -330,3 +330,97 @@ fn other_keys_and_keys_with_a_modifier_do_nothing() {
         assert_eq!(key_action(key, false), None, "{key}");
     }
 }
+
+/// The labels of the ruler of `frame`, with their places.
+fn labels(frame: Frame) -> Vec<(f64, String)> {
+    ruler_ticks(frame)
+        .into_iter()
+        .filter_map(|tick| tick.label.map(|label| (tick.x, label)))
+        .collect()
+}
+
+/// The texts of the labels of the ruler of `frame`.
+fn label_texts(frame: Frame) -> Vec<String> {
+    labels(frame).into_iter().map(|(_, label)| label).collect()
+}
+
+#[test]
+fn the_ruler_of_a_minute_has_a_label_each_five_seconds_and_a_tick_each_second() {
+    let frame = View::default().frame(minute());
+    let ticks = ruler_ticks(frame);
+    assert_eq!(ticks.len(), 61, "{ticks:?}");
+    let expected: Vec<String> = (0..=12)
+        .map(|index| format!("{}:{:02}", index * 5 / 60, index * 5 % 60))
+        .collect();
+    assert_eq!(label_texts(frame), expected);
+    let (x, label) = &labels(frame)[1];
+    assert_eq!(label, "0:05");
+    assert_close(*x, 100.0);
+    for pair in ticks.windows(2) {
+        assert_close(pair[1].x - pair[0].x, 20.0);
+    }
+}
+
+#[test]
+fn the_ruler_at_the_largest_zoom_shows_tenths() {
+    let frame = View::default().zoom(minute(), 1e9, 0.0).frame(minute());
+    let texts = label_texts(frame);
+    assert_eq!(texts.first().map(String::as_str), Some("0:00.0"));
+    assert_eq!(texts.get(3).map(String::as_str), Some("0:00.3"));
+    assert_eq!(texts.last().map(String::as_str), Some("0:01.2"));
+    assert_eq!(texts.len(), 13, "{texts:?}");
+    assert_eq!(ruler_ticks(frame).len(), 61);
+}
+
+#[test]
+fn the_ruler_of_ten_hours_has_a_label_each_hour() {
+    let frame = View::default().frame(Extent::new(36_000.0, 1200.0));
+    let texts = label_texts(frame);
+    assert_eq!(texts.len(), 11, "{texts:?}");
+    assert_eq!(texts[1], "1:00:00");
+    assert_eq!(texts[10], "10:00:00");
+}
+
+#[test]
+fn the_ruler_past_the_last_step_doubles_the_step() {
+    let frame = View::default().frame(Extent::new(360_000.0, 1200.0));
+    let texts = label_texts(frame);
+    assert_eq!(
+        texts.get(1).map(String::as_str),
+        Some("8:00:00"),
+        "{texts:?}"
+    );
+}
+
+#[test]
+fn the_ruler_of_a_scrolled_window_starts_at_the_left_edge() {
+    let frame = View::default()
+        .zoom(minute(), 4.0, 0.0)
+        .pan(minute(), 200.0)
+        .frame(minute());
+    let ticks = ruler_ticks(frame);
+    assert_close(ticks[0].x, 8.0);
+    assert_eq!(ticks[0].label, None);
+    let (x, label) = &labels(frame)[0];
+    assert_eq!(label, "0:03");
+    assert_close(*x, 40.0);
+    assert!(ticks.iter().all(|tick| (0.0..=1200.0).contains(&tick.x)));
+}
+
+#[test]
+fn a_ruler_never_holds_more_ticks_than_the_window_has_room_for() {
+    for extent in [
+        Extent::new(1e-6, 1200.0),
+        Extent::new(1e15, 1200.0),
+        Extent::new(60.0, 1.0),
+        Extent::new(60.0, 1e6),
+    ] {
+        let frame = View::default().frame(extent);
+        let count = ruler_ticks(frame).len();
+        let room = frame.width() / MIN_TICK_SPACING + 2.0;
+        assert!(
+            f64::from(u32::try_from(count).unwrap()) <= room,
+            "{extent:?}: {count}"
+        );
+    }
+}

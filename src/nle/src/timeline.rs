@@ -19,6 +19,23 @@ const WHEEL_ZOOM_RATE: f64 = 0.06;
 const MAX_WHEEL_ZOOM_FACTOR: f64 = 2.0;
 /// The pixels of one line of a wheel event that counts in lines.
 const WHEEL_LINE_PIXELS: f64 = 16.0;
+/// The steps between two labels of the ruler, in seconds. The ruler takes the
+/// first step that leaves `LABEL_SPACING` pixels for each label. The steps
+/// from one second are the steps of Remotion Studio. The steps below one
+/// second are for the largest zooms, because the timeline counts time in
+/// seconds and Remotion Studio counts frames.
+const LABEL_STEPS: [f64; 18] = [
+    0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 180.0, 300.0, 600.0, 900.0,
+    1200.0, 1800.0, 3600.0,
+];
+/// The smallest space for one label of the ruler, in pixels.
+const LABEL_SPACING: f64 = 80.0;
+/// The smallest space between two ticks of the ruler, in pixels. Remotion
+/// Studio uses the same space.
+const MIN_TICK_SPACING: f64 = 16.0;
+/// The counts of ticks in one step between two labels. The ruler takes the
+/// first count that keeps `MIN_TICK_SPACING` between two ticks.
+const TICK_DIVISIONS: [u32; 3] = [10, 5, 2];
 /// The smallest width of the window in pixels. A window that has no layout
 /// yet counts as this width, so no division is by zero.
 const MIN_WIDTH: f64 = 1.0;
@@ -202,6 +219,28 @@ impl Frame {
     pub fn time_at(self, x: f64) -> f64 {
         self.start + x / self.pixels_per_second
     }
+}
+
+/// A tick of the ruler.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tick {
+    /// The place of the tick in the window, in pixels from the left edge.
+    pub x: f64,
+    /// The time of the tick as text, for a tick that has a label.
+    pub label: Option<String>,
+}
+
+/// The ticks of the ruler in the window of `frame`, from left to right.
+///
+/// The step between two labels is the first of `LABEL_STEPS` that leaves
+/// `LABEL_SPACING` pixels for each label. Past the last step, the step is
+/// two times larger until it leaves the space. Between two labels, the ruler
+/// puts the most ticks that keep `MIN_TICK_SPACING` pixels between two ticks.
+/// The labels show tenths of a second when the step is below one second.
+#[must_use]
+pub fn ruler_ticks(frame: Frame) -> Vec<Tick> {
+    let _ = frame;
+    Vec::new()
 }
 
 /// The unit of the deltas of a wheel event.
