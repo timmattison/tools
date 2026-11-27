@@ -36,6 +36,11 @@ const TWO_COMMIT_DATE: &str = "2026-03-04T12:00:00Z";
 /// The width that the table gets, so that no line wraps.
 const WIDE: &str = "200";
 
+/// The start of the names of the oh-my-zsh variables, for example `ZSH` and
+/// `ZSH_CUSTOM`. `wdid defs` reads them from the shell, thus a run sheds each
+/// one that the environment of `cargo test` holds.
+const OH_MY_ZSH_PREFIX: &str = "ZSH";
+
 /// The format that atuin prints for the time of a row.
 const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
@@ -222,9 +227,17 @@ impl Setup {
     }
 
     /// The command for `wdid`, with the stub `PATH` and the width of the
-    /// table. The shell is zsh. The caller adds the flags.
+    /// table. The shell is zsh. The command has no variable whose name starts
+    /// with [`OH_MY_ZSH_PREFIX`], so the origins that `wdid defs` calls mine
+    /// do not depend on the shell that starts `cargo test`. The caller adds
+    /// the flags.
     fn command(&self) -> Command {
         let mut command = childenv::fixture_command(BIN);
+        for (name, _) in std::env::vars_os() {
+            if name.to_string_lossy().starts_with(OH_MY_ZSH_PREFIX) {
+                command.env_remove(name);
+            }
+        }
         command
             .env("PATH", self.stubs.path())
             .env("HOME", self.home.path())
