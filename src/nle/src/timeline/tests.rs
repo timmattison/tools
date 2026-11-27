@@ -235,6 +235,17 @@ fn a_vertical_wheel_with_no_modifier_does_nothing() {
 }
 
 #[test]
+fn a_mostly_vertical_wheel_with_no_modifier_does_nothing() {
+    assert_eq!(wheel_action(wheel(1.0, 40.0), 1200.0), WheelAction::Nothing);
+    assert_eq!(wheel_action(wheel(-3.0, -40.0), 1200.0), WheelAction::Nothing);
+    let shifted = Wheel {
+        shift: true,
+        ..wheel(1.0, 40.0)
+    };
+    assert_eq!(wheel_action(shifted, 1200.0), WheelAction::Pan(40.0));
+}
+
+#[test]
 fn a_vertical_wheel_with_shift_scrolls() {
     let event = Wheel {
         shift: true,
