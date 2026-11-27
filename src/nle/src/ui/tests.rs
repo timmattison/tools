@@ -304,6 +304,8 @@ struct Window {
     changes: Vec<ElementId>,
     /// The Apply Speed button, when a test noted it.
     apply: Option<ElementId>,
+    /// The Apply Color Scheme button, when a test noted it.
+    apply_color: Option<ElementId>,
     /// The Play and Pause button, when a test noted it.
     play: Option<ElementId>,
     /// The Stop button, when a test noted it.
@@ -327,6 +329,7 @@ impl Window {
             inputs: Vec::new(),
             changes: Vec::new(),
             apply: None,
+            apply_color: None,
             play: None,
             stop: None,
         };
@@ -410,18 +413,34 @@ impl Window {
         self.render();
     }
 
-    /// The theme menu of the preview toolbar. It is the one change listener of
-    /// the open render.
+    /// The change listeners that the open render created, in creation order:
+    /// the five menus of the color scheme panel, then the theme menu of the
+    /// preview toolbar. The properties panel mounts before the preview toolbar.
+    fn open_changes(&self) -> [ElementId; 6] {
+        self.changes
+            .clone()
+            .try_into()
+            .unwrap_or_else(|ids: Vec<ElementId>| panic!("the page has the menus {ids:?}"))
+    }
+
+    /// The theme menu of the preview toolbar.
     fn theme_menu(&self) -> ElementId {
-        assert_eq!(self.changes.len(), 1, "{:?}", self.changes);
-        self.changes[0]
+        self.open_changes()[5]
+    }
+
+    /// The five menus of the color scheme panel, in page order: the target
+    /// theme, the default colors, the cube, the grayscale, and the truecolor.
+    fn color_menus(&self) -> [ElementId; 5] {
+        let [theme, colors, cube, grayscale, truecolor, _] = self.open_changes();
+        [theme, colors, cube, grayscale, truecolor]
     }
 
     /// The input listeners that the open render created, in creation order:
-    /// the Start, End, and Speed fields of the properties panel, then the
-    /// playhead control of the timeline. The properties panel mounts before the
-    /// timeline, so the playhead is the last one.
-    fn open_inputs(&self) -> [ElementId; 4] {
+    /// the Start, End, and Speed fields of the speed panel, the Start and End
+    /// fields of the color scheme panel, then the playhead control of the
+    /// timeline. The properties panel mounts before the timeline, so the
+    /// playhead is the last one.
+    fn open_inputs(&self) -> [ElementId; 6] {
         self.inputs
             .clone()
             .try_into()
@@ -430,18 +449,29 @@ impl Window {
 
     /// The Start, End, and Speed fields, in this order.
     fn speed_fields(&self) -> [ElementId; 3] {
-        let [start, end, speed, _] = self.open_inputs();
+        let [start, end, speed, ..] = self.open_inputs();
         [start, end, speed]
+    }
+
+    /// The Start and End fields of the color scheme panel, in this order.
+    fn color_fields(&self) -> [ElementId; 2] {
+        let [_, _, _, start, end, _] = self.open_inputs();
+        [start, end]
     }
 
     /// The playhead control of the timeline.
     fn playhead_control(&self) -> ElementId {
-        self.open_inputs()[3]
+        self.open_inputs()[5]
     }
 
     /// The Apply Speed button. `open_recording` noted it.
     fn apply_button(&self) -> ElementId {
         self.apply.expect("a window with an open recording")
+    }
+
+    /// The Apply Color Scheme button. `open_recording` noted it.
+    fn apply_color_button(&self) -> ElementId {
+        self.apply_color.expect("a window with an open recording")
     }
 
     /// The Play and Pause button. `open_recording` noted it.
@@ -477,6 +507,19 @@ impl Window {
         self.type_into(end_field, end);
         self.type_into(speed_field, speed);
         self.click(self.apply_button());
+    }
+
+    /// Fills the two fields, chooses the five menus, and clicks Apply Color
+    /// Scheme. `menus` holds the values of the theme, the default colors, the
+    /// cube, the grayscale, and the truecolor menus, in this order.
+    fn apply_color_scheme(&mut self, start: &str, end: &str, menus: [&str; 5]) {
+        let [start_field, end_field] = self.color_fields();
+        self.type_into(start_field, start);
+        self.type_into(end_field, end);
+        for (menu, value) in self.color_menus().into_iter().zip(menus) {
+            self.choose(menu, value);
+        }
+        self.click(self.apply_color_button());
     }
 
     /// Runs the tasks of the app until they have no more work, and renders
@@ -795,28 +838,29 @@ fn edited_row(text: &str) -> String {
     metadata_row("Edited duration", text, None)
 }
 
-/// Opens the fixture recording through the fakes, and notes the three click
+/// Opens the fixture recording through the fakes, and notes the four click
 /// listeners that the open render creates. The render creates them in this
-/// order: Apply Speed, Play, Stop. The properties panel mounts before the
-/// preview toolbar, as it does for the input listeners, and the Play button
-/// comes before the Stop button.
+/// order: Apply Speed, Apply Color Scheme, Play, Stop. The properties panel
+/// mounts before the preview toolbar, as it does for the input listeners, and
+/// the Play button comes before the Stop button.
 async fn open_recording() -> Window {
     open_loaded(fixture()).await
 }
 
-/// Opens `loaded` through the fakes, and notes the three click listeners as
+/// Opens `loaded` through the fakes, and notes the four click listeners as
 /// `open_recording` does.
 async fn open_loaded(loaded: LoadedRecording) -> Window {
     let fakes = Fakes::new().pick(picked()).load(Answer::Ready(Ok(loaded)));
     let mut window = Window::open(&fakes);
     window.click(window.open_button());
     window.settle().await;
-    let [apply, play, stop] = window.newest[..] else {
+    let [apply, apply_color, play, stop] = window.newest[..] else {
         panic!("the open render made {:?}", window.newest)
     };
     window.play = Some(play);
     window.stop = Some(stop);
     window.apply = Some(apply);
+    window.apply_color = Some(apply_color);
     window
 }
 
@@ -1225,7 +1269,7 @@ async fn a_new_recording_opens_stopped() {
     let mut window = Window::open(&fakes);
     window.click(window.open_button());
     window.settle().await;
-    let [_, play, _] = window.newest[..] else {
+    let [_, _, play, _] = window.newest[..] else {
         panic!("the open render made {:?}", window.newest)
     };
     window.click(play);
@@ -1253,9 +1297,11 @@ async fn the_theme_menu_lists_the_five_themes() {
     let window = open_recording().await;
     let page = window.html();
     assert!(page.contains("Theme"), "{page}");
-    assert_eq!(page.matches("<select").count(), 1, "{page}");
-    assert_eq!(page.matches("<option").count(), 5, "{page}");
-    let menu = text_between(&page, "<select", "</select>");
+    // The color scheme panel has menus of its own, so read the toolbar only.
+    let toolbar = text_between(&page, "class=\"preview-theme\"", "</label>");
+    assert_eq!(toolbar.matches("<select").count(), 1, "{toolbar}");
+    assert_eq!(toolbar.matches("<option").count(), 5, "{toolbar}");
+    let menu = text_between(&toolbar, "<select", "</select>");
     let listed: String = PreviewTheme::ALL
         .into_iter()
         .map(|choice| theme_option(choice, choice == PreviewTheme::Auto))

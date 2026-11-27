@@ -2,9 +2,10 @@
 //!
 //! This module holds the window settings, the root component, and the four
 //! regions of the window: the menu bar, the preview pane, the timeline, and
-//! the properties panel. The open document lives in the state of `App`: the
-//! `Editor` of its project, and the metadata of the recording file that it
-//! came from.
+//! the properties panel. The properties panel holds the metadata of the
+//! recording, the speed panel, and the color scheme panel. The open document
+//! lives in the state of `App`: the `Editor` of its project, and the metadata
+//! of the recording file that it came from.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -23,7 +24,9 @@ use crate::types::{AppliedFilter, EditProject, FilterRegion, Seconds};
 use crate::format::{file_name, format_duration, format_recorded};
 use crate::types::{LoadedRecording, RecordingMetadata};
 
+mod color_scheme;
 mod preview;
+use color_scheme::ColorSchemePanel;
 use preview::{end_of, render_of, PreviewPane, RenderedState};
 
 /// The style sheet of the window. The `style` element at the top of `App` holds
@@ -316,8 +319,9 @@ fn summary(open: &Document) -> String {
     )
 }
 
-/// The metadata of the open recording, and the speed panel. `on_result` gets
-/// the outcome of each speed change: `Ok`, or the message of the banner.
+/// The metadata of the open recording, the speed panel, and the color scheme
+/// panel. `on_result` gets the outcome of each change: `Ok`, or the message of
+/// the banner.
 #[component]
 fn PropertiesPanel(
     loaded: Signal<Option<Document>>,
@@ -330,6 +334,7 @@ fn PropertiesPanel(
             if let Some(metadata) = metadata {
                 {metadata_rows(&metadata)}
                 SpeedPanel { loaded, on_result }
+                ColorSchemePanel { loaded, on_result }
             } else {
                 div { class: "placeholder", "No recording loaded" }
             }
