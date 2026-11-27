@@ -70,8 +70,8 @@ fn escape_alone_and_doubled() {
 fn alt_with_printable_and_control_characters() {
     check(&[
         ("\x1b.", vec![special("Alt+.")]),
-        ("\x1bf", vec![special("Alt+f")]),
-        ("\x1bF", vec![special("Alt+F")]),
+        ("\x1bf", vec![special("Alt+F")]),
+        ("\x1bF", vec![special("Alt+Shift+F")]),
         ("\x1bü", vec![special("Alt+ü")]),
         ("\x1b ", vec![special("Alt+Space")]),
         ("\x1b[32;3u", vec![special("Alt+Space")]),
@@ -82,10 +82,20 @@ fn alt_with_printable_and_control_characters() {
         ("\x1b\x00", vec![special("Ctrl+Alt+Space")]),
         ("\x1b\u{85}", vec![]),
         ("\x1b[", vec![special("Alt+[")]),
-        ("\x1bO", vec![special("Alt+O")]),
+        ("\x1bO", vec![special("Alt+Shift+O")]),
         ("\x1b]", vec![special("Alt+]")]),
-        ("\x1bP", vec![special("Alt+P")]),
+        ("\x1bP", vec![special("Alt+Shift+P")]),
         ("\x1b_", vec![special("Alt+_")]),
+    ]);
+}
+
+#[test]
+fn a_letter_with_a_modifier_has_one_label_in_each_encoding() {
+    check(&[
+        ("\x1bf", vec![special("Alt+F")]),
+        ("\x1b[102;3u", vec![special("Alt+F")]),
+        ("\x1bF", vec![special("Alt+Shift+F")]),
+        ("\x1b[102;4u", vec![special("Alt+Shift+F")]),
     ]);
 }
 
