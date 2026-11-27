@@ -692,7 +692,7 @@ is a refusal and not a clean report.
 
 `repo_guards::alternate_screen::EXEMPTIONS` keys each entry on (file, spelling),
 so a new spelling in an exempt file is still a violation. An entry that matches
-nothing is reported, so a stale entry fails too. The list holds three entries:
+nothing is reported, so a stale entry fails too. The list holds five entries:
 
 - `src/altscreen/src/lib.rs`, `EnterAlternateScreen` — the one entrance. It
   writes the entry command into the bytes of its entry write.
@@ -700,6 +700,11 @@ nothing is reported, so a stale entry fails too. The list holds three entries:
   entry bytes.
 - `src/krt/tests/terminal.rs`, `CSI ?1049 h` — the pty tests of `krt` search the
   output for the entry sequence. They write to no user terminal.
+- `src/termstate/src/tests.rs`, `CSI ?1049 h` — the tests of the emulator feed
+  it the entry sequence as data. They write to no user terminal.
+- `src/nle/src/filters/keystroke_hud/tests.rs`, `CSI ?1049 h` — a test feeds the
+  entry sequence of a full-screen program to the HUD as data. It writes to no
+  user terminal.
 
 ### What the Ban and the Guard Do Not Prove
 
