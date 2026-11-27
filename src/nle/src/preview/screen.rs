@@ -60,18 +60,64 @@ pub struct Screen {
 
 impl Screen {
     /// The screen of `state`.
-    pub fn of(_state: &termstate::TerminalState) -> Self {
+    pub fn of(state: &termstate::TerminalState) -> Self {
+        let rows = state
+            .get_grid()
+            .iter()
+            .map(|cells| Row {
+                runs: runs_of(state, cells),
+            })
+            .collect();
+        let theme = state.get_theme();
+        let blank = termstate::Cell {
+            ch: ' ',
+            fg_color: theme.foreground,
+            bg_color: theme.background,
+            ..termstate::Cell::default()
+        };
         Self {
-            columns: 0,
-            rows: Vec::new(),
-            background: (0, 0, 0),
+            columns: state.width,
+            rows,
+            background: state.resolve_cell_colors(&blank).1,
         }
     }
 
     /// The text of each row: the texts of its runs, joined.
     pub fn row_texts(&self) -> Vec<String> {
-        Vec::new()
+        self.rows
+            .iter()
+            .map(|row| row.runs.iter().map(|run| run.text.as_str()).collect())
+            .collect()
     }
+}
+
+/// The style of one cell of `state`.
+fn style_of(state: &termstate::TerminalState, cell: &termstate::Cell) -> Style {
+    let (foreground, background) = state.resolve_cell_colors(cell);
+    Style {
+        foreground,
+        background,
+        bold: cell.bold,
+        italic: cell.italic,
+        underline: cell.underline,
+    }
+}
+
+/// The runs of one row of cells. Cells next to each other with one style merge.
+fn runs_of(state: &termstate::TerminalState, cells: &[termstate::Cell]) -> Vec<Run> {
+    let mut runs: Vec<Run> = Vec::new();
+    for cell in cells {
+        let style = style_of(state, cell);
+        match runs.last_mut() {
+            Some(run) if run.style == style && !run.single_cell => run.text.push(cell.ch),
+            _ => runs.push(Run {
+                text: cell.ch.to_string(),
+                style,
+                single_cell: false,
+            }),
+        }
+    }
+    runs
 }
 
 /// The CSS hex form of a color: `#rrggbb`, lowercase.
