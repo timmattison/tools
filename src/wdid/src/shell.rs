@@ -6,9 +6,11 @@
 //! and builds a [`Resolver`] that says which tools each function runs.
 //!
 //! [`script`] and [`parse_output`] are pure. [`read`] is the one function that
-//! starts a process.
+//! starts a process, and the one function that writes a file: the temporary
+//! `.zshenv` that records the origin of each zsh alias.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
 use std::io::{ErrorKind, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -79,6 +81,21 @@ const ORIGIN_LOOP_VARIABLE: &str = "__wdid_alias";
 
 /// The variable of the bash script that holds the text of `declare -F`.
 const BASH_ORIGIN_VARIABLE: &str = "__wdid_origin";
+
+/// The variable that names the directory of the zsh startup files.
+const ZDOTDIR_VARIABLE: &str = "ZDOTDIR";
+
+/// The variable that carries the `ZDOTDIR` of the environment to the
+/// temporary `.zshenv`. [`read`] sets it only when the environment sets
+/// `ZDOTDIR`, and the temporary `.zshenv` removes it.
+const REAL_ZDOTDIR_VARIABLE: &str = "__WDID_REAL_ZDOTDIR";
+
+/// The name of the first startup file that zsh reads from `ZDOTDIR`.
+const ZSHENV_FILE: &str = ".zshenv";
+
+/// The start of the name of each temporary `ZDOTDIR`. The rest of the name is
+/// random, thus it is unique for each run.
+const ZDOTDIR_PREFIX: &str = "wdid-zdotdir-";
 
 /// The name of the loop variable in the script. It is unlikely to clash with a
 /// name that the person uses.
@@ -615,12 +632,100 @@ fn read_alias_line(line: &str, definitions: &mut Definitions) {
     }
 }
 
+/// Gives the text of the temporary `.zshenv` of [`read`].
+///
+/// zsh keeps no origin for an alias. Thus the file defines a function named
+/// `alias`, before each startup file of the person runs. For each `name=value`
+/// argument, the function records `${funcfiletrace[1]}` (`file:line`, the
+/// place of the call) by the name, and then it runs `builtin alias "$@"`. An
+/// argument after the options and `--` is a definition, and the option `s`
+/// makes a suffix alias, which zsh keeps in a namespace of its own.
+///
+/// Then the file puts `ZDOTDIR` back: the value of the environment, or no
+/// value when the environment has none. It sources the real `.zshenv` from
+/// `${ZDOTDIR-$HOME}`, the directory where zsh looks for it. zsh then reads
+/// the other startup files from the real directory, also when the real
+/// `.zshenv` changes `ZDOTDIR`.
+fn zshenv() -> String {
+    format!(
+        "typeset -gA {ALIAS_ORIGINS_TABLE} {SUFFIX_ORIGINS_TABLE}\n\
+         function {ALIAS_COMMAND} {{\n\
+         \x20 emulate -L zsh\n\
+         \x20 local __wdid_word\n\
+         \x20 local -i __wdid_suffix=0 __wdid_options=1\n\
+         \x20 for __wdid_word in \"$@\"; do\n\
+         \x20   if (( __wdid_options )); then\n\
+         \x20     case $__wdid_word in\n\
+         \x20       (--|-) __wdid_options=0; continue ;;\n\
+         \x20       ([-+]*) [[ $__wdid_word == *{SUFFIX_OPTION}* ]] && __wdid_suffix=1; continue ;;\n\
+         \x20       (*) __wdid_options=0 ;;\n\
+         \x20     esac\n\
+         \x20   fi\n\
+         \x20   [[ $__wdid_word == *=* ]] || continue\n\
+         \x20   if (( __wdid_suffix )); then\n\
+         \x20     {SUFFIX_ORIGINS_TABLE}[${{__wdid_word%%=*}}]=${{funcfiletrace[1]}}\n\
+         \x20   else\n\
+         \x20     {ALIAS_ORIGINS_TABLE}[${{__wdid_word%%=*}}]=${{funcfiletrace[1]}}\n\
+         \x20   fi\n\
+         \x20 done\n\
+         \x20 builtin {ALIAS_COMMAND} \"$@\"\n\
+         }}\n\
+         if (( ${{+{REAL_ZDOTDIR_VARIABLE}}} )); then\n\
+         \x20 export {ZDOTDIR_VARIABLE}=${REAL_ZDOTDIR_VARIABLE}\n\
+         \x20 unset {REAL_ZDOTDIR_VARIABLE}\n\
+         else\n\
+         \x20 unset {ZDOTDIR_VARIABLE}\n\
+         fi\n\
+         if [[ -r ${{{ZDOTDIR_VARIABLE}-$HOME}}/{ZSHENV_FILE} ]]; then\n\
+         \x20 source ${{{ZDOTDIR_VARIABLE}-$HOME}}/{ZSHENV_FILE}\n\
+         fi\n"
+    )
+}
+
+/// Gives the value of the variable `name` in the environment of the child
+/// that `command` starts: the value that `command` sets or removes, else the
+/// value of this process.
+fn child_variable(command: &Command, name: &str) -> Option<OsString> {
+    match command.get_envs().find(|(key, _)| *key == OsStr::new(name)) {
+        Some((_, value)) => value.map(OsStr::to_os_string),
+        None => std::env::var_os(name),
+    }
+}
+
+/// Points zsh at a new temporary `ZDOTDIR` that holds the file of
+/// [`zshenv`], and gives that directory. The directory removes itself when
+/// the caller drops it.
+///
+/// # Errors
+/// Gives [`ShellError::Zdotdir`] when the directory or its file cannot be
+/// made.
+fn wrap_zsh(command: &mut Command) -> Result<tempfile::TempDir, ShellError> {
+    let zdotdir_error = |source| ShellError::Zdotdir { source };
+    let directory = tempfile::Builder::new()
+        .prefix(ZDOTDIR_PREFIX)
+        .tempdir()
+        .map_err(zdotdir_error)?;
+    std::fs::write(directory.path().join(ZSHENV_FILE), zshenv()).map_err(zdotdir_error)?;
+    match child_variable(command, ZDOTDIR_VARIABLE) {
+        Some(real) => command.env(REAL_ZDOTDIR_VARIABLE, real),
+        None => command.env_remove(REAL_ZDOTDIR_VARIABLE),
+    };
+    command.env(ZDOTDIR_VARIABLE, directory.path());
+    Ok(directory)
+}
+
 /// Runs `command -i -c <script>` and parses the output.
 ///
 /// The caller makes the `Command`, thus a test can set `HOME` and `ZDOTDIR`.
 ///
+/// For zsh, `read` first makes a temporary `ZDOTDIR` with a unique name, and
+/// its `.zshenv` records the origin of each alias (see [`zshenv`]). The
+/// directory is gone when `read` returns, after an error and after a timeout
+/// too.
+///
 /// # Errors
-/// Gives [`ShellError::Spawn`] when the shell does not start,
+/// Gives [`ShellError::Zdotdir`] when the temporary `ZDOTDIR` cannot be made,
+/// [`ShellError::Spawn`] when the shell does not start,
 /// [`ShellError::TimedOut`] when it runs longer than `timeout`,
 /// [`ShellError::Failed`] for a non-zero status, and [`ShellError::NoMarkers`]
 /// from [`parse_output`].
@@ -629,6 +734,10 @@ pub fn read(
     kind: ShellKind,
     timeout: Duration,
 ) -> Result<Definitions, ShellError> {
+    let _zdotdir = match kind {
+        ShellKind::Zsh => Some(wrap_zsh(&mut command)?),
+        ShellKind::Bash => None,
+    };
     let shell = command.get_program().to_string_lossy().into_owned();
     let marker = Marker::unique();
     let mut child = command
