@@ -134,10 +134,7 @@ impl OpPath {
             return Err(Error::InvalidOpPath(path.to_string()));
         }
         // Block shell metacharacters as defense-in-depth
-        if path
-            .chars()
-            .any(|c| c.is_control() || ";|&$`\\".contains(c))
-        {
+        if holds_a_shell_metacharacter(path) {
             return Err(Error::InvalidOpPath(path.to_string()));
         }
         Ok(Self(path.to_string()))
@@ -226,11 +223,24 @@ impl OpItem {
 /// metacharacters that [`OpPath::new`] refuses go as defence in depth, for the
 /// reason that [`OpItem`] gives.
 fn names_something(name: &str) -> bool {
-    !name.trim().is_empty()
-        && !name.starts_with('-')
-        && !name
-            .chars()
-            .any(|c| c.is_control() || ";|&$`\\".contains(c))
+    !name.trim().is_empty() && !name.starts_with('-') && !holds_a_shell_metacharacter(name)
+}
+
+/// Whether `text` holds a control character or a shell metacharacter.
+///
+/// [`OpPath::new`] and [`OpItem::new`] refuse the same set as defence in
+/// depth, thus the set is written one time, here.
+///
+/// # Arguments
+///
+/// * `text` - A reference, a vault name, or an item name.
+///
+/// # Returns
+///
+/// `true` if `text` holds a control character or one of ``;|&$`\``.
+fn holds_a_shell_metacharacter(text: &str) -> bool {
+    text.chars()
+        .any(|c| c.is_control() || ";|&$`\\".contains(c))
 }
 
 impl fmt::Display for OpItem {
