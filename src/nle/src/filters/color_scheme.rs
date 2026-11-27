@@ -715,6 +715,29 @@ fn filter(
     ))
 }
 
+/// The OSC number of the default foreground.
+const FOREGROUND_NUMBER: usize = 10;
+/// The OSC number of the default background.
+const BACKGROUND_NUMBER: usize = 11;
+/// The OSC number that sets the default foreground back to its default.
+const RESET_FOREGROUND: usize = 110;
+/// The OSC number that sets the default background back to its default.
+const RESET_BACKGROUND: usize = 111;
+/// The first OSC number of the dynamic colors. A list of values after a
+/// number sets that color and the next ones.
+const DYNAMIC_COLORS_FIRST: usize = 10;
+/// The last OSC number of the dynamic colors.
+const DYNAMIC_COLORS_LAST: usize = 19;
+
+/// A default color that the recording sets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DefaultColor {
+    /// The default of the terminal.
+    Default,
+    /// The text of an OSC 10 or OSC 11 value.
+    Spec(String),
+}
+
 /// The color scheme that the filter follows while a `Splicer` rewrites the
 /// events of one region.
 struct SchemeEditor {
@@ -729,6 +752,10 @@ struct SchemeEditor {
     /// The default background that the answer set last, or `None` when it is
     /// not known.
     shown_background: Option<Rgb>,
+    /// The default foreground that the recording set.
+    recording_foreground: DefaultColor,
+    /// The default background that the recording set.
+    recording_background: DefaultColor,
 }
 
 impl SchemeEditor {
@@ -739,6 +766,8 @@ impl SchemeEditor {
             wanted_background: scheme.background(),
             shown_foreground: None,
             shown_background: None,
+            recording_foreground: DefaultColor::Default,
+            recording_background: DefaultColor::Default,
         }
     }
 
@@ -747,20 +776,72 @@ impl SchemeEditor {
     fn wanted(&mut self) -> String {
         let mut text = String::new();
         if self.shown_foreground != Some(self.wanted_foreground) {
-            text.push_str(&default_color_sequence(10, self.wanted_foreground));
+            text.push_str(&default_color_sequence(
+                FOREGROUND_NUMBER,
+                self.wanted_foreground,
+            ));
             self.shown_foreground = Some(self.wanted_foreground);
         }
         if self.shown_background != Some(self.wanted_background) {
-            text.push_str(&default_color_sequence(11, self.wanted_background));
+            text.push_str(&default_color_sequence(
+                BACKGROUND_NUMBER,
+                self.wanted_background,
+            ));
             self.shown_background = Some(self.wanted_background);
         }
         text
     }
 
-    /// Follow and drop the default colors that an OSC `text` sets. The stub
-    /// keeps each OSC.
-    fn osc(&mut self, _text: &str, _terminator: &str) -> Option<String> {
-        None
+    /// Follow and drop the default colors that an OSC `text` sets. Returns
+    /// what is left of the OSC, with the same `terminator`, or `None` when the
+    /// OSC stays as it is.
+    ///
+    /// OSC 110 and OSC 111 reset a color, and they drop. A number from 10 to
+    /// 19 starts a list: value i sets the dynamic color number + i. A value
+    /// for the color 10 or 11 that is not empty and not `?` is a set, and it
+    /// drops. A query stays. Each run of kept values that are next to each
+    /// other becomes one OSC that starts at the number of its first value.
+    fn osc(&mut self, text: &str, terminator: &str) -> Option<String> {
+        let mut parts = text.split(';');
+        let number: usize = parts.next()?.parse().ok()?;
+        match number {
+            RESET_FOREGROUND => {
+                self.recording_foreground = DefaultColor::Default;
+                return Some(String::new());
+            }
+            RESET_BACKGROUND => {
+                self.recording_background = DefaultColor::Default;
+                return Some(String::new());
+            }
+            DYNAMIC_COLORS_FIRST..=DYNAMIC_COLORS_LAST => {}
+            _ => return None,
+        }
+        let mut dropped = false;
+        let mut rest = String::new();
+        // The kept values of the run that is open.
+        let mut run: Vec<&str> = Vec::new();
+        let mut run_start = number;
+        for (offset, value) in parts.enumerate() {
+            let color = number.saturating_add(offset);
+            let is_set = !value.is_empty() && value != "?";
+            let target = match color {
+                FOREGROUND_NUMBER if is_set => Some(&mut self.recording_foreground),
+                BACKGROUND_NUMBER if is_set => Some(&mut self.recording_background),
+                _ => None,
+            };
+            if let Some(target) = target {
+                *target = DefaultColor::Spec(value.to_string());
+                dropped = true;
+                flush_run(&mut rest, &mut run, run_start, terminator);
+            } else {
+                if run.is_empty() {
+                    run_start = color;
+                }
+                run.push(value);
+            }
+        }
+        flush_run(&mut rest, &mut run, run_start, terminator);
+        dropped.then_some(rest)
     }
 
     /// The sequences for the end of a region that is not open.
@@ -769,8 +850,17 @@ impl SchemeEditor {
     }
 }
 
+/// Write the kept values of `run` into `rest` as one OSC that starts at the
+/// color `start`, and empty `run`. An empty `run` writes nothing.
+fn flush_run(rest: &mut String, run: &mut Vec<&str>, start: usize, terminator: &str) {
+    if !run.is_empty() {
+        rest.push_str(&format!("\x1b]{start};{}{terminator}", run.join(";")));
+        run.clear();
+    }
+}
+
 /// The OSC `number` (10 or 11) that sets a default color to `color`.
-fn default_color_sequence(number: u8, color: Rgb) -> String {
+fn default_color_sequence(number: usize, color: Rgb) -> String {
     format!("\x1b]{number};{}{ST}", hex(color))
 }
 
@@ -787,6 +877,14 @@ impl SequenceEditor for SchemeEditor {
                 Some(format!("{controls}\x1b[{new}m"))
             }
             Sequence::Osc { text, terminator } => self.osc(text, terminator),
+            // RIS, the full reset.
+            Sequence::Escape('c') => {
+                self.recording_foreground = DefaultColor::Default;
+                self.recording_background = DefaultColor::Default;
+                self.shown_foreground = None;
+                self.shown_background = None;
+                None
+            }
             _ => None,
         }
     }
