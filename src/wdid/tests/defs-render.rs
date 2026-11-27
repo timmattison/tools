@@ -4,7 +4,8 @@ use chrono::NaiveDate;
 use std::path::PathBuf;
 use unicode_width::UnicodeWidthStr;
 use wdid::defs::render::{json, text};
-use wdid::defs::{Classification, Kind, Summary, Tally, Usage, Window};
+use wdid::defs::{Classification, Kind, Reason, Summary, Tally, Usage, Window};
+use wdid::starts::Trigger;
 
 use wdid::origin::{Origin, Places};
 
@@ -555,4 +556,167 @@ fn the_json_holds_the_origin_and_mine_of_each_definition() {
         .filter_map(|entry| entry["name"].as_str())
         .collect();
     assert_eq!(never, ["_comp", "bare", "gfun", "gst", "wt"]);
+}
+
+/// Makes a definition that the shell runs without a typed name, for
+/// `reasons`.
+fn starts(name: &str, kind: Kind, reasons: Vec<Reason>) -> Usage {
+    Usage {
+        classification: Classification::RunsWithoutTyping,
+        reasons,
+        ..never(name, kind, "x")
+    }
+}
+
+/// Makes the reason that `trigger` runs a definition, through `through`
+/// when it is given.
+fn runs(trigger: Trigger, through: Option<&str>) -> Reason {
+    Reason::Runs {
+        trigger,
+        through: through.map(str::to_owned),
+    }
+}
+
+/// Makes the trigger of the widget `widget` with `keys`.
+fn widget(widget: &str, keys: &[&str]) -> Trigger {
+    Trigger::Widget {
+        widget: widget.to_owned(),
+        keys: keys.iter().map(|key| (*key).to_owned()).collect(),
+    }
+}
+
+/// The tally of the tests of the reasons: one definition for each trigger,
+/// one with two reasons, and the widget with no key in each other state.
+fn reasons_tally() -> Tally {
+    let mut lonely = never("lonely", Kind::Function, "x");
+    lonely.reasons = vec![Reason::WidgetWithoutKey];
+    let mut old = idle("oldwidget", Kind::Function, 5);
+    old.reasons = vec![Reason::WidgetWithoutKey];
+    tally(vec![
+        starts(
+            "precmd",
+            Kind::Function,
+            vec![runs(Trigger::Hook("precmd".into()), None)],
+        ),
+        starts(
+            "helper",
+            Kind::Function,
+            vec![
+                runs(Trigger::Hook("precmd".into()), Some("myprecmd")),
+                runs(Trigger::Trap("INT".into()), None),
+            ],
+        ),
+        starts(
+            "handler",
+            Kind::Function,
+            vec![runs(Trigger::CommandNotFound, None)],
+        ),
+        starts(
+            "searchfn",
+            Kind::Function,
+            vec![runs(widget("atuin-search", &["^R"]), None)],
+        ),
+        starts(
+            "twokeys",
+            Kind::Function,
+            vec![runs(widget("w", &["^R", "^S"]), Some("_twokeys"))],
+        ),
+        starts(
+            "spacefn",
+            Kind::Function,
+            vec![runs(widget("expand", &[" "]), None)],
+        ),
+        starts(
+            "initfn",
+            Kind::Function,
+            vec![runs(Trigger::SpecialWidget("zle-line-init".into()), None)],
+        ),
+        starts("pc", Kind::Alias, vec![runs(Trigger::PromptCommand, None)]),
+        starts(
+            "keyfn",
+            Kind::Function,
+            vec![runs(Trigger::KeyCommand("\\C-x\\C-r".into()), None)],
+        ),
+        lonely,
+        old,
+    ])
+}
+
+/// The group "Runs without typing" lists each definition that the shell runs
+/// without a typed name, in name order, with its kind and its reasons.
+#[test]
+fn the_text_lists_the_definitions_that_run_without_typing_with_their_reasons() {
+    let report = text(&reasons_tally(), &window(), "/bin/zsh", None);
+    assert!(
+        report.ends_with(
+            "Runs without typing:\n\
+             \x20 handler (function, command not found)\n\
+             \x20 helper (function, precmd hook, through myprecmd; INT trap)\n\
+             \x20 initfn (function, widget zle-line-init)\n\
+             \x20 keyfn (function, bind -x, key \\C-x\\C-r)\n\
+             \x20 pc (alias, PROMPT_COMMAND)\n\
+             \x20 precmd (function, precmd hook)\n\
+             \x20 searchfn (function, widget atuin-search, key ^R)\n\
+             \x20 spacefn (function, widget expand, key \" \")\n\
+             \x20 twokeys (function, widget w, keys ^R, ^S, through _twokeys)\n"
+        ),
+        "{report}"
+    );
+    let empty = text(&tally(Vec::new()), &window(), "/bin/zsh", None);
+    assert!(empty.contains("Runs without typing: none"), "{empty}");
+}
+
+/// A widget that no key starts stays in its group with its reason.
+#[test]
+fn a_widget_with_no_key_shows_its_reason_in_its_group() {
+    let report = text(&reasons_tally(), &window(), "/bin/zsh", None);
+    assert!(
+        report.contains("Never used:\n  lonely (function, widget, no key)\n"),
+        "{report}"
+    );
+    assert!(
+        report.contains(
+            "Idle (no use in the last 180 days):\n  oldwidget (function, 5 uses, last use 2025-01-01, widget, no key)\n"
+        ),
+        "{report}"
+    );
+}
+
+/// The JSON document gives the state and the text of each reason of each
+/// definition, and a list of the definitions that run without a typed name.
+#[test]
+fn the_json_gives_the_state_and_the_reasons() {
+    let document: serde_json::Value =
+        serde_json::from_str(&json(&reasons_tally(), &window(), "/bin/zsh")).unwrap();
+    let entry = |name: &str| {
+        document["definitions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == name)
+            .unwrap_or_else(|| panic!("no {name} in {document}"))
+            .clone()
+    };
+    let helper = entry("helper");
+    assert_eq!(helper["classification"], "runs_without_typing");
+    assert_eq!(
+        helper["reasons"],
+        serde_json::json!(["precmd hook, through myprecmd", "INT trap"])
+    );
+    let lonely = entry("lonely");
+    assert_eq!(lonely["classification"], "never_used");
+    assert_eq!(lonely["reasons"], serde_json::json!(["widget, no key"]));
+    let pc = entry("pc");
+    assert_eq!(pc["reasons"], serde_json::json!(["PROMPT_COMMAND"]));
+    let starts = document["runs_without_typing"].as_array().unwrap();
+    assert_eq!(starts.len(), 9, "{document}");
+    assert_eq!(
+        starts[0],
+        serde_json::json!({"name": "handler", "kind": "function"})
+    );
+    assert!(document["never_used"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|entry| entry["name"] == "lonely"));
 }
