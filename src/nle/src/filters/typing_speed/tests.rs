@@ -68,6 +68,25 @@ fn each_key_of_a_burst_comes_at_the_target_rate() {
 }
 
 #[test]
+fn the_rate_sets_the_interval() {
+    // 2 and 8 characters per second give intervals of 0.5 s and 0.125 s,
+    // which a float holds exactly.
+    for (rate, expected) in [
+        (2.0, vec![0.0, 0.5, 1.0, 1.5]),
+        (8.0, vec![0.0, 0.125, 0.25, 0.375]),
+    ] {
+        let input = || vec![key(0.0, "a"), key(0.1, "b"), key(0.2, "c"), key(0.3, "d")];
+        let from_options = with_options(FilterOptions::new().with(RATE_OPTION, rate));
+
+        let through_applied = run(input(), &[applied(FilterRegion::All, typing(rate))]);
+        let through_options = run(input(), &[from_options]);
+
+        assert_eq!(times(&through_applied), expected, "applied at {rate}");
+        assert_eq!(times(&through_options), expected, "options at {rate}");
+    }
+}
+
+#[test]
 fn the_events_after_the_last_key_move_by_its_change() {
     let input = vec![
         key(10.0, "l"),
