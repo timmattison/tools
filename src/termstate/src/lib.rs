@@ -349,6 +349,18 @@ fn replayed_parser(pending: &[u8]) -> Parser {
     parser
 }
 
+/// The count that parameter `index` of `params` gives: its value, or 1 when
+/// the parameter is missing or 0. A terminal reads a count of 0 as 1.
+///
+/// `vte` 0.15 gives a missing parameter as 0, so `unwrap_or(1)` alone is not
+/// enough.
+fn count_param(params: &vte::Params, index: usize) -> usize {
+    match params.iter().nth(index).and_then(|p| p.first().copied()) {
+        None | Some(0) => 1,
+        Some(n) => usize::from(n),
+    }
+}
+
 /// A performer that ignores each callback. It serves the replay of `pending`.
 struct Discard;
 
@@ -1180,53 +1192,29 @@ impl TerminalState {
         match action {
             'H' | 'f' => {
                 // Cursor position
-                let row = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1);
-                let col = params
-                    .iter()
-                    .nth(1)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1);
-                self.cursor_y = ((row as usize).saturating_sub(1)).min(self.height - 1);
-                self.cursor_x = ((col as usize).saturating_sub(1)).min(self.width - 1);
+                let row = count_param(params, 0);
+                let col = count_param(params, 1);
+                self.cursor_y = row.saturating_sub(1).min(self.height - 1);
+                self.cursor_x = col.saturating_sub(1).min(self.width - 1);
             }
             'A' => {
                 // Cursor up
-                let count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
+                let count = count_param(params, 0);
                 self.cursor_y = self.cursor_y.saturating_sub(count);
             }
             'B' => {
                 // Cursor down
-                let count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
+                let count = count_param(params, 0);
                 self.cursor_y = (self.cursor_y + count).min(self.height - 1);
             }
             'C' => {
                 // Cursor right
-                let count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
+                let count = count_param(params, 0);
                 self.cursor_x = (self.cursor_x + count).min(self.width - 1);
             }
             'D' => {
                 // Cursor left
-                let count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
+                let count = count_param(params, 0);
                 self.cursor_x = self.cursor_x.saturating_sub(count);
             }
             'J' => {
@@ -1315,16 +1303,11 @@ impl TerminalState {
             }
             'r' => {
                 // Set scrolling region (DECSTBM)
-                let top = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
-                let bottom = params
-                    .iter()
-                    .nth(1)
-                    .and_then(|p| p.first().copied())
-                    .map_or(self.height, usize::from);
+                let top = count_param(params, 0);
+                let bottom = match params.iter().nth(1).and_then(|p| p.first().copied()) {
+                    None | Some(0) => self.height,
+                    Some(n) => usize::from(n),
+                };
 
                 // Validate and set scrolling region
                 if top > 0 && bottom <= self.height && top < bottom {
@@ -1353,22 +1336,14 @@ impl TerminalState {
             }
             'S' => {
                 // Scroll up
-                let count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
+                let count = count_param(params, 0);
                 for _ in 0..count {
                     self.scroll_up();
                 }
             }
             'T' => {
                 // Scroll down: shift content DOWN within scroll region, clear top
-                let count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
+                let count = count_param(params, 0);
                 for _ in 0..count {
                     for y in (self.scroll_top + 1..=self.scroll_bottom).rev() {
                         for x in 0..self.width {
@@ -1380,11 +1355,7 @@ impl TerminalState {
             }
             'L' => {
                 // Insert lines
-                let count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
+                let count = count_param(params, 0);
                 for _ in 0..count {
                     // Move lines down from current cursor position
                     for y in (self.cursor_y + 1..self.height).rev() {
@@ -1399,11 +1370,7 @@ impl TerminalState {
             }
             'M' => {
                 // Delete lines
-                let count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
+                let count = count_param(params, 0);
                 for _ in 0..count {
                     // Move lines up from current cursor position
                     for y in self.cursor_y..(self.height - 1) {
@@ -1416,11 +1383,7 @@ impl TerminalState {
             }
             'P' => {
                 // Delete characters (clamped to avoid usize underflow)
-                let raw_count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
+                let raw_count = count_param(params, 0);
                 let count = raw_count.min(self.width.saturating_sub(self.cursor_x));
                 let start_x = self.cursor_x;
                 for x in start_x..self.width.saturating_sub(count) {
@@ -1437,11 +1400,7 @@ impl TerminalState {
             }
             '@' => {
                 // Insert characters (clamped to avoid usize underflow)
-                let raw_count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
+                let raw_count = count_param(params, 0);
                 let count = raw_count.min(self.width.saturating_sub(self.cursor_x));
                 let start_x = self.cursor_x;
                 for x in (start_x..self.width.saturating_sub(count)).rev() {
@@ -1458,11 +1417,7 @@ impl TerminalState {
             }
             'X' => {
                 // Erase characters
-                let count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
+                let count = count_param(params, 0);
                 for i in 0..count {
                     if self.cursor_x + i < self.width {
                         self.grid[self.cursor_y][self.cursor_x + i] = Cell {
