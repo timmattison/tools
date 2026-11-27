@@ -9,6 +9,16 @@ pub const MAX_PIXELS_PER_SECOND: f64 = 1000.0;
 /// The factor of one step of a zoom button or a zoom key. Remotion Studio
 /// uses the same factor.
 pub const ZOOM_STEP: f64 = 1.2;
+/// The rate of a wheel zoom: the zoom changes by the factor
+/// `exp(-WHEEL_ZOOM_RATE * delta)` for a vertical delta in pixels. Remotion
+/// Studio uses the same rate.
+const WHEEL_ZOOM_RATE: f64 = 0.06;
+/// The largest factor of one wheel event. One notch of some mouse wheels
+/// gives a delta of about 100 pixels, which the rate above makes a factor of
+/// `exp(-6)`. This limit keeps one notch from a jump to the end of the range.
+const MAX_WHEEL_ZOOM_FACTOR: f64 = 2.0;
+/// The pixels of one line of a wheel event that counts in lines.
+const WHEEL_LINE_PIXELS: f64 = 16.0;
 /// The smallest width of the window in pixels. A window that has no layout
 /// yet counts as this width, so no division is by zero.
 const MIN_WIDTH: f64 = 1.0;
@@ -192,6 +202,78 @@ impl Frame {
     pub fn time_at(self, x: f64) -> f64 {
         self.start + x / self.pixels_per_second
     }
+}
+
+/// The unit of the deltas of a wheel event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WheelUnit {
+    /// The deltas are pixels.
+    Pixels,
+    /// The deltas are lines of text.
+    Lines,
+    /// The deltas are pages: widths of the window.
+    Pages,
+}
+
+/// The parts of a wheel event that the timeline reads.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Wheel {
+    /// The horizontal delta. A positive value scrolls to the right.
+    pub x: f64,
+    /// The vertical delta. A positive value scrolls down.
+    pub y: f64,
+    /// The unit of `x` and `y`.
+    pub unit: WheelUnit,
+    /// True when Cmd or Ctrl is down.
+    pub command: bool,
+    /// True when Shift is down.
+    pub shift: bool,
+}
+
+/// What a wheel event does to the timeline.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WheelAction {
+    /// Zoom by the factor at the place of the pointer.
+    Zoom(f64),
+    /// Scroll by the pixels.
+    Pan(f64),
+    /// The timeline does nothing, and the event keeps its default action.
+    Nothing,
+}
+
+/// What `wheel` does to a timeline in a window of `width` pixels.
+///
+/// With Cmd or Ctrl, the vertical delta zooms: down zooms out, and up zooms
+/// in. With no modifier, the horizontal delta scrolls. With Shift, a vertical
+/// delta scrolls when there is no horizontal delta, because some systems send
+/// Shift with the wheel as a vertical delta. A delta that is not finite does
+/// nothing.
+#[must_use]
+pub fn wheel_action(wheel: Wheel, width: f64) -> WheelAction {
+    let _ = (wheel, width);
+    WheelAction::Nothing
+}
+
+/// What a key does to the timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyAction {
+    /// Zoom in by one step.
+    ZoomIn,
+    /// Zoom out by one step.
+    ZoomOut,
+    /// Show the whole project.
+    Fit,
+}
+
+/// What the key with the text `key` does to the timeline. `+` and `=` zoom in,
+/// `-` and `_` zoom out, and `0` shows the whole project. Remotion Studio uses
+/// the keys `+`, `-`, and `0`. The other two keys share a key with `+` and `-`
+/// on a US keyboard. A key with Cmd, Ctrl, or Alt does nothing, so the
+/// shortcuts of the system stay.
+#[must_use]
+pub fn key_action(key: &str, command: bool) -> Option<KeyAction> {
+    let _ = (key, command);
+    None
 }
 
 #[cfg(test)]

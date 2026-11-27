@@ -193,3 +193,140 @@ fn a_shorter_project_pulls_the_window_back_inside_it() {
     assert_close(frame.start(), 15.0);
     assert_close(frame.end(), 30.0);
 }
+
+/// A wheel event of `x` and `y` pixels with no modifier.
+fn wheel(x: f64, y: f64) -> Wheel {
+    Wheel {
+        x,
+        y,
+        unit: WheelUnit::Pixels,
+        command: false,
+        shift: false,
+    }
+}
+
+/// The factor of a zoom action, or a failure for another action.
+fn zoom_factor(action: WheelAction) -> f64 {
+    match action {
+        WheelAction::Zoom(factor) => factor,
+        other => panic!("{other:?} is not a zoom"),
+    }
+}
+
+#[test]
+fn a_horizontal_wheel_scrolls() {
+    assert_eq!(
+        wheel_action(wheel(30.0, 0.0), 1200.0),
+        WheelAction::Pan(30.0)
+    );
+    assert_eq!(
+        wheel_action(wheel(-12.0, 4.0), 1200.0),
+        WheelAction::Pan(-12.0)
+    );
+}
+
+#[test]
+fn a_vertical_wheel_with_no_modifier_does_nothing() {
+    assert_eq!(wheel_action(wheel(0.0, 40.0), 1200.0), WheelAction::Nothing);
+}
+
+#[test]
+fn a_vertical_wheel_with_shift_scrolls() {
+    let event = Wheel {
+        shift: true,
+        ..wheel(0.0, 25.0)
+    };
+    assert_eq!(wheel_action(event, 1200.0), WheelAction::Pan(25.0));
+}
+
+#[test]
+fn a_wheel_with_command_zooms_at_the_rate_of_remotion() {
+    let up = Wheel {
+        command: true,
+        ..wheel(0.0, -5.0)
+    };
+    assert_close(zoom_factor(wheel_action(up, 1200.0)), (0.3_f64).exp());
+    let down = Wheel {
+        command: true,
+        ..wheel(3.0, 5.0)
+    };
+    assert_close(zoom_factor(wheel_action(down, 1200.0)), (-0.3_f64).exp());
+}
+
+#[test]
+fn one_wheel_event_zooms_by_at_most_a_factor_of_two() {
+    let up = Wheel {
+        command: true,
+        ..wheel(0.0, -100.0)
+    };
+    assert_close(zoom_factor(wheel_action(up, 1200.0)), 2.0);
+    let down = Wheel {
+        command: true,
+        ..wheel(0.0, 100.0)
+    };
+    assert_close(zoom_factor(wheel_action(down, 1200.0)), 0.5);
+}
+
+#[test]
+fn a_wheel_with_command_and_no_vertical_delta_does_nothing() {
+    let event = Wheel {
+        command: true,
+        ..wheel(20.0, 0.0)
+    };
+    assert_eq!(wheel_action(event, 1200.0), WheelAction::Nothing);
+}
+
+#[test]
+fn a_wheel_in_lines_or_pages_counts_in_pixels() {
+    let lines = Wheel {
+        unit: WheelUnit::Lines,
+        ..wheel(2.0, 0.0)
+    };
+    assert_eq!(wheel_action(lines, 1200.0), WheelAction::Pan(32.0));
+    let pages = Wheel {
+        unit: WheelUnit::Pages,
+        ..wheel(0.5, 0.0)
+    };
+    assert_eq!(wheel_action(pages, 1200.0), WheelAction::Pan(600.0));
+}
+
+#[test]
+fn a_wheel_with_a_bad_delta_does_nothing() {
+    for (x, y) in [(f64::NAN, 0.0), (f64::INFINITY, 0.0), (0.0, f64::NAN)] {
+        for command in [false, true] {
+            let event = Wheel {
+                command,
+                shift: true,
+                ..wheel(x, y)
+            };
+            assert_eq!(
+                wheel_action(event, 1200.0),
+                WheelAction::Nothing,
+                "{x} {y} {command}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_zoom_keys_are_the_keys_of_remotion() {
+    for (key, action) in [
+        ("+", KeyAction::ZoomIn),
+        ("=", KeyAction::ZoomIn),
+        ("-", KeyAction::ZoomOut),
+        ("_", KeyAction::ZoomOut),
+        ("0", KeyAction::Fit),
+    ] {
+        assert_eq!(key_action(key, false), Some(action), "{key}");
+    }
+}
+
+#[test]
+fn other_keys_and_keys_with_a_modifier_do_nothing() {
+    for key in ["+", "-", "0"] {
+        assert_eq!(key_action(key, true), None, "{key}");
+    }
+    for key in ["a", "1", " ", "ArrowLeft", "日"] {
+        assert_eq!(key_action(key, false), None, "{key}");
+    }
+}
