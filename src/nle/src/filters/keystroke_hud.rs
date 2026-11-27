@@ -13,6 +13,11 @@
 //! output scrolls. Thus `beta play`, `beta export web`, and `beta export video`
 //! show the HUD with no change.
 //!
+//! The filter draws nothing while the output of the program stops inside an
+//! escape sequence. The first `ESC` of a draw ends that sequence in the viewer.
+//! At the end of the region, the last draw writes the start of that sequence
+//! again, so the output after the region finishes it.
+//!
 //! The options, with their defaults:
 //! - `position`: `top-right`. The corner or the edge of the box.
 //! - `duration`: 1.5. The seconds that a box stays after its last key.
@@ -46,6 +51,9 @@
 //!   first, and the HUD then repairs the screen. If that place is the last
 //!   row, a newline scrolls the viewer and puts one more line into its
 //!   scrollback.
+//! - When the region ends inside a string sequence of the program (OSC or
+//!   DCS), the viewer gets that sequence twice: first cut at the last draw of
+//!   the HUD, then whole.
 
 mod keys;
 mod options;
@@ -178,6 +186,19 @@ fn draw(screen: &Screen<'_>, span: Span, options: &FilterOptions) -> Result<Vec<
     }
     for &time in frames.iter().skip(next_frame) {
         paint(&mut painter, &mut result, time);
+    }
+    // The last draw takes the box away, also inside a sequence of the program.
+    // The time is never after the end of the region.
+    let end = result
+        .last()
+        .map_or(0.0, |event| event.time)
+        .max(frames.last().copied().unwrap_or(0.0));
+    if let Some(data) = painter.finish() {
+        result.push(Event {
+            time: end,
+            event_type: EventType::Output,
+            data,
+        });
     }
     Ok(result)
 }

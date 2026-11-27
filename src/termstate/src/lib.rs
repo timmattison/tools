@@ -329,6 +329,15 @@ fn replayed_parser(pending: &[u8]) -> Parser {
     parser
 }
 
+/// The byte `ESC`, which starts an escape sequence.
+const ESC: u8 = 0x1b;
+/// The byte `CAN`, which ends each sequence.
+const CAN: u8 = 0x18;
+/// The byte `SUB`, which ends each sequence.
+const SUB: u8 = 0x1a;
+/// The last C0 control byte.
+const LAST_C0: u8 = 0x1f;
+
 /// A performer that ignores each callback. It serves the replay of `pending`.
 struct Discard;
 
@@ -640,6 +649,32 @@ impl TerminalState {
     /// Returns whether the parser holds no unfinished escape sequence.
     pub fn is_settled(&self) -> bool {
         self.pending.is_empty()
+    }
+
+    /// Returns the text that puts a parser in the ground state into the state
+    /// of this parser. The text is empty when this parser is settled.
+    ///
+    /// The text starts at the last `ESC` of the unfinished sequence. An `ESC`
+    /// moves the parser from each state to the escape state and clears its
+    /// parameters, thus the bytes before the last `ESC` do not matter. The text
+    /// holds no C0 control, because inside a sequence a control runs and does
+    /// not change the state. A terminal that reads the text then runs no
+    /// control twice. `CAN` and `SUB` end each sequence. When the unfinished
+    /// sequence holds one of them after its last `ESC`, the text is empty.
+    pub fn unfinished_sequence(&self) -> String {
+        let Some(start) = self.pending.iter().rposition(|byte| *byte == ESC) else {
+            return String::new();
+        };
+        let tail = self.pending.get(start..).unwrap_or_default();
+        if tail.iter().any(|byte| matches!(*byte, CAN | SUB)) {
+            return String::new();
+        }
+        let kept: Vec<u8> = tail
+            .iter()
+            .copied()
+            .filter(|byte| *byte == ESC || *byte > LAST_C0)
+            .collect();
+        String::from_utf8_lossy(&kept).into_owned()
     }
 
     /// Returns the `(foreground, background)` colors that a cell is drawn with.

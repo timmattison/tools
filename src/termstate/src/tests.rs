@@ -302,3 +302,46 @@ fn is_settled_is_false_inside_a_sequence_and_true_after_it() {
     assert!(!feed_new("\x1b[").is_settled());
     assert!(feed_new("\x1b[5;5H").is_settled());
 }
+
+#[test]
+fn unfinished_sequence_reopens_the_sequence_in_a_viewer_that_ended_it() {
+    let cases = [
+        ("", "X"),
+        ("\x1b[?25", "l"),
+        ("\x1b[\r\n1", "mX"),
+        ("\x1b[1\x18", "X"),
+        ("\x1b", "[?25l"),
+        ("\x1b(", "0q"),
+        ("\x1b]0;ti", "tle\x07X"),
+    ];
+    for (start, rest) in cases {
+        let reference = feed_new(&format!("ab{start}{rest}"));
+        let reopen = feed_new(&format!("ab{start}")).unfinished_sequence();
+        let viewer = feed_new(&format!("ab{start}\x1b7\x1b8{reopen}{rest}"));
+        assert_eq!(viewer.get_grid(), reference.get_grid(), "{start:?}");
+        assert_eq!(
+            viewer.get_cursor_position(),
+            reference.get_cursor_position(),
+            "{start:?}"
+        );
+        assert_eq!(
+            viewer.is_cursor_visible(),
+            reference.is_cursor_visible(),
+            "{start:?}"
+        );
+        assert_eq!(
+            viewer.uses_line_drawing(),
+            reference.uses_line_drawing(),
+            "{start:?}"
+        );
+    }
+}
+
+#[test]
+fn unfinished_sequence_is_empty_when_settled() {
+    assert_eq!(feed_new("ab").unfinished_sequence(), "");
+    assert_eq!(feed_new("\x1b[5;5H").unfinished_sequence(), "");
+    assert_eq!(feed_new("\x1b[1\x18").unfinished_sequence(), "");
+    assert_eq!(feed_new("\x1b[?25").unfinished_sequence(), "\x1b[?25");
+    assert_eq!(feed_new("\x1b[\r\n1").unfinished_sequence(), "\x1b[1");
+}

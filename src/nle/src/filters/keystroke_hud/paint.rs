@@ -391,7 +391,34 @@ impl Painter {
     /// A paint with no box writes nothing and scans nothing while the replays
     /// agree: no restore of a save slot has run since they last agreed, and
     /// both parsers hold no unfinished sequence.
+    ///
+    /// A paint writes nothing while a replay holds an unfinished sequence of
+    /// the program. The first `ESC` of the paint would end that sequence in the
+    /// viewer, and the rest of the sequence would print as text. The next paint
+    /// after the end of the sequence writes what is owed.
     pub(crate) fn paint(&mut self, overlay: Option<&Overlay>) -> Option<String> {
+        if !(self.clean.is_settled() && self.shown.is_settled()) {
+            return None;
+        }
+        self.write(overlay, "")
+    }
+
+    /// The last output of the painter, for the end of the region. It takes the
+    /// box away, also while the program holds an unfinished sequence, because
+    /// the filter cannot write after its region. It then writes the start of
+    /// that sequence again, so the first output of the program after the
+    /// region finishes the sequence in the viewer. It returns `None` when the
+    /// viewer needs nothing.
+    pub(crate) fn finish(&mut self) -> Option<String> {
+        let reopen = self.clean.unfinished_sequence();
+        self.write(None, &reopen)
+    }
+
+    /// The output that makes the viewer see the screen of the recording with
+    /// `overlay` on top, or `None` when the viewer sees that already. When the
+    /// output is not empty, `reopen` goes after it. The painter feeds the
+    /// output to its own copy of the screen of the viewer.
+    fn write(&mut self, overlay: Option<&Overlay>, reopen: &str) -> Option<String> {
         if overlay.is_none() && self.synced == Some(self.clean.restore_count()) {
             return None;
         }
@@ -473,6 +500,7 @@ impl Painter {
         if output.is_empty() {
             return None;
         }
+        output.push_str(reopen);
         self.shown.process_output(&output).ok();
         Some(output)
     }

@@ -6427,8 +6427,11 @@ and restores the cursor. It replays the events through the emulator of
 `termstate`, so it knows the cells under the box. It puts them back when the
 box goes away, and it keeps the box in place when the output scrolls. Thus
 `beta play`, `beta export web`, and `beta export video` show the HUD with no
-change. The window has no panel for the filter yet. A project holds it in its
-list of filters:
+change. The filter draws nothing while the output of the program stops inside
+an escape sequence, because the first `ESC` of a draw ends that sequence in the
+viewer. At the end of the region, the last draw writes the start of that
+sequence again, so the output after the region finishes it. The window has no
+panel for the filter yet. A project holds it in its list of filters:
 
 ```json
 {
@@ -6471,6 +6474,9 @@ The limits of the HUD:
   first, and the HUD then repairs the screen. If that place is the last
   row, a newline scrolls the viewer and puts one more line into its
   scrollback.
+- When the region ends inside a string sequence of the program (OSC or DCS),
+  the viewer gets that sequence twice: first cut at the last draw of the HUD,
+  then whole.
 
 The crate also has functions that save the rendered recording
 (`Editor::save_recording`), list the recordings in a directory, and export a

@@ -92,6 +92,15 @@ impl Rig {
         output
     }
 
+    /// Finish, and replay the output in the viewer.
+    fn finish(&mut self) -> Option<String> {
+        let output = self.painter.finish();
+        if let Some(text) = &output {
+            self.viewer.process_output(text).unwrap();
+        }
+        output
+    }
+
     /// The text of the viewer in row `row`.
     fn row(&self, row: usize) -> String {
         self.viewer.get_grid()[row]
@@ -489,5 +498,19 @@ fn a_paint_inside_an_unfinished_sequence_of_the_program_writes_nothing() {
     assert_eq!(rig.paint(Some(&other)), None);
     rig.feed("l");
     rig.paint(None);
+    rig.assert_viewer_is_reference();
+}
+
+#[test]
+fn a_finish_inside_an_unfinished_sequence_of_the_program_opens_it_again() {
+    let screen = size(20, 8);
+    let mut rig = Rig::new(screen, &TerminalTheme::auto());
+    let overlay = box_of(screen, Position::TopRight, "ls");
+    rig.feed("ab");
+    rig.paint(Some(&overlay));
+    rig.feed("\x1b[?25");
+    let output = rig.finish().expect("the box is on the screen");
+    assert!(output.ends_with("\x1b[?25"), "{output:?}");
+    rig.feed("l");
     rig.assert_viewer_is_reference();
 }
