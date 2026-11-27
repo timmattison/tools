@@ -20,8 +20,11 @@ use crate::shell::Definitions;
 use crate::starts::Trigger;
 use crate::tally::days_since;
 
+mod findings;
 mod reasons;
 pub mod render;
+
+pub use findings::{Finding, FindingKind, Member};
 
 /// The label of a regular alias.
 const LABEL_ALIAS: &str = "alias";
@@ -215,6 +218,9 @@ pub struct Tally {
     /// The directories that decide which definitions are mine. The text
     /// report shows the home directory as `~`.
     pub places: Places,
+    /// The duplicates and the shadows among the entries, in report order. It
+    /// holds each finding, also a finding with no definition of mine.
+    pub findings: Vec<Finding>,
 }
 
 /// Gives the first line of `text`, with its other characters unchanged.
@@ -502,6 +508,7 @@ pub fn tally(entries: &[HistoryEntry], definitions: &Definitions, window: &Windo
         .count();
     let mine = usages.iter().filter(|u| u.mine).count();
     let usages_count = usages.len();
+    let findings = findings::find(definitions, &usages);
     Tally {
         definitions: usages,
         summary: Summary {
@@ -517,5 +524,6 @@ pub fn tally(entries: &[HistoryEntry], definitions: &Definitions, window: &Windo
             others: usages_count.saturating_sub(mine),
         },
         places: definitions.places.clone(),
+        findings,
     }
 }

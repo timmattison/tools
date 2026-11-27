@@ -79,6 +79,7 @@ fn tally(definitions: Vec<Usage>) -> Tally {
         definitions,
         summary: summary(),
         places: Places::default(),
+        findings: Vec::new(),
     }
 }
 
