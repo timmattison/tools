@@ -1395,6 +1395,27 @@ fn the_source_of_each_pen_color_counts_although_its_rgb_is_the_same() {
     assert!(base != rgb, "background");
 }
 
+/// The name of one field of `TerminalState`, and a change of that field alone.
+type FieldChange = (&'static str, fn(&mut TerminalState));
+
+#[test]
+fn a_change_of_one_field_makes_the_terminals_unequal() {
+    // A byte sequence often changes two fields, and then a comparison that
+    // skips one of them still finds the other. A 24-bit color changes the pen
+    // color and its source, because `ColorSource::Rgb` holds the RGB value.
+    // Thus each case changes one field of a copy.
+    let cases: &[FieldChange] = &[
+        ("current_fg", |t| t.current_fg = (1, 2, 3)),
+        ("current_bg", |t| t.current_bg = (1, 2, 3)),
+    ];
+    let base = feed_text("ab");
+    for (field, change) in cases {
+        let mut changed = base.clone();
+        change(&mut changed);
+        assert!(base != changed, "{field}");
+    }
+}
+
 #[test]
 fn the_autowrap_mode_counts_although_the_screen_is_the_same() {
     assert!(feed_text("ab") != feed_text("ab\x1b[?7l"));
