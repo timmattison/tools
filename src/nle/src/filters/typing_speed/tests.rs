@@ -305,3 +305,52 @@ fn a_bad_option_fails_the_render_with_a_message_that_names_it() {
         );
     }
 }
+
+#[test]
+fn a_burst_typed_faster_than_the_rate_becomes_longer() {
+    let input = vec![
+        key(10.0, "a"),
+        key(10.0625, "b"),
+        key(10.125, "c"),
+        out(10.25, "abc"),
+        out(15.0, "after the region"),
+    ];
+
+    let got = run(input, &[applied(range(10.0, 12.0), typing(4.0))]);
+
+    // "c" moves 0.375 s later, so each later event moves 0.375 s later too.
+    assert_eq!(times(&got), vec![10.0, 10.25, 10.5, 10.625, 15.375]);
+}
+
+#[test]
+fn a_region_with_no_key_changes_nothing() {
+    let input = vec![out(1.0, "build"), out(2.0, "done")];
+
+    let got = run(input, &[applied(FilterRegion::All, typing(4.0))]);
+
+    assert_eq!(times(&got), vec![1.0, 2.0]);
+}
+
+#[test]
+fn an_event_before_the_first_key_keeps_its_time() {
+    let input = vec![out(0.5, "$ "), key(1.0, "a"), key(1.5, "b")];
+
+    let got = run(input, &[applied(FilterRegion::All, typing(4.0))]);
+
+    assert_eq!(times(&got), vec![0.5, 1.0, 1.25]);
+}
+
+#[test]
+fn a_jitter_does_not_change_a_pause() {
+    let input = vec![key(0.0, "a"), key(0.5, "b"), key(3.0, "c")];
+    let jittery = Normalization {
+        jitter: Jitter::new(0.5).unwrap(),
+        ..typing(4.0)
+    };
+
+    let got = run(input, &[applied(FilterRegion::All, jittery)]);
+
+    assert_eq!(got[0].time, 0.0);
+    assert_ne!(got[1].time, 0.25, "the jitter must change the interval");
+    assert_eq!(got[2].time, got[1].time + 2.5, "the pause must stay 2.5 s");
+}
