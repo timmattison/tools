@@ -211,6 +211,23 @@ pub(crate) fn group(heading: &str, entries: &[String]) -> String {
     text
 }
 
+/// Gives the heading of the group of the entries that never ran and are old:
+/// their added date is unknown, or `new_days` days ago or more. The tools
+/// report and the report of `wdid defs` share it.
+pub(crate) fn never_used_old_heading(new_days: u32) -> String {
+    format!("Never used, old (added {new_days} or more days ago)")
+}
+
+/// Gives the heading of the group of the entries that never ran and are new:
+/// their added date is less than `new_days` days ago. The tools report and the
+/// report of `wdid defs` share it.
+pub(crate) fn never_used_new_heading(new_days: u32) -> String {
+    format!(
+        "Never used, new (added less than {} ago)",
+        counted(new_days, "day", "days")
+    )
+}
+
 /// Gives the three groups that name the tools never used and the tools idle.
 fn group_lines(tally: &Tally, window: &Window) -> String {
     let old: Vec<String> = tools_with(tally, Classification::NeverUsedOld)
@@ -239,20 +256,8 @@ fn group_lines(tally: &Tally, window: &Window) -> String {
         })
         .collect();
     [
-        group(
-            &format!(
-                "Never used, old (added {} or more days ago)",
-                window.new_days
-            ),
-            &old,
-        ),
-        group(
-            &format!(
-                "Never used, new (added less than {} ago)",
-                counted(window.new_days, "day", "days")
-            ),
-            &new,
-        ),
+        group(&never_used_old_heading(window.new_days), &old),
+        group(&never_used_new_heading(window.new_days), &new),
         group(
             &format!(
                 "Idle (no use in the last {})",

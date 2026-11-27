@@ -219,7 +219,7 @@ pub(super) fn ChaptersPanel(
             }
             for row in rows {
                 div { class: "chapter-row", key: "{row.id.0}",
-                    span { class: "chapter-time", {format_clock(row.time.get())} }
+                    span { class: "chapter-time", {format_clock(row.time.get(), true)} }
                     span { class: "chapter-label", "{row.label}" }
                     if row.late {
                         span { class: "chapter-late", {AFTER_THE_END} }

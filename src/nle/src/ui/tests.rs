@@ -108,9 +108,10 @@ fn panels_root() -> Element {
     let playhead = use_signal(|| Seconds::ZERO);
     let playing = use_signal(|| false);
     let rendered = use_memo(move || preview::render_of(&loaded.read()));
+    let view = use_signal(View::default);
     rsx! {
         PreviewPane { rendered, playhead, playing }
-        Timeline { loaded, rendered, playhead }
+        Timeline { loaded, rendered, playhead, view }
         PropertiesPanel { loaded, on_result: |_| {} }
     }
 }
@@ -311,6 +312,8 @@ struct Window {
     play: Option<ElementId>,
     /// The Stop button, when a test noted it.
     stop: Option<ElementId>,
+    /// The Zoom in button of the timeline, when a test noted it.
+    zoom_in: Option<ElementId>,
 }
 
 impl Window {
@@ -333,6 +336,7 @@ impl Window {
             redact: None,
             play: None,
             stop: None,
+            zoom_in: None,
         };
         window.note_listeners(&edits);
         window.first_render = window.clicks.clone();
@@ -463,12 +467,13 @@ impl Window {
 
     /// The click listeners that the render of a load creates, in creation
     /// order: Apply Speed of the speed panel, Apply Redaction of the redaction
-    /// panel, Add Chapter of the chapter panel, then Play and Stop of the
-    /// preview toolbar. The properties panel mounts before the preview
-    /// toolbar, as it does for the input listeners. A recording with chapters
-    /// adds the buttons of its rows, thus this list is for a recording with no
-    /// chapter.
-    fn load_buttons(&self) -> [ElementId; 5] {
+    /// panel, Add Chapter of the chapter panel, the Zoom out, Zoom in, and Fit
+    /// buttons of the timeline, then Play and Stop of the preview toolbar. The
+    /// properties panel mounts before the timeline, and the timeline before
+    /// the preview toolbar, as for the input listeners. A recording with
+    /// chapters adds the buttons of its rows, thus this list is for a
+    /// recording with no chapter.
+    fn load_buttons(&self) -> [ElementId; 8] {
         self.newest
             .clone()
             .try_into()
@@ -499,13 +504,14 @@ impl Window {
         self.click(self.redact_button());
     }
 
-    /// Notes the Apply Speed, Apply Redaction, Play, and Stop buttons of the
-    /// render of an open recording. `Window::load_buttons` gives their order,
-    /// thus the recording must hold no chapter.
+    /// Notes the Apply Speed, Apply Redaction, Zoom in, Play, and Stop buttons
+    /// of the render of an open recording. `Window::load_buttons` gives their
+    /// order, thus the recording must hold no chapter.
     fn note_open_buttons(&mut self) {
-        let [apply, redact, _, play, stop] = self.load_buttons();
+        let [apply, redact, _, _, zoom_in, _, play, stop] = self.load_buttons();
         self.apply = Some(apply);
         self.redact = Some(redact);
+        self.zoom_in = Some(zoom_in);
         self.play = Some(play);
         self.stop = Some(stop);
     }
@@ -523,6 +529,17 @@ impl Window {
     /// The Stop button. `open_recording` noted it.
     fn stop_button(&self) -> ElementId {
         self.stop.expect("a window with an open recording")
+    }
+
+    /// The Zoom in button of the timeline. `open_recording` noted it.
+    fn zoom_in_button(&self) -> ElementId {
+        self.zoom_in.expect("a window with an open recording")
+    }
+
+    /// The style of the first clip block of the timeline: its place and its
+    /// width, which show the zoom and the scroll.
+    fn clip_style(&self) -> String {
+        text_between(&self.html(), "class=\"timeline-clip\" style=\"", "\"")
     }
 
     /// The label of the Play and Pause button, read from the page.
@@ -666,7 +683,8 @@ fn properties_show_the_file_name_of_a_windows_path() {
 fn timeline_shows_the_event_count_and_the_duration() {
     let page = render_panels(fixture());
     assert!(page.contains("42 events"), "{page}");
-    assert!(page.contains("Timeline editor"), "{page}");
+    assert!(page.contains("class=\"timeline-clip\""), "{page}");
+    assert!(!page.contains("coming in #150"), "{page}");
 }
 
 #[test]
@@ -893,7 +911,7 @@ async fn a_failed_chapter_action_shows_the_banner_and_a_good_one_removes_it() {
         "{}",
         window.html()
     );
-    let [_, _, add, _, _] = window.load_buttons();
+    let [_, _, add, ..] = window.load_buttons();
     let [time, label, _] = window.chapter_fields();
     window.click(add);
     let page = window.html();
@@ -930,7 +948,7 @@ async fn a_second_recording_starts_the_chapter_panel_with_no_edit_and_no_search(
     let mut window = Window::open(&fakes);
     window.click(window.open_button());
     window.settle().await;
-    let [_, _, add, _, _] = window.load_buttons();
+    let [_, _, add, ..] = window.load_buttons();
     let [time, label, search] = window.chapter_fields();
     window.type_into(time, "5");
     window.type_into(label, "Intro");
@@ -1490,6 +1508,26 @@ async fn a_new_recording_starts_at_time_zero() {
     assert!(page.contains(&x_run(1)), "{page}");
     assert!(!page.contains(&x_run(2)), "{page}");
     assert!(page.contains("value=\"0\""), "{page}");
+}
+
+#[tokio::test]
+async fn a_new_recording_opens_with_the_whole_timeline() {
+    let fakes = Fakes::new()
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())))
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())));
+    let mut window = Window::open(&fakes);
+    window.click(window.open_button());
+    window.settle().await;
+    window.note_open_buttons();
+    let whole = window.clip_style();
+    window.click(window.zoom_in_button());
+    assert_ne!(window.clip_style(), whole);
+
+    window.click(window.open_button());
+    window.settle().await;
+    assert_eq!(window.clip_style(), whole);
 }
 
 #[tokio::test]
