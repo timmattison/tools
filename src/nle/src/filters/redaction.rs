@@ -66,8 +66,10 @@
 //!   not an address.
 //! - `IpAddress`: an IPv4 address, a full IPv6 address with eight groups, or a
 //!   compressed IPv6 address that has a group on each side of `::`. Thus `::1`
-//!   is not found. A clock time, a MAC address, and a version number are not
-//!   found.
+//!   is not found. A clock time, a MAC address, and a version number with
+//!   three parts are not found. A version number with four parts, such as
+//!   `1.2.3.4`, and a Rust path whose parts are all hex, such as `Add::add`,
+//!   are found.
 //! - `AwsKey`: an access key ID, or the value of a secret access key or a
 //!   session token. The filter finds a secret value only next to its key name.
 //!   It replaces only the value.

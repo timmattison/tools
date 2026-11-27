@@ -15,8 +15,10 @@ const EMAIL: &str = r"[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}";
 /// that has `::` with at least one group on each side.
 ///
 /// It does not match `::1`, because `::` has no group on its left. It does not
-/// match a clock time, a MAC address, a version number, or a Rust path such as
-/// `std::fs::read`.
+/// match a clock time, a MAC address, a version number with three parts such
+/// as `1.2.3`, or a Rust path with a part that is not hex, such as
+/// `std::fs::read`. It matches a version number with four parts, such as
+/// `1.2.3.4`, and a Rust path whose parts are all hex, such as `Add::add`.
 const IP_ADDRESS: &str = concat!(
     r"\b(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])",
     r"(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}\b",
