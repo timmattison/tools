@@ -344,6 +344,20 @@ fn the_rendered_recording_is_the_visible_columns_by_the_visible_rows() {
 // Tests of the bytes.
 
 #[test]
+fn a_line_longer_than_the_screen_wraps_in_the_crop() {
+    let rendered = render_on(
+        10,
+        4,
+        vec![out(1.0, "0123456789abc")],
+        json!({ "columns": { "start": 0, "end": 5 } }),
+        FilterRegion::All,
+    )
+    .unwrap();
+
+    assert_eq!(pairs(&rendered.events), vec![(1.0, "01234\x1b[2;1Habc")]);
+}
+
+#[test]
 fn one_red_bold_character_gives_one_sgr_and_the_character() {
     let rendered = render(vec![out(1.0, "\x1b[1;31mA")], json!({ "hide_rows": [23] }));
 
@@ -854,6 +868,14 @@ fn the_output_shows_the_crop_of_plain_text_on_several_lines() {
 }
 
 #[test]
+fn the_output_shows_the_crop_of_a_line_longer_than_the_screen() {
+    assert_each_shape(
+        &["a line that is longer than twenty columns\r\n", "next"],
+        &shapes(),
+    );
+}
+
+#[test]
 fn the_output_shows_the_crop_of_each_kind_of_color() {
     assert_each_shape(
         &[
@@ -1161,6 +1183,34 @@ fn a_range_gives_the_saved_cursor_back_after_the_range() {
 }
 
 #[test]
+fn a_range_gives_back_a_pending_wrap() {
+    let stream = [
+        (1.0, "start"),
+        (4.0, "\x1b[2;1H01234567890123456789"),
+        (7.0, "Z"),
+    ];
+
+    assert_range_property_each_shape(&stream, 3.0, 6.0);
+}
+
+#[test]
+fn a_range_gives_back_the_autowrap_mode() {
+    let turned_off = [
+        (1.0, "start"),
+        (4.0, "\x1b[?7l"),
+        (7.0, "\x1b[2;1Habcdefghijklmnopqrstuvwxyz"),
+    ];
+    let turned_on = [
+        (1.0, "\x1b[?7lstart"),
+        (4.0, "\x1b[?7h"),
+        (7.0, "\x1b[2;1Habcdefghijklmnopqrstuvwxyz"),
+    ];
+
+    assert_range_property_each_shape(&turned_off, 3.0, 6.0);
+    assert_range_property_each_shape(&turned_on, 3.0, 6.0);
+}
+
+#[test]
 fn a_range_keeps_the_line_drawing_set_before_it_and_gives_it_back() {
     let stream = [
         (1.0, "\x1b(0lqk\r\nx"),
@@ -1247,7 +1297,7 @@ fn a_range_in_the_middle_of_a_recording_writes_the_start_and_the_restore() {
             (3.0, "\x1b[1;1H\x1b[0m  \x1b[?25l"),
             (
                 6.0,
-                "\x1b[1;1Hab\x1b[1;6r\x1b[0m\x1b[1;1H\x1b7\x1b[1;3H\x1b[?25h"
+                "\x1b[1;1Hab\x1b[1;6r\x1b[?7h\x1b[0m\x1b[1;1H\x1b7\x1b[1;3H\x1b[?25h"
             ),
         ]
     );

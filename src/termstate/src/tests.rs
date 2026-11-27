@@ -750,3 +750,79 @@ fn a_clone_keeps_the_eight_attributes() {
 
     assert_eq!(pen_attributes(&state.clone()), [true; 8]);
 }
+
+// Tests of the autowrap at the last column.
+
+/// A terminal of `width` columns and `height` rows that has read `text`.
+fn feed_on(width: usize, height: usize, text: &str) -> TerminalState {
+    let mut state = TerminalState::new(width, height, TerminalTheme::auto());
+    state.process_output(text).unwrap();
+    state
+}
+
+#[test]
+fn a_line_longer_than_the_screen_wraps_to_the_next_row() {
+    let state = feed_on(5, 3, "abcdefg");
+
+    assert_eq!(row_text(&state, 0), "abcde");
+    assert_eq!(row_text(&state, 1), "fg");
+    assert_eq!(state.get_cursor_position(), (2, 1));
+}
+
+#[test]
+fn a_character_in_the_last_column_keeps_the_cursor_there_until_the_next_character() {
+    let state = feed_on(5, 3, "abcde");
+    assert_eq!(state.get_cursor_position(), (4, 0));
+
+    let state = feed_on(5, 3, "abcde\r\nX");
+    assert_eq!(row_text(&state, 0), "abcde");
+    assert_eq!(row_text(&state, 1), "X");
+    assert_eq!(row_text(&state, 2), "");
+    assert_eq!(state.get_cursor_position(), (1, 1));
+}
+
+#[test]
+fn each_cursor_move_ends_the_pending_wrap() {
+    assert_eq!(row_text(&feed_on(5, 3, "abcde\x1b[1;1HX"), 0), "Xbcde");
+    assert_eq!(row_text(&feed_on(5, 3, "abcde\x1b[1;1HX"), 1), "");
+    assert_eq!(row_text(&feed_on(5, 3, "abcde\rX"), 0), "Xbcde");
+    assert_eq!(row_text(&feed_on(5, 3, "abcde\rX"), 1), "");
+    assert_eq!(row_text(&feed_on(5, 3, "abcde\x08X"), 0), "abcXe");
+    assert_eq!(row_text(&feed_on(5, 3, "abcde\x08X"), 1), "");
+}
+
+#[test]
+fn a_wrap_on_the_last_row_scrolls_the_screen() {
+    let state = feed_on(5, 2, "abcdefghijk");
+
+    assert_eq!(row_text(&state, 0), "fghij");
+    assert_eq!(row_text(&state, 1), "k");
+    assert_eq!(state.get_cursor_position(), (1, 1));
+}
+
+#[test]
+fn with_autowrap_off_each_character_after_the_last_column_overwrites_it() {
+    let state = feed_on(5, 3, "\x1b[?7labcdefg");
+
+    assert_eq!(row_text(&state, 0), "abcdg");
+    assert_eq!(row_text(&state, 1), "");
+    assert_eq!(state.get_cursor_position(), (4, 0));
+}
+
+#[test]
+fn ris_turns_autowrap_on_again() {
+    let state = feed_on(5, 3, "\x1b[?7l\x1bcabcdefg");
+
+    assert_eq!(row_text(&state, 0), "abcde");
+    assert_eq!(row_text(&state, 1), "fg");
+}
+
+#[test]
+fn a_tab_moves_the_cursor_and_writes_no_cell() {
+    let state = feed_on(20, 2, "abcdefghij\r\tX");
+    assert_eq!(row_text(&state, 0), "abcdefghXj");
+
+    let state = feed_on(10, 2, "\x1b[1;9H\tX");
+    assert_eq!(state.get_grid()[0][9].ch, 'X');
+    assert_eq!(row_text(&state, 1), "");
+}
