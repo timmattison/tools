@@ -917,7 +917,7 @@ Every crate in this workspace **must** inherit the repo-wide lint set, and a cra
 
 ### Why
 
-The root `Cargo.toml` declares `[workspace.lints.rust]` and `[workspace.lints.clippy]`, but cargo hands those lints only to members that opt in. A member that omits the stanza is silently exempt: nothing warns and nothing fails, because the exemption is spelled as an *absence*. That is also why it spreads — a new crate that never types the stanza is born exempt. All 73 members opt in today, and `repo_guards::workspace_lints` keeps it that way: a new crate that omits the stanza fails `cargo test`.
+The root `Cargo.toml` declares `[workspace.lints.rust]` and `[workspace.lints.clippy]`, but cargo hands those lints only to members that opt in. A member that omits the stanza is silently exempt: nothing warns and nothing fails, because the exemption is spelled as an *absence*. That is also why it spreads — a new crate that never types the stanza is born exempt. Each member opts in today, and `repo_guards::workspace_lints` keeps it that way: a new crate that omits the stanza fails `cargo test`.
 
 ### Usage
 
