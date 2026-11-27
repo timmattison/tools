@@ -37,6 +37,30 @@
 //!   stays as written. A color with an operand that is not a number from 0 to
 //!   255 stays as written.
 //!
+//! The stream rules:
+//!
+//! - At the start of its region, the filter sets the default foreground and
+//!   the default background of the theme. It writes OSC 10 and OSC 11 in an
+//!   output event at time 0. With `swap`, OSC 10 gets the background of the
+//!   theme and OSC 11 gets the foreground.
+//! - The filter owns the default colors. It drops each OSC 10, OSC 11, OSC 110,
+//!   and OSC 111 of the recording. In an OSC 10 or OSC 11 list, it drops each
+//!   value that sets the color 10 or 11. A query (`?`) and an empty value
+//!   stay, and so do the values for the other colors. The kept values that
+//!   are next to each other stay in one OSC that starts at the number of the
+//!   first of them.
+//! - A full reset (RIS, `ESC c`) of the recording stays. The filter then
+//!   writes OSC 10 and OSC 11 of the theme again, right after the reset.
+//! - A range that is not the end of the timeline ends with a restore. The
+//!   filter writes OSC 110 and OSC 111, and then the OSC 10 and OSC 11 values
+//!   that the recording set. Then it writes one SGR that sets the foreground,
+//!   the background, and the underline color that the recording set and that
+//!   the filter converted. The text after the range thus has the colors that
+//!   the recording gave it.
+//! - The filter sees only its region. An SGR color that the recording set
+//!   before the start of the range stays as the recording wrote it until the
+//!   next SGR in the range. The restore does not know such a color.
+//!
 //! The filter does not read OSC 4, thus a palette that the recording sets with
 //! OSC 4 is not converted. A terminal that shows bold text in the bright colors
 //! does not do so for a base color that the filter converted, because the
@@ -79,8 +103,6 @@ const RULE_INVERT: &str = "invert";
 /// The name of the truecolor rule that inverts the lightness.
 const RULE_INVERT_LIGHTNESS: &str = "invert-lightness";
 
-/// The first palette index of the 6x6x6 cube.
-const CUBE_START: u8 = 16;
 /// The first palette index of the grayscale ramp.
 const GRAYSCALE_START: u8 = 232;
 /// The sum of the first and the last index of the grayscale ramp.
