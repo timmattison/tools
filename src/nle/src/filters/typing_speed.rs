@@ -47,8 +47,8 @@ pub const PAUSE_OPTION: &str = "pause";
 /// The option that holds the jitter.
 pub const JITTER_OPTION: &str = "jitter";
 
-/// The pause threshold of a filter whose options give none, in seconds.
-pub const DEFAULT_PAUSE: f64 = 2.0;
+/// The pause threshold of a filter whose options give none.
+pub const DEFAULT_PAUSE: Seconds = Seconds::from_whole_seconds(2);
 
 /// A typing rate in characters per second. It is finite and above zero. Each
 /// key counts as one character.
@@ -169,11 +169,14 @@ impl Normalization {
             .get(RATE_OPTION)
             .and_then(serde_json::Value::as_f64)
             .ok_or_else(|| format!("the option \"{RATE_OPTION}\" is missing or is not a number"))?;
-        let pause = optional_number(options, PAUSE_OPTION)?.unwrap_or(DEFAULT_PAUSE);
+        let pause = match optional_number(options, PAUSE_OPTION)? {
+            Some(value) => Seconds::new(value).map_err(|error| invalid(PAUSE_OPTION, &error))?,
+            None => DEFAULT_PAUSE,
+        };
         let jitter = optional_number(options, JITTER_OPTION)?.unwrap_or(Jitter::NONE.get());
         Ok(Self {
             rate: TypingRate::new(rate).map_err(|error| invalid(RATE_OPTION, &error))?,
-            pause: Seconds::new(pause).map_err(|error| invalid(PAUSE_OPTION, &error))?,
+            pause,
             jitter: Jitter::new(jitter).map_err(|error| invalid(JITTER_OPTION, &error))?,
         })
     }
