@@ -11,8 +11,8 @@
 //! time of the newest passed jobs on any runner. A job that waits uses it,
 //! because a waiting job has no sure runner. The second is the tail of a job
 //! name. The tail is the time from the end of a job to the end of its passed
-//! run. The end of a run is the latest end of any of its jobs. The mean tail of
-//! the newest passed runs is the tail of the name.
+//! run. The end of a run is the latest end of any of its jobs, in any state.
+//! The mean tail of the newest passed runs is the tail of the name.
 //!
 //! Each job of the active run gives one term: the time from now to the end of
 //! the run, if this job is the last one. The latest term is the estimate of the
@@ -116,9 +116,12 @@ impl<'a> Estimates<'a> {
     ///
     /// The same matches, with the runner ignored, give the any-runner duration
     /// of each job name. A run that passed gives one tail for each job name that
-    /// passed in it. The end of that run is the latest end time of all of its
-    /// jobs, in any state. The tail is the time from the latest end of the name
-    /// to the end of the run. Each job name keeps the newest
+    /// passed in it. The end of that run is the latest end time of its jobs in
+    /// any state. A job that failed under `continue-on-error`, or that GitHub
+    /// skipped, can end after the last job that passed. A job with no end time
+    /// does not count, and a run in which no job has an end time gives no tail.
+    /// The tail is the time from the latest end of the name to the end of the
+    /// run. Each job name keeps the newest
     /// [`MATCHES_PER_ESTIMATE`] runs by end of run, and a tie goes to the higher
     /// run ID. A run that did not pass gives no tail.
     pub fn new(
