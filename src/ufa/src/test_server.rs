@@ -640,6 +640,30 @@ pub fn json_response_with_status(status: &str, body: &str) -> String {
     )
 }
 
+/// How many bytes more than it sends a truncated response states in its head.
+const MISSING_BODY_BYTES: usize = 64;
+
+/// A response whose body stops before the end that its head states.
+///
+/// The head states a body longer than the one sent, and the server closes the
+/// connection after its answer, so the client reads the end of the stream
+/// before the stated length, after the status arrived.
+///
+/// # Arguments
+///
+/// * `status` - The status code and reason, such as `201 Created`.
+/// * `body` - The part of the body that the server sends.
+///
+/// # Returns
+///
+/// A raw response with that status whose `Content-Length` is longer than `body`.
+pub fn truncated_response(status: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len() + MISSING_BODY_BYTES
+    )
+}
+
 /// The response that carries no body at all.
 ///
 /// The integration API documents this answer for the actions of a device and

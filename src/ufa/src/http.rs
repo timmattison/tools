@@ -670,7 +670,7 @@ fn response_error(api: Api, status: StatusCode, body: &str) -> anyhow::Error {
 mod tests {
     use super::*;
     use crate::test_server::{
-        chunked_response, json_response, json_response_with_status, TestServer,
+        chunked_response, json_response, json_response_with_status, truncated_response, TestServer,
     };
     use std::time::Instant;
 
@@ -958,6 +958,58 @@ mod tests {
         .expect_err("the body is not a list of strings");
         let class = failed_answer(&error);
         (error, class)
+    }
+
+    /// The part of a JSON body that a broken read leaves behind.
+    const BROKEN_BODY: &str = r#"{"vouchers":["#;
+
+    /// A success answer whose body stops before its end is unreadable. The
+    /// status arrived, so the answer is not a missing one, and the error keeps
+    /// the cause of the broken read.
+    #[tokio::test]
+    async fn a_success_answer_whose_body_breaks_is_unreadable() {
+        let server = TestServer::replying(&truncated_response("201 Created", BROKEN_BODY)).await;
+
+        let (error, class) = classify(&server).await;
+
+        assert_eq!(class, FailedAnswer::Unreadable(StatusCode::CREATED));
+        assert!(
+            error.chain().count() >= 2,
+            "the error must keep the cause of the broken read, got: {error:#}"
+        );
+    }
+
+    /// An error answer whose body stops before its end is still a refusal. A
+    /// command reads the status of a 401 or a 403 to decide to read the key
+    /// from 1Password again, and a broken body does not change what that
+    /// status says about the key.
+    #[tokio::test]
+    async fn an_error_answer_whose_body_breaks_is_refused() {
+        for (line, status) in [
+            (
+                "500 Internal Server Error",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            ("401 Unauthorized", StatusCode::UNAUTHORIZED),
+            ("403 Forbidden", StatusCode::FORBIDDEN),
+        ] {
+            let server = TestServer::replying(&truncated_response(line, BROKEN_BODY)).await;
+
+            let (error, class) = classify(&server).await;
+
+            assert_eq!(
+                class,
+                FailedAnswer::Refused(status),
+                "status {status}, got: {error:#}"
+            );
+            if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                let rendered = format!("{error:#}");
+                assert!(
+                    rendered.starts_with(&Api::Controller.authentication_failure(status)),
+                    "the message must give the advice about the key, got: {rendered}"
+                );
+            }
+        }
     }
 
     /// A hang-up gives no answer at all.

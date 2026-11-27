@@ -728,7 +728,8 @@ mod deletion_tests {
     use super::*;
     use crate::prompt::Scripted;
     use crate::test_server::{
-        json_response, json_response_with_status, Answer, ReceivedRequest, TestServer,
+        json_response, json_response_with_status, truncated_response, Answer, ReceivedRequest,
+        TestServer,
     };
     use std::cell::Cell;
 
@@ -1506,55 +1507,61 @@ mod deletion_tests {
     /// once with a success status and a body that ufa cannot read stopped the
     /// run. The note said `Could not delete voucher`, the closing count left
     /// out a voucher that the controller deleted, and the rest were not sent,
-    /// although no timeout was at risk. Only a missing answer stops the run.
+    /// although no timeout was at risk. Only a missing answer stops the run. A
+    /// body that stops before its end is an answer that ufa cannot read too.
     #[tokio::test]
     async fn an_unreadable_success_answer_does_not_stop_the_deletion() {
-        let run = run_confirmed_delete([
-            json_response(ONE_DELETED),
+        for answer in [
             json_response(UNREADABLE_ANSWER),
-            json_response(ONE_DELETED),
-        ])
-        .await;
+            truncated_response("200 OK", UNREADABLE_ANSWER),
+        ] {
+            let run = run_confirmed_delete([
+                json_response(ONE_DELETED),
+                answer.clone(),
+                json_response(ONE_DELETED),
+            ])
+            .await;
 
-        let expected: Vec<String> = LISTED_IDS.iter().map(|id| run.deletion_of(id)).collect();
-        assert_eq!(
-            run.deletions, expected,
-            "an answer that arrived at once must not stop the run"
-        );
+            let expected: Vec<String> = LISTED_IDS.iter().map(|id| run.deletion_of(id)).collect();
+            assert_eq!(
+                run.deletions, expected,
+                "an answer that arrived at once must not stop the run"
+            );
 
-        let error = error_text(&run);
-        assert!(
-            !error.contains(NOT_ATTEMPTED),
-            "no voucher was left unsent, got {error}"
-        );
-        assert!(
-            error.contains("could not read the answer to the deletion of 1 of 3 voucher(s)"),
-            "the error must say that one answer was unreadable, got {error}"
-        );
+            let error = error_text(&run);
+            assert!(
+                !error.contains(NOT_ATTEMPTED),
+                "no voucher was left unsent, got {error}"
+            );
+            assert!(
+                error.contains("could not read the answer to the deletion of 1 of 3 voucher(s)"),
+                "the error must say that one answer was unreadable, got {error}"
+            );
 
-        let notes = run.notes();
-        assert!(
-            notes
-                .iter()
-                .any(|note| note.contains(SECOND_CODE) && note.contains("200")),
-            "a note must name the voucher and the status, got {notes:?}"
-        );
-        assert!(
-            notes
-                .iter()
-                .filter(|note| note.contains(SECOND_CODE))
-                .all(|note| !note.starts_with("Could not delete voucher")),
-            "the controller did not refuse the deletion, got {notes:?}"
-        );
-        assert!(
-            notes.iter().all(|note| !note.contains(NOT_ATTEMPTED)),
-            "no note may name a count as not attempted, got {notes:?}"
-        );
-        assert_eq!(
-            notes.last().copied(),
-            Some("Deleted 2 of 3 voucher(s)"),
-            "the closing note must stay last, got {notes:?}"
-        );
+            let notes = run.notes();
+            assert!(
+                notes
+                    .iter()
+                    .any(|note| note.contains(SECOND_CODE) && note.contains("200")),
+                "a note must name the voucher and the status, got {notes:?}"
+            );
+            assert!(
+                notes
+                    .iter()
+                    .filter(|note| note.contains(SECOND_CODE))
+                    .all(|note| !note.starts_with("Could not delete voucher")),
+                "the controller did not refuse the deletion, got {notes:?}"
+            );
+            assert!(
+                notes.iter().all(|note| !note.contains(NOT_ATTEMPTED)),
+                "no note may name a count as not attempted, got {notes:?}"
+            );
+            assert_eq!(
+                notes.last().copied(),
+                Some("Deleted 2 of 3 voucher(s)"),
+                "the closing note must stay last, got {notes:?}"
+            );
+        }
     }
 
     /// A controller that gives no answer to the first deletion gets no
@@ -1701,7 +1708,7 @@ mod listing_tests {
 #[cfg(test)]
 mod creation_tests {
     use super::*;
-    use crate::test_server::{json_response, TestServer, INTEGRATION_API};
+    use crate::test_server::{json_response, truncated_response, TestServer, INTEGRATION_API};
 
     /// The API key a test hands the client. Nothing reads it back.
     const API_KEY: &str = "an-api-key";
@@ -1807,35 +1814,42 @@ mod creation_tests {
     /// A creation that the controller answers with a success status and a
     /// body that `ufa` cannot read can have made the vouchers. The failure
     /// says so, and names the command that lists them, so that the user does
-    /// not make the vouchers a second time.
+    /// not make the vouchers a second time. A body that stops before its end
+    /// is an answer that ufa cannot read too.
     #[tokio::test]
     async fn an_unreadable_answer_to_a_creation_says_that_the_vouchers_can_exist() {
-        let controller = TestServer::replying(&json_response("{}")).await;
-        let client = UnifiClient::new(controller.origin(), API_KEY, false)
-            .expect("a loopback URL must build a client");
+        for answer in [
+            json_response("{}"),
+            truncated_response("201 Created", r#"{"vouchers":["#),
+        ] {
+            let controller = TestServer::replying(&answer).await;
+            let client = UnifiClient::new(controller.origin(), API_KEY, false)
+                .expect("a loopback URL must build a client");
 
-        let error = handle_vouchers_command(
-            VouchersCommand::Create {
-                count: 1,
-                name: "lobby café".to_string(),
-                time_limit_minutes: 1440,
-                authorized_guest_limit: None,
-                data_usage_limit_mbytes: None,
-                rx_rate_limit_kbps: None,
-                tx_rate_limit_kbps: None,
-            },
-            Some(Uuid::new_v4()),
-            &client,
-            OutputFormat::Json,
-        )
-        .await
-        .expect_err("an answer with no vouchers is a fault");
+            let error = handle_vouchers_command(
+                VouchersCommand::Create {
+                    count: 1,
+                    name: "lobby café".to_string(),
+                    time_limit_minutes: 1440,
+                    authorized_guest_limit: None,
+                    data_usage_limit_mbytes: None,
+                    rx_rate_limit_kbps: None,
+                    tx_rate_limit_kbps: None,
+                },
+                Some(Uuid::new_v4()),
+                &client,
+                OutputFormat::Json,
+            )
+            .await
+            .expect_err("an answer with no vouchers is a fault");
 
-        let report = format!("{error:#}");
-        assert!(
-            report.contains("can have made the vouchers") && report.contains("ufa vouchers list"),
-            "the failure must say that the vouchers can exist, got {report}"
-        );
+            let report = format!("{error:#}");
+            assert!(
+                report.contains("can have made the vouchers")
+                    && report.contains("ufa vouchers list"),
+                "the failure must say that the vouchers can exist, answer {answer:?}, got {report}"
+            );
+        }
     }
 }
 
