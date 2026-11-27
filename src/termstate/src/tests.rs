@@ -413,3 +413,51 @@ fn a_clone_keeps_the_pen_sources_and_the_cell_sources() {
         (ColorSource::Base(1), ColorSource::Indexed(17))
     );
 }
+
+#[test]
+fn a_new_terminal_scrolls_the_whole_screen() {
+    let state = TerminalState::new(80, 24, TerminalTheme::auto());
+
+    assert_eq!(state.scroll_region(), (0, 23));
+}
+
+#[test]
+fn decstbm_sets_the_scroll_region_counted_from_zero() {
+    let mut state = TerminalState::new(80, 24, TerminalTheme::auto());
+
+    state.process_output("\x1b[2;5r").unwrap();
+
+    assert_eq!(state.scroll_region(), (1, 4));
+}
+
+#[test]
+fn a_new_terminal_has_the_saved_cursor_at_the_top_left() {
+    let state = TerminalState::new(80, 24, TerminalTheme::auto());
+
+    assert_eq!(state.saved_cursor_position(), (0, 0));
+}
+
+#[test]
+fn each_save_of_the_cursor_gives_the_saved_position() {
+    for save in ["\x1b7", "\x1b[s", "\x1b[?1049h"] {
+        let mut state = TerminalState::new(80, 24, TerminalTheme::auto());
+
+        state.process_output("\x1b[3;4H").unwrap();
+        state.process_output(save).unwrap();
+        state.process_output("\x1b[1;1H").unwrap();
+
+        assert_eq!(state.saved_cursor_position(), (3, 2), "{save:?}");
+    }
+}
+
+#[test]
+fn line_drawing_is_on_after_the_designation_of_the_special_set() {
+    let mut state = TerminalState::new(80, 24, TerminalTheme::auto());
+    assert!(!state.uses_line_drawing());
+
+    state.process_output("\x1b(0").unwrap();
+    assert!(state.uses_line_drawing());
+
+    state.process_output("\x1b(B").unwrap();
+    assert!(!state.uses_line_drawing());
+}

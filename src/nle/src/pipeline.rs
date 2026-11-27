@@ -144,6 +144,8 @@ pub struct ScreenView<'a> {
     pub size: ScreenSize,
     /// The events before the region, with their times on the timeline.
     pub before: &'a [Event],
+    /// True when the region is `All`, the whole timeline. Only a filter on such a region can change the size of the screen.
+    pub whole_timeline: bool,
 }
 
 /// The answer of a screen filter: new events and the size of the screen.
@@ -362,6 +364,7 @@ impl FilterRegistry {
                     region: view,
                     size: current,
                     before: &before,
+                    whole_timeline: false,
                 };
                 let answer = filter(&inside, screen, &applied.options).map_err(|message| {
                     NleError::RenderError(format!("filter \"{kind}\" failed: {message}"))

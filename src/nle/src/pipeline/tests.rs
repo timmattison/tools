@@ -1198,3 +1198,28 @@ fn a_project_with_only_the_old_forms_renders_the_header_size() {
 
     assert_eq!((rendered.width, rendered.height), (100, 30));
 }
+
+#[test]
+fn a_screen_view_says_whether_the_region_is_all() {
+    let seen = TestArc::new(Mutex::new(Vec::new()));
+    let captured = TestArc::clone(&seen);
+    let mut registry = FilterRegistry::new();
+    registry.register_screen(kind("spy"), move |events, view, _| {
+        captured.lock().unwrap().push(view.whole_timeline);
+        Ok(Screen {
+            events: events.to_vec(),
+            size: view.size,
+        })
+    });
+
+    // The source has events at 0 and 8, and it lasts 10 seconds. The second
+    // range starts at 0 and holds each event, thus it is open.
+    registry
+        .render(&one_clip_project(vec![all("spy")]))
+        .unwrap();
+    registry
+        .render(&one_clip_project(vec![range("spy", 0.0, 50.0)]))
+        .unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), vec![true, false]);
+}

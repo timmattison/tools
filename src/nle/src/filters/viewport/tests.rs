@@ -50,6 +50,7 @@ fn call(
         },
         size: ScreenSize { width, height },
         before: &[],
+        whole_timeline: true,
     };
     filter(events, view, &options(value))
 }
@@ -324,47 +325,6 @@ fn the_render_error_names_the_filter() {
 }
 
 // Tests of the region.
-
-#[test]
-fn a_range_is_not_supported_yet() {
-    let result = render_on(
-        80,
-        24,
-        vec![out(0.0, "a"), out(1.5, "b"), out(3.0, "c")],
-        json!({ "hide_rows": [0] }),
-        FilterRegion::Range {
-            start: Seconds::new(1.0).unwrap(),
-            end: Seconds::new(2.0).unwrap(),
-        },
-    );
-
-    match result {
-        Err(NleError::RenderError(message)) => assert!(
-            message.contains("filter \"viewport\" failed: a range is not supported yet"),
-            "{message}"
-        ),
-        other => panic!("expected a RenderError, got {other:?}"),
-    }
-}
-
-#[test]
-fn a_view_with_events_before_it_or_a_closed_region_is_a_range() {
-    let before = [out(0.0, "a")];
-    for (before, open) in [(&before[..], true), (&[][..], false)] {
-        let view = ScreenView {
-            region: RegionView { length: 1.0, open },
-            size: ScreenSize {
-                width: 80,
-                height: 24,
-            },
-            before,
-        };
-
-        let answer = filter(&[], view, &options(json!({ "hide_rows": [0] })));
-
-        assert_eq!(answer, Err("a range is not supported yet".to_string()));
-    }
-}
 
 // Tests of the size.
 
@@ -981,4 +941,367 @@ fn the_theme_still_applies_to_the_output() {
             TerminalTheme::dracula,
         );
     }
+}
+
+// Tests of the region `Range`.
+
+/// The region from `start` to `end` seconds.
+fn span(start: f64, end: f64) -> FilterRegion {
+    FilterRegion::Range {
+        start: Seconds::new(start).unwrap(),
+        end: Seconds::new(end).unwrap(),
+    }
+}
+
+/// Feed each output event of `events` that is at or before `time` to
+/// `terminal`, from the event at `next`.
+fn feed_events_until(events: &[Event], next: &mut usize, terminal: &mut TerminalState, time: f64) {
+    while let Some(event) = events.get(*next) {
+        if event.time > time {
+            break;
+        }
+        if event.event_type == EventType::Output {
+            terminal.process_output(&event.data).unwrap();
+        }
+        *next += 1;
+    }
+}
+
+/// Check that each cell of `output` is the cell of `reference`, or a blank
+/// cell when `mask` gives the visible rows and columns. Check the cursor in
+/// the same way.
+fn assert_screen(
+    reference: &TerminalState,
+    output: &TerminalState,
+    mask: Option<(&[usize], &[usize])>,
+    label: &str,
+) {
+    let shown = |row: usize, column: usize| {
+        mask.is_none_or(|(rows, columns)| rows.contains(&row) && columns.contains(&column))
+    };
+    for (row, cells) in reference.get_grid().iter().enumerate() {
+        for (column, cell) in cells.iter().enumerate() {
+            let want = if shown(row, column) {
+                glyph_of(cell)
+            } else {
+                Glyph::BLANK
+            };
+            let got = glyph_of(&output.get_grid()[row][column]);
+            assert_eq!(got, want, "{label}: cell ({column}, {row})");
+        }
+    }
+    let (x, y) = reference.get_cursor_position();
+    if reference.is_cursor_visible() && shown(y, x) {
+        assert!(output.is_cursor_visible(), "{label}: the cursor is hidden");
+        assert_eq!(output.get_cursor_position(), (x, y), "{label}: cursor");
+    } else {
+        assert!(!output.is_cursor_visible(), "{label}: the cursor is shown");
+    }
+}
+
+/// Render `stream`, a list of `(time, data)` pairs, with the filter `shape` on
+/// the region from `start` to `end`. Replay the whole rendered recording and
+/// the original events side by side. At each time of an event, and at the
+/// start and the end of the range, check the replay of the rendered recording
+/// against the replay of the original. Inside the range it must show the
+/// masked screen. At the start of the range and after it, it must show the
+/// screen of the original, the cursor included, with no mask.
+///
+/// Returns the rendered recording.
+fn assert_range_property(stream: &[(f64, &str)], start: f64, end: f64, shape: &Shape) -> Recording {
+    let events: Vec<Event> = stream.iter().map(|(time, data)| out(*time, data)).collect();
+    let rendered = render_on(
+        WIDTH,
+        HEIGHT,
+        events.clone(),
+        shape.options(),
+        span(start, end),
+    )
+    .unwrap();
+    assert_eq!((rendered.width, rendered.height), (WIDTH, HEIGHT));
+    let rows = Shape::visible(HEIGHT, shape.rows, &shape.hide_rows);
+    let columns = Shape::visible(WIDTH, shape.columns, &shape.hide_columns);
+    let closed = end < rendered.duration;
+    let mut times: Vec<f64> = vec![start];
+    times.extend(stream.iter().map(|(time, _)| *time));
+    if closed {
+        times.push(end);
+    }
+    times.sort_by(f64::total_cmp);
+    times.dedup();
+    let mut reference = TerminalState::new(
+        usize::from(WIDTH),
+        usize::from(HEIGHT),
+        TerminalTheme::auto(),
+    );
+    let mut output = TerminalState::new(
+        usize::from(WIDTH),
+        usize::from(HEIGHT),
+        TerminalTheme::auto(),
+    );
+    let (mut next_original, mut next_rendered) = (0, 0);
+    for time in times {
+        feed_events_until(&events, &mut next_original, &mut reference, time);
+        feed_events_until(&rendered.events, &mut next_rendered, &mut output, time);
+        let inside = time >= start && (!closed || time < end);
+        let label = format!("at {time} s, {:?}", shape.options());
+        let mask: Option<(&[usize], &[usize])> =
+            inside.then_some((rows.as_slice(), columns.as_slice()));
+        assert_screen(&reference, &output, mask, &label);
+    }
+    feed_events_until(&rendered.events, &mut next_rendered, &mut output, f64::MAX);
+    assert_eq!(next_rendered, rendered.events.len());
+    rendered
+}
+
+/// Run `assert_range_property` for each of `shapes()`.
+fn assert_range_property_each_shape(stream: &[(f64, &str)], start: f64, end: f64) {
+    for shape in shapes() {
+        assert_range_property(stream, start, end, &shape);
+    }
+}
+
+#[test]
+fn a_range_masks_plain_text_and_gives_it_back_after_the_range() {
+    let stream = [
+        (1.0, "abcdefghijklmnop\r\nqrstuvwx"),
+        (2.0, "\r\nyz0123456789"),
+        (4.0, "\x1b[1;1HAAAAAAAAAAAAAAAAAAAA\r\nBBBBBBBBBBBBBBBBBBBB"),
+        (5.0, "\r\nCCCCCCCCCCCCCCCCCCCC\r\nDDDDDDDDDDDDDDDDDDDD"),
+        (7.0, "\r\nEEEEEEEEEEEEEEEEEEEE\x1b[2;3Hq"),
+        (8.0, "\x1b[6;1Hend"),
+    ];
+
+    assert_range_property_each_shape(&stream, 3.0, 6.0);
+    assert_range_property(
+        &stream,
+        3.0,
+        6.0,
+        &Shape {
+            hide_rows: vec![0, 2, 4],
+            hide_columns: vec![3],
+            ..Shape::default()
+        },
+    );
+}
+
+#[test]
+fn a_range_gives_the_pen_back_after_the_range() {
+    let stream = [
+        (1.0, "\x1b[32mgreen\x1b[0m\r\n"),
+        (4.0, "\x1b[1;3;4;31;44mred bold\r\n"),
+        (5.0, "\x1b[38;2;10;20;30mrgb \x1b[48;5;200mindexed\x1b[95m"),
+        (7.0, "after one\r\nafter two"),
+        (8.0, "\x1b[0mplain"),
+    ];
+
+    assert_range_property_each_shape(&stream, 3.0, 6.0);
+}
+
+#[test]
+fn a_range_gives_the_scroll_region_back_after_the_range() {
+    let stream = [
+        (1.0, "a\r\nb\r\nc\r\nd\r\ne\r\nf"),
+        (4.0, "\x1b[2;4r\x1b[4;1Hinside"),
+        (7.0, "\x1b[4;1H\r\nX\r\nY\r\nZ"),
+        (8.0, "\x1b[4;1H\nW\n\n"),
+    ];
+
+    assert_range_property_each_shape(&stream, 3.0, 6.0);
+}
+
+#[test]
+fn a_range_gives_the_saved_cursor_back_after_the_range() {
+    let stream = [
+        (1.0, "start\r\n"),
+        (4.0, "\x1b[3;5H\x1b7\x1b[1;1Hz"),
+        (7.0, "\x1b8Q"),
+        (8.0, "\x1b[sR\x1b[1;1H\x1b[uS"),
+    ];
+
+    assert_range_property_each_shape(&stream, 3.0, 6.0);
+}
+
+#[test]
+fn a_range_keeps_the_line_drawing_set_before_it_and_gives_it_back() {
+    let stream = [
+        (1.0, "\x1b(0lqk\r\nx"),
+        (4.0, "lqqqk\r\nx   x\r\nmqqqj"),
+        (7.0, "\x1b[1;10Hlqk"),
+        (8.0, "\x1b(B\x1b[2;10Hlqk"),
+    ];
+
+    assert_range_property_each_shape(&stream, 3.0, 6.0);
+}
+
+#[test]
+fn a_range_gives_the_line_drawing_set_back_when_the_range_turns_it_on() {
+    let stream = [(1.0, "ab"), (4.0, "\x1b(0lqk\r\n"), (7.0, "\x1b[3;1Hmqj")];
+
+    assert_range_property_each_shape(&stream, 3.0, 6.0);
+}
+
+#[test]
+fn a_range_gives_the_cursor_visibility_back_after_the_range() {
+    for stream in [
+        [(1.0, "abc"), (4.0, "\x1b[?25ldef"), (7.0, "ghi")],
+        [(1.0, "abc\x1b[?25l"), (4.0, "\x1b[?25hdef"), (7.0, "ghi")],
+    ] {
+        assert_range_property_each_shape(&stream, 3.0, 6.0);
+    }
+}
+
+#[test]
+fn a_range_from_the_start_that_holds_each_event_keeps_the_size_and_writes_no_restore() {
+    let stream = [
+        (1.0, "abcdefghij\r\nklmnopqrst"),
+        (2.0, "\x1b[2;4r\x1b[32mgreen\x1b7"),
+        (3.0, "\r\nmore\x1b[?25l"),
+    ];
+
+    for shape in shapes() {
+        let rendered = assert_range_property(&stream, 0.0, 200.0, &shape);
+
+        assert!(
+            rendered.events.iter().all(|event| event.time <= 3.0),
+            "{:?}",
+            rendered.events
+        );
+        assert!(
+            rendered
+                .events
+                .iter()
+                .all(|event| !event.data.contains("\x1b7") && !event.data.contains("r\x1b[")),
+            "{:?}",
+            rendered.events
+        );
+    }
+}
+
+#[test]
+fn a_range_in_the_middle_of_a_recording_writes_the_start_and_the_restore() {
+    let rendered = render_on(
+        20,
+        6,
+        vec![out(1.0, "ab")],
+        json!({ "hide_rows": [0] }),
+        span(3.0, 6.0),
+    )
+    .unwrap();
+
+    assert_eq!(
+        pairs(&rendered.events),
+        vec![
+            (1.0, "ab"),
+            (3.0, "\x1b[1;1H  \x1b[?25l"),
+            (
+                6.0,
+                "\x1b[1;1Hab\x1b[1;6r\x1b[0m\x1b[1;1H\x1b7\x1b[1;3H\x1b[?25h"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn the_restore_of_a_range_comes_before_an_event_after_it_at_the_same_time() {
+    let rendered = render_on(
+        20,
+        6,
+        vec![out(4.0, "x"), out(6.0, "y")],
+        json!({ "hide_rows": [0] }),
+        span(3.0, 6.0),
+    )
+    .unwrap();
+
+    let at_end: Vec<&Event> = rendered.events.iter().filter(|e| e.time == 6.0).collect();
+    assert_eq!(at_end.len(), 2, "{:?}", rendered.events);
+    assert!(at_end[0].data.contains("\x1b7"), "{:?}", at_end[0]);
+    assert_eq!(at_end[1].data, "y");
+}
+
+#[test]
+fn a_range_that_does_not_end_at_the_end_of_the_recording_writes_a_restore() {
+    let rendered = render_on(
+        20,
+        6,
+        vec![out(1.0, "ab")],
+        json!({ "hide_rows": [0] }),
+        span(3.0, 6.0),
+    )
+    .unwrap();
+
+    assert_eq!(rendered.events.last().map(|event| event.time), Some(6.0));
+}
+
+#[test]
+fn the_rendered_size_of_a_range_is_the_size_of_the_screen() {
+    for shape in shapes() {
+        let rendered = render_on(
+            WIDTH,
+            HEIGHT,
+            vec![out(1.0, "abc")],
+            shape.options(),
+            span(0.5, 2.0),
+        )
+        .unwrap();
+
+        assert_eq!((rendered.width, rendered.height), (WIDTH, HEIGHT));
+    }
+}
+
+#[test]
+fn an_input_event_in_a_range_stays_and_one_before_it_is_not_fed_to_the_emulator() {
+    let rendered = render_on(
+        20,
+        6,
+        vec![input(1.0, "ab"), input(4.0, "q")],
+        json!({ "hide_rows": [0] }),
+        span(3.0, 6.0),
+    )
+    .unwrap();
+
+    assert!(rendered
+        .events
+        .iter()
+        .any(|event| event.event_type == EventType::Input
+            && event.data == "q"
+            && event.time == 4.0));
+    // The emulator never saw "ab", thus the start has nothing to blank.
+    assert_eq!(pairs(&rendered.events)[1], (3.0, "\x1b[?25l"));
+}
+
+#[test]
+fn an_osc_that_the_start_of_a_range_splits_passes_in_the_first_event_of_the_range() {
+    let rendered = render_on(
+        20,
+        6,
+        vec![out(1.0, "\x1b]2;ti"), out(4.0, "tle\x07x")],
+        json!({ "hide_rows": [5] }),
+        span(3.0, 6.0),
+    )
+    .unwrap();
+
+    let in_range: Vec<&Event> = rendered.events.iter().filter(|e| e.time == 4.0).collect();
+    assert_eq!(in_range.len(), 1, "{:?}", rendered.events);
+    assert!(
+        in_range[0].data.starts_with("\x1b]2;title\x07"),
+        "{:?}",
+        in_range[0]
+    );
+}
+
+#[test]
+fn an_escape_sequence_that_the_start_of_a_range_splits_is_read_by_the_emulator() {
+    let rendered = render_on(
+        20,
+        6,
+        vec![out(1.0, "ab\x1b[3"), out(4.0, "1mred")],
+        json!({ "hide_rows": [5] }),
+        span(3.0, 6.0),
+    )
+    .unwrap();
+
+    let in_range: Vec<&Event> = rendered.events.iter().filter(|e| e.time == 4.0).collect();
+    assert_eq!(in_range.len(), 1, "{:?}", rendered.events);
+    assert_eq!(in_range[0].data, "\x1b[0;31mred");
 }

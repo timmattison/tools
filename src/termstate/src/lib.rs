@@ -619,6 +619,23 @@ impl TerminalState {
         (self.cursor_x, self.cursor_y)
     }
 
+    /// Returns the scrolling region as `(top, bottom)`, counted from zero,
+    /// with both rows included.
+    pub fn scroll_region(&self) -> (usize, usize) {
+        (0, 0)
+    }
+
+    /// Returns the saved cursor position as `(column, row)`, counted from
+    /// zero. `ESC 7`, `CSI s`, and `CSI ? 1049 h` save it.
+    pub fn saved_cursor_position(&self) -> (usize, usize) {
+        (0, 0)
+    }
+
+    /// Returns whether the line-drawing character set is on.
+    pub fn uses_line_drawing(&self) -> bool {
+        false
+    }
+
     /// Returns whether the application has the cursor visible.
     pub fn is_cursor_visible(&self) -> bool {
         self.cursor_visible

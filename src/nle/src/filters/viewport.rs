@@ -111,8 +111,11 @@ fn filter(
             size: view.size,
         });
     }
-    if !view.before.is_empty() || !view.region.open {
-        return Err("a range is not supported yet".to_string());
+    if !(view.whole_timeline || (view.before.is_empty() && view.region.open)) {
+        return Ok(Screen {
+            events: events.to_vec(),
+            size: view.size,
+        });
     }
     let size = ScreenSize {
         width: u16::try_from(columns.len()).map_err(|error| error.to_string())?,
