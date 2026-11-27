@@ -839,3 +839,41 @@ fn a_sequence_open_at_the_end_of_a_range_gets_the_restore_before_it() {
         Some(&(0.0, format!("A{RESET_COLORS}\x1b[3")))
     );
 }
+
+// Test of the preview of the app.
+
+#[test]
+fn the_preview_shows_the_colors_of_the_theme() {
+    use std::sync::Arc;
+
+    use crate::preview::screen::Screen;
+    use crate::preview::Preview;
+    use crate::types::{EditProject, Recording};
+
+    let mut source = Recording::test_fixture();
+    source.events = vec![out(1.0, "\x1b[31mred\x1b[0m plain")];
+    let mut project = EditProject::from_recording(Arc::new(source)).unwrap();
+    project.filters.push(applied(
+        FilterRegion::All,
+        &ColorScheme::new(PreviewTheme::SolarizedLight),
+    ));
+
+    let rendered = crate::filters::registry().render(&project).unwrap();
+    let mut preview = Preview::new(Arc::new(rendered), PreviewTheme::Dracula);
+    let screen = Screen::of(preview.seek(Seconds::new(2.0).unwrap()));
+
+    let palette = PreviewTheme::SolarizedLight.palette();
+    assert_eq!(screen.background, palette.background);
+    let runs: Vec<_> = screen.rows.iter().flat_map(|row| &row.runs).collect();
+    let red = runs
+        .iter()
+        .find(|run| run.text.contains("red"))
+        .expect("a run holds red");
+    assert_eq!(red.style.foreground, (220, 50, 47));
+    assert_eq!(red.style.background, palette.background);
+    let plain = runs
+        .iter()
+        .find(|run| run.text.contains("plain"))
+        .expect("a run holds plain");
+    assert_eq!(plain.style.foreground, palette.foreground);
+}
