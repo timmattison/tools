@@ -40,6 +40,10 @@ use crate::types::{
 ///    they had. Thus a filter need not return its events in order.
 /// 8. The end of the timeline moves by the shift when it is at or after the
 ///    region start. It is never less than the time of the last event.
+/// 9. The marks of the earlier filters split like the events. An event filter
+///    does not see them. A mark inside the region keeps its time, and a mark
+///    after the region moves by the shift. A mark never comes after the end
+///    of the timeline, and the marks are in a stable time order.
 ///
 /// The region of a later filter is in the time that the earlier filters leave.
 /// After the last filter, `FilterRegistry::run` fails when an event time or
@@ -102,6 +106,12 @@ pub struct Rendered {
 /// 6. The shift is the answered length minus the length. The events after the
 ///    region move by the shift, also when the region holds no event. The end
 ///    of the timeline moves by the shift as in step 8 of `FilterFn`.
+/// 7. The `Span` also holds the marks inside the region, relative to its
+///    start. The filter answers the marks of its result: it moves each mark
+///    that it keeps as it moves time, and it can add marks. Each answered mark
+///    time must be finite, not below zero, and not after the answered length.
+///    Else the pipeline fails with a render error that names the kind. The
+///    marks after the region move by the shift, as in step 9 of `FilterFn`.
 pub type SpanFilterFn = dyn Fn(Span, &FilterOptions) -> Result<Span, String> + Send + Sync;
 
 /// A filter in one of its two forms.
@@ -123,6 +133,13 @@ impl fmt::Debug for FilterRegistry {
             .field("kinds", &self.filters.keys().collect::<Vec<_>>())
             .finish()
     }
+}
+
+/// The timeline between two filter steps: the events, the marks, and the end.
+struct Timeline {
+    events: Vec<Event>,
+    marks: Vec<Mark>,
+    end: f64,
 }
 
 /// The largest time of `events`, or 0.0 when there is none.
@@ -176,17 +193,17 @@ impl FilterRegistry {
     }
 
     /// One filter step: the steps on `FilterFn` or on `SpanFilterFn`.
-    fn apply(
-        &self,
-        events: Vec<Event>,
-        applied: &AppliedFilter,
-        end: &mut f64,
-    ) -> Result<Vec<Event>, NleError> {
+    fn apply(&self, timeline: Timeline, applied: &AppliedFilter) -> Result<Timeline, NleError> {
         let filter = self.lookup(&applied.kind)?;
         let (start, region_end) = match &applied.region {
             FilterRegion::All => (0.0, f64::INFINITY),
             FilterRegion::Range { start, end } => (start.get(), end.get()),
         };
+        let Timeline {
+            events,
+            marks,
+            mut end,
+        } = timeline;
 
         let mut before = Vec::new();
         let mut inside = Vec::new();
@@ -203,20 +220,35 @@ impl FilterRegistry {
                 after.push(event);
             }
         }
+        let mut marks_before = Vec::new();
+        let mut marks_inside = Vec::new();
+        let mut marks_after = Vec::new();
+        for mark in marks {
+            if mark.time < start {
+                marks_before.push(mark);
+            } else if mark.time < region_end {
+                marks_inside.push(Mark {
+                    time: mark.time - start,
+                    ..mark
+                });
+            } else {
+                marks_after.push(mark);
+            }
+        }
 
-        // The answer, and how far the events after the region move.
-        let (answer, shift) = match filter {
+        // The answer, its marks, and how far the events after the region move.
+        let (answer, answer_marks, shift) = match filter {
             Registered::Events(filter) => {
                 let answer = filter(&inside, &applied.options);
                 let shift = last_time(&answer) - last_time(&inside);
-                (answer, shift)
+                (answer, marks_inside, shift)
             }
             Registered::Span(filter) => {
-                let length = (region_end.min(*end) - start).max(0.0);
+                let length = (region_end.min(end) - start).max(0.0);
                 let span = Span {
                     events: inside,
                     length,
-                    marks: Vec::new(),
+                    marks: marks_inside,
                 };
                 let answer = filter(span, &applied.options).map_err(|message| {
                     NleError::RenderError(format!(
@@ -233,8 +265,18 @@ impl FilterRegistry {
                         answer.length
                     )));
                 }
+                for mark in &answer.marks {
+                    if !(mark.time.is_finite() && mark.time >= 0.0 && mark.time <= answer.length) {
+                        return Err(NleError::RenderError(format!(
+                            "filter \"{}\" answered the mark time {} s, which is not finite, is below zero, or is after its length {} s",
+                            applied.kind.as_str(),
+                            mark.time,
+                            answer.length
+                        )));
+                    }
+                }
                 let shift = answer.length - length;
-                (answer.events, shift)
+                (answer.events, answer.marks, shift)
             }
         };
         for event in &answer {
@@ -259,11 +301,30 @@ impl FilterRegistry {
         // A stable sort: events at one time keep the order that they had.
         result.sort_by(|a, b| a.time.total_cmp(&b.time));
 
-        if *end >= start {
-            *end += shift;
+        if end >= start {
+            end += shift;
         }
-        *end = end.max(last_time(&result)).max(0.0);
-        Ok(result)
+        end = end.max(last_time(&result)).max(0.0);
+
+        let mut marks = marks_before;
+        marks.extend(answer_marks.into_iter().map(|mark| Mark {
+            time: mark.time + start,
+            ..mark
+        }));
+        marks.extend(marks_after.into_iter().map(|mark| Mark {
+            time: mark.time + shift,
+            ..mark
+        }));
+        for mark in &mut marks {
+            mark.time = mark.time.min(end);
+        }
+        marks.sort_by(|a, b| a.time.total_cmp(&b.time));
+
+        Ok(Timeline {
+            events: result,
+            marks,
+            end,
+        })
     }
 
     /// Run `filters` in order over `events`, by the steps on `FilterFn` or on
@@ -283,42 +344,46 @@ impl FilterRegistry {
     ) -> Result<Vec<Event>, NleError> {
         let end = last_time(&events);
         self.run_with_end(events, filters, end)
-            .map(|(events, _end)| events)
+            .map(|timeline| timeline.events)
     }
 
-    /// Run `filters` in order, and follow the end of the timeline, which
-    /// starts at `end`. Returns the events and the final end.
+    /// Run `filters` in order, and follow the marks and the end of the
+    /// timeline, which starts at `end` with no mark.
     ///
     /// # Errors
     /// Returns `NleError::RenderError` when a filter fails, when a span
-    /// filter answers an error or a bad length, or when an event time or the
-    /// final end is not finite.
+    /// filter answers an error, a bad length, or a bad mark, or when an event
+    /// time, a mark time, or the final end is not finite.
     fn run_with_end(
         &self,
         events: Vec<Event>,
         filters: &[AppliedFilter],
         end: f64,
-    ) -> Result<(Vec<Event>, f64), NleError> {
-        let mut events = events;
-        let mut end = end;
+    ) -> Result<Timeline, NleError> {
+        let mut timeline = Timeline {
+            events,
+            marks: Vec::new(),
+            end,
+        };
         for applied in filters {
-            events = self.apply(events, applied, &mut end)?;
+            timeline = self.apply(timeline, applied)?;
         }
         // A shift or the arithmetic of a clip can still overflow to infinity.
-        for event in &events {
-            if !event.time.is_finite() {
+        let times = timeline.events.iter().map(|event| event.time);
+        for time in times.chain(timeline.marks.iter().map(|mark| mark.time)) {
+            if !time.is_finite() {
                 return Err(NleError::RenderError(format!(
-                    "the render gives the time {} s, which is not finite",
-                    event.time
+                    "the render gives the time {time} s, which is not finite"
                 )));
             }
         }
-        if !end.is_finite() {
+        if !timeline.end.is_finite() {
             return Err(NleError::RenderError(format!(
-                "the render gives the end {end} s, which is not finite"
+                "the render gives the end {} s, which is not finite",
+                timeline.end
             )));
         }
-        Ok((events, end))
+        Ok(timeline)
     }
 
     /// Flatten `project` into one recording.
@@ -383,7 +448,7 @@ impl FilterRegistry {
             .collect();
         // A stable sort keeps track order, then clip order, on a tie.
         events.sort_by(|a, b| a.time.total_cmp(&b.time));
-        let (events, end) = self.run_with_end(events, &project.filters, project.duration())?;
+        let timeline = self.run_with_end(events, &project.filters, project.duration())?;
 
         let header = &first.source;
         Ok(Rendered {
@@ -392,13 +457,13 @@ impl FilterRegistry {
                 width: header.width,
                 height: header.height,
                 timestamp: header.timestamp,
-                duration: end,
+                duration: timeline.end,
                 command: header.command.clone(),
                 title: header.title.clone(),
                 env: header.env.clone(),
-                events,
+                events: timeline.events,
             },
-            marks: Vec::new(),
+            marks: timeline.marks,
         })
     }
 }

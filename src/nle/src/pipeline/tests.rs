@@ -865,7 +865,11 @@ fn a_later_span_filter_gets_the_marks_inside_its_region_relative_to_its_start() 
     // The marks go to 3.5 and 0.5. The spy starts at 3, so it sees 0.5 only.
     rendered_marks(
         &registry,
-        vec![all("early"), range("mark", 2.0, 6.0), range("spy", 3.0, 8.0)],
+        vec![
+            all("early"),
+            range("mark", 2.0, 6.0),
+            range("spy", 3.0, 8.0),
+        ],
     );
 
     assert_eq!(*seen.lock().unwrap(), vec![vec![0.5]]);
