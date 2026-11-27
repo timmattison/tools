@@ -93,12 +93,9 @@ impl PreviewTheme {
 /// one full grid, so this number limits the memory of the preview.
 const SNAPSHOT_CELL_BUDGET: usize = 8_000_000;
 
-/// The fewest snapshots that the spacing rule allows for the time axis and for
-/// the event axis. It applies even to a very large grid.
-const MIN_SNAPSHOTS: usize = 8;
-
 /// The most snapshots that the spacing rule allows for the time axis and for
-/// the event axis.
+/// the event axis. A small grid reaches this limit. A large grid stays below it,
+/// because of `SNAPSHOT_CELL_BUDGET`.
 const MAX_SNAPSHOTS: usize = 256;
 
 /// The shortest time in seconds between two snapshots.
@@ -143,7 +140,8 @@ struct Snapshot {
 /// A snapshot is one full grid. Thus the spacing of the snapshots depends on the
 /// size of the grid, and at most `2 * budget + 1` snapshots exist. One `budget`
 /// counts the snapshots of the time axis, and the other counts the snapshots of
-/// the event axis.
+/// the event axis. The `budget` is chosen so that the `2 * budget + 1` snapshots
+/// stay in `SNAPSHOT_CELL_BUDGET` cells.
 pub struct Preview {
     recording: Arc<Recording>,
     theme: PreviewTheme,
@@ -169,7 +167,9 @@ impl Preview {
         let (columns, rows) = grid_size(&recording);
         let blank = TerminalState::new(columns, rows, theme.palette());
         let cells = columns.saturating_mul(rows).max(1);
-        let budget = (SNAPSHOT_CELL_BUDGET / cells).clamp(MIN_SNAPSHOTS, MAX_SNAPSHOTS);
+        // `2 * budget + 1` snapshots (two axes and the blank one) stay in the
+        // cell budget. The floor of 1 keeps the divisions below defined.
+        let budget = ((SNAPSHOT_CELL_BUDGET / cells).saturating_sub(1) / 2).clamp(1, MAX_SNAPSHOTS);
         let duration = if recording.duration.is_finite() && recording.duration > 0.0 {
             recording.duration
         } else {
