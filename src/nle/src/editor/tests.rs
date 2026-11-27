@@ -714,6 +714,24 @@ async fn the_export_future_does_not_borrow_the_editor() {
     assert_eq!(Recording::load(&file).unwrap(), expected);
 }
 
+#[tokio::test]
+async fn export_writes_the_render_with_the_filters_of_the_project() {
+    let mut editor = dilation_editor();
+    editor.apply(dilation(10.0, 2.0)).unwrap();
+    let unfiltered = dilation_editor().render().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("out.json");
+
+    editor
+        .export(recording_request(&file), |_| {})
+        .await
+        .unwrap();
+
+    let written = Recording::load(&file).unwrap();
+    assert_eq!(written, editor.render().unwrap());
+    assert_ne!(written.duration, unfiltered.duration);
+}
+
 // Tests of `Editor::apply_renderable`.
 
 fn dilation(end: f64, speed: f64) -> Edit {
