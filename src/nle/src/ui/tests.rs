@@ -1130,22 +1130,24 @@ async fn removing_a_redaction_row_removes_it() {
 
 #[tokio::test]
 async fn each_remove_button_keeps_the_rows_of_the_other_panel() {
-    let mut window = open_recording().await;
-    window.apply_speed("10", "20", "2");
-    let speed_remove = window.remove_button();
-    window.apply_redaction("text", "hunter2", "asterisks", "", "output");
-    let redaction_remove = window.remove_button();
     let speed = speed_row("10 s to 20 s", "2");
     let redaction = redaction_row("text \u{201c}hunter2\u{201d} \u{2192} asterisks (output)");
 
-    window.click(redaction_remove);
+    // The speed filter comes first, and the redaction row is removed.
+    let mut window = open_recording().await;
+    window.apply_speed("10", "20", "2");
+    window.apply_redaction("text", "hunter2", "asterisks", "", "output");
+    window.click(window.remove_button());
     let page = window.html();
     assert!(page.contains(&speed), "{page}");
     assert!(!page.contains(&redaction), "{page}");
     assert!(page.contains(&edited_row("1m 0.3s")), "{page}");
 
+    // The redaction filter comes first, and the speed row is removed.
+    let mut window = open_recording().await;
     window.apply_redaction("text", "hunter2", "asterisks", "", "output");
-    window.click(speed_remove);
+    window.apply_speed("10", "20", "2");
+    window.click(window.remove_button());
     let page = window.html();
     assert!(!page.contains(&speed), "{page}");
     assert!(page.contains(&redaction), "{page}");
