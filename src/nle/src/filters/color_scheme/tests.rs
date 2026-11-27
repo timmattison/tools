@@ -804,6 +804,28 @@ fn a_slot_that_the_recording_reset_or_set_with_a_kept_color_gets_no_sgr() {
 }
 
 #[test]
+fn a_reset_or_a_default_in_the_range_clears_what_the_restore_sets() {
+    for (data, extra) in [
+        ("\x1b]10;#123456\x07\x1b[31m\x1bcA", json!({})),
+        ("\x1b]11;#123456\x07\x1b[44m\x1bcA", json!({})),
+        ("\x1b]10;#123456\x07\x1b]110\x07A", json!({})),
+        ("\x1b]11;#123456\x07\x1b]111\x07A", json!({})),
+        ("\x1b[31m\x1b[39mA", json!({})),
+        ("\x1b[44m\x1b[49mA", json!({})),
+        ("\x1b[58;5;1m\x1b[59mA", json!({})),
+        ("\x1b[31m\x1b[38;5;196mA", json!({ "cube": "keep" })),
+    ] {
+        let answer = restored(vec![out(0.0, data), out(5.0, "B")], extra);
+
+        assert_eq!(
+            answer.get(2),
+            Some(&(2.0, RESET_COLORS.to_string())),
+            "{data:?}"
+        );
+    }
+}
+
+#[test]
 fn the_restore_sets_the_foreground_background_and_underline_in_one_sgr() {
     let answer = restored(
         vec![out(0.0, "\x1b[58;5;1m\x1b[44m\x1b[31mA"), out(5.0, "B")],
