@@ -6356,9 +6356,20 @@ cargo tauri build --no-bundle   # the binary is target/release/msgs
 ## nle (non-linear editor)
 
 A desktop application for the terminal recordings that `beta` writes. It opens
-a `.json` or `.json.gz` recording, makes an edit project of it, and shows its
-metadata. The timeline (issue #150) and the preview pane (issue #151) are
-placeholders.
+a `.json` or `.json.gz` recording, makes an edit project of it, shows its
+metadata, and plays the edited recording in its preview pane. The timeline
+(issue #150) is a placeholder with a playhead control.
+
+The preview pane draws the terminal of the edited recording at the playhead.
+Drag the playhead control under **Timeline** to go to a time. **Play** plays
+the recording from the playhead, and the same button then says **Pause**.
+**Stop** stops playback and goes back to the start. Playback stops at the end,
+and **Play** at the end starts again from the beginning. The readout shows the
+time of the playhead and the duration of the edited recording. The **Theme**
+menu selects one of the palettes of `beta export --theme`: Auto, Dracula,
+Monokai, Solarized Dark, or Solarized Light. The terminal grows or shrinks to
+fit the pane, and each edit shows in the preview at once. A new recording opens
+stopped, at time zero.
 
 The speed panel under the metadata changes the speed of a region. Type the
 start and the end of the region in seconds and a speed, then click
@@ -6375,7 +6386,7 @@ The application is one Rust crate on Dioxus 0.7, with the desktop (webview)
 renderer. Its components call the Rust code directly, and the open project is
 Dioxus state, thus no IPC layer and no frontend package exist.
 
-The editing engine of the crate has four parts:
+The editing engine of the crate has five parts:
 
 - **Edit project** (`EditProject`): clips of source recordings, placed on the
   tracks of the timeline, and the filters that apply to the result. An edit
@@ -6391,14 +6402,39 @@ The editing engine of the crate has four parts:
   whether anything comes after it. It rewrites its region and moves nothing. A
   span filter (`register_span`) also gets the length of its region and answers
   a new length, and the later events move by the change in the length.
-  `filters::registry()` holds the filters that ship: the cursor filter
-  (`cursor`, issue #168) is an in-place filter, and time dilation
-  (`time-dilation`, issue #153) and typing speed (`typing-speed`, issue #155)
-  are span filters. Issues #152 to #167 add the others.
+  `filters::registry()` holds the filters that ship. The cursor filter is an
+  in-place filter, and each other one is a span filter:
+  - `cursor` (`visibility`, `shape`, `blink`, `color`, issue #168): sets how
+    the cursor looks. [The cursor filter](#the-cursor-filter) below gives its
+    options.
+  - `time-dilation` (`speed`, issue #153): plays its region faster or slower.
+  - `typing-speed` (`chars_per_second`, `pause`, `jitter`, issue #155): plays
+    each burst of typing at one rate. The paragraph on this filter below gives
+    its rules.
+  - `pause-removal` (`threshold`, `max_pause`, issue #154): each gap between two
+    events that is longer than `threshold` becomes `max_pause` long.
+  - `pause-insertion` (`at`, `duration`, issue #154): each event at or after
+    `at` moves later by `duration`, and so do the events after a range and the
+    end of the timeline. An `at` past the end of the region by more than a
+    microsecond is an error.
+  - `auto-trim` (`leading`, `trailing`, both on when not set, issue #154):
+    removes the time before the first input event and the time after the last
+    output event.
+
+  The filters of issue #154 parse their options as a Rust type, so the render
+  refuses a missing option, a value of the wrong type, and a key that the
+  filter does not know. The window cannot add them yet (issue #150). Issues
+  #152 and #156 to #167 add more filters.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
   undo and redo history.
+- **Preview** (`preview::Preview`): replays the events of the rendered
+  recording through the terminal emulator of `termstate`, which the video
+  export of `beta` also uses. On the way it keeps snapshots of the terminal,
+  about one for each second of the recording, so a seek replays only from the
+  nearest snapshot and not from time zero. The number of snapshots has a
+  limit that depends on the size of the grid.
 
 The typing speed filter plays each burst of typing at one rate. Its option
 `chars_per_second` sets the rate, and each input event counts as one
