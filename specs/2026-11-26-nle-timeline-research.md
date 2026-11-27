@@ -216,10 +216,9 @@ Only the editors with a source that states it are in this list:
   peaks.js, and the waveform-playlist editor.
 
 No source states the timeline technology of Clipchamp, Kapwing, Canva, CapCut,
-Descript, BandLab, or the Lottie Creator of LottieFiles. The pattern of the
-editors with a source is a mix: the dense layer (waveform, density, ruler,
-thumbnails) is on a canvas, and the interactive objects (clips, handles,
-playhead) are DOM.
+Descript, BandLab, or the Lottie Creator of LottieFiles. Each editor with a
+waveform puts it on a canvas, but the Animations panel of Chrome DevTools draws
+its dense layer as SVG.
 
 ### Interaction design from Remotion Studio
 
