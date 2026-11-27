@@ -1227,12 +1227,50 @@ fn a_range_in_the_middle_of_a_recording_writes_the_start_and_the_restore() {
         pairs(&rendered.events),
         vec![
             (1.0, "ab"),
-            (3.0, "\x1b[1;1H  \x1b[?25l"),
+            (3.0, "\x1b[1;1H\x1b[0m  \x1b[?25l"),
             (
                 6.0,
                 "\x1b[1;1Hab\x1b[1;6r\x1b[0m\x1b[1;1H\x1b7\x1b[1;3H\x1b[?25h"
             ),
         ]
+    );
+}
+
+#[test]
+fn a_paint_writes_dim_blink_reverse_hidden_and_strikethrough() {
+    let rendered = render(
+        vec![out(1.0, "\x1b[2;5;7;8;9mA")],
+        json!({ "hide_rows": [23] }),
+    );
+
+    assert_eq!(pairs(&rendered.events), vec![(1.0, "\x1b[0;2;5;7;8;9mA")]);
+}
+
+#[test]
+fn sgr_22_takes_back_bold_and_dim() {
+    let rendered = render(
+        vec![out(1.0, "\x1b[1;2mA\x1b[22mB")],
+        json!({ "hide_rows": [23] }),
+    );
+
+    assert_eq!(pairs(&rendered.events), vec![(1.0, "\x1b[0;1;2mA\x1b[0mB")]);
+}
+
+#[test]
+fn a_range_starts_with_a_full_sgr_for_an_attribute_that_the_emulator_does_not_model() {
+    let rendered = render_on(
+        20,
+        6,
+        vec![out(1.0, "ab\x1b[53m")],
+        json!({ "hide_rows": [0] }),
+        span(3.0, 6.0),
+    )
+    .unwrap();
+
+    assert!(
+        pairs(&rendered.events).contains(&(3.0, "\x1b[1;1H\x1b[0m  \x1b[?25l")),
+        "{:?}",
+        pairs(&rendered.events)
     );
 }
 
