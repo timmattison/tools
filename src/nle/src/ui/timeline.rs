@@ -192,8 +192,10 @@ pub(super) fn TimelineView(loaded: ReadSignal<Option<Document>>, view: Signal<Vi
                 }
             },
             div { class: "timeline-ruler",
-                for (x, class, label) in ticks {
-                    div { key: "{x}", class, style: "left: {x}px;",
+                // Two ticks of a very long project can share one place, so
+                // the key is the position in the list.
+                for (index, (x, class, label)) in ticks.into_iter().enumerate() {
+                    div { key: "{index}", class, style: "left: {x}px;",
                         if let Some(label) = label {
                             span { class: "timeline-tick-label", "{label}" }
                         }
