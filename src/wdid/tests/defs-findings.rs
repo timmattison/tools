@@ -215,6 +215,38 @@ fn an_alias_and_a_function_that_do_the_same_thing_are_one_finding() {
     }
 }
 
+/// `"${@}"` is the same word as `"$@"`: both shells keep it as written, and it
+/// passes on each argument. The function is thus the same command as the alias.
+#[test]
+fn an_alias_and_a_function_that_passes_on_its_arguments_with_braces_are_one_finding() {
+    for body in ["\tgit log \"${@}\"", "{ \n    git log \"${@}\"\n}"] {
+        let mut defs = empty();
+        alias(&mut defs, "gl", "git log", ZSHRC, 2);
+        function(&mut defs, "glog", body, GIT_PLUGIN);
+        let found = findings(&[row("gl"), row("glog"), row("glog")], &defs);
+        assert_eq!(
+            found,
+            vec![Finding {
+                kind: FindingKind::AliasAndFunction,
+                definitions: vec![
+                    member("gl", Kind::Alias, Some(origin(ZSHRC, Some(2))), 1, true),
+                    member(
+                        "glog",
+                        Kind::Function,
+                        Some(origin(GIT_PLUGIN, None)),
+                        2,
+                        false
+                    ),
+                ],
+                words: words(&["git", "log"]),
+                places: Vec::new(),
+                program: None,
+            }],
+            "body {body:?}"
+        );
+    }
+}
+
 /// A function that does something else than the alias is not a finding.
 #[test]
 fn a_function_that_does_something_else_is_not_a_finding() {
