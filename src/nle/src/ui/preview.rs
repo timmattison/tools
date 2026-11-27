@@ -7,12 +7,20 @@ use std::sync::Arc;
 use dioxus::prelude::*;
 
 use super::Document;
+use crate::format::format_duration;
+use crate::preview::playback::play_from;
 use crate::preview::screen::{hex, Screen};
 use crate::preview::{Preview, PreviewTheme};
 use crate::types::{Recording, Seconds};
 
 /// The text of the pane when no recording is open.
 const EMPTY_PREVIEW: &str = "Open a recording to preview it here";
+/// The label of the transport button while the recording is paused or stopped.
+const PLAY_LABEL: &str = "Play";
+/// The label of the transport button while the recording plays.
+const PAUSE_LABEL: &str = "Pause";
+/// The label of the button that stops playback and returns to the start.
+const STOP_LABEL: &str = "Stop";
 /// The start of the message for a project that does not render.
 pub(super) const PREVIEW_FAILED_PREFIX: &str = "The project does not render";
 
@@ -53,14 +61,16 @@ pub(super) fn end_of(rendered: &RenderedState) -> Seconds {
     }
 }
 
-/// The preview of the open recording: the terminal at the playhead. The pane
-/// keeps one `Preview` engine between renders. It replaces the engine when
-/// the rendered recording changes.
+/// The preview of the open recording: the terminal at the playhead, and the
+/// transport toolbar. The pane keeps one `Preview` engine between renders. It
+/// replaces the engine when the rendered recording changes.
 #[component]
 pub(super) fn PreviewPane(
     rendered: ReadSignal<RenderedState>,
-    playhead: ReadSignal<Seconds>,
+    mut playhead: Signal<Seconds>,
+    mut playing: Signal<bool>,
 ) -> Element {
+    let end = end_of(&rendered.read());
     // The engine is not reactive. A write to it never starts a render.
     let engine = use_hook(|| Rc::new(RefCell::new(None::<Preview>)));
     let screen = match &*rendered.read() {
@@ -78,6 +88,12 @@ pub(super) fn PreviewPane(
         Some(Err(error)) => Some(Err(error.clone())),
         None => None,
     };
+    // The playhead held at or below the end, as the readout shows it.
+    let shown = {
+        let at = playhead();
+        let held = if at > end { end } else { at };
+        format!("{} / {}", format_duration(held.get()), format_duration(end.get()))
+    };
     rsx! {
         div { class: "preview-pane",
             match screen {
@@ -88,6 +104,33 @@ pub(super) fn PreviewPane(
                     div { class: "placeholder", "{PREVIEW_FAILED_PREFIX}: {error}" }
                 },
                 Some(Ok(screen)) => rsx! {
+                    div { class: "preview-toolbar",
+                        button {
+                            class: "transport",
+                            onclick: move |_| {
+                                if playing() {
+                                    playing.set(false);
+                                } else {
+                                    playhead.set(play_from(playhead(), end));
+                                    playing.set(true);
+                                }
+                            },
+                            if playing() {
+                                {PAUSE_LABEL}
+                            } else {
+                                {PLAY_LABEL}
+                            }
+                        }
+                        button {
+                            class: "transport",
+                            onclick: move |_| {
+                                playing.set(false);
+                                playhead.set(Seconds::ZERO);
+                            },
+                            {STOP_LABEL}
+                        }
+                        span { class: "preview-time", "{shown}" }
+                    }
                     div {
                         class: "preview-screen",
                         style: "background-color:{hex(screen.background)}",

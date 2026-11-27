@@ -210,3 +210,18 @@ h3 {
   border-bottom: 1px solid #313244;
   font-size: 13px;
 }
+
+.preview-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: #181825;
+  border-bottom: 1px solid #313244;
+}
+
+.preview-time {
+  font-family: monospace;
+  font-size: 13px;
+  color: #a6adc8;
+}

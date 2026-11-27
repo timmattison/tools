@@ -103,9 +103,10 @@ fn panels_root() -> Element {
         Some(document)
     });
     let playhead = use_signal(|| Seconds::ZERO);
+    let playing = use_signal(|| false);
     let rendered = use_memo(move || preview::render_of(&loaded.read()));
     rsx! {
-        PreviewPane { rendered, playhead }
+        PreviewPane { rendered, playhead, playing }
         Timeline { loaded, rendered, playhead }
         PropertiesPanel { loaded, on_result: |_| {} }
     }
@@ -718,8 +719,11 @@ fn edited_row(text: &str) -> String {
     metadata_row("Edited duration", text, None)
 }
 
-/// Opens the fixture recording through the fakes, and notes the Apply Speed
-/// button.
+/// Opens the fixture recording through the fakes, and notes the three click
+/// listeners that the open render creates. The render creates them in this
+/// order: Apply Speed, Play, Stop. The properties panel mounts before the
+/// preview toolbar, as it does for the input listeners, and the Play button
+/// comes before the Stop button.
 async fn open_recording() -> Window {
     let fakes = Fakes::new()
         .pick(picked())
@@ -727,8 +731,12 @@ async fn open_recording() -> Window {
     let mut window = Window::open(&fakes);
     window.click(window.open_button());
     window.settle().await;
-    assert_eq!(window.newest.len(), 1, "{:?}", window.newest);
-    window.apply = Some(window.newest[0]);
+    let [apply, play, stop] = window.newest[..] else {
+        panic!("the open render made {:?}", window.newest)
+    };
+    window.play = Some(play);
+    window.stop = Some(stop);
+    window.apply = Some(apply);
     window
 }
 

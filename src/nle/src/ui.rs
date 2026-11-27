@@ -188,6 +188,7 @@ pub(crate) fn App() -> Element {
     let mut loaded = use_signal(|| None::<Document>);
     let mut error = use_signal(|| None::<String>);
     let mut playhead = use_signal(|| Seconds::ZERO);
+    let mut playing = use_signal(|| false);
     let rendered = use_memo(move || render_of(&loaded.read()));
 
     rsx! {
@@ -199,6 +200,7 @@ pub(crate) fn App() -> Element {
                         loaded.set(Some(document));
                         // A new recording starts at time zero.
                         playhead.set(Seconds::ZERO);
+                        playing.set(false);
                         error.set(None);
                     }
                     Err(failure) => error.set(Some(format!("{OPEN_FAILED_PREFIX}: {failure}"))),
@@ -211,7 +213,7 @@ pub(crate) fn App() -> Element {
                     button { class: "error-dismiss", onclick: move |_| error.set(None), "Dismiss" }
                 }
             }
-            PreviewPane { rendered, playhead }
+            PreviewPane { rendered, playhead, playing }
             Timeline { loaded, rendered, playhead }
             PropertiesPanel {
                 loaded,
