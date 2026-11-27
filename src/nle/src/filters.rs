@@ -1,5 +1,6 @@
 //! The filters that ship with the app.
 
+pub mod idle_compression;
 pub mod time_dilation;
 
 use crate::pipeline::FilterRegistry;
@@ -8,6 +9,7 @@ use crate::pipeline::FilterRegistry;
 #[must_use]
 pub fn registry() -> FilterRegistry {
     let mut registry = FilterRegistry::new();
+    idle_compression::register(&mut registry);
     time_dilation::register(&mut registry);
     registry
 }

@@ -22,6 +22,9 @@ tokio = { workspace = true }
 # bans std::process::Command::new.
 childenv = { workspace = true }
 chrono = { workspace = true }
+# The terminal emulator of beta. The idle compression filter replays the
+# output through it to find the events that change the screen.
+termstate = { workspace = true }
 # The file dialog of the Open Recording button. These are the same features that
 # dioxus-desktop uses, so the build holds one copy of rfd.
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
