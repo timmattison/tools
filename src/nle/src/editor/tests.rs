@@ -718,3 +718,94 @@ fn apply_renderable_applies_a_filter_that_renders_and_clears_the_redo_history() 
     assert!(editor.can_undo());
     assert!(!editor.can_redo());
 }
+
+// Tests of the marks of the render.
+
+/// The kind of the filter of `marking_registry`.
+const MARK_KIND: &str = "mark";
+
+/// A registry with one span filter that keeps its span and adds a mark at
+/// 1 s, and the count of the renders that ran that filter.
+fn marking_registry() -> (Arc<FilterRegistry>, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let renders = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&renders);
+    let mut registry = FilterRegistry::new();
+    registry.register_span(FilterKind::new(MARK_KIND), move |mut span, _| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        span.marks.push(Mark {
+            time: 1.0,
+            label: "m".to_string(),
+        });
+        Ok(span)
+    });
+    (Arc::new(registry), renders)
+}
+
+fn add_mark() -> Edit {
+    Edit::AddFilter {
+        index: 0,
+        filter: filter(MARK_KIND),
+    }
+}
+
+fn render_count(renders: &std::sync::atomic::AtomicUsize) -> usize {
+    renders.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[test]
+fn rendered_marks_gives_the_marks_of_the_render() {
+    let (filters, _) = marking_registry();
+    let mut editor = Editor::new(project(), filters).unwrap();
+
+    editor.apply_renderable(add_mark()).unwrap();
+
+    assert_eq!(
+        editor.rendered_marks().unwrap(),
+        vec![Mark {
+            time: 1.0,
+            label: "m".to_string()
+        }]
+    );
+}
+
+#[test]
+fn an_edit_that_renders_gives_its_duration_and_its_marks_in_one_render() {
+    let (filters, renders) = marking_registry();
+    let mut editor = Editor::new(project(), filters).unwrap();
+
+    editor.apply_renderable(add_mark()).unwrap();
+    editor.rendered_duration().unwrap();
+    editor.rendered_marks().unwrap();
+
+    assert_eq!(render_count(&renders), 1);
+}
+
+#[test]
+fn after_an_edit_with_no_render_one_render_gives_the_duration_and_the_marks() {
+    let (filters, renders) = marking_registry();
+    let mut editor = Editor::new(project(), filters).unwrap();
+    editor.apply_renderable(add_mark()).unwrap();
+    editor.apply(Edit::AddTrack { id: TrackId(3) }).unwrap();
+
+    editor.rendered_marks().unwrap();
+    editor.rendered_duration().unwrap();
+    editor.rendered_marks().unwrap();
+
+    assert_eq!(render_count(&renders), 2);
+    assert_eq!(editor.rendered_marks().unwrap().len(), 1);
+}
+
+#[test]
+fn an_undo_gives_the_marks_of_the_project_before_the_edit() {
+    let (filters, _) = marking_registry();
+    let mut editor = Editor::new(project(), filters).unwrap();
+    editor.apply_renderable(add_mark()).unwrap();
+    assert_eq!(editor.rendered_marks().unwrap().len(), 1);
+
+    assert!(editor.undo());
+
+    assert!(editor.rendered_marks().unwrap().is_empty());
+    assert!(editor.redo().unwrap());
+    assert_eq!(editor.rendered_marks().unwrap().len(), 1);
+}

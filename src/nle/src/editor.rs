@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use crate::error::NleError;
-use crate::pipeline::FilterRegistry;
+use crate::pipeline::{FilterRegistry, Mark};
 use crate::types::{
     AppliedFilter, Clip, ClipId, EditProject, Recording, Seconds, TimelineTrack, TrackId,
 };
@@ -389,6 +389,15 @@ impl Editor {
     pub fn rendered_duration(&self) -> Result<f64, NleError> {
         self.kept_duration
             .map_or_else(|| self.render().map(|recording| recording.duration), Ok)
+    }
+
+    /// The marks of the render of the project in its present state, in time
+    /// order.
+    ///
+    /// # Errors
+    /// Returns the errors of `FilterRegistry::render`.
+    pub fn rendered_marks(&self) -> Result<Vec<Mark>, NleError> {
+        Ok(Vec::new())
     }
 
     /// Write the rendered recording of this state to `path`.
