@@ -127,10 +127,11 @@ struct DefsArgs {
     idle_days: u32,
 
     /// Show each definition. Without this flag, the text report shows only
-    /// my definitions: the ones from a file under HOME that is not under the
-    /// oh-my-zsh directory, and the ones of an unknown origin. With it, the
-    /// text report also shows the others, grouped by the file that defined
-    /// them, and the functions whose name starts with `_`.
+    /// my definitions. A definition is mine when its origin is unknown, or
+    /// when its file is under `ZSH_CUSTOM`. It is also mine when its file is
+    /// under HOME and not under `ZSH`, the oh-my-zsh directory. With this
+    /// flag, the text report also shows the others, grouped by the file that
+    /// defined them, and the functions whose name starts with `_`.
     #[arg(long)]
     all: bool,
 }
