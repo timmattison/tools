@@ -938,3 +938,21 @@ fn a_render_that_fails_is_not_kept_and_the_next_read_renders_again() {
     );
     assert_eq!(render_count(&renders), 2);
 }
+
+#[tokio::test]
+async fn an_export_after_a_kept_render_writes_that_render_with_no_second_render() {
+    let (filters, renders) = marking_registry();
+    let mut editor = Editor::new(project(), filters).unwrap();
+    editor.apply_renderable(add_mark()).unwrap();
+    let kept = editor.render().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("out.json");
+
+    editor
+        .export(recording_request(&file), |_| {})
+        .await
+        .unwrap();
+
+    assert_eq!(render_count(&renders), 1);
+    assert_eq!(Recording::load(&file).unwrap(), *kept);
+}
