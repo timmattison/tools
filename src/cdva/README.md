@@ -1,7 +1,9 @@
-# cdva
+# cdva (count da various attributes)
 
-"count da various attributes". Counts the lines of a tree the way `cloc` does,
-and reports the test code apart from the production code.
+Counts the lines of a tree the way `cloc` does — files, blank rows, comment
+rows, code rows — and reports the test code apart from the production code. It
+finds the test code *inside* a production file, which `cloc`, `tokei`, `scc`,
+and `gocloc` cannot do.
 
 ```console
 $ cdva src/gsw
@@ -13,13 +15,60 @@ TOML          1      5        0      26 |           0          0    0.0%
 Total        13  1,227    4,621  11,701 |          11      8,541   73.0%
 ```
 
-`Test code` is a part of `Code`, not a column beside it. Of the 11,701 rows of
-code above, 8,541 are test code and 3,160 are production code.
+`Test code` is a part of `Code` rather than a column beside it: for every file,
+and for every row of the table, the production count plus the test count is the
+whole count. Of the 11,701 rows of code above, 8,541 are test code and 3,160 are
+production code.
 
 Every other counter reports one number for a file. `cdva` reports two, because
 a file is not always one thing: a Rust source with a `#[cfg(test)] mod tests`
 at the bottom holds production code and test code in one file, and one number
 hides that.
+
+Over this repository:
+
+```
+Language    Files   Blank  Comment     Code |  Test files  Test code  Test %
+----------------------------------------------------------------------------
+Rust          309  15,792   40,625  105,826 |         220     62,745   59.3%
+Markdown       50   2,976        0   10,847 |           0          0    0.0%
+Go             19     403      232    1,574 |           7        152    9.7%
+TOML           85     259      124    1,463 |           0          0    0.0%
+TypeScript      7      86       95      496 |           6        225   45.4%
+Shell           6      70       64      321 |           0          0    0.0%
+C#              5      11        1       96 |           5         96  100.0%
+JSON            3       0        0       78 |           2         66   84.6%
+Java            5      19        3       71 |           5         71  100.0%
+Ruby            6       9        8       70 |           6         70  100.0%
+JavaScript      6       9        0       63 |           6         63  100.0%
+TSX             4       6        0       61 |           4         61  100.0%
+Elixir          4       8        0       48 |           4         48  100.0%
+Python          9      25        1       47 |           9         47  100.0%
+Kotlin          4      13        1       42 |           4         42  100.0%
+Swift           4       8        1       41 |           4         41  100.0%
+Zig             3       6        4       21 |           3         21  100.0%
+YAML            1       7        0       17 |           0          0    0.0%
+Perl            1      11       15       16 |           0          0    0.0%
+----------------------------------------------------------------------------
+Total         531  19,718   41,174  121,198 |         285     63,748   52.6%
+```
+
+## Usage
+
+Usage: `cdva`, `cdva src --by-file --top 20`, `cdva --json`, `cdva --tests-only`,
+`cdva --explain src/gsw/src/age.rs`, `cdva --test-glob 'harness/**'`, `cdva --no-tree`
+
+The flags a reader needs first:
+
+| Flag | What it does |
+| --- | --- |
+| `--by-file` | One row for each file rather than one for each language. `--sort` and `--top` order the rows and trim them, and the total still covers every file. |
+| `--json` | The whole report as JSON: every row, both buckets, the files whose parse failed, and the files whose scan ended inside a string. |
+| `--csv` | The same report as CSV, one row to a line. |
+| `--explain <PATH>` | Answer for one file instead of printing a table: the rows a rule marked, and which rule marked them. |
+| `--no-tree` | Read no syntax tree. The path rule alone decides, which runs in about half the wall time and finds no test code inside a production file. |
+| `--strict` | Fail the run when the parse of any file failed. |
+| `--test-glob <GLOB>` | Mark a path as test material. `--production-glob` holds one out of the test bucket, and wins over `--test-glob`. |
 
 ## The invariant
 
@@ -54,8 +103,10 @@ depth.
 ### The tree rule
 
 The tree rule parses what the path rule left and marks the span of each test
-node *inside* the file. Thirteen grammars have one, and the three script
-dialects share a query, so the table holds eleven rows:
+node *inside* the file. Thirteen grammars carry a tree rule — Rust, Go, Zig,
+Python, JavaScript, TypeScript, TSX, Java, Kotlin, C#, Ruby, Swift, and Elixir —
+and 40 languages are counted in all. The three script dialects share a query, so
+the table holds eleven rows:
 
 | Language | What the rule marks |
 | --- | --- |
@@ -299,3 +350,7 @@ so a test can assert that the two modes agree over the fixture corpus, which is
 what proves the needle set complete: a needle the table forgot would show up as
 a file the default mode marked as production code and `--tree` marked as test
 code.
+
+## Install
+
+To install: `cargo install --git https://github.com/timmattison/tools cdva`
