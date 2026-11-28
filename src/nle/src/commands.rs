@@ -1,7 +1,10 @@
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use tokio::io::AsyncBufReadExt;
 
 use crate::error::NleError;
+use crate::export::{output_path_text, parse_progress_line, ExportProgress};
 use crate::types::{ExportFormat, ExportOptions, LoadedRecording, Recording, RecordingMetadata};
 
 /// Run blocking file work on the blocking pool of the tokio runtime that the
@@ -61,23 +64,71 @@ const WEB_ENDINGS: &[&str] = &[".html"];
 /// The file name ending of a gzip recording.
 const GZIP_ENDINGS: &[&str] = &[".gz"];
 
-/// Return true when `name`, in lowercase, ends with one of `endings`.
-/// Each ending in `endings` must be lowercase.
-fn has_ending(name: &str, endings: &[&str]) -> bool {
+/// Return the longest of `endings` that `name`, in lowercase, ends with, or
+/// `None` when it ends with none of them. Each ending in `endings` must be
+/// lowercase.
+fn matching_ending<'a>(name: &str, endings: &[&'a str]) -> Option<&'a str> {
     let lowercase_name = name.to_lowercase();
     endings
         .iter()
-        .any(|ending| lowercase_name.ends_with(ending))
+        .copied()
+        .filter(|ending| lowercase_name.ends_with(ending))
+        .max_by_key(|ending| ending.len())
+}
+
+/// Return true when `name`, in lowercase, ends with one of `endings`.
+/// Each ending in `endings` must be lowercase.
+fn has_ending(name: &str, endings: &[&str]) -> bool {
+    matching_ending(name, endings).is_some()
+}
+
+/// The longest chain of symbolic links that `follow_links` accepts.
+const MAX_LINKS: usize = 40;
+
+/// Follow the chain of symbolic links that starts at `path`. Return the end of
+/// the chain. A relative target resolves against the directory of the link.
+/// A link to a file that does not exist ends at that missing file. It refuses a
+/// chain of more than `MAX_LINKS` links, so a loop ends. Each error goes
+/// through `to_error`.
+fn follow_links(path: &Path, to_error: fn(String) -> NleError) -> Result<PathBuf, NleError> {
+    let mut current = path.to_path_buf();
+    for _ in 0..=MAX_LINKS {
+        let is_link = std::fs::symlink_metadata(&current)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false);
+        if !is_link {
+            return Ok(current);
+        }
+        let target = std::fs::read_link(&current).map_err(|e| {
+            to_error(format!(
+                "Failed to read the symbolic link {}: {e}",
+                current.display()
+            ))
+        })?;
+        current = match current.parent() {
+            Some(parent) => parent.join(target),
+            None => target,
+        };
+    }
+    Err(to_error(format!(
+        "Refusing to write {}: more than {MAX_LINKS} symbolic links",
+        path.display()
+    )))
 }
 
 /// Resolve an output path that nle writes, or that it asks `beta` to write.
 ///
 /// It refuses a path whose file name, in lowercase, does not end with one of
-/// `endings`. It refuses a path with no file name, or with no parent
-/// directory, or whose parent directory does not exist. Otherwise it returns
-/// the canonical parent directory joined with the file name. It does not
-/// confine the path: a `..` or a symlink in the parent resolves to wherever it
-/// points. Each error goes through `to_error`.
+/// `endings`. It refuses a path with no file name. Then it follows the chain of
+/// symbolic links that starts at the path, so the write changes the file at the
+/// end of the chain and keeps each link. That file must end with the same one
+/// of `endings` as the path, so a link to a file of another format is refused.
+/// A link to a file that does not exist ends at that file, and the write creates
+/// it. A chain of more than `MAX_LINKS` links is refused. It refuses an end of
+/// the chain with no parent directory, or whose parent directory does not
+/// exist. Otherwise it returns the canonical parent directory joined with the
+/// file name. It does not confine the path: a `..` or a symbolic link in the
+/// parent resolves to wherever it points. Each error goes through `to_error`.
 fn resolve_output_path(
     path: &str,
     endings: &[&str],
@@ -87,10 +138,21 @@ fn resolve_output_path(
     let file_name = file_path
         .file_name()
         .ok_or_else(|| to_error(format!("Invalid path (no filename): {path}")))?;
-    if !has_ending(&file_name.to_string_lossy(), endings) {
-        return Err(to_error(format!(
+    let ending = matching_ending(&file_name.to_string_lossy(), endings).ok_or_else(|| {
+        to_error(format!(
             "Refusing to write {path}: the file name must end in one of {}",
             endings.join(", ")
+        ))
+    })?;
+    let file_path = follow_links(&file_path, to_error)?;
+    let file_name = file_path
+        .file_name()
+        .ok_or_else(|| to_error(format!("Invalid path (no filename): {path}")))?
+        .to_os_string();
+    if !has_ending(&file_name.to_string_lossy(), &[ending]) {
+        return Err(to_error(format!(
+            "Refusing to write {path}: it links to {}, and the file name must end in {ending}",
+            file_path.display()
         )));
     }
     let parent = file_path
@@ -113,8 +175,10 @@ fn resolve_output_path(
 
 /// Save `recording` to `path`. It refuses a file name that does not end in
 /// `.json` or `.json.gz` in any case, and a parent directory that does not
-/// exist. An absent `compress` falls back to the `.gz` suffix of the file
-/// name, in any case.
+/// exist. If `path` is a symbolic link, it writes the file at the end of the
+/// link and keeps the link. That file must have the same ending as `path`. An
+/// absent `compress` falls back to the `.gz` suffix of the file name, in any
+/// case.
 pub(crate) fn save_recording_to(
     path: &str,
     recording: &Recording,
@@ -189,7 +253,10 @@ fn validate_export_input(input_path: &str) -> Result<PathBuf, NleError> {
 
 /// Build the arguments that all `beta export` runs share: the subcommand,
 /// the canonical input path, and the resolved output path.
-/// The output file name must end in one of `output_endings`.
+/// The output file name must end in one of `output_endings`. If the output
+/// path is a symbolic link, `beta` gets the file at the end of the link, and
+/// that file name must have the same ending as the output path. `beta` takes
+/// the resolved output path as text, thus that path must be valid UTF-8.
 fn base_export_args(
     subcommand: &str,
     input_path: &str,
@@ -203,15 +270,16 @@ fn base_export_args(
         subcommand.to_string(),
         canonical_input.to_string_lossy().to_string(),
         "--output".to_string(),
-        resolved_output.to_string_lossy().to_string(),
+        output_path_text(&resolved_output)?.to_owned(),
     ])
 }
 
 /// Build the full `beta` argument list for a video export.
-/// It fails if the format is not Video, the input file is missing, or the
-/// output file name does not end in `.mp4` or `.gif`, or the output directory
-/// does not exist.
-fn video_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
+/// It fails if the format is not Video, the input file is missing, the output
+/// file name does not end in `.mp4` or `.gif`, the file that it links to does
+/// not have the same ending, the resolved output path is not valid UTF-8, or
+/// the output directory does not exist.
+pub(crate) fn video_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
     if !matches!(options.format, ExportFormat::Video) {
         return Err(NleError::ExportError(
             "export_video requires Video format".into(),
@@ -244,9 +312,10 @@ fn video_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
 
 /// Build the full `beta` argument list for a web export.
 /// It fails if the format is not Web, the input file is missing, or the
-/// output file name does not end in `.html`, or the output directory does not
-/// exist.
-fn web_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
+/// output file name, or the file that it links to, does not end in `.html`, or
+/// the resolved output path is not valid UTF-8, or the output directory does
+/// not exist.
+pub(crate) fn web_export_args(options: &ExportOptions) -> Result<Vec<String>, NleError> {
     if !matches!(options.format, ExportFormat::Web) {
         return Err(NleError::ExportError(
             "export_web requires Web format".into(),
@@ -318,26 +387,82 @@ fn beta_command(
     command
 }
 
+/// Read the stdout of `beta` line by line, as it arrives, and give each line
+/// that is a frame report to `on_progress`.
+///
+/// A line is the bytes up to a `\n`. A byte that is not UTF-8 becomes a
+/// replacement character, and it does not stop the read.
+async fn read_progress(
+    stdout: impl tokio::io::AsyncBufRead + Unpin,
+    mut on_progress: impl FnMut(ExportProgress),
+) -> Result<(), NleError> {
+    let mut lines = stdout.split(b'\n');
+    while let Some(line) = lines.next_segment().await.map_err(read_error)? {
+        if let Some(progress) = parse_progress_line(&String::from_utf8_lossy(&line)) {
+            on_progress(progress);
+        }
+    }
+    Ok(())
+}
+
+/// The export error for a failed read of a stream of `beta`.
+fn read_error(error: std::io::Error) -> NleError {
+    NleError::ExportError(format!("Failed to read the output of beta: {error}"))
+}
+
 /// Run the `beta` CLI with `args` as a child process.
 /// Returns `output_path` when `beta` succeeds.
-async fn run_beta(
+///
+/// `beta` runs with its stdout and stderr piped. The stdout is read line by
+/// line while `beta` runs, and each frame report goes to `on_progress` at
+/// once. The stderr is read in full at the same time, so a full pipe never
+/// stops `beta`. The child is killed when the future is dropped.
+pub(crate) async fn run_beta(
     args: &[String],
     output_path: &str,
     var: impl Fn(&'static str) -> Option<OsString>,
+    on_progress: impl FnMut(ExportProgress) + Send,
 ) -> Result<String, NleError> {
-    let output = tokio::process::Command::from(beta_command(args, var))
-        .output()
-        .await
+    let mut child = tokio::process::Command::from(beta_command(args, var))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
         .map_err(|e| {
             NleError::ExportError(format!(
                 "Failed to run beta CLI (is it on PATH or in ~/.cargo/bin?): {e}"
             ))
         })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| NleError::ExportError("beta gave no stdout".into()))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| NleError::ExportError("beta gave no stderr".into()))?;
 
-    if output.status.success() {
+    let read_stderr = async {
+        let mut bytes = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut bytes)
+            .await
+            .map_err(read_error)?;
+        Ok::<_, NleError>(bytes)
+    };
+    let (progress_result, stderr_result, status) = tokio::join!(
+        read_progress(tokio::io::BufReader::new(stdout), on_progress),
+        read_stderr,
+        child.wait()
+    );
+    progress_result?;
+    let stderr = stderr_result?;
+    let status =
+        status.map_err(|e| NleError::ExportError(format!("Failed to wait for beta: {e}")))?;
+
+    if status.success() {
         Ok(output_path.to_string())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = String::from_utf8_lossy(&stderr);
         Err(NleError::ExportError(format!(
             "beta export failed: {stderr}"
         )))
@@ -352,7 +477,7 @@ async fn run_beta(
 /// refused, `beta` cannot start, or `beta` fails.
 pub async fn export_video(options: ExportOptions) -> Result<String, NleError> {
     let args = video_export_args(&options)?;
-    run_beta(&args, &options.output_path, std::env::var_os).await
+    run_beta(&args, &options.output_path, std::env::var_os, |_| {}).await
 }
 
 /// Export a recording to web (HTML) format by shelling out to the beta CLI.
@@ -363,8 +488,8 @@ pub async fn export_video(options: ExportOptions) -> Result<String, NleError> {
 /// refused, `beta` cannot start, or `beta` fails.
 pub async fn export_web(options: ExportOptions) -> Result<String, NleError> {
     let args = web_export_args(&options)?;
-    run_beta(&args, &options.output_path, std::env::var_os).await
+    run_beta(&args, &options.output_path, std::env::var_os, |_| {}).await
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

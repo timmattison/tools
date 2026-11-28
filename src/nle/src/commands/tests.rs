@@ -44,7 +44,7 @@ fn canonical_out(dir: &tempfile::TempDir, name: &str) -> String {
 }
 
 /// Run `future` to its end on a multi-thread tokio runtime of its own.
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
+pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -415,6 +415,257 @@ fn video_export_args_gives_beta_the_canonical_output_path() {
     assert_eq!(args[at + 1], expected);
 }
 
+#[cfg(unix)]
+#[test]
+fn save_recording_to_writes_through_a_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("rec.json");
+    fs::write(&target, b"old").unwrap();
+    let link = dir.path().join("latest.json");
+    std::os::unix::fs::symlink("rec.json", &link).unwrap();
+    save_recording_to(&link.to_string_lossy(), &Recording::test_fixture(), None).unwrap();
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link was replaced"
+    );
+    assert_eq!(fs::read_link(&link).unwrap(), Path::new("rec.json"));
+    assert!(
+        fs::read(&target).unwrap().starts_with(b"{"),
+        "the target was not written"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn save_recording_to_refuses_a_link_to_a_file_without_a_recording_ending() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("notes.txt");
+    fs::write(&target, b"keep").unwrap();
+    let link = dir.path().join("latest.json");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let err =
+        save_recording_to(&link.to_string_lossy(), &Recording::test_fixture(), None).unwrap_err();
+    assert!(matches!(err, NleError::SaveError(_)), "got {err}");
+    assert!(err.to_string().contains("must end in"), "got {err}");
+    assert_eq!(fs::read(&target).unwrap(), b"keep");
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link was replaced"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn save_recording_to_refuses_a_loop_of_symlinks() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("a.json");
+    let second = dir.path().join("b.json");
+    std::os::unix::fs::symlink("b.json", &first).unwrap();
+    std::os::unix::fs::symlink("a.json", &second).unwrap();
+    let err =
+        save_recording_to(&first.to_string_lossy(), &Recording::test_fixture(), None).unwrap_err();
+    assert!(matches!(err, NleError::SaveError(_)), "got {err}");
+    assert!(err.to_string().contains("symbolic links"), "got {err}");
+}
+
+/// Make a chain of `count` relative symbolic links in `dir` that ends at
+/// `rec.json`, and return the first link of the chain.
+#[cfg(unix)]
+fn link_chain(dir: &Path, count: usize) -> std::path::PathBuf {
+    for index in 0..count {
+        let target = if index + 1 == count {
+            "rec.json".to_string()
+        } else {
+            format!("link-{}.json", index + 1)
+        };
+        std::os::unix::fs::symlink(target, dir.join(format!("link-{index}.json"))).unwrap();
+    }
+    dir.join("link-0.json")
+}
+
+#[cfg(unix)]
+#[test]
+fn save_recording_to_writes_through_a_chain_of_max_links_symlinks() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("rec.json");
+    fs::write(&target, b"old").unwrap();
+    let first = link_chain(dir.path(), MAX_LINKS);
+    save_recording_to(&first.to_string_lossy(), &Recording::test_fixture(), None).unwrap();
+    assert!(
+        fs::read(&target).unwrap().starts_with(b"{"),
+        "the end of the chain was not written"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn save_recording_to_refuses_a_chain_of_more_than_max_links_symlinks() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("rec.json");
+    fs::write(&target, b"keep").unwrap();
+    let first = link_chain(dir.path(), MAX_LINKS + 1);
+    let err =
+        save_recording_to(&first.to_string_lossy(), &Recording::test_fixture(), None).unwrap_err();
+    assert!(matches!(err, NleError::SaveError(_)), "got {err}");
+    assert!(err.to_string().contains("symbolic links"), "got {err}");
+    assert_eq!(fs::read(&target).unwrap(), b"keep");
+}
+
+#[cfg(unix)]
+#[test]
+fn save_recording_to_refuses_a_json_link_to_a_gzip_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("b.json.gz");
+    fs::write(&target, b"keep").unwrap();
+    let link = dir.path().join("a.json");
+    std::os::unix::fs::symlink("b.json.gz", &link).unwrap();
+    let err = save_recording_to(
+        &link.to_string_lossy(),
+        &Recording::test_fixture(),
+        Some(false),
+    )
+    .unwrap_err();
+    assert!(matches!(err, NleError::SaveError(_)), "got {err}");
+    assert!(err.to_string().contains("must end in .json"), "got {err}");
+    assert_eq!(fs::read(&target).unwrap(), b"keep");
+}
+
+#[cfg(unix)]
+#[test]
+fn save_recording_to_refuses_a_gzip_link_to_a_json_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("b.json");
+    fs::write(&target, b"keep").unwrap();
+    let link = dir.path().join("a.json.gz");
+    std::os::unix::fs::symlink("b.json", &link).unwrap();
+    let err = save_recording_to(
+        &link.to_string_lossy(),
+        &Recording::test_fixture(),
+        Some(true),
+    )
+    .unwrap_err();
+    assert!(matches!(err, NleError::SaveError(_)), "got {err}");
+    assert!(
+        err.to_string().contains("must end in .json.gz"),
+        "got {err}"
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"keep");
+}
+
+#[cfg(unix)]
+#[test]
+fn video_export_args_refuses_an_mp4_link_to_a_gif_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("a.json");
+    write_fixture(&input, false);
+    let link = dir.path().join("out.mp4");
+    std::os::unix::fs::symlink(dir.path().join("real.gif"), &link).unwrap();
+    let err = video_export_args(&options(
+        &input,
+        &link.to_string_lossy(),
+        ExportFormat::Video,
+    ))
+    .unwrap_err();
+    assert!(matches!(err, NleError::ExportError(_)), "got {err}");
+    assert!(err.to_string().contains("must end in .mp4"), "got {err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn video_export_args_accepts_a_link_whose_ending_differs_only_in_case() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("a.json");
+    write_fixture(&input, false);
+    let link = dir.path().join("OUT.MP4");
+    std::os::unix::fs::symlink(dir.path().join("real.mp4"), &link).unwrap();
+    let args = video_export_args(&options(
+        &input,
+        &link.to_string_lossy(),
+        ExportFormat::Video,
+    ))
+    .unwrap();
+    let at = args.iter().position(|a| a == "--output").unwrap();
+    assert_eq!(args[at + 1], canonical_out(&dir, "real.mp4"));
+}
+
+#[cfg(unix)]
+#[test]
+fn video_export_args_gives_beta_the_target_of_a_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("a.json");
+    write_fixture(&input, false);
+    let link = dir.path().join("out.mp4");
+    std::os::unix::fs::symlink(dir.path().join("real.mp4"), &link).unwrap();
+    let args = video_export_args(&options(
+        &input,
+        &link.to_string_lossy(),
+        ExportFormat::Video,
+    ))
+    .unwrap();
+    let expected = dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("real.mp4")
+        .to_string_lossy()
+        .to_string();
+    let at = args.iter().position(|a| a == "--output").unwrap();
+    assert_eq!(args[at + 1], expected);
+}
+
+#[cfg(unix)]
+#[test]
+fn web_export_args_refuses_a_link_to_a_file_without_a_web_ending() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("a.json");
+    write_fixture(&input, false);
+    let target = dir.path().join("notes.txt");
+    fs::write(&target, b"keep").unwrap();
+    let link = dir.path().join("page.html");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let err =
+        web_export_args(&options(&input, &link.to_string_lossy(), ExportFormat::Web)).unwrap_err();
+    assert!(matches!(err, NleError::ExportError(_)), "got {err}");
+    assert!(err.to_string().contains("must end in"), "got {err}");
+}
+
+/// A link whose chain ends at a path that is not valid UTF-8 is refused.
+/// `beta` takes the output path as text, and a lossy text names a different
+/// file. APFS keeps such a target in a link, but it refuses such a file name,
+/// thus each link ends at a missing file.
+#[cfg(unix)]
+#[test]
+fn export_args_refuse_a_link_to_a_name_that_is_not_utf8() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("a.json");
+    write_fixture(&input, false);
+    let cases: [(&str, &[u8], ExportFormat); 2] = [
+        ("out.mp4", b"x\xff.mp4", ExportFormat::Video),
+        ("page.html", b"x\xff.html", ExportFormat::Web),
+    ];
+    for (name, target, format) in cases {
+        let link = dir.path().join(name);
+        std::os::unix::fs::symlink(OsStr::from_bytes(target), &link).unwrap();
+        let export = options(&input, &link.to_string_lossy(), format);
+        let result = match export.format {
+            ExportFormat::Video => video_export_args(&export),
+            ExportFormat::Web => web_export_args(&export),
+        };
+        let Err(NleError::ExportError(text)) = result else {
+            panic!("{name}: expected an ExportError, got {result:?}");
+        };
+        assert!(text.contains("not valid UTF-8"), "{name}: {text}");
+    }
+}
+
 #[test]
 fn run_blocking_runs_the_work_on_another_thread() {
     let caller = std::thread::current().id();
@@ -501,7 +752,7 @@ const SUCCEEDING_BETA: &str = "#!/bin/sh\nexit 0\n";
 
 /// A `beta` that prints its arguments on stderr, then fails.
 #[cfg(unix)]
-const FAILING_BETA: &str = "#!/bin/sh\nprintf '%s\\n' \"$*\" >&2\nexit 1\n";
+pub(crate) const FAILING_BETA: &str = "#!/bin/sh\nprintf '%s\\n' \"$*\" >&2\nexit 1\n";
 
 /// A `beta` that succeeds only when its stdin is `/dev/null`.
 #[cfg(unix)]
@@ -517,7 +768,7 @@ const NULL_STDIN_BETA: &str = "#!/bin/sh\n\
 /// 26.04 refuse to run under a name other than their own. The writer of
 /// `gitscratch` stops the ETXTBSY race of a written script on Linux.
 #[cfg(unix)]
-fn home_with_beta_script(script: &str) -> tempfile::TempDir {
+pub(crate) fn home_with_beta_script(script: &str) -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join(".cargo").join("bin");
     fs::create_dir_all(&bin).unwrap();
@@ -527,7 +778,7 @@ fn home_with_beta_script(script: &str) -> tempfile::TempDir {
 
 /// The variables of a run from Finder, with `home` as the home directory.
 #[cfg(unix)]
-fn finder_vars(home: &tempfile::TempDir) -> impl Fn(&'static str) -> Option<OsString> {
+pub(crate) fn finder_vars(home: &tempfile::TempDir) -> impl Fn(&'static str) -> Option<OsString> {
     vars(&[
         (PATH_NAME, FINDER_PATH),
         (HOME_NAME, home.path().to_str().unwrap()),
@@ -562,7 +813,7 @@ fn beta_command_finds_beta_in_cargo_bin_from_the_finder_path() {
 fn run_beta_returns_the_output_path_when_beta_succeeds() {
     let home = home_with_beta_script(SUCCEEDING_BETA);
 
-    let result = block_on(run_beta(&[], "out.mp4", finder_vars(&home)));
+    let result = block_on(run_beta(&[], "out.mp4", finder_vars(&home), |_| {}));
 
     assert_eq!(result.unwrap(), "out.mp4");
 }
@@ -574,13 +825,39 @@ fn run_beta_reports_the_stderr_of_a_failed_beta() {
     let missing = home.path().join("no-such-file");
     let args = vec![missing.to_string_lossy().to_string()];
 
-    let result = block_on(run_beta(&args, "out.mp4", finder_vars(&home)));
+    let result = block_on(run_beta(&args, "out.mp4", finder_vars(&home), |_| {}));
 
     let Err(NleError::ExportError(text)) = result else {
         panic!("expected an ExportError, got {result:?}");
     };
     assert!(text.contains("beta export failed"), "got {text}");
     assert!(text.contains("no-such-file"), "got {text}");
+}
+
+/// A `beta` that prints one frame line, then waits for the marker file that
+/// its first argument names. It gives up after about 20 seconds.
+#[cfg(unix)]
+const WAITING_BETA: &str = "#!/bin/sh\n\
+    echo 'Processed frame 1 / 2'\n\
+    i=0; while [ ! -e \"$1\" ]; do i=$((i+1)); \
+    if [ \"$i\" -gt 200 ]; then echo 'no progress arrived' >&2; exit 1; fi; \
+    sleep 0.1; done; exit 0\n";
+
+#[cfg(unix)]
+#[test]
+fn run_beta_reports_progress_while_beta_runs() {
+    let home = home_with_beta_script(WAITING_BETA);
+    let marker = home.path().join("progress-arrived");
+    let args = vec![marker.to_string_lossy().to_string()];
+    let mut reported = Vec::new();
+
+    let result = block_on(run_beta(&args, "out.mp4", finder_vars(&home), |progress| {
+        reported.push(progress);
+        fs::write(&marker, b"").unwrap();
+    }));
+
+    assert_eq!(result.unwrap(), "out.mp4");
+    assert_eq!(reported, [ExportProgress::Frames { done: 1, total: 2 }]);
 }
 
 /// The variable that makes the probe test run. It is set only by the outer
@@ -600,7 +877,7 @@ fn stdin_probe_runs_beta_with_the_stdin_of_this_process() {
     }
     let home = home_with_beta_script(NULL_STDIN_BETA);
 
-    let result = block_on(run_beta(&[], "out.mp4", finder_vars(&home)));
+    let result = block_on(run_beta(&[], "out.mp4", finder_vars(&home), |_| {}));
 
     assert_eq!(result.unwrap(), "out.mp4");
 }

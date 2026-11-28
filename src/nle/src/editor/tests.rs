@@ -1,6 +1,7 @@
 //! Tests for the edit operations and the editor.
 
 use super::*;
+use crate::export::{ExportProgress, ExportRequest, ExportTarget};
 use crate::types::{
     ChapterId, ChapterMarker, EventType, FilterKind, FilterOptions, FilterRegion, TimelineTrack,
 };
@@ -794,6 +795,71 @@ fn update_chapter_with_a_blank_label_is_refused_and_changes_nothing() {
     }));
 
     assert_eq!(editor.project(), &before);
+}
+
+// Tests of `Editor::export`.
+
+fn recording_request(file: &std::path::Path) -> ExportRequest {
+    ExportRequest {
+        output_path: file.to_path_buf(),
+        target: ExportTarget::Recording {
+            compress: Some(false),
+        },
+    }
+}
+
+#[tokio::test]
+async fn export_reports_rendering_first_and_writes_the_rendered_recording() {
+    let editor = trimmed_editor();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("out.json");
+    let reported = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let collected = Arc::clone(&reported);
+
+    let result = editor
+        .export(recording_request(&file), move |progress| {
+            collected.lock().unwrap().push(progress);
+        })
+        .await;
+
+    assert_eq!(
+        *reported.lock().unwrap(),
+        [ExportProgress::Rendering, ExportProgress::Writing]
+    );
+    assert_eq!(result.unwrap(), file);
+    assert_eq!(Recording::load(&file).unwrap(), editor.render().unwrap());
+}
+
+#[tokio::test]
+async fn the_export_future_does_not_borrow_the_editor() {
+    let editor = trimmed_editor();
+    let expected = editor.render().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("out.json");
+
+    let future = editor.export(recording_request(&file), |_| {});
+    drop(editor);
+    future.await.unwrap();
+
+    assert_eq!(Recording::load(&file).unwrap(), expected);
+}
+
+#[tokio::test]
+async fn export_writes_the_render_with_the_filters_of_the_project() {
+    let mut editor = dilation_editor();
+    editor.apply(dilation(10.0, 2.0)).unwrap();
+    let unfiltered = dilation_editor().render().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("out.json");
+
+    editor
+        .export(recording_request(&file), |_| {})
+        .await
+        .unwrap();
+
+    let written = Recording::load(&file).unwrap();
+    assert_eq!(written, editor.render().unwrap());
+    assert_ne!(written.duration, unfiltered.duration);
 }
 
 // Tests of `Editor::apply_renderable`.

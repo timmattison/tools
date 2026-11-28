@@ -6230,9 +6230,9 @@ cargo tauri build --no-bundle   # the binary is target/release/msgs
 
 A desktop application for the terminal recordings that `beta` writes. It opens
 a `.json` or `.json.gz` recording, makes an edit project of it, shows its
-metadata, shows its clips on a timeline, and plays the edited recording in its
-preview pane. The window can add, edit, and remove the chapter markers of the
-project, and the timeline shows them.
+metadata, shows its clips on a timeline, plays the edited recording in its
+preview pane, and exports the edited recording. The window can add, edit, and
+remove the chapter markers of the project, and the timeline shows them.
 
 The preview pane draws the terminal of the edited recording at the playhead.
 Drag the playhead control under **Timeline** to go to a time. **Play** plays
@@ -6452,11 +6452,6 @@ that moves the playhead to its chapter waits for the playhead on the timeline
 playhead. The playhead is a time of the edited recording, but the time of a
 chapter is before the filters.
 
-The crate also has functions that save the rendered recording
-(`Editor::save_recording`), list the recordings in a directory, and export a
-recording through the `beta` CLI as a video or a web player. The window does
-not call them yet.
-
 ### The cursor filter
 
 The `cursor` filter sets how the cursor looks in the rendered recording. It
@@ -6614,7 +6609,50 @@ The limits:
   keys keeps its oldest keys. A terminal of more than 1,048,576 cells fails the
   render.
 
-The export functions run `beta` with the PATH of the app, then
+### Export
+
+The export bar in the menu bar writes the edited recording. The editor first
+renders the project into one `beta` recording, with each filter, clip, and time
+change applied. Then it writes that recording in the format that you pick:
+
+| Format | File | How |
+| ------ | ---- | --- |
+| Beta recording | `.json` or `.json.gz` | The editor writes it. `beta play` plays it, and the editor opens it again. |
+| Web page | `.html` | `beta export web`, with a theme and an option to compress the embedded recording. |
+| MP4 video or GIF | `.mp4` or `.gif` | `beta export video`, with a theme, the frame rate (FPS), the resolution (`WIDTHxHEIGHT`), and an option to optimize for the web. An empty field leaves the value to `beta`. |
+
+To export:
+
+1. Open a recording.
+2. Select the format and the settings in the export bar.
+3. Click **Export**, then select the file in the save dialog.
+
+The save dialog offers `<name>-edited` with the ending of the format, in the
+folder of the recording. If the file name that you type has a different
+ending, the editor replaces it with the ending of the format. If the file that
+you select is a symbolic link, the export writes the file that the link points
+to, and keeps the link. That file must have the same ending as the link, so a
+link `out.mp4` to `real.gif` is refused.
+
+Open Recording and Export are disabled while a dialog, a load, or an export
+runs. Thus a new recording cannot open during an export, and an export cannot
+start during an open.
+
+For a web page or a video, the editor writes the rendered recording to a
+temporary file and runs `beta export` on it. The editor deletes the temporary
+file when `beta` stops. During a video export, the bar shows the frame count
+that `beta` reports (`Processed frame N / M`). When the export ends, the bar
+shows the path of the file. If the export fails, the error banner shows the
+reason.
+
+In code, `Editor::export` does the render and the export, and reports each
+stage through an `ExportProgress` callback. `Editor::save_recording` writes the
+rendered recording only.
+
+The crate also has functions that list the recordings in a directory, and
+export a recording file through the `beta` CLI as a video or a web player.
+
+The export runs `beta` with the PATH of the app, then
 `$CARGO_HOME/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.
 A macOS app that starts from Finder or the Dock gets only the system PATH.
 `beta` runs `ffmpeg` through the same PATH.
