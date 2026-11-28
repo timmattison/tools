@@ -70,6 +70,22 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
 
 ## The tools
 
+- [aa](src/aa/README.md) — Quickly prints your AWS caller identity as JSON, no pager.
+- [aws2env](src/aws2env/README.md) — Converts AWS credentials/config into env-var exports (use with `eval $(aws2env)`).
+- [beta](src/beta/README.md) — Records and replays terminal sessions; exports to HTML players or MP4/GIF.
+- [bibibi](src/bibibi/README.md) — Finds the commit that caused a regression, with a test from a later commit.
+- [bm](src/bm/README.md) — Bulk Move — recursively find and move files matching a pattern to a destination.
+- [cctop](src/cctop/README.md) — Claude Code top — one row for each live Claude Code session with its state, and a macOS notification when a session needs you.
+- [cdknuke](src/cdknuke/README.md) — Removes `cdk.out` directories from AWS CDK projects throughout a repo.
+- [cdva](src/cdva/README.md) — Count da various attributes — counts the lines of a tree the way `cloc` does, and reports the test code apart from the production code.
+- [cf](src/cf/README.md) — Count Files — recursively counts files, with optional suffix/prefix/substring filters.
+- [chf](src/chf/README.md) — ch find — finds a Claude Code session by the words in its messages, from any directory, and resumes it with `ch` or `che`.
+- [clipboard-random](src/clipboard-random/README.md) — Generates random binary or Zalgo text data and copies it to the clipboard.
+
+### Not moved yet
+
+These tools keep their long entries in this file until each one moves to `src/<tool>/README.md`.
+
 - dirhash
     - Gets a SHA256 hash of a directory tree. This is useful for comparing two directories to see if they are
       identical. This hash will only be the same if the directories have the same file names and the same file contents.
@@ -105,11 +121,6 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
       (e.g. `--substring G_00`). Without filters, it shows the total size of all files. Doesn't assume suffixes have 
       a period in front of them so you need to include that if you want it.
     - To install: `cargo install --git https://github.com/timmattison/tools sf`
-- cf (count files)
-    - Recursively counts files in the specified directories. Without filters, counts all files. Supports optional
-      filtering by suffix (e.g. `--suffix .mkv`), prefix (e.g. `--prefix IMG_`), or substring (e.g. `--substring G_00`).
-      The same as doing `find . | wc -l` but shorter and faster.
-    - To install: `cargo install --git https://github.com/timmattison/tools cf`
 - tc (token count)
     - Counts estimated tokens in files, similar to how `wc` counts words/lines/characters. Useful for estimating
       LLM API costs and checking if content fits within context windows. Supports multiple OpenAI tokenizer models
@@ -136,11 +147,6 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
     - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
       reads the clipboard each 500 ms, and the mosh-rs client allows only 5 pastes in each 10 seconds.
     - To install: `cargo install --git https://github.com/timmattison/tools jsonboard`
-- bm
-    - Bulk Move - recursively find and move files matching a pattern to a destination directory. Named "bm" because
-      moving lots of files is shitty. Much simpler than `find ... -exec mv`, especially for common tasks like moving
-      all files of a certain type. Collision-safe by default and handles moves across volumes (where `rename` fails).
-    - To install: `cargo install --git https://github.com/timmattison/tools bm`
 - unescapeboard
     - Waits for text with `\\"` in it to be put on the clipboard and then unescapes one level of it.
     - In a mosh-rs session, it watches the clipboard of the server, not the clipboard of your client computer. It
@@ -346,13 +352,6 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
       repository
       and could be candidates for Git LFS or removal.
     - To install: `cargo install --git https://github.com/timmattison/tools glo`
-- clipboard-random
-    - Generates random data and copies it to the clipboard. Supports two modes: binary data (with hex, base64, or raw 
-      output formats) and text with diacritics (Zalgo text). Features include customizable parameters, presets for 
-      text generation (mild, scary, insane, zalgo, doom), and a dry run mode to preview without copying.
-    - In a mosh-rs session, the data goes to the clipboard of your client computer, through the `pbcopy` shim that the
-      mosh-rs server puts on `PATH`.
-    - To install: `cargo install --git https://github.com/timmattison/tools clipboard-random`
 - freeport
     - Finds a free TCP port on localhost (127.0.0.1) quickly and cross-platform. Supports random or sequential port 
       selection, custom port ranges, and can include privileged ports. Useful for development servers, testing 
@@ -410,11 +409,6 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
       `--hidden` flag to include hidden directories in the search, and `--worktrees` flag to include
       git worktrees in the search.
     - To install: `cargo install --git https://github.com/timmattison/tools nodenuke`
-- cdknuke
-    - Removes cdk.out directories from AWS CDK projects throughout a repository. Uses the same intelligent
-      directory scanning as nodenuke. Supports `--no-root` flag to start from current directory instead of
-      git root, and `--hidden` flag to include hidden directories in the search.
-    - To install: `cargo install --git https://github.com/timmattison/tools cdknuke`
 - nodeup
     - Updates npm/pnpm/yarn packages in all directories with package.json. Intelligently detects which
       package manager to use based on lock files. Supports `--latest` flag for major version updates,
@@ -441,18 +435,6 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
       parallel deletion with 10 concurrent operations, automatic pagination handling with the `--all` flag, 
       and progress tracking. Includes safety confirmation prompts and retry logic for reliability.
     - To install: `cargo install --git https://github.com/timmattison/tools r2-bucket-cleaner`
-- aws2env
-    - Converts AWS credentials from `~/.aws/credentials` and `~/.aws/config` files into environment variable 
-      export commands. Supports multiple profiles, lists available profiles, and generates exports for 
-      AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, and AWS_REGION. Use with `eval $(aws2env)` 
-      to apply exports to current shell.
-    - To install: `cargo install --git https://github.com/timmattison/tools aws2env`
-- aa
-  - AWS Account - quickly get AWS account information without a pager. Runs the equivalent of
-    `aws sts get-caller-identity` but as a simple Rust binary that outputs JSON directly to stdout.
-    Perfect for when you need to check which AWS account you're using frequently and don't want to
-    type the full AWS CLI command or deal with pager output.
-  - To install: `cargo install --git https://github.com/timmattison/tools aa`
 - nwt
   - New Worktree - Creates a new git worktree with a randomly generated Docker-style name
     (e.g., "absurd-rock", "zesty-penguin"). Supports config files (~/.nwt.toml), custom branch
@@ -1013,11 +995,6 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
     search and replay. `tsm shell-init <shell>` emits the hook snippet to eval; `tsm record` is the
     per-command recorder invoked by the hook.
   - To install: `cargo install --git https://github.com/timmattison/tools tsm`
-- beta
-  - Terminal session recorder and player — because Betamax was always better than VHS. Captures
-    terminal I/O with microsecond timestamps, replays with speed control / pause / rewind, and can
-    export recordings to self-contained HTML players or MP4/GIF videos with multiple themes.
-  - To install: `cargo install --git https://github.com/timmattison/tools beta`
 - vpn-tunnel
   - Generates Docker-based VPN tunnels using gluetun + ProtonVPN + WireGuard. Produces a ready-to-run
     `docker-compose.yml` plus helper scripts. Reads the `credential*` fields of a 1Password item
@@ -1086,10 +1063,6 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
     the workspace, finds every member that produces a binary, and runs `cargo install` for each.
     Useful for installing this entire toolbox at once.
   - To install: `cargo install --git https://github.com/timmattison/tools kitchen-sync`
-- claude-usage
-  - Parses an Anthropic API usage CSV export and computes per-model costs using built-in pricing for
-    each Claude model. Useful for reconciling spend or estimating burn across date ranges.
-  - To install: `cargo install --git https://github.com/timmattison/tools claude-usage`
 - swt (subagent worktree)
   - Subagent worktree helper for parallel TDD. `swt create <name>` spins up an isolated worktree on a
     new branch and runs the green check *inside* it — a clean checkout of HEAD, so uncommitted parent
@@ -1576,78 +1549,6 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
     `krt hunt`, `krt hunt --rounds 16 --max-targets 256 --concurrency 16`
   - To install: `cargo install --git https://github.com/timmattison/tools krt`
 
-- cdva (count da various attributes)
-  - Counts the lines of a tree the way `cloc` does — files, blank rows, comment rows, code rows —
-    and reports the test code apart from the production code. `Test code` is a part of `Code`
-    rather than a column beside it: for every file, and for every row of the table, the production
-    count plus the test count is the whole count.
-  - It finds the test code *inside* a production file, which `cloc`, `tokei`, `scc`, and `gocloc`
-    cannot do. A Rust source with a `#[cfg(test)] mod tests` at the bottom holds production code
-    and test code in one file, and one number for that file hides it.
-  - Over this repository:
-
-    ```
-    Language    Files   Blank  Comment     Code |  Test files  Test code  Test %
-    ----------------------------------------------------------------------------
-    Rust          309  15,792   40,625  105,826 |         220     62,745   59.3%
-    Markdown       50   2,976        0   10,847 |           0          0    0.0%
-    Go             19     403      232    1,574 |           7        152    9.7%
-    TOML           85     259      124    1,463 |           0          0    0.0%
-    TypeScript      7      86       95      496 |           6        225   45.4%
-    Shell           6      70       64      321 |           0          0    0.0%
-    C#              5      11        1       96 |           5         96  100.0%
-    JSON            3       0        0       78 |           2         66   84.6%
-    Java            5      19        3       71 |           5         71  100.0%
-    Ruby            6       9        8       70 |           6         70  100.0%
-    JavaScript      6       9        0       63 |           6         63  100.0%
-    TSX             4       6        0       61 |           4         61  100.0%
-    Elixir          4       8        0       48 |           4         48  100.0%
-    Python          9      25        1       47 |           9         47  100.0%
-    Kotlin          4      13        1       42 |           4         42  100.0%
-    Swift           4       8        1       41 |           4         41  100.0%
-    Zig             3       6        4       21 |           3         21  100.0%
-    YAML            1       7        0       17 |           0          0    0.0%
-    Perl            1      11       15       16 |           0          0    0.0%
-    ----------------------------------------------------------------------------
-    Total         531  19,718   41,174  121,198 |         285     63,748   52.6%
-    ```
-
-  - Two rules mark the test code. The path rule reads a name — `*_test.go`, `tests/**`,
-    `*.spec.*`, `testdata/**`, and 30 more — and marks the whole file. The tree rule parses what
-    is left with tree-sitter and marks the span of each test node inside it: a `#[cfg(test)]`
-    module, a Go `func TestX`, a Zig `test` block, a `pytest` decorator, a Jest `describe`, a
-    JUnit `@Test`, an xUnit `[Fact]`, an RSpec `describe`, an `XCTestCase`, an ExUnit `test`.
-    Thirteen grammars carry a tree rule — Rust, Go, Zig, Python, JavaScript, TypeScript, TSX,
-    Java, Kotlin, C#, Ruby, Swift, and Elixir — and 40 languages are counted in all.
-  - The flags a reader needs first:
-
-    | Flag | What it does |
-    | --- | --- |
-    | `--by-file` | One row for each file rather than one for each language. `--sort` and `--top` order the rows and trim them, and the total still covers every file. |
-    | `--json` | The whole report as JSON: every row, both buckets, the files whose parse failed, and the files whose scan ended inside a string. |
-    | `--csv` | The same report as CSV, one row to a line. |
-    | `--explain <PATH>` | Answer for one file instead of printing a table: the rows a rule marked, and which rule marked them. |
-    | `--no-tree` | Read no syntax tree. The path rule alone decides, which runs in about half the wall time and finds no test code inside a production file. |
-    | `--strict` | Fail the run when the parse of any file failed. |
-    | `--test-glob <GLOB>` | Mark a path as test material. `--production-glob` holds one out of the test bucket, and wins over `--test-glob`. |
-
-  - A file whose parse failed counts entirely as production code, which is the safe reading of a
-    tree nobody could read and a silent one, so the table names such files under it. `--strict`
-    puts the same news in the exit status. Careful with the pair: `--no-tree` parses nothing at
-    all, so no parse can fail and `--strict` under it always passes.
-  - A second footer names the files whose scan ended inside a string or a block comment. Valid
-    source almost never ends that way, so such a file is a row of the language table reading a
-    construct wrong — a JavaScript regular expression that holds a backtick is one — and every row
-    behind that construct carries the wrong label. This fault moves rows between the comment count
-    and the code count and moves none between the two buckets, so `--strict` says nothing about it
-    and the two lists stay apart.
-  - `src/cdva/README.md` carries the limits. The one to know before reading a number is that a
-    test helper standing outside a test node counts as production code: tree-sitter reads syntax
-    and resolves no names, so it sees `#[test]` and cannot see that a helper exists only to serve
-    the tests.
-  - Usage: `cdva`, `cdva src --by-file --top 20`, `cdva --json`, `cdva --tests-only`,
-    `cdva --explain src/gsw/src/age.rs`, `cdva --test-glob 'harness/**'`, `cdva --no-tree`
-  - To install: `cargo install --git https://github.com/timmattison/tools cdva`
 - wn (what's next)
   - Walks a chain of GitHub issues in the order it is written — `wn "#277 → #278 ∥ #279 → #280"`
     — and names the first one that is still open. Prints one row for each issue in the chain,
@@ -2334,6 +2235,19 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
       queue two times has two rows.
     - These rows show no workflow runs and no jobs. The runs of a merge group show in "Running"
       and in "Last 8h", on a branch that starts with `gh-readonly-queue/`.
+    - Enter on a "Merge queue" row opens the run of the merge group of that entry. Thus one key
+      press shows the live checks. The runs of an entry are the runs on the board of the same
+      repository that test the commit of its merge group (`head_sha`), on a branch that starts
+      with `gh-readonly-queue/`. Two attempts of one pull request on one base have the same
+      branch, thus only the commit tells them apart. The `push` run of the merged commit tests the
+      same commit, but its branch is the default branch. When a merge group has more than one run,
+      Enter opens a failed run, because that failure takes the entry out of the queue. Else it
+      opens an active run, else the run that GitHub created last, and in a tie the run with the
+      lowest ID. When the board holds no run of the merge group, Enter opens the pull request,
+      and the status line says `no run of the merge group of #<N>: opened the pull request`.
+      This occurs while the entry waits for its turn, because GitHub did not make its merge group
+      yet, and before GitHub starts a run of the merge group. Enter sends no request to GitHub.
+    - Enter on a "Merge history" row opens the pull request.
     - When the queue merges a pull request, `github-merge-queue[bot]` removes it from the queue, and
       GitHub writes the `merged` event in the same second or the next second. `ha` reads the two
       events as one merge. A merge more than 60 seconds after a removal by the queue, or after a
@@ -2588,7 +2502,9 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
     press of Right or Left on a pull request row does nothing. Two fast presses of Right expand
     every run, and two fast presses of Left collapse every run, also from a pull request row. A
     held Right or Left does the same, because the terminal sends each repeat as a new press. Enter
-    opens the highlighted pull request, run, or job in the browser, and `ha` keeps running. The
+    opens the highlighted run or job in the browser, and `ha` keeps running. On a "Merge queue"
+    row, Enter opens the run of the merge group of the entry, or the pull request when the board
+    holds no such run. On a "Merge history" row, Enter opens the pull request. The
     page of a job shows its log. A job that has no address opens the page of its run. The highlight
     stays on the same job through each refresh. It also stays on the same pull request. When a pull
     request leaves the queue, the highlight stays at the same position.
@@ -5134,84 +5050,6 @@ The function sends `--status`, `--forks`, `--help`, `-h`, `--version`, `-V`, and
 - `12`: `--user <name>` named no account with a `.claude/projects` tree (a typo, or an account that never ran Claude); the message lists the accounts you can resume from
 - `13`: `--expand`: the transcript has a compaction that `crap` cannot undo; the message names the boundary or the summary, and no import was written
 
-## bm (bulk move)
-
-Recursively find and move files matching a pattern (suffix, prefix, or substring) to a destination directory. Named "bm" because moving lots of files is shitty.
-
-Unlike a bare `mv`/`rename`, bm is collision-safe by default (it refuses to silently overwrite) and transparently handles **moves across volumes** — where `rename(2)` fails with a cross-device error — by copying then deleting, with a progress bar.
-
-### Basic Usage
-
-```bash
-bm --suffix .jpg --destination ~/Pictures/photos
-bm --prefix IMG_ --destination ~/Pictures/camera ~/Downloads
-bm --substring 2024 --destination ~/archive/2024
-```
-
-### Options
-
-- `-s`, `--suffix <SUFFIX>`: Match files ending with this string (e.g., `.jpg`, `.mkv`)
-- `-p`, `--prefix <PREFIX>`: Match files starting with this string (e.g., `IMG_`, `video_`)
-- `--substring <SUBSTRING>`: Match files containing this string anywhere in the name
-- `-d`, `--destination <DIR>`: Directory to move matching files to (required; must already exist)
-- `--on-collision <POLICY>`: What to do when a destination name already exists or repeats within the batch — `abort` (default), `skip`, `rename`, or `overwrite`
-- `--dry-run`: Show what would be moved without moving anything
-- `[DIR]...`: Directories to search (defaults to the current directory)
-
-**Note:** Exactly one of `--suffix`, `--prefix`, or `--substring` must be specified.
-
-### Collision handling
-
-If two matched files would land on the same destination name — because the destination already contains that name, or because two source files share a basename — bm does not silently clobber. Choose the behavior with `--on-collision`:
-
-- **`abort`** (default): report every collision and move nothing.
-- **`skip`**: move the non-colliding files, leave the colliding ones in place.
-- **`rename`**: move everything, disambiguating names (`foo.mkv` → `foo-1.mkv`), preserving extensions.
-- **`overwrite`**: move everything, letting later files clobber earlier ones (lossy).
-
-### Cross-volume moves
-
-A plain `rename(2)` cannot move a file between filesystems (e.g. internal disk → an external `/Volumes/...` drive); it fails with a cross-device error. bm detects this and falls back to a chunked copy (with a progress bar) followed by deleting the source, so the same command works whether or not the destination is on the same volume:
-
-```bash
-bm --suffix .mkv --destination /Volumes/Backup/videos
-```
-
-### Why use bm instead of mv?
-
-```bash
-# Moving all .mkv files to a backup drive, with mv + find (verbose, error-prone,
-# and find's mv fails file-by-file across volumes):
-find . -name "*.mkv" -exec mv {} /Volumes/Backup/videos/ \;
-
-# With bm (simple, collision-safe, cross-volume aware):
-bm --suffix .mkv --destination /Volumes/Backup/videos
-```
-
-### Examples
-
-Preview moving every file from 2024 without touching anything:
-```bash
-bm --substring 2024 --destination ~/archive/2024 --dry-run
-```
-
-Organize photos, keeping every file even on name clashes:
-```bash
-bm --prefix IMG_ --on-collision rename --destination ~/Pictures/iphone ~/Downloads
-```
-
-Move PDFs from several directories at once:
-```bash
-bm --suffix .pdf --destination ~/Documents/pdfs ~/Downloads ~/Desktop /tmp
-```
-
-### Output
-
-On completion, bm prints a summary:
-```
-Move complete: 42 moved (40 renamed, 2 copied across volumes), 0 skipped in 1.23s (34 files/sec)
-```
-
 ## zth (zero the hero)
 
 Recursively hunt down files that are larger than zero bytes and contain nothing but zero bytes, and print their absolute paths. Named for the relaxing Cannibal Corpse cover of Black Sabbath's "Zero the Hero".
@@ -6037,123 +5875,6 @@ The one entry of `findings` in the same document:
 cargo install --git https://github.com/timmattison/tools wdid
 ```
 
-## bibibi (bye bye bye)
-
-Find the commit that caused a regression, with a test from a later commit. The name is a reference to the NSYNC song "Bye Bye Bye": `bibibi` finds the bad commit, and then you can say goodbye to it.
-
-TDD gives a red commit that proves a bug. The next question is often "which commit caused this bug?" `git bisect` answers that question, but it cannot use the red test. At each step, bisect puts the tree of an older commit in the working directory, and the red test is part of a newer tree. `git help bisect` gives a workaround ("Automatically bisect with temporary modifications"), and each person writes that script again. A script written by hand blames an unrelated commit when the build fails there, stops when a signal kills the test, never tests the two ends of the range, and can leave the tree dirty for the next checkout.
-
-`bibibi` makes that procedure one command:
-
-1. It takes the change of the test commit one time, as a patch (`git diff-tree -p --binary --full-index`).
-2. It refuses a test commit that is a merge or a root commit or that changes no file, and a `--good` commit that is not an ancestor of the bad commit.
-3. It makes a scratch worktree in a temporary directory. Your checkout does not change.
-4. At each commit that it tests, it checks out the commit, applies the patch (`git apply`, then `git apply --3way`), runs the build, runs the test, and restores the tree (`git reset --hard`, then `git clean -fd`).
-5. Before the search, it runs the test at each `--good` commit and at the bad commit (the pre-flight). If a good commit does not pass or the bad commit does not fail, it refuses, and the output of the build and the test is already on standard error.
-6. It chooses each next commit from `git rev-list --bisect-all`, and keeps the search state in memory. It never runs `git bisect`, so a Ctrl-C leaves no `refs/bisect/*` and no `BISECT_LOG`.
-
-### Basic Usage
-
-```bash
-# HEAD is the red commit that adds the test, and v1.4.0 is a release where the test passes
-bibibi --good v1.4.0 -- cargo test -q --test regression_add
-
-# Build first. A commit that does not build is a skip, not a bad commit
-bibibi --good v1.4.0 --build 'cargo test --no-run -q' -- cargo test -q --test regression_add
-
-# The test commit is not HEAD, the bad commit is not its parent, and two branches merged
-bibibi 3f2a1bc --good a1b2c3d --good d4e5f6a --bad 9e8d7c6 -- sh tests/add.sh
-
-# A test that can hang
-bibibi --good v1.4.0 -- timeout 60 cargo test -q --test regression_add
-```
-
-### Options
-
-```text
-bibibi [<test-commit>] --good <commit>... [--bad <commit>] [--build <command>] -- <test-command>...
-```
-
-- `<test-commit>`: The commit that adds the test. Defaults to `HEAD`, which is usually the red commit that you just made. It must have one parent and change at least one file. If the test is in more than one commit, squash it into one red commit first.
-- `--good <commit>`: A commit where the test passes. Necessary. Give the flag more than once for more than one good commit, for example one on each branch of a merge.
-- `--bad <commit>`: A commit where the test fails. Defaults to the parent of the test commit, which has the bug but not the test.
-- `--build <command>`: A shell command that runs before the test, through `sh -c`. If it exits non-zero or a signal stops it, `bibibi` skips the commit.
-- `-- <test-command>...`: The test. `bibibi` runs it as an argument vector, without a shell. Write `-- sh -c '...'` when you need a shell.
-- `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
-- `-h`, `--help`: Print the usage.
-
-The build and the test run in the root of the scratch worktree, with `/dev/null` as standard input. Their standard output and standard error go to the standard error of `bibibi`, so the standard output of `bibibi` holds only the result. They get your environment without the `GIT_` variables that a git hook exports (`GIT_DIR`, `GIT_INDEX_FILE`, and the others), so a `bibibi` that a hook starts does not aim the test at a different repository. The six variables that a person sets on purpose stay: `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_ASKPASS`, and `GIT_TERMINAL_PROMPT`.
-
-### The verdict at one commit
-
-| Result | Verdict |
-| --- | --- |
-| The patch does not apply, also with `--3way` | skip |
-| The build exits non-zero, or a signal stops it | skip |
-| The test exits 0 | good |
-| The test exits 125 | skip |
-| The test exits with a different code | bad |
-| A signal stops the test | bad |
-
-A skip never blames a commit. If skips leave more than one commit that can be the first bad commit, `bibibi` names each of them and exits 1.
-
-### What it prints
-
-Standard error has one line for each commit that `bibibi` tests: the short id, the verdict, the subject, the reason for a skip, and the approximate number of steps left. The subject gets shorter to fit the terminal. Standard output has only the result: the full id and the subject of the first bad commit.
-
-```
-$ COLUMNS=80 bibibi --good 0ea2e3d -- sh tests/add.sh
-test: add(2, 2) must be 4
-bibibi: 0ea2e3d good add the add function - pre-flight
-test: add(2, 2) must be 4
-bibibi: 9e5dd09 bad  write note 10 - pre-flight
-test: add(2, 2) must be 4
-bibibi: 40b0a0f bad  simplify the arithmetic - about 1 step left
-test: add(2, 2) must be 4
-bibibi: 50ce507 good write note 3 - about 1 step left
-test: add(2, 2) must be 4
-bibibi: 5a88026 good write note 5 - about 0 steps left
-40b0a0f0eb62646296305a44a2183e911ccfe825 simplify the arithmetic
-```
-
-The `test:` lines are the output of the test script. When the build fails at the culprit and at its parent, skips leave more than one candidate. Standard output then has one line for each candidate:
-
-```
-$ COLUMNS=80 bibibi --good 0ea2e3d --build 'test ! -f note-5.txt || test -f note-7.txt' -- sh tests/add.sh
-...
-bibibi: 40b0a0f skip simplify the ari… - the build exited 1 - about 2 steps left
-bibibi: 5a88026 skip write note 5 - the build exited 1 - about 2 steps left
-...
-40b0a0f0eb62646296305a44a2183e911ccfe825 simplify the arithmetic - skipped: the build exited 1
-5a88026130fe71a05742aca6276ffccf7f34c215 write note 5 - skipped: the build exited 1
-d09208ec7eea6e59b1a2c6b2e4df85a21c7c4708 write note 7 - bad
-bibibi: skips leave 3 candidates for the first bad commit
-```
-
-### Exit codes
-
-| Exit | Meaning |
-| --- | --- |
-| 0 | The search found one first bad commit. |
-| 1 | Skips leave more than one candidate. |
-| 2 | Usage error, refusal, or git error. |
-| 128 + signal | A signal ended the run: 129 for SIGHUP (the terminal closed), 130 for SIGINT (Ctrl-C), 143 for SIGTERM. |
-
-### Notes
-
-- **Your checkout does not change.** HEAD, the index, your uncommitted files, and the `refs/bisect/*` of a `git bisect` that you have in progress stay as they are. The scratch worktree and the patch file go away after each end of the run: a result, a refusal, an error, a panic, SIGHUP, SIGINT, or SIGTERM.
-- **A Ctrl-C never counts as a verdict.** The build and the test run in a session of their own. On SIGHUP, SIGINT, or SIGTERM, `bibibi` stops the process group of the build or the test (SIGTERM, then SIGKILL after 2 seconds), removes the scratch worktree, and exits 128 + signal. A Ctrl-C or a hangup of the terminal also reaches a git command of `bibibi`. If that git command fails first, the run can exit 2 in place of 130 or 129, and the cleanup still occurs. A second Ctrl-C during the cleanup can stop the `git worktree remove` of `bibibi` and leave the scratch worktree behind. It is in your temporary directory, and `git worktree list` shows it. Remove it with `git worktree remove --force <path>`. If its directory is already gone, run `git worktree prune`.
-- **The build and the test have no terminal.** They run with no controlling terminal, as under CI. A command that opens `/dev/tty` (a password prompt, a pager, a terminal interface) fails at once, so the commit counts as bad, or as a skip when the build fails. Wrap such a command, or give it its input in another way.
-- **The first build is cold.** Each worktree has its own `./target`, so the first build in the scratch worktree compiles everything. The restore never runs `git clean -x`, so ignored build output stays, and each build after the first is incremental. To share a build cache with your checkout, set `CARGO_TARGET_DIR`.
-- **There is no `--timeout` flag.** If a test can hang, wrap it: `-- timeout 60 cargo test ...`. `timeout` exits 124, which counts as bad.
-- **Limits.** `bibibi` does not support a test that is in more than one commit (squash it first), repositories with submodules, or Windows (`--build` runs through `sh -c`).
-
-### Install
-
-```bash
-cargo install --git https://github.com/timmattison/tools bibibi
-```
-
 ## whyslow (why slow)
 
 `whyslow` answers one question: why is this Mac slow? It takes one sample of 1 s, puts each process into a group, adds the CPU and the memory of each group, and prints a short summary of the likely cause. It uses no language model.
@@ -6467,88 +6188,6 @@ Load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.timmat
 
 ```bash
 cargo install --git https://github.com/timmattison/tools glance
-```
-
-## cctop (Claude Code top)
-
-cctop shows one row for each live Claude Code session, with its state: working, needs-you, idle, agents, or shells. A row also shows `frozen` when the process of the session is stopped. It keeps a log of the changes, and it sends a macOS notification when a session needs you. Enter brings the Zellij pane and the WezTerm window of the session to the front.
-
-To install: `cargo install --git https://github.com/timmattison/tools cctop`
-
-See [src/cctop/README.md](src/cctop/README.md) for the keys, the focus steps, and the limits.
-
-## chf (ch find)
-
-Find a Claude Code session by the words in its messages, and resume it.
-
-The `/resume` picker of Claude Code shows the sessions of one worktree by default. It does not open the expanded version of a compacted session. A person who remembers a word from a session, but not its folder, cannot find it. `chf` searches the sessions of every folder. It then resumes the session you pick with `ch` or `che`.
-
-Run `chf` and type words. The list changes at each key press. A preview of the messages around the first match shows beside the list, or below it on a terminal narrower than 100 columns.
-
-```bash
-chf
-```
-
-### Keys
-
-| Key | Action |
-| --- | --- |
-| Up, Down, `Ctrl-P`, `Ctrl-N` | Move the selection. |
-| PageUp, PageDown | Move the selection by one page. |
-| Shift-Up, Shift-Down | Scroll the preview. |
-| `Ctrl-U` | Clear the query. |
-| Enter | Resume the selected session. |
-| Esc, `Ctrl-C` | Quit. |
-
-### Matching rules
-
-- Each word is a literal text. There is no fuzzy match.
-- Each word must occur in the session. Words can occur in different messages.
-- The case rule is "smart case" for each word. A word in lowercase matches text in any case. A word with a capital letter matches only that capital letter.
-- The case folding follows Unicode.
-
-### The row
-
-Each row shows the time of the last message, a `⇊` mark with the count of compactions for a session that Claude Code compacted, the folder, and the title of the session. The preview header shows the session id, the folder, and the git branch.
-
-### A compacted session
-
-When you press Enter on a compacted session, `chf` asks which version to resume. Press `c` for `ch`, the compacted version. Press `e` for `che`, the expanded version. The question shows the token count of the conversation before the last compaction. The expanded version holds all of those tokens. Thus it can fill the context window of Claude at once. The question also tells you when the first match is in a message from before the last compaction. The compacted version holds that message only as part of a summary.
-
-### Requirements
-
-`chf` runs `crap --here` through `$SHELL -ic`. Thus:
-
-- The `crap` shell function must exist. Run `crap --shell-setup` to install it.
-- `$SHELL` must be `bash` or `zsh`. For other shells, `chf` prints the command to paste.
-- `CRAP_LAUNCHER` applies, because the shell function starts Claude.
-
-### The cache
-
-`chf` keeps its index in `<cache dir>/chf`. It writes one file for each project folder. The directory has mode 0700 and each file has mode 0600. The first run reads every transcript and shows its progress. Later runs read only the files that changed. If `chf` cannot read a project folder or the store, it counts it as unreadable and keeps its cache files. If `chf` cannot stat a transcript, it counts it as unreadable and keeps its cache entry.
-
-### What `chf` does not search
-
-- Tool calls
-- Tool results
-- Thinking blocks
-- Transcripts of subagents
-
-### Exit codes
-
-| Exit | Meaning |
-| --- | --- |
-| 0 | `chf --help` and `chf --version` print their text and exit with this code. |
-| 1 | A failure, or a `$SHELL` that is not `bash` or `zsh`. |
-| 2 | Standard input or standard output is not a terminal, or `chf` cannot find the home directory. |
-| 130 | You pressed Esc or `Ctrl-C`. |
-
-After Enter, `chf` replaces itself with the shell that runs `crap`. The exit status is then the status of that shell. This status can be any of the codes above or another code.
-
-### Install
-
-```bash
-cargo install --git https://github.com/timmattison/tools chf
 ```
 
 ## msgs (iMessage browser)
