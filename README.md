@@ -6782,9 +6782,10 @@ The properties panel holds a chapter panel. To add a chapter, type its time and
 its label, then click **Add Chapter**. The time can be seconds (`83.5`),
 `M:SS` (`1:23.5`), or `H:MM:SS` (`1:02:03.5`). **Edit** puts a chapter back in
 the form, and **Remove** deletes it. When an undo or a redo removes or changes
-the chapter in the form, the form is empty again and shows **Add Chapter**. The
-search field shows only the chapters whose label holds the search text, with no
-attention to case.
+the chapter in the form, the form is empty again and shows **Add Chapter**. If a
+redo returns the same chapter before you type in the form or click another
+**Edit**, the form shows that edit again. The search field shows only the
+chapters whose label holds the search text, with no attention to case.
 
 The list shows the chapters in time order. A chapter after the end of the
 timeline gets the note `after the end`. Each change is an edit, thus undo and
