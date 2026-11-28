@@ -438,16 +438,18 @@ impl FilterRegistry {
     /// 0. A project that breaks a rule of `EditProject::validate` is refused.
     /// 1. A project with no clip fails with `NleError::RenderError`.
     /// 2. The events are the clips spliced by the rules of the private
-    ///    `splice` module: the clips play in the order of their start (a tie
-    ///    keeps track order, then clip order), and each clip after the first
-    ///    starts with a hard cut that clears the screen.
+    ///    `splice` module. The clips play in the order of their start (a tie
+    ///    keeps track order, then clip order). The start of a clip cuts each
+    ///    clip that still plays at that time, and each clip that plays after
+    ///    the first starts with a hard cut that clears the screen.
     /// 3. The filters of the project run on them by the steps of their form,
-    ///    with the end of the timeline starting at `EditProject::duration`. A
-    ///    span filter gets the terminal size of the clip that starts first.
+    ///    with the end of the timeline starting at the end of the splice: the
+    ///    latest end of the part of a clip that plays. With no overlap, it is
+    ///    `EditProject::duration`. A span filter gets the terminal size of
+    ///    the header clip.
     /// 4. The header (`version`, `width`, `height`, `timestamp`, `command`,
-    ///    `title`, `env`) is the header of the source of the clip that starts
-    ///    first on the timeline. A tie goes to the clip that comes first in
-    ///    track order, then in clip order.
+    ///    `title`, `env`) is the header of the source of the first clip that
+    ///    plays, or of the first clip in the play order when no clip plays.
     /// 5. `duration` is the end of the timeline after the filters.
     /// 6. Each event time and the duration must be finite. Else the render
     ///    fails with `NleError::RenderError`.
