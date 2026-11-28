@@ -1423,6 +1423,177 @@ fn a_span_filter_with_no_screen_filter_before_it_is_not_told_so() {
     assert!(!seen.lock().unwrap()[0].2);
 }
 
+/// A project of one clip that holds the events `items`, each a time, a type,
+/// and data, with the filters `filters`.
+fn typed_project(items: &[(f64, EventType, &str)], filters: Vec<AppliedFilter>) -> EditProject {
+    let mut recording = source("typed", &[], 10.0);
+    recording.events = items
+        .iter()
+        .map(|(time, event_type, data)| Event {
+            time: *time,
+            event_type: event_type.clone(),
+            data: (*data).to_string(),
+        })
+        .collect();
+    let mut project = EditProject::from_recording(Arc::new(recording)).unwrap();
+    project.filters = filters;
+    project
+}
+
+/// Registers a screen filter under "crop" that writes "c" in place of the data
+/// of each output event of its region. It keeps the input events, the times,
+/// and the size.
+fn register_output_rewriter(registry: &mut FilterRegistry) {
+    registry.register_screen(kind("crop"), |events, view, _| {
+        let events = events
+            .iter()
+            .map(|event| match event.event_type {
+                EventType::Output => Event {
+                    data: "c".to_string(),
+                    ..event.clone()
+                },
+                EventType::Input => event.clone(),
+            })
+            .collect();
+        Ok(Screen {
+            events,
+            size: view.size,
+        })
+    });
+}
+
+/// The input events of `events` and then the output events, each in the order
+/// that it had.
+fn inputs_first(events: Vec<Event>) -> Vec<Event> {
+    let (mut inputs, outputs): (Vec<Event>, Vec<Event>) = events
+        .into_iter()
+        .partition(|event| event.event_type == EventType::Input);
+    inputs.extend(outputs);
+    inputs
+}
+
+/// The events of the timeline after "crop" rewrote the output event at 1 s.
+/// The input at 2 s holds "c" too, as an echo does.
+const ECHOED: [(f64, EventType, &str); 3] = [
+    (1.0, EventType::Output, "a"),
+    (2.0, EventType::Input, "c"),
+    (3.0, EventType::Output, "b"),
+];
+
+#[test]
+fn a_span_filter_after_a_span_step_that_answered_its_inputs_first_is_told_so() {
+    let (mut registry, seen) = context_spy_registry();
+    register_output_rewriter(&mut registry);
+    // The step keeps each event and its time, and lists the inputs first.
+    registry.register_span(kind("inputs-first"), |span, _, _| {
+        Ok(Span {
+            events: inputs_first(span.events),
+            length: span.length,
+        })
+    });
+
+    registry
+        .render(&typed_project(
+            &ECHOED,
+            vec![
+                range("crop", 0.5, 1.5),
+                all("inputs-first"),
+                range("look", 0.0, 1.5),
+            ],
+        ))
+        .unwrap();
+
+    assert!(seen.lock().unwrap()[0].2);
+}
+
+#[test]
+fn a_span_filter_after_an_event_step_that_answered_its_inputs_first_is_told_so() {
+    let (mut registry, seen) = context_spy_registry();
+    register_output_rewriter(&mut registry);
+    registry.register(kind("inputs-first"), |events, _| {
+        inputs_first(events.to_vec())
+    });
+
+    registry
+        .render(&typed_project(
+            &ECHOED,
+            vec![
+                range("crop", 0.5, 1.5),
+                all("inputs-first"),
+                range("look", 0.0, 1.5),
+            ],
+        ))
+        .unwrap();
+
+    assert!(seen.lock().unwrap()[0].2);
+}
+
+#[test]
+fn a_span_filter_after_a_step_that_reversed_its_outputs_is_told_so() {
+    let (mut registry, seen) = context_spy_registry();
+    register_output_rewriter(&mut registry);
+    // The step keeps each event and its time, and lists them last to first.
+    registry.register_span(kind("reverse"), |span, _, _| {
+        let mut events = span.events;
+        events.reverse();
+        Ok(Span {
+            events,
+            length: span.length,
+        })
+    });
+
+    registry
+        .render(&typed_project(
+            &[(1.0, EventType::Output, "a"), (3.0, EventType::Output, "b")],
+            vec![
+                range("crop", 0.5, 1.5),
+                all("reverse"),
+                range("look", 0.0, 1.5),
+            ],
+        ))
+        .unwrap();
+
+    assert!(seen.lock().unwrap()[0].2);
+}
+
+#[test]
+fn a_span_filter_after_a_step_that_changed_only_data_is_told_only_of_the_rewritten_part() {
+    let (mut registry, seen) = context_spy_registry();
+    register_output_rewriter(&mut registry);
+    // As a redaction does, the step changes the data of each event and keeps
+    // its time, its type, and its index.
+    registry.register_span(kind("mask"), |span, _, _| {
+        let events = span
+            .events
+            .into_iter()
+            .map(|event| Event {
+                data: "*".to_string(),
+                ..event
+            })
+            .collect();
+        Ok(Span {
+            events,
+            length: span.length,
+        })
+    });
+
+    registry
+        .render(&typed_project(
+            &[(1.0, EventType::Output, "a"), (3.0, EventType::Output, "b")],
+            vec![
+                range("crop", 0.5, 1.5),
+                all("mask"),
+                range("look", 0.0, 1.5),
+                range("look", 2.5, 3.5),
+            ],
+        ))
+        .unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert!(seen[0].2, "the part of the crop stays at 1 s");
+    assert!(!seen[1].2, "the part of the crop does not cover 3 s");
+}
+
 // Tests of the moves of the rewritten parts.
 
 fn moved_parts(parts: &[(f64, f64)], step: &TimeStep<'_>) -> Vec<(f64, f64)> {
