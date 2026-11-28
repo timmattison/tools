@@ -176,6 +176,8 @@ const MAX_SETTLE_ROUNDS: usize = 50;
 const SETTLE_ROUND_TIMEOUT: Duration = Duration::from_millis(100);
 /// The text of the Open Recording button.
 const OPEN_LABEL: &str = "Open Recording";
+/// The text of the Add Recording button.
+const ADD_LABEL: &str = "Add Recording";
 /// The text of the Undo button.
 const UNDO_TEXT: &str = "Undo";
 /// The text of the Redo button.
@@ -378,8 +380,8 @@ impl Window {
     }
 
     /// The button of the menu bar at `position`. The first render creates the
-    /// click listeners of the menu bar in this order: Open Recording, Undo,
-    /// Redo.
+    /// click listeners of the menu bar in this order: Open Recording, Add
+    /// Recording, Undo, Redo.
     fn menu_button(&self, position: usize, name: &str) -> ElementId {
         self.first_render
             .get(position)
@@ -392,14 +394,19 @@ impl Window {
         self.menu_button(0, OPEN_LABEL)
     }
 
-    /// The Undo button. It is the second click listener of the first render.
-    fn undo_button(&self) -> ElementId {
-        self.menu_button(1, UNDO_TEXT)
+    /// The Add Recording button. It is the second click listener of the first render.
+    fn add_button(&self) -> ElementId {
+        self.menu_button(1, ADD_LABEL)
     }
 
-    /// The Redo button. It is the third click listener of the first render.
+    /// The Undo button. It is the third click listener of the first render.
+    fn undo_button(&self) -> ElementId {
+        self.menu_button(2, UNDO_TEXT)
+    }
+
+    /// The Redo button. It is the fourth click listener of the first render.
     fn redo_button(&self) -> ElementId {
-        self.menu_button(2, REDO_TEXT)
+        self.menu_button(3, REDO_TEXT)
     }
 
     /// The Dismiss button. It is the one click listener of the render that showed the banner.
@@ -771,8 +778,8 @@ async fn app_with_no_recording_has_an_enabled_open_button_and_no_dialog() {
     let fakes = Fakes::new();
     let window = Window::open(&fakes);
     assert!(!window.open_is_disabled(), "{}", window.html());
-    // Open Recording, Undo, and Redo.
-    assert_eq!(window.first_render.len(), 3);
+    // Open Recording, Add Recording, Undo, and Redo.
+    assert_eq!(window.first_render.len(), 4);
     assert_eq!((fakes.picks(), fakes.loads().len()), (0, 0));
 }
 
@@ -918,6 +925,163 @@ async fn a_load_after_an_error_removes_the_banner() {
     let page = window.html();
     assert!(!page.contains("role=\"alert\""), "{page}");
     assert!(page.contains("Demo Recording"), "{page}");
+}
+
+// Tests of the Add Recording button.
+
+/// The banner for an added recording whose file does not exist.
+const ADD_NOT_FOUND_BANNER: &str = "Failed to add recording: File not found: /tmp/demo.json";
+
+/// A second take of the fixture: 10 events in 5 seconds, with its own title.
+fn second_take() -> LoadedRecording {
+    let mut loaded = fixture();
+    loaded.recording.title = "Second Take".into();
+    loaded.recording.duration = 5.0;
+    loaded.recording.events.truncate(10);
+    loaded.metadata.title = "Second Take".into();
+    loaded.metadata.duration = 5.0;
+    loaded.metadata.event_count = 10;
+    loaded
+}
+
+/// Opens the fixture through `fakes`, whose first dialog and first load open
+/// it. The other answers of `fakes` stay for the test.
+async fn open_with(fakes: &Fakes) -> Window {
+    let mut window = Window::open(fakes);
+    window.click(window.open_button());
+    window.settle().await;
+    window
+}
+
+/// The fakes that open the fixture, and then answer one Add Recording with
+/// `added`.
+fn open_then_add(added: Answer<LoadResult>) -> Fakes {
+    Fakes::new()
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())))
+        .pick(picked())
+        .load(added)
+}
+
+/// The titles of the clip blocks of the timeline, in the order of the page.
+fn clip_titles(page: &str) -> Vec<String> {
+    page.split("class=\"timeline-clip\"")
+        .skip(1)
+        .map(|block| text_between(block, "title=\"", "\""))
+        .collect()
+}
+
+#[tokio::test]
+async fn add_recording_is_disabled_until_a_recording_is_open() {
+    let fakes = open_then_add(Answer::Ready(Ok(second_take())));
+    let window = Window::open(&fakes);
+    assert!(window.button_is_disabled(ADD_LABEL), "{}", window.html());
+
+    let window = open_with(&fakes).await;
+
+    assert!(!window.button_is_disabled(ADD_LABEL), "{}", window.html());
+}
+
+#[tokio::test]
+async fn an_added_recording_plays_after_the_end_of_the_timeline() {
+    let fakes = open_then_add(Answer::Ready(Ok(second_take())));
+    let mut window = open_with(&fakes).await;
+
+    window.click(window.add_button());
+    window.settle().await;
+
+    let page = window.html();
+    assert_eq!(fakes.picks(), 2);
+    assert_eq!(fakes.loads(), vec![PathBuf::from(PICKED_PATH); 2]);
+    assert!(!page.contains("role=\"alert\""), "{page}");
+    // The timeline holds both clips, one after the other.
+    assert_eq!(
+        clip_titles(&page),
+        vec![
+            "Demo Recording: 0s to 1m 5.3s of the recording",
+            "Second Take: 0s to 5.0s of the recording",
+        ]
+    );
+    assert!(page.contains("52 events | 1m 10.3s"), "{page}");
+    // The rendered recording ends at the end of the second clip.
+    assert!(page.contains(&edited_row("1m 10.3s")), "{page}");
+    // The properties still show the file that the project came from.
+    assert!(page.contains(&metadata_row("Title", "Demo Recording", None)), "{page}");
+}
+
+#[tokio::test]
+async fn one_undo_removes_an_added_recording() {
+    let fakes = open_then_add(Answer::Ready(Ok(second_take())));
+    let mut window = open_with(&fakes).await;
+    window.click(window.add_button());
+    window.settle().await;
+
+    window.click(window.undo_button());
+    window.settle().await;
+
+    let page = window.html();
+    assert_eq!(clip_titles(&page).len(), 1, "{page}");
+    assert!(page.contains("42 events | 1m 5.3s"), "{page}");
+}
+
+#[tokio::test]
+async fn a_failed_add_shows_the_banner_and_keeps_the_project() {
+    let fakes = open_then_add(not_found());
+    let mut window = open_with(&fakes).await;
+
+    window.click(window.add_button());
+    window.settle().await;
+
+    let page = window.html();
+    assert!(page.contains(ADD_NOT_FOUND_BANNER), "{page}");
+    assert_eq!(clip_titles(&page).len(), 1, "{page}");
+    assert!(page.contains("42 events | 1m 5.3s"), "{page}");
+    assert!(!window.button_is_disabled(ADD_LABEL), "{page}");
+}
+
+#[tokio::test]
+async fn a_recording_that_cannot_become_a_clip_shows_the_banner() {
+    let mut broken = second_take();
+    broken.recording.duration = -1.0;
+    let fakes = open_then_add(Answer::Ready(Ok(broken)));
+    let mut window = open_with(&fakes).await;
+
+    window.click(window.add_button());
+    window.settle().await;
+
+    let page = window.html();
+    assert!(
+        page.contains(
+            "Failed to add recording: Invalid time: -1 (a time must be finite and not below zero)"
+        ),
+        "{page}"
+    );
+    assert_eq!(clip_titles(&page).len(), 1, "{page}");
+}
+
+#[tokio::test]
+async fn both_buttons_stay_disabled_while_the_add_dialog_is_open() {
+    let (answer, pending) = Answer::later();
+    let fakes = Fakes::new()
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())))
+        .pick(pending);
+    let mut window = open_with(&fakes).await;
+    window.click(window.add_button());
+    window.settle().await;
+    assert!(window.open_is_disabled(), "{}", window.html());
+    assert!(window.button_is_disabled(ADD_LABEL), "{}", window.html());
+    window.click(window.add_button());
+    window.click(window.open_button());
+    window.settle().await;
+    assert_eq!(fakes.picks(), 2);
+
+    answer.send(None).expect("the dialog future waits");
+    window.settle().await;
+
+    assert!(!window.open_is_disabled(), "{}", window.html());
+    assert!(!window.button_is_disabled(ADD_LABEL), "{}", window.html());
+    assert_eq!(clip_titles(&window.html()).len(), 1);
 }
 
 /// The row text of a speed change as the page shows it.
