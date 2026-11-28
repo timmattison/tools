@@ -12,6 +12,7 @@ use std::time::Duration;
 use crate::format::format_recorded;
 use crate::preview::PreviewTheme;
 use crate::types::{Event, EventType, Recording, RecordingMetadata};
+use dioxus::html::SerializedFormData;
 use dioxus_core::{ElementId, Mutation};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -19,7 +20,10 @@ use tokio::sync::oneshot;
 
 use crate::editor::Edit;
 use crate::error::NleError;
+use crate::export::{ExportProgress, ExportRequest, ExportTarget, Theme};
 use crate::types::{ClipId, Seconds};
+use crate::ui::export::SaveDialog;
+use std::num::NonZeroU32;
 
 const FIXTURE_PATH: &str = "/home/user/recordings/demo.json";
 /// The number of events in the fixture.
@@ -211,6 +215,21 @@ impl<T> Answer<T> {
     }
 }
 
+type ExportOutcome = Result<PathBuf, NleError>;
+
+/// What a fake export does: it sends each stage of `progress` at once, then it
+/// waits for `outcome`.
+struct FakeExport {
+    progress: Vec<ExportProgress>,
+    outcome: Answer<ExportOutcome>,
+}
+
+/// What a fake export got: the request, and the render of the editor.
+struct ExportCall {
+    request: ExportRequest,
+    render: Recording,
+}
+
 /// What the fakes saw and what they will answer.
 #[derive(Default)]
 struct Script {
@@ -218,6 +237,11 @@ struct Script {
     loads: Vec<PathBuf>,
     pick_answers: VecDeque<Answer<Option<PathBuf>>>,
     load_answers: VecDeque<Answer<LoadResult>>,
+    /// Each save dialog that the fake showed.
+    dialogs: Vec<SaveDialog>,
+    dialog_answers: VecDeque<Answer<Option<PathBuf>>>,
+    exports: Vec<ExportCall>,
+    export_answers: VecDeque<FakeExport>,
 }
 
 /// A fake dialog and a fake load. Each takes its answer from a queue.
@@ -248,6 +272,45 @@ impl Fakes {
         self
     }
 
+    /// Queues the answer of the next save dialog.
+    fn dialog(self, answer: Answer<Option<PathBuf>>) -> Self {
+        self.script().dialog_answers.push_back(answer);
+        self
+    }
+
+    /// Queues the next export: the stages that it reports at once, and its end.
+    fn export(self, progress: Vec<ExportProgress>, outcome: Answer<ExportOutcome>) -> Self {
+        self.script()
+            .export_answers
+            .push_back(FakeExport { progress, outcome });
+        self
+    }
+
+    /// The save dialogs that the fake showed, oldest first.
+    fn dialogs(&self) -> Vec<SaveDialog> {
+        self.script().dialogs.clone()
+    }
+
+    /// The requests of the exports that the fake got, oldest first.
+    fn export_requests(&self) -> Vec<ExportRequest> {
+        let script = self.script();
+        script
+            .exports
+            .iter()
+            .map(|call| call.request.clone())
+            .collect()
+    }
+
+    /// The renders of the editors that the exports got, oldest first.
+    fn export_renders(&self) -> Vec<Recording> {
+        let script = self.script();
+        script
+            .exports
+            .iter()
+            .map(|call| call.render.clone())
+            .collect()
+    }
+
     fn picks(&self) -> usize {
         self.script().picks
     }
@@ -260,6 +323,8 @@ impl Fakes {
     fn services(&self) -> Services {
         let pick_script = Arc::clone(&self.script);
         let load_script = Arc::clone(&self.script);
+        let dialog_script = Arc::clone(&self.script);
+        let export_script = Arc::clone(&self.script);
         Services::new(
             move || {
                 let mut script = pick_script.lock().expect("the script lock");
@@ -277,6 +342,30 @@ impl Fakes {
                 let answer = script.load_answers.pop_front().expect("an unexpected load");
                 drop(script);
                 Box::pin(answer.resolve())
+            },
+            move |dialog| {
+                let mut script = dialog_script.lock().expect("the script lock");
+                script.dialogs.push(dialog);
+                let answer = script
+                    .dialog_answers
+                    .pop_front()
+                    .expect("an unexpected save dialog");
+                drop(script);
+                Box::pin(answer.resolve())
+            },
+            move |editor, request, sender| {
+                let render = Recording::clone(&editor.render().expect("a render"));
+                let mut script = export_script.lock().expect("the script lock");
+                script.exports.push(ExportCall { request, render });
+                let fake = script
+                    .export_answers
+                    .pop_front()
+                    .expect("an unexpected export");
+                drop(script);
+                for stage in fake.progress {
+                    sender.send(stage).expect("the export bar listens");
+                }
+                Box::pin(fake.outcome.resolve())
             },
         )
     }
@@ -303,10 +392,11 @@ struct Window {
     newest: Vec<ElementId>,
     /// The click listeners of the first render.
     first_render: Vec<ElementId>,
-    /// The id of each element that got an input listener, in creation order.
-    inputs: Vec<ElementId>,
-    /// The id of each element that got a change listener, in creation order.
-    changes: Vec<ElementId>,
+    /// The id of each element that got a listener, by event name, in creation
+    /// order.
+    listeners: BTreeMap<String, Vec<ElementId>>,
+    /// For each event name, the ids that the newest render created for it.
+    newest_listeners: BTreeMap<String, Vec<ElementId>>,
     /// The Apply Speed button, when a test noted it.
     apply: Option<ElementId>,
     /// The Compress Idle Time button, when a test noted it.
@@ -335,8 +425,8 @@ impl Window {
             clicks: Vec::new(),
             newest: Vec::new(),
             first_render: Vec::new(),
-            inputs: Vec::new(),
-            changes: Vec::new(),
+            listeners: BTreeMap::new(),
+            newest_listeners: BTreeMap::new(),
             apply: None,
             compress: None,
             redact: None,
@@ -349,8 +439,19 @@ impl Window {
         window
     }
 
-    /// Keeps the id of each new click listener in `edits`.
+    /// Keeps the id of each new listener in `edits`, by event name, and the id
+    /// of each new click listener in `clicks`.
     fn note_listeners(&mut self, edits: &[Mutation]) {
+        let mut created_by_name: BTreeMap<String, Vec<ElementId>> = BTreeMap::new();
+        for edit in edits {
+            if let Mutation::NewEventListener { name, id } = edit {
+                created_by_name.entry(name.clone()).or_default().push(*id);
+            }
+        }
+        for (name, ids) in created_by_name {
+            self.listeners.entry(name.clone()).or_default().extend(&ids);
+            self.newest_listeners.insert(name, ids);
+        }
         let created: Vec<ElementId> = edits
             .iter()
             .filter_map(|edit| match edit {
@@ -362,16 +463,6 @@ impl Window {
             self.clicks.extend(&created);
             self.newest = created;
         }
-        self.inputs
-            .extend(edits.iter().filter_map(|edit| match edit {
-                Mutation::NewEventListener { name, id } if name == "input" => Some(*id),
-                _ => None,
-            }));
-        self.changes
-            .extend(edits.iter().filter_map(|edit| match edit {
-                Mutation::NewEventListener { name, id } if name == "change" => Some(*id),
-                _ => None,
-            }));
     }
 
     /// Renders what is dirty.
@@ -417,20 +508,91 @@ impl Window {
         self.newest[0]
     }
 
+    /// The Export button. It is the fourth click listener that the app ever
+    /// made: the first three are the Open Recording, Undo, and Redo buttons of
+    /// the first render, and the export bar appears with the first document,
+    /// before any banner.
+    fn export_button(&self) -> ElementId {
+        assert!(self.html().contains(EXPORT_BAR_TAG), "no export bar");
+        let clicks = &self.listeners["click"];
+        assert!(clicks.len() >= 4, "{clicks:?}");
+        clicks[3]
+    }
+
+    /// The select of the kind of file. It is the first `change` listener that
+    /// the app ever made, because the export bar starts with it, and the other
+    /// controls of the bar come after it.
+    fn kind_select(&self) -> ElementId {
+        assert!(self.html().contains(EXPORT_BAR_TAG), "no export bar");
+        self.listeners
+            .get("change")
+            .and_then(|ids| ids.first().copied())
+            .unwrap_or_else(|| panic!("no kind select in {}", self.html()))
+    }
+
+    /// The FPS field. It is the first of the `input` listeners that the newest
+    /// render of such listeners made, because the FPS field comes before the
+    /// resolution field in a bar that shows both.
+    fn fps_input(&self) -> ElementId {
+        self.newest_listeners
+            .get("input")
+            .and_then(|ids| ids.first().copied())
+            .unwrap_or_else(|| panic!("no FPS field in {}", self.html()))
+    }
+
+    /// The ids of the listeners of the event `name` that the newest render of
+    /// such listeners created, in creation order.
+    fn newest_listeners_of(&self, name: &str) -> Vec<ElementId> {
+        self.newest_listeners
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| panic!("no `{name}` listeners in {}", self.html()))
+    }
+
+    /// The FPS field and the Resolution field of the export bar, in this
+    /// order. They are the newest `input` listeners after the choice of a
+    /// video kind, because only a video kind shows them.
+    fn video_fields(&self) -> [ElementId; 2] {
+        let inputs = self.newest_listeners_of("input");
+        inputs.try_into().unwrap_or_else(|ids: Vec<ElementId>| {
+            panic!("expected the FPS and Resolution fields: {ids:?}")
+        })
+    }
+
+    /// Sends the text to the input element, as if the user typed it, and renders.
+    fn type_into(&mut self, id: ElementId, text: &str) {
+        self.send_form_event("input", id, text);
+    }
+
+    /// Sends the value to the select element, as if the user chose it, and renders.
+    fn choose(&mut self, id: ElementId, value: &str) {
+        self.send_form_event("change", id, value);
+    }
+
+    /// Sends a form event with `value` under the event `name`, and renders.
+    fn send_form_event(&mut self, name: &str, id: ElementId, value: &str) {
+        let form = SerializedFormData::new(value.to_string(), vec![]);
+        let data = Rc::new(PlatformEventData::new(Box::new(form)));
+        let event = dioxus::prelude::Event::new(data as Rc<dyn Any>, true);
+        self.dom.runtime().handle_event(name, event, id);
+        self.render();
+    }
+
+    /// Whether the start tag of the Export button holds `disabled`.
+    fn export_is_disabled(&self) -> bool {
+        let page = self.html();
+        let (before, _) = page
+            .split_once(">Export</button>")
+            .unwrap_or_else(|| panic!("no Export button in {page}"));
+        let (_, tag) = before.rsplit_once("<button").expect("a button start tag");
+        tag.split([' ', '>', '=']).any(|word| word == "disabled")
+    }
+
     /// Sends a click to the element and renders.
     fn click(&mut self, id: ElementId) {
         let data = Rc::new(PlatformEventData::new(Box::<SerializedMouseData>::default()));
         let event = dioxus::prelude::Event::new(data as Rc<dyn Any>, true);
         self.dom.runtime().handle_event("click", event, id);
-        self.render();
-    }
-
-    /// Sends the text to the input element, as if the user typed it, and renders.
-    fn type_into(&mut self, id: ElementId, text: &str) {
-        let form = dioxus::html::SerializedFormData::new(text.to_string(), Vec::new());
-        let data = Rc::new(PlatformEventData::new(Box::new(form)));
-        let event = dioxus::prelude::Event::new(data as Rc<dyn Any>, true);
-        self.dom.runtime().handle_event("input", event, id);
         self.render();
     }
 
@@ -455,20 +617,19 @@ impl Window {
         !event.default_action_enabled()
     }
 
-    /// Sends the value to the select element, as if the user chose it, and renders.
-    fn choose(&mut self, id: ElementId, value: &str) {
-        let form = dioxus::html::SerializedFormData::new(value.to_string(), Vec::new());
-        let data = Rc::new(PlatformEventData::new(Box::new(form)));
-        let event = dioxus::prelude::Event::new(data as Rc<dyn Any>, true);
-        self.dom.runtime().handle_event("change", event, id);
-        self.render();
-    }
-
-    /// The theme menu of the preview toolbar. It is the one change listener of
-    /// the open render.
+    /// The theme menu of the preview toolbar. The open render makes two
+    /// `change` listeners: the kind select of the export bar and this menu.
     fn theme_menu(&self) -> ElementId {
-        assert_eq!(self.changes.len(), 1, "{:?}", self.changes);
-        self.changes[0]
+        let kind = self.kind_select();
+        let others: Vec<ElementId> = self.listeners["change"]
+            .iter()
+            .copied()
+            .filter(|id| *id != kind)
+            .collect();
+        let [theme] = others[..] else {
+            panic!("the page has the change listeners {others:?} beside the kind select")
+        };
+        theme
     }
 
     /// The input listeners that the open render created, in creation order:
@@ -476,10 +637,13 @@ impl Window {
     /// the idle panel, then the Find, Pattern, Replace with, Replacement text,
     /// and Events fields of the redaction panel, then the playhead control of
     /// the timeline. The properties panel mounts before the timeline, so the
-    /// playhead is the last one.
+    /// playhead is the last one. An export bar that shows no video settings
+    /// has no `input` listener.
     fn open_inputs(&self) -> [ElementId; 13] {
-        self.inputs
-            .clone()
+        self.listeners
+            .get("input")
+            .cloned()
+            .unwrap_or_default()
             .try_into()
             .unwrap_or_else(|ids: Vec<ElementId>| panic!("the page has the inputs {ids:?}"))
     }
@@ -553,12 +717,13 @@ impl Window {
     }
 
     /// Notes the eight click listeners that the render of an open recording
-    /// created. The render creates them in this order: Apply Speed, Compress
-    /// Idle Time, Apply Redaction, the Zoom out, Zoom in, and Fit buttons of
-    /// the timeline, Play, Stop. The properties panel mounts before the
-    /// timeline, as it does for the input listeners, and the timeline mounts
-    /// before the preview toolbar. The three panels come in the order of the
-    /// page, and the Play button comes before the Stop button.
+    /// created beside the Export button of the export bar. The render creates
+    /// them in this order: Apply Speed, Compress Idle Time, Apply Redaction,
+    /// the Zoom out, Zoom in, and Fit buttons of the timeline, Play, Stop. The
+    /// properties panel mounts before the timeline, as it does for the input
+    /// listeners, and the timeline mounts before the preview toolbar. The
+    /// three panels come in the order of the page, and the Play button comes
+    /// before the Stop button.
     fn note_open_buttons(&mut self) {
         let page = self.html();
         let labels = [APPLY_SPEED_LABEL, APPLY_IDLE_LABEL, APPLY_REDACTION_LABEL]
@@ -567,9 +732,16 @@ impl Window {
             matches!(labels, [Some(speed), Some(idle), Some(redact)] if speed < idle && idle < redact),
             "the page does not hold {APPLY_SPEED_LABEL}, then {APPLY_IDLE_LABEL}, then {APPLY_REDACTION_LABEL}: {page}"
         );
-        let [apply, compress, redact, _, zoom_in, _, play, stop] = self.newest[..] else {
+        let export = self.export_button();
+        let buttons: Vec<ElementId> = self
+            .newest
+            .iter()
+            .copied()
+            .filter(|id| *id != export)
+            .collect();
+        let [apply, compress, redact, _, zoom_in, _, play, stop] = buttons[..] else {
             panic!(
-                "the open render made {:?}, not the {APPLY_SPEED_LABEL}, the {APPLY_IDLE_LABEL}, the {APPLY_REDACTION_LABEL}, the three zoom, the Play, and the Stop buttons",
+                "the open render made {:?}, not the Export button, the {APPLY_SPEED_LABEL}, the {APPLY_IDLE_LABEL}, the {APPLY_REDACTION_LABEL}, the three zoom, the Play, and the Stop buttons",
                 self.newest
             )
         };
@@ -960,6 +1132,378 @@ async fn a_load_after_an_error_removes_the_banner() {
     assert!(page.contains("Demo Recording"), "{page}");
 }
 
+/// The `class` attribute of the export bar. The style sheet in the page names
+/// the class too, so the bare class name proves nothing.
+const EXPORT_BAR_TAG: &str = "class=\"export-bar\"";
+/// The path that the fake save dialog picks.
+const EXPORT_PICKED: &str = "/tmp/out";
+/// The file that the fake export writes.
+const EXPORT_WRITTEN: &str = "/tmp/out.json";
+
+/// A fake script that opens the fixture recording.
+fn fakes_with_recording() -> Fakes {
+    Fakes::new()
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())))
+}
+
+/// Opens a window and loads the fixture recording into it.
+async fn window_with_recording(fakes: &Fakes) -> Window {
+    let mut window = Window::open(fakes);
+    window.click(window.open_button());
+    window.settle().await;
+    window
+}
+
+#[tokio::test]
+async fn an_export_with_the_default_settings_writes_a_recording() {
+    let fakes = fakes_with_recording()
+        .dialog(Answer::Ready(Some(PathBuf::from(EXPORT_PICKED))))
+        .export(Vec::new(), Answer::Ready(Ok(PathBuf::from(EXPORT_WRITTEN))));
+    let mut window = window_with_recording(&fakes).await;
+    window.click(window.export_button());
+    window.settle().await;
+    assert_eq!(
+        fakes.dialogs(),
+        vec![SaveDialog {
+            file_name: "demo-edited.json".into(),
+            directory: Some(PathBuf::from("/home/user/recordings")),
+            filter_name: "Beta recording",
+            extensions: &["json"],
+        }]
+    );
+    assert_eq!(
+        fakes.export_requests(),
+        vec![ExportRequest {
+            output_path: PathBuf::from(EXPORT_WRITTEN),
+            target: ExportTarget::Recording {
+                compress: Some(false)
+            },
+        }]
+    );
+    assert_eq!(fakes.export_renders(), vec![fixture().recording]);
+    let page = window.html();
+    assert!(
+        page.contains(
+            "<span class=\"export-status\" role=\"status\">Exported to /tmp/out.json</span>"
+        ),
+        "{page}"
+    );
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[test]
+fn app_with_no_recording_has_no_export_bar() {
+    let page = render_empty_app();
+    assert!(!page.contains(EXPORT_BAR_TAG), "{page}");
+}
+
+#[tokio::test]
+async fn a_video_export_shows_its_progress_and_blocks_a_second_click() {
+    let (finish, pending) = Answer::later();
+    let stages = vec![
+        ExportProgress::Rendering,
+        ExportProgress::Writing,
+        ExportProgress::Frames {
+            done: 30,
+            total: 300,
+        },
+    ];
+    let fakes = fakes_with_recording()
+        .dialog(Answer::Ready(Some(PathBuf::from(EXPORT_PICKED))))
+        .export(stages, pending);
+    let mut window = window_with_recording(&fakes).await;
+    window.choose(window.kind_select(), "mp4");
+    window.type_into(window.fps_input(), "30");
+    let button = window.export_button();
+    window.click(button);
+    window.settle().await;
+    assert_eq!(fakes.dialogs()[0].file_name, "demo-edited.mp4");
+    let page = window.html();
+    assert!(page.contains("<progress"), "{page}");
+    assert!(page.contains("value=\"30\""), "{page}");
+    assert!(page.contains("max=\"300\""), "{page}");
+    assert!(page.contains("Step 2 of 2: frame 30 of 300"), "{page}");
+    assert!(window.export_is_disabled(), "{page}");
+    window.click(button);
+    window.settle().await;
+    assert_eq!(
+        (fakes.dialogs().len(), fakes.export_requests().len()),
+        (1, 1)
+    );
+    finish
+        .send(Ok(PathBuf::from("/tmp/out.mp4")))
+        .expect("the export future waits");
+    window.settle().await;
+    let page = window.html();
+    assert!(!page.contains("<progress"), "{page}");
+    assert!(page.contains("Exported to /tmp/out.mp4"), "{page}");
+    assert!(!window.export_is_disabled(), "{page}");
+    assert_eq!(
+        fakes.export_requests()[0],
+        ExportRequest {
+            output_path: PathBuf::from("/tmp/out.mp4"),
+            target: ExportTarget::Video {
+                theme: Theme::Auto,
+                fps: NonZeroU32::new(30),
+                resolution: None,
+                optimize_web: false,
+            },
+        }
+    );
+}
+
+/// The first export outcome that fails.
+fn boom() -> Answer<ExportOutcome> {
+    Answer::Ready(Err(NleError::ExportError(
+        "beta export failed: boom".into(),
+    )))
+}
+
+#[tokio::test]
+async fn a_failed_export_shows_the_banner_until_an_export_works() {
+    let fakes = fakes_with_recording()
+        .dialog(Answer::Ready(Some(PathBuf::from(EXPORT_PICKED))))
+        .export(Vec::new(), boom())
+        .dialog(Answer::Ready(Some(PathBuf::from(EXPORT_PICKED))))
+        .export(Vec::new(), Answer::Ready(Ok(PathBuf::from(EXPORT_WRITTEN))));
+    let mut window = window_with_recording(&fakes).await;
+    let button = window.export_button();
+    window.click(button);
+    window.settle().await;
+    let page = window.html();
+    assert!(page.contains("role=\"alert\""), "{page}");
+    assert!(
+        page.contains("Export failed: beta export failed: boom"),
+        "{page}"
+    );
+    assert!(!page.contains("role=\"status\""), "{page}");
+    assert!(!window.export_is_disabled(), "{page}");
+    assert!(!page.contains("<progress"), "{page}");
+    window.click(button);
+    window.settle().await;
+    let page = window.html();
+    assert!(!page.contains("role=\"alert\""), "{page}");
+    assert!(page.contains("Exported to /tmp/out.json"), "{page}");
+}
+
+#[tokio::test]
+async fn a_bad_frame_rate_shows_the_banner_and_asks_no_dialog() {
+    let fakes = fakes_with_recording();
+    let mut window = window_with_recording(&fakes).await;
+    window.choose(window.kind_select(), "mp4");
+    window.type_into(window.fps_input(), "0");
+    window.click(window.export_button());
+    window.settle().await;
+    let page = window.html();
+    assert!(page.contains("role=\"alert\""), "{page}");
+    assert!(
+        page.contains("Export failed: the frame rate &#34;0&#34; is not a whole number above zero"),
+        "{page}"
+    );
+    assert!(fakes.dialogs().is_empty());
+    assert!(!window.export_is_disabled(), "{page}");
+}
+
+#[tokio::test]
+async fn a_bad_setting_after_a_success_removes_the_status() {
+    let fakes = fakes_with_recording()
+        .dialog(Answer::Ready(Some(PathBuf::from(EXPORT_PICKED))))
+        .export(Vec::new(), Answer::Ready(Ok(PathBuf::from(EXPORT_WRITTEN))));
+    let mut window = window_with_recording(&fakes).await;
+    window.click(window.export_button());
+    window.settle().await;
+    assert!(
+        window.html().contains("Exported to /tmp/out.json"),
+        "{}",
+        window.html()
+    );
+    window.choose(window.kind_select(), "mp4");
+    window.type_into(window.fps_input(), "0");
+    window.click(window.export_button());
+    window.settle().await;
+    let page = window.html();
+    assert_eq!(page.matches("role=\"alert\"").count(), 1, "{page}");
+    assert!(!page.contains("role=\"status\""), "{page}");
+    assert_eq!(fakes.dialogs().len(), 1);
+}
+
+#[tokio::test]
+async fn a_cancelled_save_dialog_exports_nothing() {
+    let fakes = fakes_with_recording().dialog(Answer::Ready(None));
+    let mut window = window_with_recording(&fakes).await;
+    window.click(window.export_button());
+    window.settle().await;
+    let page = window.html();
+    assert_eq!(fakes.dialogs().len(), 1);
+    assert!(fakes.export_requests().is_empty());
+    assert!(!window.export_is_disabled(), "{page}");
+    assert!(!page.contains("role=\"alert\""), "{page}");
+    assert!(!page.contains("role=\"status\""), "{page}");
+}
+
+/// The markup of the Theme menu with its label.
+const THEME_MARKUP: &str = "<label>Theme<select>";
+/// The markup of the FPS field with its label.
+const FPS_MARKUP: &str = "<label>FPS<input";
+/// The markup of the Resolution field with its label.
+const RESOLUTION_MARKUP: &str = "<label>Resolution<input";
+/// The markup of the end of the Optimize for web box with its label.
+const OPTIMIZE_MARKUP: &str = "/>Optimize for web</label>";
+/// The markup of the end of the Compress box with its label.
+const COMPRESS_MARKUP: &str = "/>Compress</label>";
+
+/// Whether each of the five controls of the export bar is on the page, in the
+/// order Theme, FPS, Resolution, Optimize for web, Compress.
+fn shown_controls(page: &str) -> [bool; 5] {
+    [
+        THEME_MARKUP,
+        FPS_MARKUP,
+        RESOLUTION_MARKUP,
+        OPTIMIZE_MARKUP,
+        COMPRESS_MARKUP,
+    ]
+    .map(|markup| page.contains(markup))
+}
+
+#[tokio::test]
+async fn each_kind_shows_its_own_controls() {
+    let cases: [(&str, [bool; 5]); 5] = [
+        ("json", [false, false, false, false, false]),
+        ("json-gz", [false, false, false, false, false]),
+        ("html", [true, false, false, false, true]),
+        ("mp4", [true, true, true, true, false]),
+        ("gif", [true, true, true, true, false]),
+    ];
+    for (key, expected) in cases {
+        let fakes = fakes_with_recording();
+        let mut window = window_with_recording(&fakes).await;
+        window.choose(window.kind_select(), key);
+        let page = window.html();
+        assert_eq!(
+            shown_controls(&page),
+            expected,
+            "controls of {key} (Theme, FPS, Resolution, Optimize, Compress): {page}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_web_export_carries_the_theme_and_the_compress_box() {
+    let fakes = fakes_with_recording()
+        .dialog(Answer::Ready(Some(PathBuf::from(EXPORT_PICKED))))
+        .export(
+            Vec::new(),
+            Answer::Ready(Ok(PathBuf::from("/tmp/out.html"))),
+        );
+    let mut window = window_with_recording(&fakes).await;
+    window.choose(window.kind_select(), "html");
+    // The newest `change` listeners are the Theme menu and the Compress box.
+    let listeners = window.newest_listeners_of("change");
+    let [theme, compress] = listeners[..] else {
+        panic!("expected the Theme menu and the Compress box: {listeners:?}");
+    };
+    window.choose(theme, "dracula");
+    window.choose(compress, "true");
+    window.click(window.export_button());
+    window.settle().await;
+    assert_eq!(
+        fakes.export_requests(),
+        vec![ExportRequest {
+            output_path: PathBuf::from("/tmp/out.html"),
+            target: ExportTarget::Web {
+                theme: Theme::Dracula,
+                compress: true,
+            },
+        }]
+    );
+}
+
+#[tokio::test]
+async fn a_video_export_carries_the_theme_the_resolution_and_the_optimize_box() {
+    let fakes = fakes_with_recording()
+        .dialog(Answer::Ready(Some(PathBuf::from(EXPORT_PICKED))))
+        .export(Vec::new(), Answer::Ready(Ok(PathBuf::from("/tmp/out.gif"))));
+    let mut window = window_with_recording(&fakes).await;
+    window.choose(window.kind_select(), "gif");
+    // The newest `change` listeners are the Theme menu and the Optimize box,
+    // and the newest `input` listeners are the FPS field and the Resolution field.
+    let changes = window.newest_listeners_of("change");
+    let [theme, optimize] = changes[..] else {
+        panic!("expected the Theme menu and the Optimize box: {changes:?}");
+    };
+    let [_fps, resolution] = window.video_fields();
+    window.choose(theme, "monokai");
+    window.type_into(resolution, "1280x720");
+    window.choose(optimize, "true");
+    window.click(window.export_button());
+    window.settle().await;
+    assert_eq!(
+        fakes.export_requests(),
+        vec![ExportRequest {
+            output_path: PathBuf::from("/tmp/out.gif"),
+            target: ExportTarget::Video {
+                theme: Theme::Monokai,
+                fps: None,
+                resolution: Some("1280x720".parse().expect("a valid resolution")),
+                optimize_web: true,
+            },
+        }]
+    );
+}
+
+#[tokio::test]
+async fn open_recording_is_disabled_while_the_save_dialog_shows() {
+    let (answer, pending) = Answer::later();
+    let fakes = fakes_with_recording().dialog(pending);
+    let mut window = window_with_recording(&fakes).await;
+    window.click(window.export_button());
+    window.settle().await;
+    assert!(window.open_is_disabled(), "{}", window.html());
+    window.click(window.open_button());
+    window.settle().await;
+    assert_eq!(fakes.picks(), 1);
+    answer.send(None).expect("the dialog future waits");
+    window.settle().await;
+    assert!(!window.open_is_disabled(), "{}", window.html());
+}
+
+#[tokio::test]
+async fn open_recording_is_disabled_while_an_export_runs() {
+    let (finish, pending) = Answer::later();
+    let fakes = fakes_with_recording()
+        .dialog(Answer::Ready(Some(PathBuf::from(EXPORT_PICKED))))
+        .export(Vec::new(), pending);
+    let mut window = window_with_recording(&fakes).await;
+    window.click(window.export_button());
+    window.settle().await;
+    assert!(window.open_is_disabled(), "{}", window.html());
+    window.click(window.open_button());
+    window.settle().await;
+    assert_eq!(fakes.picks(), 1);
+    finish
+        .send(Ok(PathBuf::from(EXPORT_WRITTEN)))
+        .expect("the export future waits");
+    window.settle().await;
+    assert!(!window.open_is_disabled(), "{}", window.html());
+}
+
+#[tokio::test]
+async fn export_is_disabled_while_a_second_recording_opens() {
+    let (answer, pending) = Answer::later();
+    let fakes = fakes_with_recording().pick(pending);
+    let mut window = window_with_recording(&fakes).await;
+    window.click(window.open_button());
+    window.settle().await;
+    assert!(window.export_is_disabled(), "{}", window.html());
+    window.click(window.export_button());
+    window.settle().await;
+    assert!(fakes.dialogs().is_empty());
+    answer.send(None).expect("the pick future waits");
+    window.settle().await;
+    assert!(!window.export_is_disabled(), "{}", window.html());
+}
+
 /// The row text of a speed change as the page shows it.
 fn speed_row(region: &str, speed: &str) -> String {
     format!("<span>{region} at {speed}\u{d7}</span>")
@@ -971,7 +1515,8 @@ fn edited_row(text: &str) -> String {
 }
 
 /// Opens the fixture recording through the fakes, and notes the eight click
-/// listeners that the open render creates (`Window::note_open_buttons`).
+/// listeners that the open render creates beside the Export button
+/// (`Window::note_open_buttons`).
 async fn open_recording() -> Window {
     open_loaded(fixture()).await
 }
@@ -980,9 +1525,7 @@ async fn open_recording() -> Window {
 /// `open_recording` does.
 async fn open_loaded(loaded: LoadedRecording) -> Window {
     let fakes = Fakes::new().pick(picked()).load(Answer::Ready(Ok(loaded)));
-    let mut window = Window::open(&fakes);
-    window.click(window.open_button());
-    window.settle().await;
+    let mut window = window_with_recording(&fakes).await;
     window.note_open_buttons();
     window
 }
@@ -2224,7 +2767,8 @@ const REDO_KEYS: Press = Press {
 impl Window {
     /// The Start, End, and Speed fields of the speed panel, the four fields of
     /// the idle panel, and the Pattern and Replacement text fields of the
-    /// redaction panel.
+    /// redaction panel. The two text fields of the export bar show only for a
+    /// video kind, thus `video_fields` gives them.
     fn text_fields(&self) -> [ElementId; 9] {
         let [start, end, speed] = self.speed_fields();
         let [threshold, compress_to, top, bottom] = self.idle_fields();
@@ -2282,6 +2826,25 @@ async fn the_keys_keep_their_text_field_behavior_in_each_text_field() {
     for field in window.text_fields() {
         assert!(!window.press(field, &REDO_KEYS), "{field:?}");
         assert_original_speed(&window);
+    }
+}
+
+#[tokio::test]
+async fn the_keys_keep_their_text_field_behavior_in_each_text_field_of_the_export_bar() {
+    for kind in ["mp4", "gif"] {
+        let mut window = open_with_a_speed_change().await;
+        window.choose(window.kind_select(), kind);
+        let fields = window.video_fields();
+        for field in fields {
+            assert!(!window.press(field, &UNDO_KEYS), "{kind} {field:?}");
+            assert_sped_up(&window);
+        }
+
+        window.click(window.undo_button());
+        for field in fields {
+            assert!(!window.press(field, &REDO_KEYS), "{kind} {field:?}");
+            assert_original_speed(&window);
+        }
     }
 }
 

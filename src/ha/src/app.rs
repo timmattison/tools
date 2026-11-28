@@ -349,7 +349,10 @@ where
     /// acts at once, thus one press does not wait. Each other key ends the
     /// count, and so does a key that closes the box. `Page Down` and `Page Up`
     /// move the highlight one page down and one page up. `Enter` opens the
-    /// highlighted pull request, run, or job.
+    /// highlighted run or job. On a merge queue row, it opens the run of the
+    /// merge group of the entry. When the board holds no such run, it opens
+    /// the pull request and posts why. On a merge history row, it opens the
+    /// pull request. A failed open posts the address and the reason.
     ///
     /// `c` opens a box that asks to cancel the run of the highlighted row.
     /// On a finished run, and on a pull request row, it posts that there is
@@ -417,11 +420,18 @@ where
                 Flow::Continue
             }
             KeyCode::Enter => {
-                if let Some(url) = self.board.selected_url((self.now)()) {
-                    self.status.message = match self.opener.open(&url) {
-                        Ok(()) => None,
-                        Err(reason) => Some(failed_open(&url, &reason, (self.now)())),
-                    };
+                if let Some(link) = self.board.selected_link((self.now)()) {
+                    match self.opener.open(&link.url) {
+                        Ok(()) => {
+                            if let Some(notice) = link.notice {
+                                self.post(notice);
+                            }
+                        }
+                        Err(reason) => {
+                            self.status.message =
+                                Some(failed_open(&link.url, &reason, (self.now)()));
+                        }
+                    }
                 }
                 Flow::Continue
             }
@@ -520,7 +530,7 @@ mod tests {
     use crate::action::{Action, ActionOutcome};
     use crate::github::{RepoList, SourceError};
     use crate::queue::{Departure, EntryState, History, PullNumber, QueueEntry};
-    use crate::run::{Run, RunId, RunState};
+    use crate::run::{CommitSha, Run, RunId, RunState};
     use crate::status::{OwnerProblem, RateLimit};
     use crate::target::{OwnerName, RepoName};
     use crate::worker::{Command, Update};
@@ -650,6 +660,7 @@ mod tests {
     /// An active run that started `started` minutes before `now`.
     fn active_run(id: u64, started: i64) -> Run {
         Run {
+            head_sha: None,
             visibility: crate::run::Visibility::Private,
             id: RunId(id),
             repo: repo(),
@@ -3044,6 +3055,7 @@ mod tests {
     /// An entry of the merge queue of `acme/widgets` for pull request `pull`.
     fn queue_entry(pull: u64) -> QueueEntry {
         QueueEntry {
+            merge_group_commit: None,
             repo: repo(),
             pull: PullNumber(pull),
             title: format!("pull {pull}"),
@@ -3170,6 +3182,80 @@ mod tests {
         assert_eq!(
             *opener.urls.borrow(),
             ["https://github.com/acme/widgets/pull/7"]
+        );
+    }
+
+    #[test]
+    fn enter_on_a_merge_queue_row_opens_the_run_of_its_merge_group() {
+        let group = "e8dc7f8f0a3c4b5d6e7f8091a2b3c4d5e6f70812";
+        let channels = channels();
+        let entry = QueueEntry {
+            merge_group_commit: Some(CommitSha(group.to_owned())),
+            ..queue_entry(7)
+        };
+        send_queue(&channels, vec![entry], Ok(Vec::new()));
+        let group_run = Run {
+            branch: "gh-readonly-queue/main/pr-7-2a5e21d6".to_owned(),
+            head_sha: Some(CommitSha(group.to_owned())),
+            ..active_run(4, 2)
+        };
+        send_runs(&channels, vec![active_run(1, 5), group_run]);
+        let opener = opener(false);
+        let (result, frame) = run_app(
+            &opener,
+            &channels,
+            vec![press(KeyCode::Enter), press(KeyCode::Char('q'))],
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(*opener.urls.borrow(), ["https://example.test/runs/4"]);
+        assert!(
+            !frame[11].contains("no run of the merge group"),
+            "{:?}",
+            frame[11]
+        );
+    }
+
+    #[test]
+    fn enter_on_a_merge_queue_row_with_no_run_opens_the_pull_request_and_tells_why() {
+        let channels = channels();
+        send_queue(&channels, vec![queue_entry(7)], Ok(Vec::new()));
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let opener = opener(false);
+        let (result, frame) = run_app(
+            &opener,
+            &channels,
+            vec![press(KeyCode::Enter), press(KeyCode::Char('q'))],
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            *opener.urls.borrow(),
+            ["https://github.com/acme/widgets/pull/7"]
+        );
+        assert!(
+            frame[11].contains("no run of the merge group of #7: opened the pull request"),
+            "{:?}",
+            frame[11]
+        );
+    }
+
+    #[test]
+    fn a_failed_open_of_a_merge_queue_row_with_no_run_shows_the_failure_and_no_notice() {
+        let channels = channels();
+        send_queue(&channels, vec![queue_entry(7)], Ok(Vec::new()));
+        let (_, frame) = run_app(
+            &opener(true),
+            &channels,
+            vec![press(KeyCode::Enter), press(KeyCode::Char('q'))],
+        );
+        assert!(
+            frame[11].contains("could not open a browser: https://github.com/acme/widgets/pull/7"),
+            "{:?}",
+            frame[11]
+        );
+        assert!(
+            !frame[11].contains("no run of the merge group"),
+            "{:?}",
+            frame[11]
         );
     }
 

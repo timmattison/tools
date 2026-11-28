@@ -349,6 +349,7 @@ mod tests {
 
     fn run(id: u64, repo: &str, workflow: &str) -> Run {
         Run {
+            head_sha: None,
             id: RunId(id),
             repo: RepoName::parse(repo).expect("a repository"),
             visibility: Visibility::Private,
