@@ -416,10 +416,11 @@ impl Editor {
     }
 
     /// Export the render of the project in its present state as `request`
-    /// asks. When the editor keeps that render, the export writes it with no copy. Else
-    /// the export renders a copy of the state on a blocking thread. The future
-    /// borrows nothing from the editor. It reports `ExportProgress::Rendering`
-    /// first, then the stages of `export::export_recording`.
+    /// asks. When the editor keeps that render, the export writes it with no
+    /// copy. Else the export renders a copy of the state on a blocking thread.
+    /// The future borrows nothing from the editor. It reports
+    /// `ExportProgress::Rendering` first, then the stages of
+    /// `export::export_recording`.
     ///
     /// # Errors
     /// The future gives the errors of `FilterRegistry::render` and of
