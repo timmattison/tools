@@ -1226,6 +1226,47 @@ fn the_clip_list_shows_untitled_for_a_clip_with_no_title() {
     );
 }
 
+// Tests of the size warning of the timeline.
+
+/// The markup of the size warning of the timeline.
+const SIZE_WARNING_CLASS: &str = "class=\"size-warning\"";
+
+/// The edit that appends a recording of `width` by `height` cells to the
+/// project of the fixture.
+fn append_of_size(width: u16, height: u16) -> Edit {
+    let project = EditProject::from_recording(Arc::new(fixture().recording)).unwrap();
+    let mut other = second_take().recording;
+    other.width = width;
+    other.height = height;
+    Edit::append_recording(&project, Arc::new(other)).unwrap()
+}
+
+#[test]
+fn the_timeline_warns_that_clips_of_different_sizes_are_padded() {
+    // The fixture has 120x40 cells, so the terminal takes 132 columns from
+    // the second clip and 40 rows from the first.
+    let page = render_edited_panels(fixture(), vec![append_of_size(132, 30)]);
+
+    let warning = text_between(&page, SIZE_WARNING_CLASS, "</div>");
+    assert!(warning.contains("role=\"status\""), "{warning}");
+    assert!(
+        warning.ends_with(
+            ">The clips have different terminal sizes. The render pads each clip to 132x40, at the top left."
+        ),
+        "{warning}"
+    );
+}
+
+#[test]
+fn the_timeline_has_no_size_warning_when_the_clips_have_one_size() {
+    for page in [
+        render_panels(fixture()),
+        render_edited_panels(fixture(), vec![append_of_size(120, 40)]),
+    ] {
+        assert!(!page.contains(SIZE_WARNING_CLASS), "{page}");
+    }
+}
+
 /// The row text of a speed change as the page shows it.
 fn speed_row(region: &str, speed: &str) -> String {
     format!("<span>{region} at {speed}\u{d7}</span>")
