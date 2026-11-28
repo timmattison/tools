@@ -2,9 +2,15 @@
 //!
 //! This module holds the window settings, the root component, and the four
 //! regions of the window: the menu bar, the preview pane, the timeline, and
-//! the properties panel. The open document lives in the state of `App`: the
-//! `Editor` of its project, and the metadata of the recording file that it
-//! came from.
+//! the properties panel. The menu bar holds the Open Recording button, the
+//! Add Recording button, the Undo button and the Redo button of the `history`
+//! module, and the export bar of the `export` module. The open document lives
+//! in the state of `App`: the `Editor` of its project, and the metadata of the
+//! recording file that it came from.
+//!
+//! `App` also owns one `busy` signal. It is true from a click on Open
+//! Recording, Add Recording or Export until its dialog and its work end, and
+//! it disables the three buttons.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -16,6 +22,7 @@ use dioxus::prelude::*;
 
 use crate::editor::{Edit, Editor};
 use crate::error::NleError;
+use crate::export::{ExportProgress, ExportRequest};
 use crate::filters::redaction::{self, Find, Preset, Redaction, Replacement};
 use crate::filters::time_dilation::{self, Speed};
 use crate::pipeline::FilterRegistry;
@@ -24,6 +31,7 @@ use crate::types::{AppliedFilter, EditProject, FilterRegion, Seconds};
 
 use crate::format::{file_name, format_duration, format_recorded};
 use crate::types::{LoadedRecording, RecordingMetadata};
+use export::SaveDialog;
 
 mod history;
 use history::{
@@ -182,10 +190,22 @@ pub(crate) fn window_config() -> Config {
 /// A future that the interface runs on its own thread. It needs no `Send`.
 type LocalFuture<T> = Pin<Box<dyn Future<Output = T>>>;
 
-/// The two things that the interface asks of the outside world: the file
-/// dialog and the load of a recording.
+/// The way that an export reports each stage to the export bar.
+type ProgressSender = tokio::sync::mpsc::UnboundedSender<ExportProgress>;
+
+/// The function that starts an export. It takes the editor, the request, and
+/// the sender of the progress.
+type ExportFn =
+    dyn Fn(&Editor, ExportRequest, ProgressSender) -> LocalFuture<ExportResult> + Send + Sync;
+
+/// The end of an export: the file that it wrote, or the reason that it failed.
+type ExportResult = Result<PathBuf, NleError>;
+
+/// The things that the interface asks of the outside world: the dialog that
+/// picks a recording, the load of a recording, the dialog that picks an export
+/// file, and the export itself.
 ///
-/// The application gets the real dialog and the real command from
+/// The application gets the real dialogs and the real commands from
 /// `Services::desktop`. A test gives fakes to `Services::new`, so it needs
 /// no window and no file. The value is `Send + Sync` because the launcher
 /// asks for it. The futures that it returns are not `Send`.
@@ -194,13 +214,21 @@ pub(crate) struct Services {
     pick_recording: Arc<dyn Fn() -> LocalFuture<Option<PathBuf>> + Send + Sync>,
     load_recording:
         Arc<dyn Fn(PathBuf) -> LocalFuture<Result<LoadedRecording, NleError>> + Send + Sync>,
+    pick_export_path: Arc<dyn Fn(SaveDialog) -> LocalFuture<Option<PathBuf>> + Send + Sync>,
+    export: Arc<ExportFn>,
 }
 
 impl Services {
-    /// Builds the services from a dialog and a load function.
+    /// Builds the services from the two dialogs, the load function, and the
+    /// export function.
     pub(crate) fn new(
         pick_recording: impl Fn() -> LocalFuture<Option<PathBuf>> + Send + Sync + 'static,
         load_recording: impl Fn(PathBuf) -> LocalFuture<Result<LoadedRecording, NleError>>
+            + Send
+            + Sync
+            + 'static,
+        pick_export_path: impl Fn(SaveDialog) -> LocalFuture<Option<PathBuf>> + Send + Sync + 'static,
+        export: impl Fn(&Editor, ExportRequest, ProgressSender) -> LocalFuture<ExportResult>
             + Send
             + Sync
             + 'static,
@@ -208,11 +236,13 @@ impl Services {
         Self {
             pick_recording: Arc::new(pick_recording),
             load_recording: Arc::new(load_recording),
+            pick_export_path: Arc::new(pick_export_path),
+            export: Arc::new(export),
         }
     }
 
-    /// Builds the services of the application: the native file dialog and
-    /// the `load_recording` command.
+    /// Builds the services of the application: the native file dialogs, the
+    /// `load_recording` command, and the export of the editor.
     ///
     /// The command takes a `String`, so a path that is not valid UTF-8 loses
     /// its invalid bytes.
@@ -233,6 +263,27 @@ impl Services {
                     crate::commands::load_recording(path.to_string_lossy().into_owned()).await
                 })
             },
+            |dialog| {
+                Box::pin(async move {
+                    let mut native = rfd::AsyncFileDialog::new()
+                        .set_file_name(dialog.file_name)
+                        .add_filter(dialog.filter_name, dialog.extensions);
+                    if let Some(directory) = dialog.directory {
+                        native = native.set_directory(directory);
+                    }
+                    native
+                        .save_file()
+                        .await
+                        .map(|file| file.path().to_path_buf())
+                })
+            },
+            |editor, request, sender| {
+                // A send fails only when the export bar no longer listens.
+                // The export continues, so that failure is not an error.
+                Box::pin(editor.export(request, move |progress| {
+                    sender.send(progress).ok();
+                }))
+            },
         )
     }
 
@@ -244,6 +295,23 @@ impl Services {
     /// Loads the recording at `path`.
     fn load_recording(&self, path: PathBuf) -> LocalFuture<Result<LoadedRecording, NleError>> {
         (self.load_recording)(path)
+    }
+
+    /// Shows the save dialog of `dialog`. The answer is `None` when the user
+    /// cancels.
+    fn pick_export_path(&self, dialog: SaveDialog) -> LocalFuture<Option<PathBuf>> {
+        (self.pick_export_path)(dialog)
+    }
+
+    /// Starts the export of the project of `editor`. The future reports each
+    /// stage through `progress` and ends with the written file.
+    fn export(
+        &self,
+        editor: &Editor,
+        request: ExportRequest,
+        progress: ProgressSender,
+    ) -> LocalFuture<ExportResult> {
+        (self.export)(editor, request, progress)
     }
 }
 
@@ -272,6 +340,9 @@ pub(crate) fn App() -> Element {
     let filters = use_hook(|| Arc::new(crate::filters::registry()));
     let mut loaded = use_signal(|| None::<Document>);
     let mut error = use_signal(|| None::<String>);
+    // True from a click on Open Recording, Add Recording or Export until its
+    // dialog and its work end.
+    let busy = use_signal(|| false);
     let mut playhead = use_signal(|| Seconds::ZERO);
     let mut playing = use_signal(|| false);
     let mut view = use_signal(View::default);
@@ -296,6 +367,7 @@ pub(crate) fn App() -> Element {
                 }
             },
             MenuBar {
+                busy,
                 loaded,
                 on_step: take_step,
                 on_loaded: move |recording| match Document::open(recording, filters.clone()) {
@@ -319,6 +391,11 @@ pub(crate) fn App() -> Element {
                     error.set(outcome.err().map(|reason| format!("{ADD_FAILED_PREFIX}: {reason}")));
                 },
                 on_error: move |message| error.set(Some(message)),
+                export::ExportBar {
+                    loaded,
+                    busy,
+                    on_result: move |result: Result<(), String>| error.set(result.err()),
+                }
             }
             if let Some(message) = error() {
                 div { class: "error-banner", role: "alert",
@@ -337,48 +414,55 @@ pub(crate) fn App() -> Element {
 }
 
 /// The menu bar: the Open Recording button, the Add Recording button, then
-/// the Undo button and the Redo button of the editor of `loaded`.
+/// the Undo button and the Redo button of the editor of `loaded`, then
+/// `children`.
 ///
 /// Open Recording sends the loaded recording to `on_loaded`, which starts a
 /// new project. Add Recording sends it to `on_added`, which puts it on the
 /// timeline of the open project. Add Recording is disabled when no project is
-/// open. Both are disabled from a click until its dialog and its load end. A
-/// failed load sends the message of the banner to `on_error`. Each click of
-/// Undo or Redo sends its step to `on_step`.
+/// open. A failed load sends the message of the banner to `on_error`. Each
+/// click of Undo or Redo sends its step to `on_step`.
+///
+/// Both buttons are disabled while `busy` is true. Thus no load starts during
+/// a dialog, a load, or an export.
 #[component]
 fn MenuBar(
+    /// True from a click on Open Recording, Add Recording or Export until its
+    /// dialog and its work end. Each of the three buttons is disabled while it
+    /// is true.
+    busy: Signal<bool>,
     loaded: ReadSignal<Option<Document>>,
     on_step: EventHandler<HistoryStep>,
     on_loaded: EventHandler<LoadedRecording>,
     on_added: EventHandler<LoadedRecording>,
     on_error: EventHandler<String>,
+    children: Element,
 ) -> Element {
     let services = use_context::<Services>();
-    // True from a click until the dialog and the load end.
-    let opening = use_signal(|| false);
     let open = loaded.read().is_some();
     let add_services = services.clone();
     rsx! {
         div { class: "menu-bar",
             button {
-                disabled: opening(),
+                disabled: busy(),
                 onclick: move |_| {
-                    pick_and_load(services.clone(), opening, on_loaded, on_error, OPEN_FAILED_PREFIX);
+                    pick_and_load(services.clone(), busy, on_loaded, on_error, OPEN_FAILED_PREFIX);
                 },
                 {OPEN_RECORDING_LABEL}
             }
             button {
-                disabled: opening() || !open,
+                disabled: busy() || !open,
                 onclick: move |_| {
                     // The webview sends no click to a disabled button, but a
                     // click must not add to a project that is not there.
                     if loaded.peek().is_some() {
-                        pick_and_load(add_services.clone(), opening, on_added, on_error, ADD_FAILED_PREFIX);
+                        pick_and_load(add_services.clone(), busy, on_added, on_error, ADD_FAILED_PREFIX);
                     }
                 },
                 {ADD_RECORDING_LABEL}
             }
             HistoryButtons { loaded, on_step }
+            {children}
         }
     }
 }
@@ -387,19 +471,20 @@ fn MenuBar(
 /// `on_done`. A failed load sends its message, after `prefix`, to
 /// `on_error`. A cancelled dialog sends nothing.
 ///
-/// `opening` is true from the call until the dialog and the load end. A call
-/// while it is true starts nothing, so one click at a time opens a dialog.
+/// `busy` is true from the call until the dialog and the load end. A call
+/// that arrives while it is true starts nothing. Thus no load starts during a
+/// dialog, a load, or an export.
 fn pick_and_load(
     services: Services,
-    mut opening: Signal<bool>,
+    mut busy: Signal<bool>,
     on_done: EventHandler<LoadedRecording>,
     on_error: EventHandler<String>,
     prefix: &'static str,
 ) {
-    if *opening.peek() {
+    if *busy.peek() {
         return;
     }
-    opening.set(true);
+    busy.set(true);
     spawn(async move {
         if let Some(path) = services.pick_recording().await {
             match services.load_recording(path).await {
@@ -407,7 +492,7 @@ fn pick_and_load(
                 Err(error) => on_error.call(format!("{prefix}: {error}")),
             }
         }
-        opening.set(false);
+        busy.set(false);
     });
 }
 
@@ -891,6 +976,8 @@ fn metadata_rows(metadata: &RecordingMetadata) -> Element {
         }
     }
 }
+
+mod export;
 
 #[cfg(test)]
 mod tests;

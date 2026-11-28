@@ -2191,6 +2191,7 @@ mod tests {
         updated: &str,
     ) -> Run {
         Run {
+            head_sha: None,
             visibility: crate::run::Visibility::Private,
             id: RunId(id),
             repo: repo(repo_text),
@@ -7874,6 +7875,7 @@ mod tests {
         enqueued: &str,
     ) -> QueueEntry {
         QueueEntry {
+            merge_group_commit: None,
             repo: repo("rust-lang/cargo"),
             pull: PullNumber(pull),
             title: title.to_owned(),

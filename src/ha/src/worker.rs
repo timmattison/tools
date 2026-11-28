@@ -1980,6 +1980,7 @@ mod tests {
     fn run(repo_text: &str, id: u64) -> Run {
         let at = Utc::now();
         Run {
+            head_sha: None,
             visibility: crate::run::Visibility::Private,
             id: RunId(id),
             repo: repo(repo_text),
@@ -4560,6 +4561,7 @@ mod tests {
     /// An entry of the queue of `acme/a` for pull request `pull`.
     fn entry(pull: u64, branch: &str) -> QueueEntry {
         QueueEntry {
+            merge_group_commit: None,
             repo: repo("acme/a"),
             pull: PullNumber(pull),
             title: format!("pull {pull}"),

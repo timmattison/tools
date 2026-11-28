@@ -987,11 +987,11 @@ Every binary this workspace builds **must** appear in both `README.md` and
 
 ### Why
 
-The repository documents its tools twice, and on purpose. `README.md` carries
-the long entry — what the tool is for, how to run it, how to install it.
-`TLDR.md` carries one line per tool, alphabetized, for a reader who only needs
-to know which tool to reach for. A tool that is missing from either one is a
-tool nobody finds.
+The long entry of a tool — what the tool is for, how to run it, how to install
+it — is in `src/<tool>/README.md`. `README.md` gives each tool one line, with a
+link to that file. `TLDR.md` carries one line per tool, alphabetized, for a
+reader who only needs to know which tool to reach for. A tool that is missing
+from either index is a tool nobody finds.
 
 Nothing enforced this before. The omission is spelled as an *absence*, which is
 why it spread: a crate that nobody remembers to document is born undocumented,
@@ -1001,24 +1001,35 @@ index by the time the guard was written: it carried a `README.md` entry and no
 
 ### Usage
 
-`TLDR.md` is one table, alphabetized. Add a row whose **first cell** is the tool
-name:
+A new tool gets three things:
 
-```markdown
-| `krt` | Knights of the Round Trip — records the network path to a destination. |
-```
+1. **`src/<tool>/README.md`** holds the long entry. Start it with a `# `
+   heading whose first word is the name of the binary, for example
+   `# krt (Knights of the Round Trip)`.
+2. **One line in the index of `README.md`.** The index is the bulleted list
+   directly under `## The tools`, in alphabetical order. The link text is the
+   name of the binary, and the target is the README of the crate that builds
+   it. The text after the dash is one sentence of at most 25 words:
 
-`README.md` accepts either of the two forms in service today. Add a **top-level
-list item** under `## The tools`, whose first word is the tool name:
+   ```markdown
+   - [krt](src/krt/README.md) — Records the network path to a destination, hop by hop.
+   ```
 
-```markdown
-- krt (Knights of the Round Trip)
-  - Records the network path to a destination, hop by hop.
-  - To install: `cargo install --git https://github.com/timmattison/tools krt`
-```
+3. **A row in `TLDR.md`**, until issue #838 (part 8 of the README split) merges
+   `TLDR.md` into `README.md`. `TLDR.md` is one table, alphabetized. Add a row
+   whose **first cell** is the tool name:
 
-Or add a **level-2 section heading** whose first word is the tool name
-(`## occ (old Claude Code)`), for a tool that needs more room than a list item.
+   ```markdown
+   | `krt` | Knights of the Round Trip — records the network path to a destination. |
+   ```
+
+The README split (issues #831 to #838) moves the old long entries out of
+`README.md` one range of tools at a time. Until a part moves an entry, it stays
+below the heading `### Not moved yet`, in one of the two old forms: a
+**top-level list item** whose first word is the tool name, or a **level-2
+section heading** whose first word is the tool name (`## occ (old Claude
+Code)`). The guard accepts both old forms during the split. Do not use them for
+a new tool.
 
 ### The Trap: A Mention Is Not An Entry
 
@@ -1031,6 +1042,11 @@ for the wrong reason is indistinguishable from a guard doing real work.
 
 A nested list item is not an entry either. The `- To install: …` line under a
 tool's own entry would otherwise document a tool named `To`.
+
+The text of a link counts as the first word of an item, thus
+`- [krt](src/krt/README.md) — …` is the entry of `krt`. A level-3 heading does
+not end the tools section, thus a top-level item below `### Not moved yet` is
+still an entry.
 
 ### Guards Enforcing This
 

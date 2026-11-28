@@ -139,6 +139,7 @@ mod tests {
     fn run(id: u64) -> Run {
         let time = chrono::DateTime::UNIX_EPOCH;
         Run {
+            head_sha: None,
             visibility: crate::run::Visibility::Private,
             id: RunId(id),
             repo: repo("acme/a"),

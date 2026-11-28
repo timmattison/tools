@@ -8,9 +8,8 @@
 //! older commit in the working directory, and the test is part of a newer tree.
 //! `bibibi` takes the change of the test commit one time, as a patch, and
 //! applies it at each commit that it tests, in a scratch worktree from
-//! `gitscratch`. The checkout of the user does not change. The `README.md` at
-//! the root of the repository gives the interface, the verdicts, and the exit
-//! codes.
+//! `gitscratch`. The checkout of the user does not change. The `README.md` of
+//! this crate gives the interface, the verdicts, and the exit codes.
 
 mod child;
 mod interrupt;
