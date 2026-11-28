@@ -1556,6 +1556,7 @@ mod tests {
     use crate::cost::{Prices, Sku};
     use crate::money::Usd;
     use crate::queue::{EntryState, Outcome};
+    use crate::run::CommitSha;
     use crate::target::OwnerName;
     use chrono::{Duration as Span, TimeZone};
 
@@ -4890,6 +4891,172 @@ mod tests {
         assert_eq!(
             board.selected_link(now()).map(|link| link.url).as_deref(),
             Some("https://github.com/a/x/pull/2")
+        );
+    }
+
+    /// The commit of the merge group of pull request 7 in the tests of Enter
+    /// on a queue row.
+    const GROUP: &str = "e8dc7f8f0a3c4b5d6e7f8091a2b3c4d5e6f70812";
+    /// The commit of an older attempt of pull request 7 on the same base.
+    const OLD_GROUP: &str = "8220d8a80b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e";
+    /// The branch of each merge group of pull request 7 on the base
+    /// `2a5e21d6`. Two attempts on the same base have the same branch.
+    const GROUP_BRANCH: &str =
+        "gh-readonly-queue/main/pr-7-2a5e21d6c3b4a5968778695a4b3c2d1e0f9a8b7c";
+    /// The notice of Enter on the row of pull request 7 with no run.
+    const NO_RUN_NOTICE: &str = "no run of the merge group of #7: opened the pull request";
+
+    /// The entry of pull request 7 in the queue of `a/x`, whose merge group
+    /// tests `commit`.
+    fn entry_of_group(commit: Option<&str>) -> QueueEntry {
+        QueueEntry {
+            state: EntryState::AwaitingChecks,
+            merge_group_commit: commit.map(|sha| CommitSha(sha.to_owned())),
+            ..queue_entry("a/x", 7, 1, 3)
+        }
+    }
+
+    /// A run of `repo_text` on `branch` that tests `commit`. GitHub made it
+    /// `created` minutes before `now()`.
+    fn run_of_commit(
+        id: u64,
+        repo_text: &str,
+        state: RunState,
+        branch: &str,
+        commit: Option<&str>,
+        created: i64,
+    ) -> Run {
+        Run {
+            branch: branch.to_owned(),
+            head_sha: commit.map(|sha| CommitSha(sha.to_owned())),
+            ..run(id, repo_text, state, created, 0)
+        }
+    }
+
+    /// What Enter opens on the row of `entry`, when the board holds `runs`
+    /// for `a/x`. The row of the entry is the first row, thus it is selected.
+    fn link_of_entry(entry: QueueEntry, runs: Vec<Run>) -> Link {
+        let mut board = queue_board(vec![entry], Vec::new());
+        board.replace(repo("a/x"), runs, now());
+        board.selected_link(now()).expect("a link")
+    }
+
+    /// The link of the page of run `id` of `a/x`, with no notice.
+    fn run_link(id: u64) -> Link {
+        Link {
+            url: format!("https://example.test/a/x/runs/{id}"),
+            notice: None,
+        }
+    }
+
+    /// The link of the page of pull request 7, with the notice of no run.
+    fn pull_link_with_notice() -> Link {
+        Link {
+            url: "https://github.com/a/x/pull/7".to_owned(),
+            notice: Some(NO_RUN_NOTICE.to_owned()),
+        }
+    }
+
+    #[test]
+    fn enter_on_a_queue_row_opens_the_run_of_its_merge_group() {
+        let link = link_of_entry(
+            entry_of_group(Some(GROUP)),
+            vec![run_of_commit(
+                11,
+                "a/x",
+                RunState::Running,
+                GROUP_BRANCH,
+                Some(GROUP),
+                2,
+            )],
+        );
+        assert_eq!(link, run_link(11));
+    }
+
+    #[test]
+    fn enter_on_a_queue_row_opens_no_old_attempt_no_push_run_and_no_run_of_another_repository() {
+        let mut board = queue_board(vec![entry_of_group(Some(GROUP))], Vec::new());
+        // Each run that is not of the merge group failed, thus the order
+        // would pick it first if the rule let it in.
+        board.replace(
+            repo("a/x"),
+            vec![
+                run_of_commit(
+                    21,
+                    "a/x",
+                    RunState::Failed,
+                    GROUP_BRANCH,
+                    Some(OLD_GROUP),
+                    30,
+                ),
+                run_of_commit(22, "a/x", RunState::Failed, "main", Some(GROUP), 0),
+                run_of_commit(23, "a/x", RunState::Running, GROUP_BRANCH, Some(GROUP), 2),
+            ],
+            now(),
+        );
+        board.replace(
+            repo("b/y"),
+            vec![run_of_commit(
+                24,
+                "b/y",
+                RunState::Failed,
+                GROUP_BRANCH,
+                Some(GROUP),
+                1,
+            )],
+            now(),
+        );
+        assert_eq!(board.selected_link(now()), Some(run_link(23)));
+    }
+
+    #[test]
+    fn enter_on_a_queue_row_with_no_run_of_its_merge_group_opens_the_pull_request_with_a_notice() {
+        let link = link_of_entry(
+            entry_of_group(Some(GROUP)),
+            vec![
+                run_of_commit(
+                    21,
+                    "a/x",
+                    RunState::Running,
+                    GROUP_BRANCH,
+                    Some(OLD_GROUP),
+                    30,
+                ),
+                run_of_commit(22, "a/x", RunState::Running, "main", Some(GROUP), 0),
+            ],
+        );
+        assert_eq!(link, pull_link_with_notice());
+    }
+
+    #[test]
+    fn enter_on_a_queue_row_with_no_merge_group_opens_the_pull_request_with_a_notice() {
+        // A run that gives no head_sha is not a run of an entry that has no
+        // merge group.
+        let link = link_of_entry(
+            entry_of_group(None),
+            vec![run_of_commit(
+                31,
+                "a/x",
+                RunState::Running,
+                GROUP_BRANCH,
+                None,
+                2,
+            )],
+        );
+        assert_eq!(link, pull_link_with_notice());
+    }
+
+    #[test]
+    fn enter_on_a_merge_history_row_opens_the_pull_request_with_no_notice() {
+        let mut board = mixed_board();
+        board.select_next(now());
+        board.select_next(now());
+        assert_eq!(
+            board.selected_link(now()),
+            Some(Link {
+                url: "https://github.com/a/x/pull/2".to_owned(),
+                notice: None,
+            })
         );
     }
 

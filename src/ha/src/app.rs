@@ -520,7 +520,7 @@ mod tests {
     use crate::action::{Action, ActionOutcome};
     use crate::github::{RepoList, SourceError};
     use crate::queue::{Departure, EntryState, History, PullNumber, QueueEntry};
-    use crate::run::{Run, RunId, RunState};
+    use crate::run::{CommitSha, Run, RunId, RunState};
     use crate::status::{OwnerProblem, RateLimit};
     use crate::target::{OwnerName, RepoName};
     use crate::worker::{Command, Update};
@@ -3172,6 +3172,36 @@ mod tests {
         assert_eq!(
             *opener.urls.borrow(),
             ["https://github.com/acme/widgets/pull/7"]
+        );
+    }
+
+    #[test]
+    fn enter_on_a_merge_queue_row_opens_the_run_of_its_merge_group() {
+        let group = "e8dc7f8f0a3c4b5d6e7f8091a2b3c4d5e6f70812";
+        let channels = channels();
+        let entry = QueueEntry {
+            merge_group_commit: Some(CommitSha(group.to_owned())),
+            ..queue_entry(7)
+        };
+        send_queue(&channels, vec![entry], Ok(Vec::new()));
+        let group_run = Run {
+            branch: "gh-readonly-queue/main/pr-7-2a5e21d6".to_owned(),
+            head_sha: Some(CommitSha(group.to_owned())),
+            ..active_run(4, 2)
+        };
+        send_runs(&channels, vec![active_run(1, 5), group_run]);
+        let opener = opener(false);
+        let (result, frame) = run_app(
+            &opener,
+            &channels,
+            vec![press(KeyCode::Enter), press(KeyCode::Char('q'))],
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(*opener.urls.borrow(), ["https://example.test/runs/4"]);
+        assert!(
+            !frame[11].contains("no run of the merge group"),
+            "{:?}",
+            frame[11]
         );
     }
 
