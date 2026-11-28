@@ -144,6 +144,12 @@ const APPLY_REDACTION_LABEL: &str = "Apply Redaction";
 /// The start of the message for a redaction that does not apply.
 const REDACTION_FAILED_PREFIX: &str = "Failed to redact";
 
+/// The start of the warning for clips of different terminal sizes.
+const SIZE_WARNING_PREFIX: &str =
+    "The clips have different terminal sizes. The render pads each clip to";
+/// The end of the warning for clips of different terminal sizes.
+const SIZE_WARNING_SUFFIX: &str = "at the top left.";
+
 /// The accessible label of the playhead control.
 const PLAYHEAD_LABEL: &str = "Playhead";
 
@@ -405,8 +411,9 @@ fn pick_and_load(
     });
 }
 
-/// The timeline of the open recording: its heading and summary, the playhead
-/// control, and the view of the tracks. `view` holds the zoom and the scroll
+/// The timeline of the open recording: its heading and summary, a warning
+/// when the clips have different terminal sizes, the playhead control, and
+/// the view of the tracks. `view` holds the zoom and the scroll
 /// of the view.
 ///
 /// The playhead control is a plain range input in the time of the render,
@@ -427,6 +434,11 @@ fn Timeline(
                 div { class: "timeline-header",
                     h3 { "Timeline" }
                     span { class: "timeline-summary", "{summary(open)}" }
+                }
+                if let Some(size) = crate::splice::mixed_padded_size(open.editor.project()) {
+                    div { class: "size-warning", role: "status",
+                        "{SIZE_WARNING_PREFIX} {size.width}x{size.height}, {SIZE_WARNING_SUFFIX}"
+                    }
                 }
                 input {
                     class: "playhead",

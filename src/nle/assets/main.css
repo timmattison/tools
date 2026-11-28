@@ -386,6 +386,12 @@ h3 {
   font-size: 13px;
 }
 
+.size-warning {
+  color: #f9e2af;
+  font-size: 12px;
+  margin: 4px 0;
+}
+
 .clip-track-label {
   display: block;
   color: #a6adc8;

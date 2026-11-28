@@ -30,6 +30,19 @@ pub(crate) fn play_order(project: &EditProject) -> Vec<&Clip> {
     ordered
 }
 
+/// The padded size of the terminal of `project`, when its clips do not all
+/// have one terminal size: the largest width and the largest height of the
+/// sources of its clips. The answer is `None` when every clip has one size,
+/// or when the project has no clip.
+pub(crate) fn mixed_padded_size(project: &EditProject) -> Option<TerminalSize> {
+    let size = largest_size(&project.clips)?;
+    project
+        .clips
+        .iter()
+        .any(|clip| (clip.source.width, clip.source.height) != (size.width, size.height))
+        .then_some(size)
+}
+
 /// The largest width and the largest height of the sources of `clips`, or
 /// `None` when there is no clip.
 fn largest_size<'a>(clips: impl IntoIterator<Item = &'a Clip>) -> Option<TerminalSize> {
