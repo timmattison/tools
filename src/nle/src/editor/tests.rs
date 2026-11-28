@@ -469,6 +469,49 @@ fn one_undo_puts_a_reordered_track_back() {
     assert!(!editor.can_undo());
 }
 
+// Tests of `Edit::append_recording`.
+
+#[test]
+fn append_recording_adds_the_whole_recording_after_the_end_of_the_timeline_on_the_first_track() {
+    let mut editor = three_clip_editor();
+    let mut longer = Recording::test_fixture();
+    longer.duration = 3.5;
+    let longer = Arc::new(longer);
+
+    let edit = Edit::append_recording(editor.project(), Arc::clone(&longer)).unwrap();
+    editor.apply(edit).unwrap();
+
+    // The timeline ends at 8, the end of clip 3. The largest id was 4.
+    let project = editor.project();
+    let added = clip_in(project, 5);
+    assert!(Arc::ptr_eq(&added.source, &longer));
+    assert_eq!(added.in_point, Seconds::ZERO);
+    assert_eq!(added.out_point, secs(3.5));
+    assert_eq!(added.timeline_offset, secs(8.0));
+    assert_eq!(
+        clip_ids_of(project, 1),
+        vec![ClipId(1), ClipId(2), ClipId(3), ClipId(5)]
+    );
+    assert_eq!(project.duration(), 11.5);
+}
+
+#[test]
+fn append_recording_to_a_project_with_no_track_fails() {
+    let result = Edit::append_recording(&EditProject::default(), source());
+
+    assert!(matches!(result, Err(NleError::EditError(_))), "{result:?}");
+}
+
+#[test]
+fn append_recording_with_a_duration_that_is_not_a_time_fails() {
+    let mut broken = Recording::test_fixture();
+    broken.duration = f64::NAN;
+
+    let result = Edit::append_recording(&project(), Arc::new(broken));
+
+    assert!(matches!(result, Err(NleError::InvalidTime(_))), "{result:?}");
+}
+
 // Tests of filter edits.
 
 fn filter_names(project: &EditProject) -> Vec<&str> {

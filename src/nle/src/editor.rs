@@ -95,6 +95,18 @@ pub enum Edit {
 }
 
 impl Edit {
+    /// The edit that adds the whole of `source` as a new clip of `project`.
+    ///
+    /// # Errors
+    /// Returns `NleError::EditError` for every call.
+    pub fn append_recording(
+        project: &EditProject,
+        source: Arc<Recording>,
+    ) -> Result<Self, NleError> {
+        let _ = (project, source);
+        Err(NleError::EditError("not yet".to_owned()))
+    }
+
     /// Apply this edit to `project`. It may leave `project` half changed when
     /// it fails, so the caller gives it a copy. It does not validate the
     /// result.
