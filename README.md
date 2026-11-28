@@ -6679,6 +6679,15 @@ sequences:
 
 The timeline does not show where the redactions are yet (issue #818).
 
+**Undo** and **Redo** in the menu bar take back the last edit of the project
+and apply it again, for example a speed change, a redaction, or the removal of
+a row. The keys are Cmd+Z and Cmd+Shift+Z on macOS, and Ctrl+Z and
+Ctrl+Shift+Z on Linux and Windows. The tooltip of each button names its keys.
+A button is disabled when the editor has nothing to undo or to redo. After each
+step, the preview, the timeline, and the panels show the project at once. While
+a text field has the focus, the keys undo and redo the typing in the field, and
+the project does not change. A new recording opens with an empty history.
+
 The application is one Rust crate on Dioxus 0.7, with the desktop (webview)
 renderer. Its components call the Rust code directly, and the open project is
 Dioxus state, thus no IPC layer and no frontend package exist.
@@ -6736,7 +6745,8 @@ The editing engine of the crate has five parts:
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
-  undo and redo history.
+  undo and redo history. The Undo and Redo controls of the window step
+  through that history.
 - **Preview** (`preview::Preview`): replays the events of the rendered
   recording through the terminal emulator of `termstate`, which the video
   export of `beta` also uses. On the way it keeps snapshots of the terminal,
