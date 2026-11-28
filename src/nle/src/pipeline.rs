@@ -15,6 +15,8 @@ use crate::types::{
 /// This is the event form. `InPlaceFilterFn` is the in-place form, for a
 /// filter that rewrites its region and moves nothing. `SpanFilterFn` is the
 /// span form, for a filter that changes the length of its region.
+/// `ScreenFilterFn` is the screen form, for a filter that rewrites its region
+/// and can change the size of the screen.
 ///
 /// The pipeline calls a filter once for each `AppliedFilter` that names it.
 /// What a filter sees, and what the pipeline does with its answer:
@@ -159,59 +161,77 @@ pub struct Span {
 pub type SpanFilterFn =
     dyn Fn(Span, SpanContext<'_>, &FilterOptions) -> Result<Span, String> + Send + Sync;
 
-/// What a screen filter sees beside its region.
-#[derive(Debug, Clone, Copy)]
-pub struct Screen<'a> {
-    /// The size of the terminal.
+/// What a screen filter knows about its region and its screen.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenView<'a> {
+    /// The same value that an in-place filter gets for this region.
+    pub region: RegionView,
+    /// The size of the screen at this step.
     pub size: TerminalSize,
-    /// The events before the region, in the order of the timeline, with their
-    /// times on the timeline.
+    /// The events before the region, with their times on the timeline.
     pub before: &'a [Event],
+    /// True when the region is `All`, the whole timeline. Only a filter on
+    /// such a region can change the size of the screen.
+    pub whole_timeline: bool,
 }
 
-/// A screen filter: a pure function from the screen, a region, and the options
-/// to new events, or an error message.
+/// The answer of a screen filter: new events and the size of the screen.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Screen {
+    /// The events of the region, with times relative to its start.
+    pub events: Vec<Event>,
+    /// The size of the screen for the later steps.
+    pub size: TerminalSize,
+}
+
+/// A screen filter: a pure function that rewrites the events of a region,
+/// keeps the region in its place on the timeline, and can change the size of
+/// the screen.
 ///
-/// Use a screen filter when the filter must know what is on the screen. It
-/// draws on the output of the terminal, for example a box with the keys that
-/// the user presses. It needs the size of the terminal, and the events before
-/// its region, so that it can find the screen at the start of the region. It
-/// never changes the time of an event after the region. The pipeline calls it
-/// once for each `AppliedFilter` that names it. Steps 1 to 3 and 7 to 8 of
-/// `FilterFn` are the same. The other steps are:
+/// Use a screen filter when the filter must know what is on the screen, for
+/// example a box that shows the keys that the user presses, or when it changes
+/// how big the screen is, for example a crop. The pipeline calls it once for
+/// each `AppliedFilter` that names it. Steps 1 to 3 and step 7 of `FilterFn`
+/// are the same. The other steps are:
 ///
-/// 1. The length of the region is the length that a span filter gets (step 1
-///    of `SpanFilterFn`).
-/// 2. The filter gets a `Screen` with the size of the terminal and the events
-///    before the region, which are the events of the `before` list of step 2
-///    of `FilterFn`. It gets a `Span` with the events inside the region,
-///    relative to its start, and the length. It gets the options. It answers
-///    `Ok` with events relative to the region start, or `Err` with a message.
-/// 3. An `Err` fails the pipeline with a render error. Its text names the kind
-///    and holds the message, as for a span filter.
-/// 4. Each answered time is checked as in step 5 of `FilterFn`, with the same
-///    error.
-/// 5. No answered time is after the end of the region: the relative time must
-///    be at most the length. Else the pipeline fails with a render error that
-///    names the kind, the time on the timeline, and the end of the region on
-///    the timeline. Step 4 comes before step 5.
-/// 6. The shift is zero. The events after the region and the end of the
-///    timeline do not move. The end of the timeline is still never less than
-///    the time of the last event. An answered time goes back onto the
-///    timeline as in step 4 of `InPlaceFilterFn`, never after the end of the
-///    region.
-/// 7. Without a terminal size (`FilterRegistry::run`), the filter is not
-///    called, and the pipeline fails with a render error that names the kind.
+/// 1. The filter gets the events inside the region, relative to its start,
+///    and a `ScreenView`. The view holds the `RegionView` that an in-place
+///    filter gets, the size of the screen at this step, the events before
+///    the region with their times on the timeline, and `whole_timeline`, which
+///    is true only for the region `All`. A range that holds each event is not
+///    `All`, thus a filter reads `whole_timeline` and not `RegionView::open`
+///    to know if it can change the size. The size of the first step
+///    is the width and the height of the header that `FilterRegistry::render`
+///    takes, or the size that `FilterRegistry::run_on` takes. A later step
+///    gets the size that the step before it gave.
+/// 2. The filter answers `Ok` with a `Screen`, or `Err` with a message. An
+///    `Err` fails the pipeline with a render error. Its text names the kind
+///    and holds the message, as for an in-place filter.
+/// 3. The answered width and the answered height must each be at least 1.
+///    Else the pipeline fails with a render error that names the kind and the
+///    size.
+/// 4. When the region is not `All`, the answered size must be the size of the
+///    view. Only a filter on the region `All` can change the size of the
+///    screen. Else the pipeline fails with a render error that names the kind
+///    and both sizes.
+/// 5. The answered size is the size of the later steps, and at the end it is
+///    the size of the rendered recording.
+/// 6. Each answered time is checked as in steps 3 and 4 of `InPlaceFilterFn`,
+///    with the same errors. Nothing moves: the events after the region keep
+///    their times, and the end of the timeline stays.
+///
+/// `FilterRegistry::run` has no header, so it has no size to give. It fails
+/// when it meets a screen filter. `FilterRegistry::run_on` takes a size.
 pub type ScreenFilterFn =
-    dyn Fn(&Screen<'_>, Span, &FilterOptions) -> Result<Vec<Event>, String> + Send + Sync;
+    dyn Fn(&[Event], ScreenView<'_>, &FilterOptions) -> Result<Screen, String> + Send + Sync;
 
 /// A filter in one of its four forms.
 #[derive(Clone)]
 enum Registered {
+    Screen(Arc<ScreenFilterFn>),
     Events(Arc<FilterFn>),
     InPlace(Arc<InPlaceFilterFn>),
     Span(Arc<SpanFilterFn>),
-    Screen(Arc<ScreenFilterFn>),
 }
 
 /// The filters that a project can use, by kind.
@@ -265,6 +285,20 @@ impl FilterRegistry {
             .insert(kind, Registered::InPlace(Arc::new(filter)));
     }
 
+    /// Register `filter` as a screen filter under `kind`. A filter of any form
+    /// that is already under `kind` is replaced.
+    pub fn register_screen(
+        &mut self,
+        kind: FilterKind,
+        filter: impl Fn(&[Event], ScreenView<'_>, &FilterOptions) -> Result<Screen, String>
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        self.filters
+            .insert(kind, Registered::Screen(Arc::new(filter)));
+    }
+
     /// Register `filter` as a span filter under `kind`. A filter of any form
     /// that is already under `kind` is replaced.
     pub fn register_span(
@@ -277,20 +311,6 @@ impl FilterRegistry {
     ) {
         self.filters
             .insert(kind, Registered::Span(Arc::new(filter)));
-    }
-
-    /// Register `filter` as a screen filter under `kind`. A filter of any form
-    /// that is already under `kind` is replaced.
-    pub fn register_screen(
-        &mut self,
-        kind: FilterKind,
-        filter: impl Fn(&Screen<'_>, Span, &FilterOptions) -> Result<Vec<Event>, String>
-            + Send
-            + Sync
-            + 'static,
-    ) {
-        self.filters
-            .insert(kind, Registered::Screen(Arc::new(filter)));
     }
 
     /// Whether a filter is registered under `kind`.
@@ -311,14 +331,14 @@ impl FilterRegistry {
 
     /// One filter step: the steps on `FilterFn`, on `InPlaceFilterFn`, on
     /// `SpanFilterFn`, or on `ScreenFilterFn`. The events draw on a terminal
-    /// of `size`, when the caller has one. Without one, a span filter gets the
-    /// size of a VT100, and a screen filter fails.
+    /// of `size`, and only a screen filter changes it. When `size` is `None`,
+    /// a span filter gets the size of a VT100 and a screen filter fails.
     fn apply(
         &self,
         events: Vec<Event>,
         applied: &AppliedFilter,
         end: &mut f64,
-        size: Option<TerminalSize>,
+        size: &mut Option<TerminalSize>,
     ) -> Result<Vec<Event>, NleError> {
         let filter = self.lookup(&applied.kind)?;
         let (start, region_end) = match &applied.region {
@@ -343,57 +363,64 @@ impl FilterRegistry {
         }
 
         let kind = applied.kind.as_str();
-        // The length of the region, for a screen filter, which must stay
-        // inside it.
-        let mut region_length = None;
+        // The end of the region on the timeline, and the view of the region
+        // that an in-place, a screen, and a span filter get.
+        let top = region_end.min(*end).max(start);
+        let view = RegionView {
+            length: top - start,
+            open: after.is_empty() && region_end >= *end,
+        };
         // The answer, the view of an in-place filter, the latest time on the
         // timeline that the answer can get, and how far the events after the
         // region move.
         let (answer, view, ceiling, shift) = match filter {
-            Registered::Screen(filter) => {
-                let Some(size) = size else {
-                    return Err(NleError::RenderError(format!(
-                        "filter \"{kind}\" draws on the screen, and this run has no terminal size"
-                    )));
-                };
-                // The end of the region on the timeline.
-                let top = region_end.min(*end).max(start);
-                let length = top - start;
-                let span = Span {
-                    events: inside,
-                    length,
-                };
-                let screen = Screen {
-                    size,
-                    before: &before,
-                };
-                let answer = filter(&screen, span, &applied.options).map_err(|message| {
-                    NleError::RenderError(format!("filter \"{kind}\" failed: {message}"))
-                })?;
-                region_length = Some(length);
-                // A screen filter moves nothing.
-                (answer, None, top, 0.0)
-            }
             Registered::Events(filter) => {
                 let answer = filter(&inside, &applied.options);
                 let shift = last_time(&answer) - last_time(&inside);
                 (answer, None, f64::INFINITY, shift)
             }
             Registered::InPlace(filter) => {
-                // The end of the region on the timeline.
-                let top = region_end.min(*end).max(start);
-                let view = RegionView {
-                    length: top - start,
-                    open: after.is_empty() && region_end >= *end,
-                };
                 let answer = filter(&inside, view, &applied.options).map_err(|message| {
                     NleError::RenderError(format!("filter \"{kind}\" failed: {message}"))
                 })?;
                 // An in-place filter moves nothing.
                 (answer, Some(view), top, 0.0)
             }
+            Registered::Screen(filter) => {
+                let Some(current) = *size else {
+                    return Err(NleError::RenderError(format!(
+                        "filter \"{kind}\" needs the size of the screen, and only FilterRegistry::render and FilterRegistry::run_on give it"
+                    )));
+                };
+                let screen = ScreenView {
+                    region: view,
+                    size: current,
+                    before: &before,
+                    whole_timeline: applied.region == FilterRegion::All,
+                };
+                let answer = filter(&inside, screen, &applied.options).map_err(|message| {
+                    NleError::RenderError(format!("filter \"{kind}\" failed: {message}"))
+                })?;
+                let TerminalSize {
+                    width: w,
+                    height: h,
+                } = answer.size;
+                if w == 0 || h == 0 {
+                    return Err(NleError::RenderError(format!(
+                        "filter \"{kind}\" answered the size {w}x{h}, which has no cells"
+                    )));
+                }
+                if answer.size != current && applied.region != FilterRegion::All {
+                    return Err(NleError::RenderError(format!(
+                        "filter \"{kind}\" answered the size {w}x{h} on a range, and only a filter on the region All can change the size of the screen ({}x{})",
+                        current.width, current.height
+                    )));
+                }
+                *size = Some(answer.size);
+                (answer.events, Some(view), top, 0.0)
+            }
             Registered::Span(filter) => {
-                let length = (region_end.min(*end) - start).max(0.0);
+                let length = view.length;
                 let span = Span {
                     events: inside,
                     length,
@@ -440,17 +467,6 @@ impl FilterRegistry {
             }
         }
 
-        if let Some(length) = region_length {
-            for event in &answer {
-                if event.time > length {
-                    return Err(NleError::RenderError(format!(
-                        "filter \"{kind}\" answered the time {} s, which is after the end of its region at {ceiling} s",
-                        event.time + start
-                    )));
-                }
-            }
-        }
-
         let mut result = before;
         // The length plus the start can round up by one step, so a time is
         // held at the ceiling.
@@ -473,21 +489,20 @@ impl FilterRegistry {
     }
 
     /// Run `filters` in order over `events`, by the steps of their form. The
-    /// end of the timeline starts at the time of the last event. This run has
-    /// no terminal size, so a screen filter fails. Use `FilterRegistry::run_on`
-    /// for that.
+    /// end of the timeline starts at the time of the last event.
     ///
     /// The events have no recording, so a span filter gets the size of a
-    /// VT100 (`TerminalSize::VT100`). `render` gives the size of the
-    /// recording.
+    /// VT100 (`TerminalSize::VT100`), and a screen filter fails. `render`
+    /// gives the size of the recording, and `FilterRegistry::run_on` takes a
+    /// size.
     ///
     /// # Errors
     /// Returns `NleError::RenderError` when a filter kind is not registered,
     /// when a filter answers a time that is not finite or is below zero on
     /// the timeline, when an in-place filter fails or answers a time after
     /// its region, when a span filter answers an error or a bad length, when
-    /// a screen filter answers an error or a time after its region, when a
-    /// screen filter is in the list, or when an event time or the end of the
+    /// a filter of the screen form is in `filters` (this method has no header,
+    /// so it has no size to give), or when an event time or the end of the
     /// timeline that the filters give is not finite.
     pub fn run(
         &self,
@@ -496,20 +511,22 @@ impl FilterRegistry {
     ) -> Result<Vec<Event>, NleError> {
         let end = last_time(&events);
         self.run_with_end(events, filters, end, None)
-            .map(|(events, _end)| events)
+            .map(|(events, _end, _size)| events)
     }
 
     /// Run `filters` in order over `events`, as `FilterRegistry::run` does,
-    /// with the terminal size `size`. A span filter and a screen filter get
-    /// that size.
+    /// on a terminal of `size`. A span filter and the first screen filter get
+    /// that size, and a later filter gets the size that a screen filter
+    /// before it gave.
     ///
     /// # Errors
     /// Returns `NleError::RenderError` when a filter kind is not registered,
     /// when a filter answers a time that is not finite or is below zero on
-    /// the timeline, when a span filter or a screen filter answers an error,
-    /// when a span filter answers a bad length, when a screen filter answers
-    /// a time after its region, or when an event time or the end of the
-    /// timeline that the filters give is not finite.
+    /// the timeline, when an in-place filter or a screen filter fails or
+    /// answers a time outside its region, when a span filter answers an error
+    /// or a bad length, when a screen filter answers a bad size, or when an
+    /// event time or the end of the timeline that the filters give is not
+    /// finite.
     pub fn run_on(
         &self,
         events: Vec<Event>,
@@ -518,29 +535,31 @@ impl FilterRegistry {
     ) -> Result<Vec<Event>, NleError> {
         let end = last_time(&events);
         self.run_with_end(events, filters, end, Some(size))
-            .map(|(events, _end)| events)
+            .map(|(events, _end, _size)| events)
     }
 
-    /// Run `filters` in order on a terminal of `size`, when the caller has
-    /// one, and follow the end of the timeline, which starts at `end`. Returns
-    /// the events and the final end.
+    /// Run `filters` in order on a terminal of `size`, and follow the end of
+    /// the timeline, which starts at `end`, and the size, which only a screen
+    /// filter changes. When `size` is `None`, a span filter gets the size of a
+    /// VT100 and a screen filter fails. Returns the events, the final end, and
+    /// the final size.
     ///
     /// # Errors
     /// Returns `NleError::RenderError` when a filter fails, when a span
-    /// filter answers an error or a bad length, when a screen filter answers
-    /// an error or a time after its region, when a screen filter runs with no
-    /// size, or when an event time or the final end is not finite.
+    /// filter answers an error or a bad length, or when an event time or the
+    /// final end is not finite.
     fn run_with_end(
         &self,
         events: Vec<Event>,
         filters: &[AppliedFilter],
         end: f64,
         size: Option<TerminalSize>,
-    ) -> Result<(Vec<Event>, f64), NleError> {
+    ) -> Result<(Vec<Event>, f64, Option<TerminalSize>), NleError> {
         let mut events = events;
         let mut end = end;
+        let mut size = size;
         for applied in filters {
-            events = self.apply(events, applied, &mut end, size)?;
+            events = self.apply(events, applied, &mut end, &mut size)?;
         }
         // A shift or the arithmetic of a clip can still overflow to infinity.
         for event in &events {
@@ -556,7 +575,7 @@ impl FilterRegistry {
                 "the render gives the end {end} s, which is not finite"
             )));
         }
-        Ok((events, end))
+        Ok((events, end, size))
     }
 
     /// Flatten `project` into one recording.
@@ -568,13 +587,16 @@ impl FilterRegistry {
     ///    track and clip by clip, in a stable time order. Events at one time
     ///    keep track order, then clip order.
     /// 3. The filters of the project run on them by the steps of their form,
-    ///    with the end of the timeline starting at `EditProject::duration`. A
-    ///    span filter and a screen filter get the terminal size of the header
-    ///    of rule 4, which is the size of the clip that starts first.
+    ///    with the end of the timeline starting at `EditProject::duration`,
+    ///    and the size of the screen starting at the header size of rule 4:
+    ///    the terminal size of the clip that starts first. A span filter gets
+    ///    the size at its step, which a screen filter before it can change.
     /// 4. The header (`version`, `width`, `height`, `timestamp`, `command`,
     ///    `title`, `env`) is the header of the source of the clip that starts
     ///    first on the timeline. A tie goes to the clip that comes first in
-    ///    track order, then in clip order.
+    ///    track order, then in clip order. The exception is `width` and
+    ///    `height`: they are the size of the screen after the filters, which
+    ///    is the header size when no screen filter changes it.
     /// 5. `duration` is the end of the timeline after the filters.
     /// 6. Each event time and the duration must be finite. Else the render
     ///    fails with `NleError::RenderError`.
@@ -613,17 +635,19 @@ impl FilterRegistry {
         // A stable sort keeps track order, then clip order, on a tie.
         events.sort_by(|a, b| a.time.total_cmp(&b.time));
         let header = &first.source;
-        let (events, end) = self.run_with_end(
+        let (events, end, size) = self.run_with_end(
             events,
             &project.filters,
             project.duration(),
             Some(header.size()),
         )?;
-
+        let (width, height) = size.map_or((header.width, header.height), |size| {
+            (size.width, size.height)
+        });
         Ok(Recording {
             version: header.version,
-            width: header.width,
-            height: header.height,
+            width,
+            height,
             timestamp: header.timestamp,
             duration: end,
             command: header.command.clone(),

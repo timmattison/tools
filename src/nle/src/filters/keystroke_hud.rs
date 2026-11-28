@@ -42,11 +42,10 @@
 //!   skips it.
 //! - The HUD never makes a region longer. A box that is still on the screen at
 //!   the end of the region goes away there.
-//! - `termstate` gives each character one cell. A wide character (for example
-//!   `日`) in a label moves the right border by one cell in a terminal or in
-//!   xterm.js.
-//! - A cell color of exactly one of the 18 colors of the private replay theme
-//!   comes back as its theme color.
+//! - The layout of the box gives each character of a label one cell, but
+//!   `termstate` and a terminal give a wide character (for example `日`) two
+//!   cells. Thus a wide character in a label does not show correctly, and the
+//!   HUD writes the label again at each output event while the box shows.
 //! - The HUD saves and restores the cursor with `ESC 7` and `ESC 8`, and the
 //!   program shares that one save of the terminal. When the program saves the
 //!   cursor, the HUD draws, and then the program restores the cursor, the
@@ -68,7 +67,7 @@ pub use options::{
     FADE_OPTION, POSITION_OPTION, TEXT_OPTION, THEME_OPTION,
 };
 
-use crate::pipeline::{FilterRegistry, Screen, Span};
+use crate::pipeline::{FilterRegistry, Screen, ScreenView};
 use crate::types::{AppliedFilter, Event, EventType, FilterKind, FilterOptions, FilterRegion};
 use paint::{layout, Painter};
 use timeline::{Press, Timeline, Timing};
@@ -101,15 +100,17 @@ pub fn register(registry: &mut FilterRegistry) {
     registry.register_screen(kind(), draw);
 }
 
-/// The screen filter of the HUD. It answers the events of `span`, with the
-/// output events of the box added in time order.
+/// The screen filter of the HUD. It answers the events of its region, with the
+/// output events of the box added in time order, and it keeps the size of the
+/// screen.
 ///
 /// # Errors
 /// Returns a message when an option is not valid, or when the screen has more
 /// than `MAX_CELLS` cells.
-fn draw(screen: &Screen<'_>, span: Span, options: &FilterOptions) -> Result<Vec<Event>, String> {
+fn draw(events: &[Event], view: ScreenView<'_>, options: &FilterOptions) -> Result<Screen, String> {
     let options = HudOptions::from_options(options)?;
-    let size = screen.size;
+    let size = view.size;
+    let unchanged = |events: Vec<Event>| Screen { events, size };
     let (columns, rows) = (size.width, size.height);
     if usize::from(columns) * usize::from(rows) > MAX_CELLS {
         return Err(format!(
@@ -117,15 +118,15 @@ fn draw(screen: &Screen<'_>, span: Span, options: &FilterOptions) -> Result<Vec<
         ));
     }
     let Some(mut painter) = Painter::new(size) else {
-        return Ok(span.events);
+        return Ok(unchanged(events.to_vec()));
     };
-    for event in screen.before {
+    for event in view.before {
         if event.event_type == EventType::Output {
             painter.feed(&event.data);
         }
     }
 
-    let mut events = span.events;
+    let mut events = events.to_vec();
     // The pipeline gives no order inside a region.
     events.sort_by(|a, b| a.time.total_cmp(&b.time));
     let mut reader = keys::KeyReader::new();
@@ -152,7 +153,7 @@ fn draw(screen: &Screen<'_>, span: Span, options: &FilterOptions) -> Result<Vec<
         Timing {
             duration: options.duration,
             fade: options.fade,
-            limit: span.length,
+            limit: view.region.length,
         },
     );
     let frames = timeline.frames();
@@ -203,7 +204,7 @@ fn draw(screen: &Screen<'_>, span: Span, options: &FilterOptions) -> Result<Vec<
             data,
         });
     }
-    Ok(result)
+    Ok(unchanged(result))
 }
 
 #[cfg(test)]

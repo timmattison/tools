@@ -1817,3 +1817,10 @@ gitscratch = { workspace = true, features = ["testing"] }
   and by how much?
 - [`bibibi`](../../README.md#bibibi-bye-bye-bye) — which commit caused this
   regression, found with a test from a later commit?
+- [`gsw`](../../README.md) — the rebase and the merge that one press of `m`
+  measures, with the same calls that `grind` and `grime` make
+
+The `testing` module is shared too. About 30 crates of this workspace take it
+as a dev-dependency, for `write_executable`, `git_shim`, and the fixture
+repositories. `sysclip` also takes it through its own `testing` feature, for the
+fake `pbcopy` and `pbpaste` that `sysclip::testing::FakeShims` writes.

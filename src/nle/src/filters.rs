@@ -11,6 +11,7 @@ pub mod keystroke_hud;
 pub mod redaction;
 pub mod time_dilation;
 pub mod typing_speed;
+pub mod viewport;
 
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -78,6 +79,7 @@ pub fn registry() -> FilterRegistry {
     keystroke_hud::register(&mut registry);
     redaction::register(&mut registry);
     typing_speed::register(&mut registry);
+    viewport::register(&mut registry);
     register_with_options(&mut registry, PAUSE_REMOVAL, |span, options| {
         Ok(remove_pauses(span, options))
     });

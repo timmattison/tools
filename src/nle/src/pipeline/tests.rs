@@ -991,6 +991,295 @@ fn register_span_and_register_replace_each_other_under_one_kind() {
     assert_eq!(times(&out), vec![2.0, 4.0]);
 }
 
+// Tests of the screen form.
+
+/// What a screen spy saw: the region view, the size, and the events before the
+/// region.
+type Seen = (RegionView, TerminalSize, Vec<Event>);
+
+fn size(width: u16, height: u16) -> TerminalSize {
+    TerminalSize { width, height }
+}
+
+/// Registers a screen filter under `name`. It records what it sees, and it
+/// answers its events with one more event, "mark", at the length of its
+/// region, and with the size `answer`.
+fn register_screen_spy(
+    registry: &mut FilterRegistry,
+    name: &str,
+    answer: TerminalSize,
+    seen: &TestArc<Mutex<Vec<Seen>>>,
+) {
+    let captured = TestArc::clone(seen);
+    registry.register_screen(kind(name), move |events, view, _| {
+        captured
+            .lock()
+            .unwrap()
+            .push((view.region, view.size, view.before.to_vec()));
+        let mut out = events.to_vec();
+        out.push(Event {
+            time: view.region.length,
+            event_type: EventType::Output,
+            data: "mark".to_string(),
+        });
+        Ok(Screen {
+            events: out,
+            size: answer,
+        })
+    });
+}
+
+fn screen_spy(answer: TerminalSize) -> (FilterRegistry, TestArc<Mutex<Vec<Seen>>>) {
+    let seen = TestArc::new(Mutex::new(Vec::new()));
+    let mut registry = FilterRegistry::new();
+    register_screen_spy(&mut registry, "crop", answer, &seen);
+    (registry, seen)
+}
+
+fn assert_error_has(result: Result<impl fmt::Debug, NleError>, parts: &[&str]) {
+    match result {
+        Err(NleError::RenderError(message)) => {
+            for part in parts {
+                assert!(message.contains(part), "{message}");
+            }
+        }
+        other => panic!("expected a RenderError, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_screen_filter_on_all_sets_the_size_of_the_rendered_recording() {
+    let (registry, _seen) = screen_spy(size(40, 10));
+
+    let rendered = registry
+        .render(&one_clip_project(vec![all("crop")]))
+        .unwrap();
+
+    assert_eq!((rendered.width, rendered.height), (40, 10));
+}
+
+#[test]
+fn the_first_screen_filter_sees_the_header_size_of_the_first_clip() {
+    let (registry, seen) = screen_spy(size(40, 10));
+
+    registry
+        .render(&one_clip_project(vec![all("crop")]))
+        .unwrap();
+
+    assert_eq!(seen.lock().unwrap()[0].1, size(100, 30));
+}
+
+#[test]
+fn a_second_screen_filter_sees_the_size_that_the_first_answered() {
+    let seen = TestArc::new(Mutex::new(Vec::new()));
+    let mut registry = FilterRegistry::new();
+    register_screen_spy(&mut registry, "first", size(40, 10), &seen);
+    register_screen_spy(&mut registry, "second", size(20, 5), &seen);
+
+    let rendered = registry
+        .render(&one_clip_project(vec![all("first"), all("second")]))
+        .unwrap();
+
+    let sizes: Vec<TerminalSize> = seen.lock().unwrap().iter().map(|s| s.1).collect();
+    assert_eq!(sizes, vec![size(100, 30), size(40, 10)]);
+    assert_eq!((rendered.width, rendered.height), (20, 5));
+}
+
+#[test]
+fn a_screen_filter_on_a_range_sees_the_events_before_and_the_region_view() {
+    let (registry, seen) = screen_spy(size(100, 30));
+
+    registry
+        .render(&one_clip_project(vec![range("crop", 2.0, 9.0)]))
+        .unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(
+        seen[0].0,
+        RegionView {
+            length: 7.0,
+            open: false
+        }
+    );
+    assert_eq!(times(&seen[0].2), vec![0.0]);
+}
+
+#[test]
+fn a_screen_filter_on_a_range_cannot_change_the_size() {
+    let (registry, _seen) = screen_spy(size(40, 10));
+
+    let result = registry.render(&one_clip_project(vec![range("crop", 2.0, 9.0)]));
+
+    assert_error_has(
+        result,
+        &[
+            "\"crop\"",
+            "40x10",
+            "only a filter on the region All",
+            "100x30",
+        ],
+    );
+}
+
+#[test]
+fn a_screen_filter_that_answers_no_cells_fails() {
+    for answer in [size(0, 10), size(40, 0)] {
+        let (registry, _seen) = screen_spy(answer);
+
+        let result = registry.render(&one_clip_project(vec![all("crop")]));
+
+        assert_error_has(result, &["\"crop\"", "which has no cells"]);
+    }
+}
+
+#[test]
+fn a_screen_filter_that_fails_fails_the_render_with_its_kind_and_message() {
+    let mut registry = FilterRegistry::new();
+    registry.register_screen(kind("grumpy"), |_, _, _| Err("bad options".to_string()));
+
+    let result = registry.render(&one_clip_project(vec![all("grumpy")]));
+
+    assert_error_has(result, &["filter \"grumpy\" failed: bad options"]);
+}
+
+#[test]
+fn a_screen_filter_cannot_answer_a_time_outside_its_region() {
+    let answers: [f64; 3] = [7.5, -0.5, f64::NAN];
+    for at in answers {
+        let mut registry = FilterRegistry::new();
+        registry.register_screen(kind("crop"), move |_, _, _| {
+            Ok(Screen {
+                events: vec![ev(at)],
+                size: size(100, 30),
+            })
+        });
+
+        let result = registry.render(&one_clip_project(vec![range("crop", 2.0, 9.0)]));
+
+        assert_error_has(result, &["\"crop\" answered the time"]);
+    }
+}
+
+#[test]
+fn a_screen_filter_moves_nothing() {
+    let (registry, _seen) = screen_spy(size(40, 10));
+
+    let rendered = registry
+        .render(&one_clip_project(vec![all("crop")]))
+        .unwrap();
+
+    assert_eq!(times(&rendered.events), vec![0.0, 8.0, 10.0]);
+    assert_eq!(rendered.duration, 10.0);
+}
+
+#[test]
+fn run_with_a_screen_filter_fails_and_names_the_kind() {
+    let (registry, _seen) = screen_spy(size(40, 10));
+
+    let result = registry.run(events(&[1.0]), &[all("crop")]);
+
+    assert_error_has(
+        result,
+        &[
+            "\"crop\"",
+            "needs the size of the screen",
+            "FilterRegistry::render",
+        ],
+    );
+}
+
+#[test]
+fn a_project_with_only_the_old_forms_renders_the_header_size() {
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("double"), double());
+    registry.register_in_place(kind("spot"), |events, _, _| Ok(events.to_vec()));
+
+    let rendered = registry
+        .render(&one_clip_project(vec![all("double"), all("spot")]))
+        .unwrap();
+
+    assert_eq!((rendered.width, rendered.height), (100, 30));
+}
+
+#[test]
+fn a_screen_view_says_whether_the_region_is_all() {
+    let seen = TestArc::new(Mutex::new(Vec::new()));
+    let captured = TestArc::clone(&seen);
+    let mut registry = FilterRegistry::new();
+    registry.register_screen(kind("spy"), move |events, view, _| {
+        captured.lock().unwrap().push(view.whole_timeline);
+        Ok(Screen {
+            events: events.to_vec(),
+            size: view.size,
+        })
+    });
+
+    // The source has events at 0 and 8, and it lasts 10 seconds. The second
+    // range starts at 0 and holds each event, thus it is open.
+    registry
+        .render(&one_clip_project(vec![all("spy")]))
+        .unwrap();
+    registry
+        .render(&one_clip_project(vec![range("spy", 0.0, 50.0)]))
+        .unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), vec![true, false]);
+}
+
+#[test]
+fn register_screen_and_each_other_form_replace_each_other_under_one_kind() {
+    // Each row registers one filter of another form under the kind "f".
+    type Register = fn(&mut FilterRegistry);
+    let forms: [(&str, Register); 3] = [
+        ("event", |registry| {
+            registry.register(kind("f"), add_one());
+        }),
+        ("in-place", |registry| {
+            registry.register_in_place(kind("f"), |events, _, _| Ok(events.to_vec()));
+        }),
+        ("span", |registry| {
+            registry.register_span(kind("f"), scale_span(2.0));
+        }),
+    ];
+
+    for (name, register_other) in forms {
+        // The screen filter comes first. The other form replaces it, thus the
+        // screen filter does not run and the header size stays.
+        let seen = TestArc::new(Mutex::new(Vec::new()));
+        let mut registry = FilterRegistry::new();
+        register_screen_spy(&mut registry, "f", size(40, 10), &seen);
+        register_other(&mut registry);
+        let rendered = registry.render(&one_clip_project(vec![all("f")])).unwrap();
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "the {name} form did not replace the screen filter"
+        );
+        assert_eq!(
+            (rendered.width, rendered.height),
+            (100, 30),
+            "the {name} form did not replace the screen filter"
+        );
+
+        // The screen filter comes last. It replaces the other form, thus it
+        // runs once and its size is in the header.
+        let seen = TestArc::new(Mutex::new(Vec::new()));
+        let mut registry = FilterRegistry::new();
+        register_other(&mut registry);
+        register_screen_spy(&mut registry, "f", size(40, 10), &seen);
+        let rendered = registry.render(&one_clip_project(vec![all("f")])).unwrap();
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "the screen filter did not replace the {name} form"
+        );
+        assert_eq!(
+            (rendered.width, rendered.height),
+            (40, 10),
+            "the screen filter did not replace the {name} form"
+        );
+    }
+}
+
 // Tests of the context of a span filter.
 
 /// The contexts that a spy got: the events before its region and the size.
@@ -1079,114 +1368,82 @@ fn render_gives_a_span_filter_the_size_of_the_clip_that_starts_first() {
     );
 }
 
-// Tests of the screen form.
+#[test]
+fn a_span_filter_after_a_screen_filter_gets_the_size_that_the_screen_filter_gave() {
+    let (mut registry, seen) = context_spy_registry();
+    let screens = TestArc::new(Mutex::new(Vec::new()));
+    register_screen_spy(&mut registry, "crop", size(40, 10), &screens);
 
-/// What the spy of a screen filter saw.
-#[derive(Debug, Default)]
-struct ScreenSeen {
-    sizes: Vec<TerminalSize>,
-    before: Vec<f64>,
-    inside: Vec<f64>,
-    lengths: Vec<f64>,
+    registry
+        .render(&one_clip_project(vec![all("crop"), all("look")]))
+        .unwrap();
+
+    assert_eq!(seen.lock().unwrap()[0].1, size(40, 10));
 }
 
-/// Registers a screen filter `spy` that records what it sees and answers its
-/// own region unchanged.
-fn screen_spy_registry() -> (FilterRegistry, TestArc<Mutex<ScreenSeen>>) {
-    let seen = TestArc::new(Mutex::new(ScreenSeen::default()));
-    let captured = TestArc::clone(&seen);
-    let mut registry = FilterRegistry::new();
-    registry.register_screen(kind("spy"), move |screen, span, _| {
-        let mut seen = captured.lock().unwrap();
-        seen.sizes.push(screen.size);
-        seen.before.extend(times(screen.before));
-        seen.inside.extend(times(&span.events));
-        seen.lengths.push(span.length);
-        Ok(span.events)
-    });
-    (registry, seen)
-}
+// Tests of a screen filter under `FilterRegistry::run_on`.
 
-/// Registers a screen filter `draw` that answers one event at `relative`.
+/// Registers a screen filter `draw` that answers its events and one more
+/// event at `relative`, and keeps the size.
 fn screen_drawer(relative: f64) -> FilterRegistry {
     let mut registry = FilterRegistry::new();
-    registry.register_screen(kind("draw"), move |_, span, _| {
-        let mut out = span.events;
+    registry.register_screen(kind("draw"), move |events, view, _| {
+        let mut out = events.to_vec();
         out.push(ev(relative));
-        Ok(out)
+        Ok(Screen {
+            events: out,
+            size: view.size,
+        })
     });
     registry
 }
 
-const SIZE_100_30: TerminalSize = TerminalSize {
-    width: 100,
-    height: 30,
-};
-
 #[test]
-fn a_screen_filter_sees_the_size_the_events_before_and_its_region() {
-    let (registry, seen) = screen_spy_registry();
+fn run_on_gives_a_screen_filter_its_size_the_events_before_and_its_region() {
+    let (registry, seen) = screen_spy(size(90, 20));
 
-    registry
+    let out = registry
         .run_on(
             events(&[0.5, 0.8, 1.5, 5.0]),
-            &[range("spy", 1.0, 3.0)],
-            SIZE_100_30,
+            &[range("crop", 1.0, 3.0)],
+            size(90, 20),
         )
         .unwrap();
 
     let seen = seen.lock().unwrap();
-    assert_eq!(seen.sizes, vec![SIZE_100_30]);
-    assert_eq!(seen.before, vec![0.5, 0.8]);
-    assert_eq!(seen.inside, vec![0.5]);
-    assert_eq!(seen.lengths, vec![2.0]);
-}
-
-#[test]
-fn render_gives_a_screen_filter_the_size_of_the_header() {
-    let (registry, seen) = screen_spy_registry();
-    let mut recording = source("one", &[0.0, 8.0], 10.0);
-    recording.width = 80;
-    recording.height = 24;
-    let mut project = EditProject::from_recording(Arc::new(recording)).unwrap();
-    project.filters = vec![all("spy")];
-
-    registry.render(&project).unwrap();
-
+    assert_eq!(seen.len(), 1);
     assert_eq!(
-        seen.lock().unwrap().sizes,
-        vec![TerminalSize {
-            width: 80,
-            height: 24
-        }]
+        seen[0].0,
+        RegionView {
+            length: 2.0,
+            open: false
+        }
+    );
+    assert_eq!(seen[0].1, size(90, 20));
+    assert_eq!(times(&seen[0].2), vec![0.5, 0.8]);
+    // The event inside the region stays, and the mark of the spy lands on the
+    // end of the region.
+    assert_eq!(
+        with_data(&out),
+        vec![
+            (0.5, "e0.5"),
+            (0.8, "e0.8"),
+            (1.5, "e1.5"),
+            (3.0, "mark"),
+            (5.0, "e5")
+        ]
     );
 }
 
 #[test]
-fn run_without_a_size_fails_for_a_screen_filter_and_names_the_kind() {
-    let (registry, seen) = screen_spy_registry();
-
-    let result = registry.run(events(&[1.0]), &[all("spy")]);
-
-    match result {
-        Err(NleError::RenderError(message)) => {
-            assert!(message.contains("\"spy\""), "{message}");
-            assert!(message.contains("no terminal size"), "{message}");
-        }
-        other => panic!("expected a RenderError, got {other:?}"),
-    }
-    assert!(seen.lock().unwrap().sizes.is_empty());
-}
-
-#[test]
-fn a_screen_filter_keeps_the_later_events_and_the_end_in_place() {
+fn a_screen_filter_on_a_range_keeps_the_later_events_and_the_end_in_place() {
     let registry = screen_drawer(0.5);
 
     let out = registry
         .run_on(
             events(&[0.5, 1.5, 5.0]),
             &[range("draw", 1.0, 3.0)],
-            SIZE_100_30,
+            size(100, 30),
         )
         .unwrap();
 
@@ -1200,27 +1457,15 @@ fn a_screen_filter_keeps_the_later_events_and_the_end_in_place() {
 }
 
 #[test]
-fn a_screen_filter_that_answers_a_time_after_its_region_fails() {
-    let registry = screen_drawer(2.5);
-
-    let result = registry.run_on(events(&[0.5, 5.0]), &[range("draw", 1.0, 3.0)], SIZE_100_30);
-
-    match result {
-        Err(NleError::RenderError(message)) => {
-            assert!(message.contains("\"draw\""), "{message}");
-            assert!(message.contains("after the end of its region"), "{message}");
-            assert!(message.contains("at 3 s"), "{message}");
-        }
-        other => panic!("expected a RenderError, got {other:?}"),
-    }
-}
-
-#[test]
 fn a_screen_filter_may_answer_exactly_the_length_of_its_region() {
     let registry = screen_drawer(2.0);
 
     let out = registry
-        .run_on(events(&[0.5, 5.0]), &[range("draw", 1.0, 3.0)], SIZE_100_30)
+        .run_on(
+            events(&[0.5, 5.0]),
+            &[range("draw", 1.0, 3.0)],
+            size(100, 30),
+        )
         .unwrap();
 
     assert_eq!(times(&out), vec![0.5, 3.0, 5.0]);
@@ -1240,7 +1485,7 @@ fn a_screen_mark_at_the_region_end_lands_on_the_end_when_the_sum_rounds_up() {
         .run_on(
             events(&[0.0, start, end]),
             &[range("draw", start, end)],
-            SIZE_100_30,
+            size(100, 30),
         )
         .unwrap();
 
@@ -1253,34 +1498,4 @@ fn a_screen_mark_at_the_region_end_lands_on_the_end_when_the_sum_rounds_up() {
             (5.79, "e5.79")
         ]
     );
-}
-
-#[test]
-fn a_screen_filter_that_answers_an_error_fails_with_the_kind_and_the_message() {
-    let mut registry = FilterRegistry::new();
-    registry.register_screen(kind("bad"), |_, _, _| Err("no room".to_string()));
-
-    let result = registry.run_on(events(&[1.0]), &[all("bad")], SIZE_100_30);
-
-    match result {
-        Err(NleError::RenderError(message)) => {
-            assert_eq!(message, "filter \"bad\" failed: no room");
-        }
-        other => panic!("expected a RenderError, got {other:?}"),
-    }
-}
-
-#[test]
-fn a_screen_filter_that_answers_nan_fails_and_names_the_kind() {
-    let registry = screen_drawer(f64::NAN);
-
-    let result = registry.run_on(events(&[1.0]), &[all("draw")], SIZE_100_30);
-
-    match result {
-        Err(NleError::RenderError(message)) => {
-            assert!(message.contains("\"draw\""), "{message}");
-            assert!(message.contains("not finite"), "{message}");
-        }
-        other => panic!("expected a RenderError, got {other:?}"),
-    }
 }

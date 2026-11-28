@@ -3,16 +3,15 @@
 //! with the HUD. The difference between the two replays is the output that the
 //! filter must write.
 //!
-//! Both replays use a private theme. Its 18 colors are unique, and none is in
-//! the 256-color table of `termstate`. Thus the painter maps the color of a
-//! cell back to the SGR code that set it, and a repaint of a cell is correct
-//! in each theme of the export. A program color of exactly one of the 18 values
-//! maps to its theme code. This is the cost of the method.
+//! The painter writes each color of a cell in the form of its source in the
+//! replay: the default color, one of the 16 base colors, an entry of the
+//! 256-color table, or a 24-bit color. Thus a repaint of a cell is correct in
+//! each theme of the export.
 
 use super::options::{HudOptions, Position, Rgb};
 use super::timeline::{Piece, Shown};
 use crate::pipeline::TerminalSize;
-use termstate::{Cell, TerminalState, TerminalTheme};
+use termstate::{Cell, ColorSource, TerminalState, TerminalTheme};
 
 /// The cells between the box and the edge of the screen.
 const MARGIN: usize = 1;
@@ -21,82 +20,39 @@ const PADDING: usize = 1;
 /// The rows of the box: the top border, the label, the bottom border.
 const BOX_ROWS: usize = 3;
 
-/// The number of base colors in a theme.
-const BASE_COLORS: u8 = 16;
-
 /// A color as three channels.
 type Color = (u8, u8, u8);
-
-/// The replay color of the default foreground.
-const REPLAY_FOREGROUND: Color = (1, 1, 1);
-/// The replay color of the default background.
-const REPLAY_BACKGROUND: Color = (1, 1, 2);
 
 /// The sequence that selects the DEC line drawing character set.
 const SELECT_LINE_DRAWING: &str = "\x1b(0";
 /// The sequence that selects the ASCII character set.
 const SELECT_ASCII: &str = "\x1b(B";
 
-/// The replay color of the base color `index`, from 0 to 15.
-fn replay_base(index: u8) -> Color {
-    (1, 1, index.saturating_add(3))
-}
-
-/// The private theme of the two replays.
-fn replay_theme() -> TerminalTheme {
-    TerminalTheme {
-        foreground: REPLAY_FOREGROUND,
-        background: REPLAY_BACKGROUND,
-        black: replay_base(0),
-        red: replay_base(1),
-        green: replay_base(2),
-        yellow: replay_base(3),
-        blue: replay_base(4),
-        magenta: replay_base(5),
-        cyan: replay_base(6),
-        white: replay_base(7),
-        bright_black: replay_base(8),
-        bright_red: replay_base(9),
-        bright_green: replay_base(10),
-        bright_yellow: replay_base(11),
-        bright_blue: replay_base(12),
-        bright_magenta: replay_base(13),
-        bright_cyan: replay_base(14),
-        bright_white: replay_base(15),
+/// The SGR code that sets the foreground to `source`.
+fn fg_code(source: ColorSource) -> String {
+    match source {
+        ColorSource::Default => "39".to_string(),
+        ColorSource::Base(index) if index < 8 => format!("{}", 30 + u32::from(index)),
+        ColorSource::Base(index) => format!("{}", 90 + u32::from(index) - 8),
+        ColorSource::Indexed(index) => format!("38;5;{index}"),
+        ColorSource::Rgb(red, green, blue) => format!("38;2;{red};{green};{blue}"),
     }
 }
 
-/// The index of the base color that has the replay color `color`, if any.
-fn base_index(color: Color) -> Option<u8> {
-    let (red, green, blue) = color;
-    if red != 1 || green != 1 {
-        return None;
-    }
-    blue.checked_sub(3).filter(|index| *index < BASE_COLORS)
-}
-
-/// The SGR code that sets the foreground `color` of a replay cell.
-fn fg_code(color: Color) -> String {
-    if color == REPLAY_FOREGROUND {
-        return "39".to_string();
-    }
-    match base_index(color) {
-        Some(index) if index < 8 => format!("{}", 30 + u32::from(index)),
-        Some(index) => format!("{}", 90 + u32::from(index) - 8),
-        None => format!("38;2;{};{};{}", color.0, color.1, color.2),
+/// The SGR code that sets the background to `source`.
+fn bg_code(source: ColorSource) -> String {
+    match source {
+        ColorSource::Default => "49".to_string(),
+        ColorSource::Base(index) if index < 8 => format!("{}", 40 + u32::from(index)),
+        ColorSource::Base(index) => format!("{}", 100 + u32::from(index) - 8),
+        ColorSource::Indexed(index) => format!("48;5;{index}"),
+        ColorSource::Rgb(red, green, blue) => format!("48;2;{red};{green};{blue}"),
     }
 }
 
-/// The SGR code that sets the background `color` of a replay cell.
-fn bg_code(color: Color) -> String {
-    if color == REPLAY_BACKGROUND {
-        return "49".to_string();
-    }
-    match base_index(color) {
-        Some(index) if index < 8 => format!("{}", 40 + u32::from(index)),
-        Some(index) => format!("{}", 100 + u32::from(index) - 8),
-        None => format!("48;2;{};{};{}", color.0, color.1, color.2),
-    }
+/// The source of the 24-bit color `color`.
+fn rgb_source((red, green, blue): Color) -> ColorSource {
+    ColorSource::Rgb(red, green, blue)
 }
 
 /// Whether the screen of `size` has room for a box with a label of one cell.
@@ -276,12 +232,31 @@ pub(crate) fn layout(size: TerminalSize, options: &HudOptions, shown: &Shown) ->
 }
 
 /// The SGR sequence that sets the style of a cell: it resets the attributes,
-/// then sets the ones of `cell` and the colors `fg` and `bg`.
-fn sgr(cell: &Cell, fg: &str, bg: &str) -> String {
+/// then sets bold, italic and underline of `cell` and the sources of its two
+/// colors.
+fn sgr(cell: &Cell) -> String {
     let bold = if cell.bold { "1;" } else { "" };
     let italic = if cell.italic { "3;" } else { "" };
     let underline = if cell.underline { "4;" } else { "" };
-    format!("\x1b[0;{bold}{italic}{underline}{fg};{bg}m")
+    format!(
+        "\x1b[0;{bold}{italic}{underline}{};{}m",
+        fg_code(cell.fg_source),
+        bg_code(cell.bg_source)
+    )
+}
+
+/// Whether the viewer shows the cells `a` and `b` the same, for each part of a
+/// cell that `sgr` writes: the character, the source of each color, and bold,
+/// italic and underline. The viewer draws a color from its source in its own
+/// theme, thus the RGB value of a replay does not count. That value can also
+/// be stale: SGR 39 and SGR 49 change only the source.
+fn same_look(a: &Cell, b: &Cell) -> bool {
+    a.ch == b.ch
+        && a.fg_source == b.fg_source
+        && a.bg_source == b.bg_source
+        && a.bold == b.bold
+        && a.italic == b.italic
+        && a.underline == b.underline
 }
 
 /// The sequence that moves the cursor to `row` and `column`, counted from zero.
@@ -295,10 +270,10 @@ fn move_to(row: usize, column: usize) -> String {
 struct Pen {
     /// The cursor, as column and row.
     cursor: (usize, usize),
-    /// The current foreground.
-    fg: Color,
-    /// The current background.
-    bg: Color,
+    /// The source of the current foreground.
+    fg: ColorSource,
+    /// The source of the current background.
+    bg: ColorSource,
     /// Whether the text is bold.
     bold: bool,
     /// Whether the text is italic.
@@ -314,8 +289,8 @@ impl Pen {
     fn of(screen: &TerminalState) -> Self {
         Self {
             cursor: screen.get_cursor_position(),
-            fg: screen.current_fg,
-            bg: screen.current_bg,
+            fg: screen.current_fg_source,
+            bg: screen.current_bg_source,
             bold: screen.bold,
             italic: screen.italic,
             underline: screen.underline,
@@ -328,6 +303,8 @@ impl Pen {
     /// so that a repair of the cursor writes no set of the replay.
     fn restore(&self, from: &Self) -> String {
         let cell = Cell {
+            fg_source: self.fg,
+            bg_source: self.bg,
             bold: self.bold,
             italic: self.italic,
             underline: self.underline,
@@ -341,7 +318,7 @@ impl Pen {
         format!(
             "{}{}{charset}",
             move_to(self.cursor.1, self.cursor.0),
-            sgr(&cell, &fg_code(self.fg), &bg_code(self.bg))
+            sgr(&cell)
         )
     }
 }
@@ -372,8 +349,8 @@ impl Painter {
         let width = usize::from(size.width);
         let height = usize::from(size.height);
         Some(Self {
-            clean: TerminalState::new(width, height, replay_theme()),
-            shown: TerminalState::new(width, height, replay_theme()),
+            clean: TerminalState::new(width, height, TerminalTheme::auto()),
+            shown: TerminalState::new(width, height, TerminalTheme::auto()),
             synced: Some(0),
             #[cfg(test)]
             scans: 0,
@@ -442,31 +419,20 @@ impl Painter {
                 let wanted = match over {
                     Some(cell) => Cell {
                         ch: cell.ch,
-                        fg_color: cell.fg,
-                        bg_color: cell.bg.unwrap_or(clean.bg_color),
+                        fg_source: rgb_source(cell.fg),
+                        bg_source: cell.bg.map_or(clean.bg_source, rgb_source),
                         bold: cell.bold,
-                        italic: false,
-                        underline: false,
+                        ..Cell::default()
                     },
                     None => clean.clone(),
                 };
                 // Most cells do not change. Compare before the codes are built,
                 // so that a cell that does not change costs no allocation.
-                if *seen == wanted {
+                if same_look(seen, &wanted) {
                     continue;
                 }
-                let (fg, bg) = match over {
-                    Some(cell) => (
-                        format!("38;2;{};{};{}", cell.fg.0, cell.fg.1, cell.fg.2),
-                        match cell.bg {
-                            Some(color) => format!("48;2;{};{};{}", color.0, color.1, color.2),
-                            None => bg_code(clean.bg_color),
-                        },
-                    ),
-                    None => (fg_code(clean.fg_color), bg_code(clean.bg_color)),
-                };
                 any_cell = true;
-                let style = sgr(&wanted, &fg, &bg);
+                let style = sgr(&wanted);
                 let after_last = last.as_ref().is_some_and(|(last_row, last_column, _)| {
                     *last_row == row && *last_column + 1 == column
                 });

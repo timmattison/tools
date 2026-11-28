@@ -692,7 +692,7 @@ is a refusal and not a clean report.
 
 `repo_guards::alternate_screen::EXEMPTIONS` keys each entry on (file, spelling),
 so a new spelling in an exempt file is still a violation. An entry that matches
-nothing is reported, so a stale entry fails too. The list holds six entries:
+nothing is reported, so a stale entry fails too. The list holds seven entries:
 
 - `src/altscreen/src/lib.rs`, `EnterAlternateScreen` — the one entrance. It
   writes the entry command into the bytes of its entry write.
@@ -708,6 +708,9 @@ nothing is reported, so a stale entry fails too. The list holds six entries:
 - `src/nle/src/filters/keystroke_hud/tests.rs`, `CSI ?1049 h` — a test feeds the
   entry sequence of a full-screen program to the HUD as data. It writes to no
   user terminal.
+- `src/nle/src/filters/viewport/tests.rs`, `CSI ?1049 h` — the tests feed the
+  entry sequence to the viewport filter, and expect that it does not pass
+  through. They write to no user terminal.
 
 ### What the Ban and the Guard Do Not Prove
 

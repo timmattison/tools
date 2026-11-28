@@ -1,8 +1,9 @@
 //! The screen of the preview as rows of styled runs of text.
 //!
-//! The emulator gives each character one cell, also a wide character such as
-//! `日` and a zero-width mark. The UI draws a run with `single_cell` set in a
-//! box of one cell width, so the columns stay aligned.
+//! The emulator gives a wide character such as `日` two cells, and it gives a
+//! zero-width mark no cell. The UI draws a run with `single_cell` set in a box
+//! of one cell width, and a run with `wide` set in a box of two cells, so the
+//! columns stay aligned.
 
 use std::collections::HashMap;
 
@@ -71,6 +72,9 @@ pub struct Run {
     pub style: Style,
     /// Whether the run is one character that the UI draws in a box of one cell.
     pub single_cell: bool,
+    /// Whether the run is one wide character, which the UI draws in a box of
+    /// two cells.
+    pub wide: bool,
 }
 
 /// One row of the screen.
@@ -220,9 +224,19 @@ fn runs_of(
     cursor_column: Option<usize>,
 ) -> Vec<Run> {
     let mut runs: Vec<Run> = Vec::new();
-    for (column, cell) in cells.iter().enumerate() {
+    let mut column = 0;
+    while let Some(cell) = cells.get(column) {
+        let wide = cells
+            .get(column + 1)
+            .is_some_and(termstate::Cell::is_wide_continuation)
+            && !cell.is_wide_continuation();
+        let covered = if wide {
+            column..column + 2
+        } else {
+            column..column + 1
+        };
         let mut style = style_of(colors, cell);
-        if cursor_column == Some(column) {
+        if cursor_column.is_some_and(|cursor| covered.contains(&cursor)) {
             style = Style {
                 foreground: style.background,
                 background: style.foreground,
@@ -230,7 +244,7 @@ fn runs_of(
             };
         }
         let ch = if cell.ch.is_control() { ' ' } else { cell.ch };
-        let single_cell = ch.width() != Some(1);
+        let single_cell = wide || ch.width() != Some(1);
         match runs.last_mut() {
             Some(run) if run.style == style && !run.single_cell && !single_cell => {
                 run.text.push(ch);
@@ -239,8 +253,10 @@ fn runs_of(
                 text: ch.to_string(),
                 style,
                 single_cell,
+                wide,
             }),
         }
+        column = covered.end;
     }
     runs
 }

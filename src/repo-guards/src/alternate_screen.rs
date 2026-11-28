@@ -128,12 +128,13 @@ pub struct Exemption {
 
 /// Every use of an entry spelling that is deliberate.
 ///
-/// Each entry is final. Two cover `altscreen` itself, the one entrance, and one
-/// covers the pty tests of `krt`.
+/// Each entry is final. Two cover `altscreen` itself, the one entrance, one
+/// covers the pty tests of `krt`, and two cover the tests that feed the entry
+/// sequence to an emulator as input.
 ///
 /// Public so a test can measure the list against what the repository holds. An
 /// entry that matches nothing is reported by [`Report::unused_exemptions`].
-pub const EXEMPTIONS: [Exemption; 6] = [
+pub const EXEMPTIONS: [Exemption; 7] = [
     Exemption {
         file: "src/altscreen/src/lib.rs",
         spelling: "EnterAlternateScreen",
@@ -167,6 +168,12 @@ pub const EXEMPTIONS: [Exemption; 6] = [
         spelling: "CSI ?1049 h",
         reason: "a test feeds the entry sequence of a full-screen program to the \
                  HUD as data; it writes to no user terminal",
+    },
+    Exemption {
+        file: "src/nle/src/filters/viewport/tests.rs",
+        spelling: "CSI ?1049 h",
+        reason: "the tests feed the entry sequence to the viewport filter and expect that it \
+                 does not pass through; they write to no user terminal",
     },
 ];
 

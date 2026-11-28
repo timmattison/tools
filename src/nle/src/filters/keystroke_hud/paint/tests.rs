@@ -2,11 +2,11 @@
 //! painter in a viewer, and compares the viewer with a reference that gets only
 //! the recording.
 
-use super::{bg_code, fg_code, fits, layout, replay_theme, Color, Overlay, Painter};
+use super::{bg_code, fg_code, fits, layout, Overlay, Painter};
 use crate::filters::keystroke_hud::options::{HudOptions, Position, Rgb};
 use crate::filters::keystroke_hud::timeline::{Piece, Shown};
 use crate::pipeline::TerminalSize;
-use termstate::{TerminalState, TerminalTheme};
+use termstate::{ColorSource, TerminalState, TerminalTheme};
 
 /// The size of a screen.
 fn size(columns: u16, rows: u16) -> TerminalSize {
@@ -137,16 +137,16 @@ impl Rig {
     }
 }
 
-/// The color of the first cell after `data` on a screen with the replay theme.
-fn replay_cell_colors(data: &str) -> (Color, Color) {
-    let mut state = TerminalState::new(4, 2, replay_theme());
+/// The sources of the two colors of the first cell after `data`.
+fn cell_sources(data: &str) -> (ColorSource, ColorSource) {
+    let mut state = TerminalState::new(4, 2, TerminalTheme::auto());
     state.process_output(data).unwrap();
     let cell = &state.get_grid()[0][0];
-    (cell.fg_color, cell.bg_color)
+    (cell.fg_source, cell.bg_source)
 }
 
 #[test]
-fn each_color_of_the_replay_theme_maps_back_to_the_code_that_set_it() {
+fn each_color_source_maps_back_to_the_code_that_set_it() {
     let foregrounds = [
         "39",
         "30",
@@ -197,7 +197,7 @@ fn each_color_of_the_replay_theme_maps_back_to_the_code_that_set_it() {
         state.get_grid()[0][0].clone()
     };
     for code in foregrounds {
-        let (fg, _) = replay_cell_colors(&format!("\x1b[{code}mx"));
+        let (fg, _) = cell_sources(&format!("\x1b[{code}mx"));
         let mapped = fg_code(fg);
         assert_eq!(
             cell_after(&format!("\x1b[{mapped}mx")),
@@ -206,7 +206,7 @@ fn each_color_of_the_replay_theme_maps_back_to_the_code_that_set_it() {
         );
     }
     for code in backgrounds {
-        let (_, bg) = replay_cell_colors(&format!("\x1b[{code}mx"));
+        let (_, bg) = cell_sources(&format!("\x1b[{code}mx"));
         let mapped = bg_code(bg);
         assert_eq!(
             cell_after(&format!("\x1b[{mapped}mx")),
@@ -383,6 +383,27 @@ fn the_paint_restores_the_colors_of_the_cells_under_the_box() {
     assert_eq!(rig.slice(3, 23, 6), "│ ls │");
     rig.paint(None);
     rig.assert_viewer_is_reference();
+}
+
+#[test]
+fn the_paint_restores_the_default_colors_that_sgr_39_and_49_set() {
+    let screen = size(20, 6);
+    let mut rig = Rig::new(screen, &TerminalTheme::auto());
+    let overlay = box_of(screen, Position::TopRight, "ls");
+    assert_eq!((overlay.top, overlay.left), (1, 13));
+    // SGR 39 and SGR 49 change only the source of a color in `termstate`, and
+    // the RGB value of red and green stays. Thus the RGB value of the replay
+    // does not tell the color that a viewer shows.
+    rig.feed("\x1b[2;14H\x1b[31;42m\x1b[39;49mxyz");
+    rig.paint(Some(&overlay));
+    assert_eq!(rig.slice(1, 13, 6), "╭────╮");
+    rig.paint(None);
+    let cell = &rig.viewer.get_grid()[1][13];
+    assert_eq!(cell.ch, 'x');
+    assert_eq!(
+        (cell.fg_source, cell.bg_source),
+        (ColorSource::Default, ColorSource::Default)
+    );
 }
 
 #[test]
