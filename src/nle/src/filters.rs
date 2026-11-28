@@ -11,6 +11,7 @@ pub mod cursor;
 pub mod redaction;
 pub mod time_dilation;
 pub mod typing_speed;
+pub mod viewport;
 
 mod splice;
 
@@ -80,6 +81,7 @@ pub fn registry() -> FilterRegistry {
     time_dilation::register(&mut registry);
     redaction::register(&mut registry);
     typing_speed::register(&mut registry);
+    viewport::register(&mut registry);
     register_with_options(&mut registry, PAUSE_REMOVAL, |span, options| {
         Ok(remove_pauses(span, options))
     });

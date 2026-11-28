@@ -550,6 +550,11 @@ fn the_app_registry_holds_the_cursor_filter() {
 }
 
 #[test]
+fn the_app_registry_holds_the_viewport_filter() {
+    assert!(registry().contains(&FilterKind::new(viewport::VIEWPORT)));
+}
+
+#[test]
 fn a_project_with_the_cursor_filter_renders_through_the_app_registry() {
     let mut source = Recording::test_fixture();
     source.events = vec![Event {
