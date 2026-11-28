@@ -1748,7 +1748,7 @@ fn a_part_over_the_end_of_a_step_that_changes_the_count_covers_the_answer_and_th
 fn a_part_inside_a_step_that_keeps_the_count_in_a_new_order_covers_the_whole_answer() {
     let old_times = [6.0, 8.0];
     let old = events(&old_times.map(|time| time - 5.0));
-    // The step answers the two events of its region in reverse order, at half speed.
+    // The step answers the two events of its region in reverse order, at twice the speed.
     let answer = [
         Event {
             time: 0.5,
