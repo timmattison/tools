@@ -2361,7 +2361,8 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
     It shows how much runner time the run used. The `TIME` column shows the wall-clock time of
     the run. A run with two parallel jobs of 15 minutes shows `15m 00s` under `TIME` and
     `30m 00s` under `JOB SUM`. Thus you can find the runs that use many runners in parallel,
-    and how much runner time a change costs.
+    and how much runner time a change costs. An active run row can show an estimate of the time
+    until the run finishes in place of its sum, as a later item tells.
     - The time of one job is the time that its job row shows after the job starts: from its
       start to its finish, or to now while it runs. Thus the sum of an active run increases
       each second. A job that waits for a runner or for an approval (`⏳`) adds nothing, because
@@ -2401,6 +2402,31 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
       - The estimate needs no more request to GitHub. It reads the jobs that `ha` already loads
         for the job sum. `ha` keeps no history after it stops. Thus after a start, the
         estimates fill in over the first refreshes, as the jobs of the recent runs load.
+    - An active run row shows an estimate of the time until the run finishes, in place of its
+      sum. It uses the same signs and the same text as a job row, with one more sign:
+      - `~9m 00s` means that the run finishes in about 9 minutes.
+      - `>12m` means that the run finishes in 12 minutes or more. The latest end comes from a
+        job that waits for a runner or for an approval. The start of that job is unknown, and
+        an approval can take hours.
+      - `+30s` means that the run is 30 seconds past its estimate.
+      - Each job of the run gives a time when the run can finish. A job that passed gives its
+        end. A job that runs gives the end of its estimate, or now when it is past its estimate.
+        A job that waits gives now plus the mean time of its name on any runner. Each of these
+        times then adds the tail of the job name. The latest time is the estimate.
+      - The tail of a job name is the mean time from the end of that job to the end of its run,
+        in the newest 5 passed runs of the same repository and workflow in the window. The end
+        of a run is the end of its last job. Thus the tail holds the time of each job that runs
+        after the job. This includes a job that GitHub did not create yet, for example a job
+        that `needs:` a job that still runs.
+      - A failed, cancelled, or skipped job of the active run does not change the estimate.
+      - The run row keeps its sum when a running job shows a blank cell on its job row, when a
+        waiting job has no passed match on any runner, and when a job name has no tail. It keeps
+        its sum when no job passed, runs, or waits, for example when each job failed, was
+        cancelled, or was skipped. It also keeps its sum before its jobs load, and after the run
+        finishes.
+      - A past run on a different branch can skip jobs that this run does not skip. Its tails
+        then mix two shapes of the run. In the estimate, a job that waits starts now, because
+        `ha` does not estimate when a runner gets free.
     - A finished run can show a `JOB SUM` smaller than its `TIME`, also when its jobs ran in
       parallel. The `TIME` cell of a finished run ends at the last update of the run, and GitHub
       sometimes makes that update some minutes after the last job finished.
@@ -6699,9 +6725,15 @@ The editing engine of the crate has five parts:
   a new length, and the later events move by the change in the length. A span
   filter also gets the events before and after its region and the size of the
   terminal: the size of the clip that starts first, or 80 by 24 in
-  `FilterRegistry::run`.
+  `FilterRegistry::run`. A screen filter (`register_screen`) also gets the
+  size of the screen and the events before its region. It rewrites its region,
+  moves nothing, and on the region `All` it can change the size of the screen.
+  A later span filter gets that size, and the rendered recording has the size
+  that the last screen filter gives. `FilterRegistry::run` has no header, so a
+  screen filter fails there.
   `filters::registry()` holds the filters that ship. The cursor filter is an
-  in-place filter, and each other one is a span filter:
+  in-place filter, the viewport filter is a screen filter, and each other one
+  is a span filter:
   - `cursor` (`visibility`, `shape`, `blink`, `color`, issue #168): sets how
     the cursor looks. [The cursor filter](#the-cursor-filter) below gives its
     options.
@@ -6728,6 +6760,9 @@ The editing engine of the crate has five parts:
     key after it, their output, and their time.
     [The backspace removal filter](#the-backspace-removal-filter) below gives
     its rules.
+  - `viewport` (`rows`, `columns`, `hide_rows`, `hide_columns`, issue #165):
+    crops the screen and hides rows and columns.
+    [The viewport filter](#the-viewport-filter) below gives its options.
 
   The filters of issue #154 parse their options as a Rust type, so the render
   refuses a missing option, a value of the wrong type, and a key that the
@@ -6799,6 +6834,60 @@ thus it takes the state before the range to be the default of a terminal: a
 visible cursor, DECSCUSR 0, and the default color. After a reset of the
 terminal (RIS or DECSTR) in the recording, the filter sets the cursor again.
 
+### The viewport filter
+
+The `viewport` filter crops the screen and hides rows and columns, for example
+the status bar of a multiplexer or an empty part of a wide terminal. It runs the
+terminal emulator of `termstate` over the recording, and it writes the visible
+cells again as escape sequences. Thus `beta play`, each export of `beta`, and
+the preview show the crop, and none of them changes. The colors go out as the
+recording gave them (a base color, a color of the 256-color palette, or a 24-bit
+color), thus the `--theme` of an export still applies.
+
+A project file names the filter in its `filters` list:
+
+```json
+{
+  "kind": "viewport",
+  "region": "All",
+  "options": { "rows": { "start": 1, "end": 24 }, "columns": { "start": 0, "end": 80 }, "hide_rows": [12] }
+}
+```
+
+| Option | Values | What it does |
+|---|---|---|
+| `rows` | `{ "start": n, "end": m }` | Shows only the rows from `start` up to, and not including, `end`. The count starts at 0. All rows show when it is missing. |
+| `columns` | `{ "start": n, "end": m }` | The same for the columns. |
+| `hide_rows` | a list of row numbers | Hides these rows of the full screen, also when they are not next to each other. |
+| `hide_columns` | a list of column numbers | The same for the columns. |
+
+On the region `All`, the rendered recording gets the size of the visible cells:
+a hidden row or column goes out, and the cells after it move up or left. On a
+range, the size stays, each cell keeps its place, and each cell that is not
+visible is blank during the range. At the end of the range, the filter writes
+the full screen again, and it sets the scrolling region, the autowrap mode, the
+pen, the saved cursor, a pending wrap, the character set, and the cursor back to
+the state of the recording.
+
+A wide character, for example 日, covers two cells. If a crop, a hidden column,
+or the mask cuts it in half, the visible half shows as a space. A character of
+no width, for example a combining mark, does not show in the output.
+
+An unknown key fails the render. A crop that does not start before its end, a
+crop or a hidden number that is not on the screen, and options that leave no
+row or no column visible also fail the render, and the message names the
+option. A screen larger than 500 by 500 fails too. When every row and every
+column is visible, the filter changes nothing.
+
+The output shows the screen as `termstate` models it, which is the model of the
+video export of `beta`. A sequence that `termstate` does not model, for example
+the insert mode or a second screen buffer for mode 1049, thus has no effect in
+the output. The filter keeps the OSC sequences (the title, the
+palette, the default colors, and the cursor color), DECSCUSR, mode 12, and BEL.
+The design is in `specs/2026-11-27-nle-viewport-filter-design.md`. A zoom into a
+region over time cannot go into escape sequences, thus it waits for the export
+of edited recordings (issue #158).
+
 ### The backspace removal filter
 
 The `backspace-removal` filter removes the typing errors of a recording. It
@@ -6844,10 +6933,9 @@ stays, because the filter cannot see all of its output.
 
 The limits:
 
-- The comparison is as exact as the emulator. The emulator does not wrap at the
-  right margin, it gives each character one cell, and it reads `CSI C` or
-  `CSI D` with no number as a move of zero columns. Thus a typo near such
-  output usually stays.
+- The comparison is as exact as the emulator. The emulator does not model each
+  sequence, for example the insert mode or a second screen buffer for mode
+  1049. Thus a typo near such output usually stays.
 - At a prompt that echoes nothing, more than one typed key leaves the screen as
   a Ctrl+W or a Ctrl+U leaves it. The filter cannot tell how many keys the
   erase removed, so it keeps them all.

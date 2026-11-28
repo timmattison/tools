@@ -142,11 +142,9 @@ fn a_typed_multi_byte_character_goes_with_its_backspace() {
 
 #[test]
 fn a_combining_sequence_in_one_input_event_stays_and_ends_the_stack() {
-    // A terminal draws `e` and U+0301 in one cell, and the emulator draws
-    // them in two. The echo of the Ctrl+U erases `a` and the sequence in a
-    // terminal, but leaves `a` on the screen of the emulator. If the sequence
-    // were a typed key, the filter would remove it and the Ctrl+U, and keep
-    // the `a` that the terminal erased.
+    // The input event holds two characters, `e` and U+0301, so its key is an
+    // other key. It stays and ends the stack. Thus the Ctrl+U after it finds
+    // no typed key, and its unit stays too.
     let events = vec![
         out(0.0, "$ "),
         input(1.0, "a"),
@@ -160,11 +158,10 @@ fn a_combining_sequence_in_one_input_event_stays_and_ends_the_stack() {
 }
 
 #[test]
-fn a_wide_character_and_its_shell_erase_stay_with_the_key_before_it() {
-    // A terminal draws `日` (U+65E5) in two cells, and the emulator draws it
-    // in one. The shell erases it with two backspaces, which in the emulator
-    // also erase `a`. The screen then equals the screen before `a`, but the
-    // terminal still shows `a`.
+fn a_wide_character_and_its_shell_erase_go_and_the_key_before_it_stays() {
+    // A terminal draws `日` (U+65E5) in two cells, and so does the emulator.
+    // The shell erases it with two backspaces. The screen then equals the
+    // screen before `日`, and `a` stays on it.
     let events = vec![
         out(0.0, "$ "),
         input(1.0, "a"),
@@ -173,8 +170,17 @@ fn a_wide_character_and_its_shell_erase_stay_with_the_key_before_it() {
         out(1.5, "\u{65e5}"),
         input(2.0, "\x7f"),
         out(2.0, "\x08\x08  \x08\x08"),
+        input(2.5, "b"),
+        out(2.5, "b"),
     ];
-    assert_eq!(run(events.clone()), events);
+    let expected = vec![
+        out(0.0, "$ "),
+        input(1.0, "a"),
+        out(1.0, "a"),
+        input(1.5, "b"),
+        out(1.5, "b"),
+    ];
+    assert_eq!(run(events), expected);
 }
 
 #[test]
@@ -247,8 +253,7 @@ fn a_backspace_that_does_not_restore_the_screen_stays_with_its_typed_key() {
 
 #[test]
 fn a_key_between_the_typo_and_the_backspace_keeps_both() {
-    // The echo of the right arrow is `CSI 1 C`. The emulator reads a `CSI C`
-    // with no number as a move of zero columns.
+    // The echo of the right arrow is `CSI 1 C`.
     let events = vec![
         out(0.0, "$ "),
         input(1.0, "a"),
@@ -530,9 +535,6 @@ fn a_range_that_ends_after_the_echo_of_a_backspace_removes_the_typo() {
 
 #[test]
 fn a_black_cell_is_not_a_blank_cell() {
-    // With `TerminalTheme::auto()`, black is the background, so the space on
-    // `CSI 40 m` equals a blank cell. In another theme the viewer sees a black
-    // cell, so the pair must stay.
     let events = vec![
         out(0.0, "$ "),
         input(1.0, "x"),
