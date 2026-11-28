@@ -2287,12 +2287,22 @@ const REDO_KEYS: Press = Press {
 };
 
 impl Window {
-    /// The Start, End, and Speed fields of the speed panel, and the Pattern and
-    /// Replacement text fields of the redaction panel.
-    fn text_fields(&self) -> [ElementId; 5] {
+    /// The Start, End, and Speed fields of the speed panel, the Pattern and
+    /// Replacement text fields of the redaction panel, and the Start and End
+    /// fields of the color scheme panel.
+    fn text_fields(&self) -> [ElementId; 7] {
         let [start, end, speed] = self.speed_fields();
         let [_, pattern, _, replacement, _] = self.redaction_fields();
-        [start, end, speed, pattern, replacement]
+        let [color_start, color_end] = self.color_fields();
+        [
+            start,
+            end,
+            speed,
+            pattern,
+            replacement,
+            color_start,
+            color_end,
+        ]
     }
 
     /// Elements that have the focus in turn and are not text fields: the
