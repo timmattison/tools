@@ -49,7 +49,7 @@ use crate::billing::{
 use crate::job::{Job, JobId, RunnerName};
 use crate::money::Usd;
 use crate::queue::{EntryState, EventKind, PullNumber, QueueEntry, QueueEvent, QUEUE_BOT};
-use crate::run::{keep_first_of_each_id, Run, RunId, RunState, Visibility};
+use crate::run::{keep_first_of_each_id, CommitSha, Run, RunId, RunState, Visibility};
 use crate::status::RateLimit;
 use crate::target::{OwnerName, RepoName};
 
@@ -108,6 +108,7 @@ struct RunJson {
     name: Option<String>,
     display_title: Option<String>,
     head_branch: Option<String>,
+    head_sha: Option<String>,
     status: Option<String>,
     conclusion: Option<String>,
     run_started_at: Option<DateTime<Utc>>,
@@ -148,7 +149,7 @@ fn run_of(json: RunJson, repo: &RepoName) -> Run {
         Some(true) | None => Visibility::Private,
     };
     Run {
-        head_sha: None,
+        head_sha: json.head_sha.map(CommitSha),
         visibility,
         id: RunId(json.id),
         repo: repo.clone(),
@@ -1766,7 +1767,6 @@ mod tests {
     use super::test_answers::{ACCEPTED, CREATED};
     use super::*;
     use crate::billing::EnterpriseSlug;
-    use crate::run::CommitSha;
 
     /// A time limit that no stub that finishes comes near.
     const GENEROUS_LIMIT: Duration = Duration::from_secs(60);
