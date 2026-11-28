@@ -15,6 +15,10 @@ A command-line tool that converts AWS credentials from `~/.aws/credentials` and 
 
 ## Installation
 
+To install: `cargo install --git https://github.com/timmattison/tools aws2env`
+
+To build from this directory:
+
 ```bash
 cargo build --release
 ```

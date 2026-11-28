@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
+use crate::run::CommitSha;
 use crate::target::RepoName;
 
 /// The number of one pull request in its repository.
@@ -74,6 +75,11 @@ pub struct QueueEntry {
     pub position: u32,
     /// What the entry waits for.
     pub state: EntryState,
+    /// The commit of the merge group of the entry (`headCommit`). Each run
+    /// of the merge group tests this commit. The value is `None` while
+    /// GitHub did not make the merge group, for example while the entry
+    /// waits for its turn.
+    pub merge_group_commit: Option<CommitSha>,
     /// When the pull request joined the queue.
     pub enqueued_at: DateTime<Utc>,
     /// The address of the page of the pull request.
