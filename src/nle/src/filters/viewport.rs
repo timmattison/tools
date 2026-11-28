@@ -19,13 +19,16 @@
 //!   the crop has no effect.
 //!
 //! The visible rows are the rows of the crop that are not hidden. The visible
-//! columns are the same for columns. An unknown key fails the render. A start
-//! that is not before its end, an end after the edge of the screen, a start
-//! below 0, a hidden index that is not on the screen, no visible row, and no
-//! visible column each fail the render, with a message that names the option.
-//! The checks run in this order. A screen of width 0 or height 0, or larger
-//! than the limits of the preview, fails the render.
-//! Thus a bad header cannot cause a panic or a very large allocation.
+//! columns are the same for columns. An unknown key fails the render. A screen
+//! of width 0 or height 0, or larger than the limits of the preview, fails the
+//! render. Thus a bad header cannot cause a panic or a very large allocation.
+//! A start that is not before its end, an end after the edge of the screen, a
+//! start below 0, a hidden index that is not on the screen, no visible row,
+//! and no visible column each fail the render, with a message that names the
+//! option. The checks run in this order: the keys, the screen, `rows`,
+//! `columns`, `hide_rows`, `hide_columns`, the visible rows, and the visible
+//! columns. In a crop, the start before the end comes first, then the end
+//! after the edge, then the start below 0.
 //!
 //! A wide character (for example 日) covers two cells. When a crop, a hidden
 //! column, or the mask cuts it in half, the visible half shows as a space with

@@ -111,13 +111,16 @@ pub type ScreenFilterFn =
   columns are the same for columns.
 - An unknown key fails the render. A start that is not before its end, an end
   after the edge of the screen, a start below 0, a hidden index that is not on
-  the screen, no visible row, and no visible column each fail the render, in
-  this order, with a message that names the option. The filter reads each
-  index as a signed 64-bit number, so a number that is not on the screen
-  reaches these checks.
+  the screen, no visible row, and no visible column each fail the render, with
+  a message that names the option. The filter reads each index as a signed
+  64-bit number, so a number that is not on the screen reaches these checks.
 - A screen of width 0 or height 0, or larger than the limits of the preview
   (500 by 500), fails the render. Thus a bad header cannot cause a panic or a
   very large allocation.
+- The checks run in this order: the keys, the screen, `rows`, `columns`,
+  `hide_rows`, `hide_columns`, the visible rows, and the visible columns. In a
+  crop, the start before the end comes first, then the end after the edge,
+  then the start below 0.
 - When all rows and all columns are visible, the filter answers the events
   with no change, at the same size.
 

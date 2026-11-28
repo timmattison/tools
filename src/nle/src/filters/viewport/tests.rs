@@ -314,6 +314,22 @@ fn a_screen_with_no_visible_row_or_column_is_refused() {
 
 #[test]
 fn the_checks_run_in_the_documented_order() {
+    // The keys come before the screen, and the screen comes before the
+    // options.
+    let bad = json!({ "colour": 1, "hide_rows": [99] });
+    assert!(refusal(0, 24, bad).contains("unknown field"));
+
+    let bad = json!({ "rows": { "start": 5, "end": 5 } });
+    assert!(refusal(0, 24, bad).starts_with("the screen"));
+
+    // In a crop, the start before the end comes first, then the end after
+    // the edge, then the start below 0.
+    let bad = json!({ "rows": { "start": 99, "end": 30 } });
+    assert!(refusal(80, 24, bad).contains("is not before the end"));
+
+    let bad = json!({ "rows": { "start": -1, "end": 99 } });
+    assert!(refusal(80, 24, bad).contains("is after the last row"));
+
     // The crop of the rows comes before the crop of the columns, and the
     // crops come before the hidden indexes.
     let bad = json!({
@@ -336,6 +352,9 @@ fn the_checks_run_in_the_documented_order() {
 
     let bad = json!({ "hide_columns": [99], "hide_rows": [0, 1] });
     assert!(refusal(80, 2, bad).starts_with("hide_columns:"));
+
+    let bad = json!({ "hide_rows": [0, 1], "hide_columns": [0, 1, 2] });
+    assert_eq!(refusal(3, 2, bad), "no row is visible");
 }
 
 #[test]
