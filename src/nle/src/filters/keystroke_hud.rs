@@ -42,10 +42,11 @@
 //!   skips it.
 //! - The HUD never makes a region longer. A box that is still on the screen at
 //!   the end of the region goes away there.
-//! - The layout of the box gives each character of a label one cell, but
-//!   `termstate` and a terminal give a wide character (for example `日`) two
-//!   cells. Thus a wide character in a label does not show correctly, and the
-//!   HUD writes the label again at each output event while the box shows.
+//! - While the edge of a box covers one half of a wide character of the
+//!   program (for example `日`), the other half shows blank. A terminal cannot
+//!   show one half of a wide character.
+//! - A character of no width, for example a combining accent, does not show in
+//!   a label. `termstate` gives it no cell.
 //! - The HUD saves and restores the cursor with `ESC 7` and `ESC 8`, and the
 //!   program shares that one save of the terminal. When the program saves the
 //!   cursor, the HUD draws, and then the program restores the cursor, the

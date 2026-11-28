@@ -7,11 +7,19 @@
 //! replay: the default color, one of the 16 base colors, an entry of the
 //! 256-color table, or a 24-bit color. Thus a repaint of a cell is correct in
 //! each theme of the export.
+//!
+//! A wide character takes two cells, as in `termstate` and in a terminal: the
+//! character and a continuation cell. The painter writes no byte for a
+//! continuation cell, because the write of the character covers both cells.
+//! A terminal cannot show one half of a wide character. Thus, while the edge
+//! of the box covers one half of a wide character of the program, the other
+//! half shows blank.
 
 use super::options::{HudOptions, Position, Rgb};
 use super::timeline::{Piece, Shown};
 use crate::pipeline::TerminalSize;
-use termstate::{Cell, ColorSource, TerminalState, TerminalTheme};
+use termstate::{Cell, ColorSource, TerminalState, TerminalTheme, WIDE_CONTINUATION};
+use unicode_width::UnicodeWidthChar;
 
 /// The cells between the box and the edge of the screen.
 const MARGIN: usize = 1;
@@ -122,6 +130,20 @@ fn blend(from: Rgb, to: Rgb, alpha: f64) -> Color {
     )
 }
 
+/// Add the cells of `ch` with `style` to `cells`, as `termstate` gives them: a
+/// wide character takes the character and a continuation cell, and a
+/// character of no width takes none.
+fn push_cells(cells: &mut Vec<(char, Style)>, ch: char, style: Style) {
+    match UnicodeWidthChar::width(ch).unwrap_or(1) {
+        0 => {}
+        1 => cells.push((ch, style)),
+        _ => {
+            cells.push((ch, style));
+            cells.push((WIDE_CONTINUATION, style));
+        }
+    }
+}
+
 /// The cells of the label of `shown`, each with its style.
 fn label_cells(shown: &Shown) -> Vec<(char, Style)> {
     let mut cells = Vec::new();
@@ -132,15 +154,19 @@ fn label_cells(shown: &Shown) -> Vec<(char, Style)> {
             cells.push((' ', Style::Text));
         }
         match piece {
-            Piece::Text(text) => cells.extend(text.chars().map(|ch| (ch, Style::Text))),
+            Piece::Text(text) => {
+                for ch in text.chars() {
+                    push_cells(&mut cells, ch, Style::Text);
+                }
+            }
             Piece::Special { label, count } => {
-                cells.extend(label.chars().map(|ch| (ch, Style::Accent)));
-                if *count > 1 {
-                    cells.extend(
-                        format!(" \u{d7}{count}")
-                            .chars()
-                            .map(|ch| (ch, Style::Accent)),
-                    );
+                let counted = if *count > 1 {
+                    format!(" \u{d7}{count}")
+                } else {
+                    String::new()
+                };
+                for ch in label.chars().chain(counted.chars()) {
+                    push_cells(&mut cells, ch, Style::Accent);
                 }
             }
         }
@@ -161,6 +187,10 @@ pub(crate) fn layout(size: TerminalSize, options: &HudOptions, shown: &Shown) ->
     if label.len() > most {
         let keep = most.saturating_sub(1);
         let mut kept = label.split_off(label.len().saturating_sub(keep));
+        // The cut leaves no second half of a wide character.
+        if kept.first().is_some_and(|(ch, _)| *ch == WIDE_CONTINUATION) {
+            kept.remove(0);
+        }
         kept.insert(0, ('\u{2026}', Style::Text));
         label = kept;
     }
@@ -323,6 +353,17 @@ impl Pen {
     }
 }
 
+/// Whether the cell `clean` at (`row`, `column`) is one half of a wide
+/// character, and the box of `overlay` covers its other half.
+fn cuts_wide_character(overlay: Option<&Overlay>, clean: &Cell, row: usize, column: usize) -> bool {
+    let covered = |column: usize| overlay.is_some_and(|o| o.cell_at(row, column).is_some());
+    if clean.is_wide_continuation() {
+        column.checked_sub(1).is_some_and(covered)
+    } else {
+        covered(column + 1) && UnicodeWidthChar::width(clean.ch) == Some(2)
+    }
+}
+
 /// Two replays of the recording: the screen as the recording draws it, and
 /// the screen as the viewer sees it with the HUD.
 pub(crate) struct Painter {
@@ -424,11 +465,27 @@ impl Painter {
                         bold: cell.bold,
                         ..Cell::default()
                     },
+                    // A terminal cannot show one half of a wide character, thus
+                    // the half that the box does not cover shows blank.
+                    None if cuts_wide_character(overlay, clean, row, column) => Cell {
+                        ch: ' ',
+                        ..clean.clone()
+                    },
                     None => clean.clone(),
                 };
                 // Most cells do not change. Compare before the codes are built,
                 // so that a cell that does not change costs no allocation.
                 if same_look(seen, &wanted) {
+                    continue;
+                }
+                if wanted.is_wide_continuation() {
+                    // The write of the wide character before this cell covers
+                    // it, and a terminal writes no byte for it.
+                    if let Some(at) = last.as_mut().filter(|(last_row, last_column, _)| {
+                        *last_row == row && *last_column + 1 == column
+                    }) {
+                        at.1 = column;
+                    }
                     continue;
                 }
                 any_cell = true;
