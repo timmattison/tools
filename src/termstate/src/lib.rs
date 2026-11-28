@@ -29,20 +29,41 @@ pub const WIDE_CONTINUATION: char = '\0';
 
 /// The glyph that the DEC line drawing set shows for `ch`, or `ch` when that
 /// set shows it unchanged. A print of `ch` while the set is on puts this glyph
-/// into the cell.
+/// into the cell. The set changes each character from `_` (0x5F) to `~` (0x7E).
 pub fn line_drawing_glyph(ch: char) -> char {
     match ch {
-        'j' => '┘', // Lower right corner
-        'k' => '┐', // Upper right corner
-        'l' => '┌', // Upper left corner
-        'm' => '└', // Lower left corner
-        'n' => '┼', // Cross
-        'q' => '─', // Horizontal line
-        't' => '├', // Left T
-        'u' => '┤', // Right T
-        'v' => '┴', // Bottom T
-        'w' => '┬', // Top T
-        'x' => '│', // Vertical line
+        '_' => ' ',        // Blank
+        '`' => '◆',        // Diamond
+        'a' => '▒',        // Checkerboard
+        'b' => '\u{2409}', // Symbol for horizontal tabulation
+        'c' => '\u{240c}', // Symbol for form feed
+        'd' => '\u{240d}', // Symbol for carriage return
+        'e' => '\u{240a}', // Symbol for line feed
+        'f' => '°',        // Degree sign
+        'g' => '±',        // Plus or minus sign
+        'h' => '\u{2424}', // Symbol for newline
+        'i' => '\u{240b}', // Symbol for vertical tabulation
+        'j' => '┘',        // Lower right corner
+        'k' => '┐',        // Upper right corner
+        'l' => '┌',        // Upper left corner
+        'm' => '└',        // Lower left corner
+        'n' => '┼',        // Cross
+        'o' => '⎺',        // Scan line 1
+        'p' => '⎻',        // Scan line 3
+        'q' => '─',        // Horizontal line (scan line 5)
+        'r' => '⎼',        // Scan line 7
+        's' => '⎽',        // Scan line 9
+        't' => '├',        // Left T
+        'u' => '┤',        // Right T
+        'v' => '┴',        // Bottom T
+        'w' => '┬',        // Top T
+        'x' => '│',        // Vertical line
+        'y' => '≤',        // Less than or equal to
+        'z' => '≥',        // Greater than or equal to
+        '{' => 'π',        // Pi
+        '|' => '≠',        // Not equal to
+        '}' => '£',        // Pound sign
+        '~' => '·',        // Centered dot
         _ => ch,
     }
 }
@@ -1336,7 +1357,7 @@ impl TerminalState {
     }
 
     fn put_char(&mut self, ch: char) {
-        // Convert ACS characters to Unicode box drawing if needed
+        // A print in the line drawing set shows the glyph of that set.
         let display_char = if self.use_acs {
             line_drawing_glyph(ch)
         } else {
