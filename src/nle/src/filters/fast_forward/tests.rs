@@ -577,7 +577,8 @@ fn summary_of_a_region_without_output_is_unchanged() {
     assert_eq!(run_summary(&[], &summary(10.0, 30.0, 0, 0)), vec![]);
 }
 
-fn render_summary(items: &[(f64, &str)], duration: f64, head: usize, tail: usize) -> Recording {
+/// A project of a recording of 80 by 24 with the output events `items`.
+fn project_of(items: &[(f64, &str)], duration: f64) -> EditProject {
     let recording = Recording {
         version: 2,
         width: 80,
@@ -596,11 +597,27 @@ fn render_summary(items: &[(f64, &str)], duration: f64, head: usize, tail: usize
             })
             .collect(),
     };
-    let mut project = EditProject::from_recording(Arc::new(recording)).unwrap();
-    project
-        .filters
-        .push(applied(FilterRegion::All, Mode::Summary { head, tail }));
-    filters::registry().render(&project).unwrap()
+    EditProject::from_recording(Arc::new(recording)).unwrap()
+}
+
+/// Render the events `items` through `filters_list`, in list order.
+fn render_with(
+    items: &[(f64, &str)],
+    duration: f64,
+    filters_list: Vec<AppliedFilter>,
+) -> Result<Recording, NleError> {
+    let mut project = project_of(items, duration);
+    project.filters.extend(filters_list);
+    filters::registry().render(&project)
+}
+
+fn render_summary(items: &[(f64, &str)], duration: f64, head: usize, tail: usize) -> Recording {
+    render_with(
+        items,
+        duration,
+        vec![applied(FilterRegion::All, Mode::Summary { head, tail })],
+    )
+    .unwrap()
 }
 
 #[test]
@@ -627,4 +644,174 @@ fn summary_tail_never_moves_before_the_marker_after_rounding() {
         triples(&rendered.events),
         vec![out(0.0, "a\r\n"), out(0.1, "...\r\n"), out(0.1, "d\r\n")]
     );
+}
+
+/// A viewport filter on `region`. `options` is a JSON object.
+fn viewport(region: FilterRegion, options: serde_json::Value) -> AppliedFilter {
+    AppliedFilter {
+        kind: FilterKind::new(crate::filters::viewport::VIEWPORT),
+        region,
+        options: serde_json::from_value(options).unwrap(),
+    }
+}
+
+/// A viewport crop that hides the last row, and so rewrites the screen.
+fn crop(region: FilterRegion) -> AppliedFilter {
+    viewport(region, serde_json::json!({"rows": {"start": 0, "end": 23}}))
+}
+
+/// The lines `l1`, `l2`, ... at the times `first`, `first + 1`, ...
+fn numbered_lines(first: f64, count: u32) -> Vec<(f64, String)> {
+    (1..=count)
+        .map(|n| (first + f64::from(n - 1), format!("l{n}\r\n")))
+        .collect()
+}
+
+fn borrowed(items: &[(f64, String)]) -> Vec<(f64, &str)> {
+    items.iter().map(|(t, d)| (*t, d.as_str())).collect()
+}
+
+/// Assert that the render failed with the reason of the summary.
+fn assert_summary_refused(result: Result<Recording, NleError>) {
+    match result {
+        Err(NleError::RenderError(message)) => {
+            assert!(message.contains(KIND), "{message}");
+            assert!(message.contains(SUMMARY_AFTER_SCREEN_FILTER), "{message}");
+        }
+        other => panic!("expected a render error, got {other:?}"),
+    }
+}
+
+fn triples_from(recording: &Recording, from: f64) -> Vec<Triple> {
+    triples(&recording.events)
+        .into_iter()
+        .filter(|t| t.0 >= from)
+        .collect()
+}
+
+#[test]
+fn summary_after_a_viewport_crop_of_its_region_fails_the_render() {
+    let lines = numbered_lines(1.0, 10);
+    let result = render_with(
+        &borrowed(&lines),
+        12.0,
+        vec![crop(FilterRegion::All), summary_all(2, 2)],
+    );
+    assert_summary_refused(result);
+}
+
+fn summary_all(head: usize, tail: usize) -> AppliedFilter {
+    applied(FilterRegion::All, Mode::Summary { head, tail })
+}
+
+#[test]
+fn summary_after_a_viewport_range_that_a_slow_down_moved_into_its_region_fails_the_render() {
+    let lines: Vec<(f64, String)> = (1..=30)
+        .map(|n| (f64::from(n), format!("l{n}\r\n")))
+        .collect();
+    let result = render_with(
+        &borrowed(&lines),
+        31.0,
+        vec![
+            crop(range(10.0, 20.0)),
+            time_dilation::applied(range(0.0, 10.0), Speed::new(0.5).unwrap()),
+            summary(22.0, 28.0, 1, 1),
+        ],
+    );
+    assert_summary_refused(result);
+}
+
+#[test]
+fn summary_that_starts_where_a_viewport_range_ends_fails_the_render() {
+    let lines = numbered_lines(11.0, 10);
+    let result = render_with(
+        &borrowed(&lines),
+        30.0,
+        vec![crop(range(0.0, 10.0)), summary(10.0, 30.0, 2, 2)],
+    );
+    assert_summary_refused(result);
+}
+
+#[test]
+fn summary_after_a_viewport_range_elsewhere_drops_the_middle_lines() {
+    let mut lines = numbered_lines(11.0, 10);
+    lines.push((35.0, "late".to_string()));
+    let rendered = render_with(
+        &borrowed(&lines),
+        36.0,
+        vec![crop(range(0.0, 5.0)), summary(10.0, 30.0, 2, 2)],
+    )
+    .unwrap();
+    assert_eq!(
+        triples_from(&rendered, 10.0),
+        vec![
+            out(11.0, "l1\r\n"),
+            out(12.0, "l2\r\n"),
+            out(13.0, "...\r\n"),
+            out(14.0, "l9\r\n"),
+            out(15.0, "l10\r\n"),
+            out(30.0, "late"),
+        ]
+    );
+}
+
+#[test]
+fn summary_that_ends_where_a_viewport_range_starts_drops_the_middle_lines() {
+    let items = [
+        (1.0, "a\r\n"),
+        (2.0, "b\r\n"),
+        (3.0, "c\r\n"),
+        (4.0, "d\r\n"),
+    ];
+    let rendered = render_with(
+        &items,
+        5.0,
+        vec![crop(range(10.0, 20.0)), summary(0.0, 10.0, 1, 1)],
+    )
+    .unwrap();
+    let early: Vec<Triple> = triples(&rendered.events)
+        .into_iter()
+        .filter(|t| t.0 < 10.0 && !t.2.starts_with('\x1b'))
+        .collect();
+    assert_eq!(
+        early,
+        vec![out(1.0, "a\r\n"), out(2.0, "...\r\n"), out(3.0, "d\r\n")]
+    );
+}
+
+#[test]
+fn summary_after_a_viewport_that_shows_every_cell_drops_the_middle_lines() {
+    let items = [
+        (1.0, "a\r\n"),
+        (2.0, "b\r\n"),
+        (3.0, "c\r\n"),
+        (4.0, "d\r\n"),
+    ];
+    let rendered = render_with(
+        &items,
+        5.0,
+        vec![
+            viewport(FilterRegion::All, serde_json::json!({})),
+            summary_all(1, 1),
+        ],
+    )
+    .unwrap();
+    assert!(
+        rendered.events.iter().any(|e| e.data == SUMMARY_MARKER),
+        "{:?}",
+        rendered.events
+    );
+}
+
+#[test]
+fn skip_and_accelerate_after_a_viewport_crop_still_render() {
+    let lines = numbered_lines(1.0, 10);
+    for filter in [skip(1.0, 5.0), accelerate(1.0, 5.0, 20.0)] {
+        let result = render_with(
+            &borrowed(&lines),
+            12.0,
+            vec![crop(FilterRegion::All), filter],
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
 }

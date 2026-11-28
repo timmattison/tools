@@ -45,6 +45,10 @@ pub const TAIL_OPTION: &str = "tail";
 /// ends a line with CR LF.
 pub const SUMMARY_MARKER: &str = "...\r\n";
 
+/// The reason that a summary gives when a screen filter at an earlier step
+/// rewrote part of its region.
+pub const SUMMARY_AFTER_SCREEN_FILTER: &str = "a screen filter before it in the list, for example viewport, rewrote part of this region as cells of the screen. Those cells hold no line feed, and a summary counts line feeds. Put the summary before the screen filter";
+
 /// An acceleration factor. It is finite and above 1. A fast-forward never
 /// slows a region, because the time dilation filter does slow-downs.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
