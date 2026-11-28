@@ -581,6 +581,7 @@ fn FastForwardPanel(
                     min: "0",
                     value: "{start}",
                     oninput: move |event| start.set(event.value()),
+                    onkeydown: keep_keys_in_field,
                 }
             }
             label { class: "edit-field",
@@ -591,6 +592,7 @@ fn FastForwardPanel(
                     min: "0",
                     value: "{end}",
                     oninput: move |event| end.set(event.value()),
+                    onkeydown: keep_keys_in_field,
                 }
             }
             label { class: "edit-field",
@@ -601,6 +603,7 @@ fn FastForwardPanel(
                     min: "0",
                     value: "{acceleration}",
                     oninput: move |event| acceleration.set(event.value()),
+                    onkeydown: keep_keys_in_field,
                 }
             }
             label { class: "edit-field",
@@ -611,6 +614,7 @@ fn FastForwardPanel(
                     min: "0",
                     value: "{first}",
                     oninput: move |event| first.set(event.value()),
+                    onkeydown: keep_keys_in_field,
                 }
             }
             label { class: "edit-field",
@@ -621,6 +625,7 @@ fn FastForwardPanel(
                     min: "0",
                     value: "{last}",
                     oninput: move |event| last.set(event.value()),
+                    onkeydown: keep_keys_in_field,
                 }
             }
             div { class: "edit-buttons",
