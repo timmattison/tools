@@ -531,14 +531,16 @@ impl Window {
         self.click(self.redact_button());
     }
 
-    /// Notes the seven click listeners that the render of an open recording
-    /// created. The render creates them in this order: Apply Speed, Apply
-    /// Redaction, the Zoom out, Zoom in, and Fit buttons of the timeline,
-    /// Play, Stop. The properties panel mounts before the timeline, and the
-    /// timeline before the preview toolbar. The speed panel comes before the
-    /// redaction panel, and the Play button comes before the Stop button.
+    /// Notes the nine click listeners that the render of an open recording
+    /// created. The render creates them in this order: the Move Earlier and
+    /// Move Later buttons of the one clip, Apply Speed, Apply Redaction, the
+    /// Zoom out, Zoom in, and Fit buttons of the timeline, Play, Stop. The
+    /// properties panel mounts before the timeline, and the timeline before
+    /// the preview toolbar. The clip list comes before the speed panel, the
+    /// speed panel before the redaction panel, and the Play button before the
+    /// Stop button.
     fn note_open_buttons(&mut self) {
-        let [apply, redact, _, zoom_in, _, play, stop] = self.newest[..] else {
+        let [_, _, apply, redact, _, zoom_in, _, play, stop] = self.newest[..] else {
             panic!("the open render made {:?}", self.newest)
         };
         self.apply = Some(apply);
@@ -1082,6 +1084,146 @@ async fn both_buttons_stay_disabled_while_the_add_dialog_is_open() {
     assert!(!window.open_is_disabled(), "{}", window.html());
     assert!(!window.button_is_disabled(ADD_LABEL), "{}", window.html());
     assert_eq!(clip_titles(&window.html()).len(), 1);
+}
+
+// Tests of the clip list.
+
+/// The rows of the clip list of `page`: the text of each row, and whether its
+/// Move Earlier button and its Move Later button are disabled.
+fn clip_list(page: &str) -> Vec<(String, bool, bool)> {
+    page.split("class=\"clip-row\"")
+        .skip(1)
+        .map(|row| {
+            let text = text_between(row, "class=\"clip-row-text\">", "</span>");
+            let disabled: Vec<bool> = row
+                .split("<button")
+                .skip(1)
+                .take(2)
+                .map(|tag| {
+                    let (start, _) = tag.split_once('>').expect("a button start tag");
+                    start.split([' ', '=']).any(|word| word == "disabled")
+                })
+                .collect();
+            let [earlier, later] = disabled[..] else {
+                panic!("a row with the buttons {disabled:?}: {row}")
+            };
+            (text, earlier, later)
+        })
+        .collect()
+}
+
+/// The row of the clip list with `text` and the disabled states of its
+/// Move Earlier and Move Later buttons.
+fn clip_row(text: &str, earlier_disabled: bool, later_disabled: bool) -> (String, bool, bool) {
+    (text.to_owned(), earlier_disabled, later_disabled)
+}
+
+/// Opens the fixture, adds the second take, and gives back the window and
+/// the Move Earlier and Move Later buttons of the row of the second take.
+async fn two_clip_window() -> (Window, ElementId, ElementId) {
+    let fakes = open_then_add(Answer::Ready(Ok(second_take())));
+    let mut window = open_with(&fakes).await;
+    window.click(window.add_button());
+    window.settle().await;
+    let [earlier, later] = window.newest[..] else {
+        panic!("the add render made {:?}", window.newest)
+    };
+    (window, earlier, later)
+}
+
+#[tokio::test]
+async fn the_clip_list_shows_the_one_clip_with_both_moves_disabled() {
+    let window = open_recording().await;
+
+    let page = window.html();
+    assert!(page.contains("<h3>Clips</h3>"), "{page}");
+    assert!(page.contains("Track 1"), "{page}");
+    assert_eq!(
+        clip_list(&page),
+        vec![clip_row("1. Demo Recording, 1m 5.3s", true, true)]
+    );
+}
+
+#[tokio::test]
+async fn the_clip_list_shows_an_added_recording_after_the_first() {
+    let (window, _, _) = two_clip_window().await;
+
+    assert_eq!(
+        clip_list(&window.html()),
+        vec![
+            clip_row("1. Demo Recording, 1m 5.3s", true, false),
+            clip_row("2. Second Take, 0m 5.0s", false, true),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn move_earlier_puts_a_clip_first_and_the_clips_back_to_back() {
+    let (mut window, earlier, _) = two_clip_window().await;
+
+    window.click(earlier);
+    window.settle().await;
+
+    let page = window.html();
+    assert!(!page.contains("role=\"alert\""), "{page}");
+    assert_eq!(
+        clip_list(&page),
+        vec![
+            clip_row("1. Second Take, 0m 5.0s", true, false),
+            clip_row("2. Demo Recording, 1m 5.3s", false, true),
+        ]
+    );
+    // The second take now plays first, from 0, and the first take after it.
+    assert_eq!(
+        clip_titles(&page),
+        vec![
+            "Second Take: 0m 0.0s to 0m 5.0s of the recording",
+            "Demo Recording: 0m 0.0s to 1m 5.3s of the recording",
+        ]
+    );
+    assert!(page.contains(&edited_row("1m 10.3s")), "{page}");
+}
+
+#[tokio::test]
+async fn move_later_and_one_undo_put_the_order_back() {
+    let (mut window, earlier, later) = two_clip_window().await;
+    window.click(earlier);
+    window.settle().await;
+
+    // The row of the second take is now first, and its Move Later moves it back.
+    window.click(later);
+    window.settle().await;
+    let order = vec![
+        clip_row("1. Demo Recording, 1m 5.3s", true, false),
+        clip_row("2. Second Take, 0m 5.0s", false, true),
+    ];
+    assert_eq!(clip_list(&window.html()), order);
+
+    window.click(window.undo_button());
+    window.settle().await;
+    assert_eq!(
+        clip_list(&window.html()),
+        vec![
+            clip_row("1. Second Take, 0m 5.0s", true, false),
+            clip_row("2. Demo Recording, 1m 5.3s", false, true),
+        ]
+    );
+    window.click(window.undo_button());
+    window.settle().await;
+    assert_eq!(clip_list(&window.html()), order);
+}
+
+#[test]
+fn the_clip_list_shows_untitled_for_a_clip_with_no_title() {
+    let mut recording = fixture();
+    recording.recording.title = String::new();
+
+    let page = render_panels(recording);
+
+    assert_eq!(
+        clip_list(&page),
+        vec![clip_row("1. (untitled), 1m 5.3s", true, true)]
+    );
 }
 
 /// The row text of a speed change as the page shows it.
