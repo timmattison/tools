@@ -59,7 +59,14 @@ pub enum Edit {
         timeline_offset: Seconds,
     },
     /// Put a clip at a new place in the play order of its track, and put the
-    /// clips of that track back to back.
+    /// clips of that track back to back. The play order of a track is the
+    /// order of the starts of its clips, and a tie keeps the order on the
+    /// track. The first clip in the new order starts at the earliest start on
+    /// the track, and each next clip starts at the end of the clip before it.
+    /// After the edit, the order on the track is the new play order. A place
+    /// at or past the number of clips of the track is refused with
+    /// `NleError::EditError`, and a start that is not a valid time with
+    /// `NleError::InvalidTime`.
     ReorderClip {
         /// The clip to move.
         id: ClipId,
@@ -180,7 +187,7 @@ impl Edit {
                     .timeline_offset = *timeline_offset;
                 Ok(())
             }
-            Self::ReorderClip { .. } => Ok(()),
+            Self::ReorderClip { id, index } => reorder_clip(project, *id, *index),
             Self::AddFilter { index, filter } => {
                 if *index > project.filters.len() {
                     return Err(missing_filter(*index));
@@ -205,6 +212,56 @@ impl Edit {
             }
         }
     }
+}
+
+/// The edit `Edit::ReorderClip`: put clip `id` at `index` in the play order
+/// of its track, then start each clip of the track at the end of the clip
+/// before it, from the earliest start on the track.
+///
+/// The play order of a track is the order of the starts of its clips. A tie
+/// keeps the order on the track. After the edit, the order on the track is
+/// the new play order.
+fn reorder_clip(project: &mut EditProject, id: ClipId, index: usize) -> Result<(), NleError> {
+    clip_position(project, id)?;
+    let track = project
+        .timeline
+        .iter_mut()
+        .find(|track| track.clips.contains(&id))
+        .ok_or_else(|| NleError::EditError(format!("clip {} is on no track", id.0)))?;
+    let clips = &mut project.clips;
+    let start_of = |clip_id: &ClipId| {
+        clips
+            .iter()
+            .find(|clip| clip.id == *clip_id)
+            .map_or(f64::INFINITY, |clip| clip.timeline_offset.get())
+    };
+    let mut order = track.clips.clone();
+    // A stable sort keeps the order on the track on a tie.
+    order.sort_by(|a, b| start_of(a).total_cmp(&start_of(b)));
+    if index >= order.len() {
+        return Err(NleError::EditError(format!(
+            "place {index} is past the end of track {}, which holds {} clips",
+            track.id.0,
+            order.len()
+        )));
+    }
+    let mut at = order.iter().map(start_of).fold(f64::INFINITY, f64::min);
+    let from = order
+        .iter()
+        .position(|clip_id| *clip_id == id)
+        .ok_or_else(|| missing_clip(id))?;
+    let moved = order.remove(from);
+    order.insert(index, moved);
+    for clip_id in &order {
+        let clip = clips
+            .iter_mut()
+            .find(|clip| clip.id == *clip_id)
+            .ok_or_else(|| missing_clip(*clip_id))?;
+        clip.timeline_offset = Seconds::new(at)?;
+        at += clip.out_point.get() - clip.in_point.get();
+    }
+    track.clips = order;
+    Ok(())
 }
 
 /// The edit error for a filter index that is out of range.
