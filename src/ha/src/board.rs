@@ -1392,12 +1392,33 @@ impl Board {
     /// same branch, and only the commit tells them apart. The prefix keeps
     /// out the `push` run of the merged commit, which has the same
     /// `head_sha`. An entry with no merge group commit has no runs.
+    ///
+    /// A merge group can start more than one workflow. The run that opens is
+    /// the first in this order:
+    ///
+    /// 1. A failed run, because a failure takes the entry out of the queue.
+    /// 2. An active run.
+    /// 3. The run that GitHub created last.
+    /// 4. The run with the lowest ID.
+    ///
+    /// Each step only breaks the ties of the steps above it.
     fn merge_group_run(&self, entry: &QueueEntry) -> Option<&Run> {
         let commit = entry.merge_group_commit.as_ref()?;
-        self.runs.get(&entry.repo)?.iter().find(|run| {
-            run.head_sha.as_ref() == Some(commit)
-                && run.branch.starts_with(MERGE_GROUP_BRANCH_PREFIX)
-        })
+        self.runs
+            .get(&entry.repo)?
+            .iter()
+            .filter(|run| {
+                run.head_sha.as_ref() == Some(commit)
+                    && run.branch.starts_with(MERGE_GROUP_BRANCH_PREFIX)
+            })
+            .min_by_key(|run| {
+                (
+                    run.state != RunState::Failed,
+                    !run.state.is_active(),
+                    std::cmp::Reverse(run.created_at),
+                    run.id,
+                )
+            })
     }
 }
 
