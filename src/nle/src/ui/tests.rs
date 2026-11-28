@@ -2222,12 +2222,24 @@ const REDO_KEYS: Press = Press {
 };
 
 impl Window {
-    /// The Start, End, and Speed fields of the speed panel, and the Pattern and
-    /// Replacement text fields of the redaction panel.
-    fn text_fields(&self) -> [ElementId; 5] {
+    /// The Start, End, and Speed fields of the speed panel, the four fields of
+    /// the idle panel, and the Pattern and Replacement text fields of the
+    /// redaction panel.
+    fn text_fields(&self) -> [ElementId; 9] {
         let [start, end, speed] = self.speed_fields();
+        let [threshold, compress_to, top, bottom] = self.idle_fields();
         let [_, pattern, _, replacement, _] = self.redaction_fields();
-        [start, end, speed, pattern, replacement]
+        [
+            start,
+            end,
+            speed,
+            threshold,
+            compress_to,
+            top,
+            bottom,
+            pattern,
+            replacement,
+        ]
     }
 
     /// Elements that have the focus in turn and are not text fields: the
