@@ -118,12 +118,17 @@ impl Rig {
     }
 
     /// Assert that the viewer shows the same as the reference: the grid, the
-    /// cursor, the visibility of the cursor, and the current attributes.
+    /// cursor, the pending wrap, the visibility of the cursor, and the current
+    /// attributes.
     fn assert_viewer_is_reference(&self) {
         assert_eq!(self.viewer.get_grid(), self.reference.get_grid());
         assert_eq!(
             self.viewer.get_cursor_position(),
             self.reference.get_cursor_position()
+        );
+        assert_eq!(
+            self.viewer.is_wrap_pending(),
+            self.reference.is_wrap_pending()
         );
         assert_eq!(
             self.viewer.is_cursor_visible(),
@@ -461,6 +466,37 @@ fn the_paint_repairs_the_cursor_after_a_restore_of_the_program() {
     );
     rig.paint(None);
     rig.assert_viewer_is_reference();
+}
+
+#[test]
+fn the_paint_keeps_a_pending_wrap_of_the_program() {
+    let screen = size(20, 6);
+    // Each recording fills a row, thus the cursor stays in the last column and
+    // the next character goes to the start of the next row.
+    let rows = [
+        // A plain row. The last cell is red, and the pen is not.
+        ("\x1b[1;1Habcdefghijklmnopqrs\x1b[31mt\x1b[0m", 1),
+        // A row that ends in a wide character, under the edge of the box.
+        ("\x1b[2;1Habcdefghijklmnopqr日", 2),
+        // A row that ends in `q` of the ASCII set, then the line drawing set.
+        ("\x1b[1;1Habcdefghijklmnopqrsq\x1b(0", 1),
+    ];
+    for (row, next) in rows {
+        let mut rig = Rig::new(screen, &TerminalTheme::auto());
+        let overlay = box_of(screen, Position::TopRight, "ls");
+        rig.feed(row);
+        assert!(rig.reference.is_wrap_pending(), "{row:?}");
+        assert!(rig.paint(Some(&overlay)).is_some(), "{row:?}");
+        assert!(rig.viewer.is_wrap_pending(), "{row:?}");
+        assert!(rig.paint(None).is_some(), "{row:?}");
+        rig.assert_viewer_is_reference();
+        assert_eq!(rig.paint(None), None, "{row:?}");
+        rig.feed("X");
+        rig.paint(None);
+        assert_eq!(rig.viewer.get_grid()[next][0].ch, 'X', "{row:?}");
+        rig.assert_viewer_is_reference();
+        assert_eq!(rig.finish(), None, "{row:?}");
+    }
 }
 
 #[test]
