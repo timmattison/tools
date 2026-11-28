@@ -349,7 +349,10 @@ where
     /// acts at once, thus one press does not wait. Each other key ends the
     /// count, and so does a key that closes the box. `Page Down` and `Page Up`
     /// move the highlight one page down and one page up. `Enter` opens the
-    /// highlighted pull request, run, or job.
+    /// highlighted run or job. On a merge queue row, it opens the run of the
+    /// merge group of the entry. When the board holds no such run, it opens
+    /// the pull request and posts why. On a merge history row, it opens the
+    /// pull request. A failed open posts the address and the reason.
     ///
     /// `c` opens a box that asks to cancel the run of the highlighted row.
     /// On a finished run, and on a pull request row, it posts that there is
@@ -418,10 +421,17 @@ where
             }
             KeyCode::Enter => {
                 if let Some(link) = self.board.selected_link((self.now)()) {
-                    self.status.message = match self.opener.open(&link.url) {
-                        Ok(()) => None,
-                        Err(reason) => Some(failed_open(&link.url, &reason, (self.now)())),
-                    };
+                    match self.opener.open(&link.url) {
+                        Ok(()) => {
+                            if let Some(notice) = link.notice {
+                                self.post(notice);
+                            }
+                        }
+                        Err(reason) => {
+                            self.status.message =
+                                Some(failed_open(&link.url, &reason, (self.now)()));
+                        }
+                    }
                 }
                 Flow::Continue
             }
