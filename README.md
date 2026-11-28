@@ -6852,7 +6852,8 @@ again.
 At the end of a range that does not reach the end of the timeline, the filter
 writes OSC 110, then the default foreground that the recording set, then OSC
 111, then the default background that the recording set, and then the SGR
-colors that the recording set inside the range.
+colors that the recording set inside the range. A soft reset of the terminal
+(DECSTR) in the range clears those SGR colors, and it keeps the default colors.
 Thus the text after the range has the colors of the recording. The filter sees
 only its range, thus a color that the recording set before the start of the
 range stays as the recording wrote it, until the next SGR in the range. The

@@ -898,7 +898,10 @@ fn a_reset_or_a_default_in_the_range_clears_what_the_restore_sets() {
 fn a_soft_reset_in_the_range_clears_the_sgr_colors_and_keeps_the_default_colors() {
     let colors = restored(vec![out(0.0, "\x1b[31m\x1b[!pA"), out(5.0, "B")], json!({}));
     let defaults = restored(
-        vec![out(0.0, "\x1b]10;#123456\x07\x1b[31m\x1b[!pA"), out(5.0, "B")],
+        vec![
+            out(0.0, "\x1b]10;#123456\x07\x1b[31m\x1b[!pA"),
+            out(5.0, "B"),
+        ],
         json!({}),
     );
 

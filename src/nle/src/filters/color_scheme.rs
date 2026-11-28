@@ -53,6 +53,9 @@
 //!   first of them.
 //! - A full reset (RIS, `ESC c`) of the recording stays. The filter then
 //!   writes OSC 10 and OSC 11 of the theme again, right after the reset.
+//! - A soft reset (DECSTR, `CSI ! p`) of the recording stays. It resets the
+//!   SGR colors, thus the restore does not set them again. It does not reset
+//!   the default colors.
 //! - A range that is not the end of the timeline ends with a restore. The
 //!   filter writes OSC 110, then the OSC 10 value that the recording set, then
 //!   OSC 111, then the OSC 11 value that the recording set. Then it writes one
@@ -998,6 +1001,17 @@ impl SequenceEditor for SchemeEditor {
                 self.slots = SlotStates::new();
                 self.shown_foreground = None;
                 self.shown_background = None;
+                None
+            }
+            // DECSTR, the soft reset, resets the SGR rendition. It does not
+            // reset the default colors of OSC 10 and OSC 11.
+            Sequence::Csi {
+                params,
+                intermediates,
+                final_char: 'p',
+                ..
+            } if params.is_empty() && intermediates == "!" => {
+                self.slots = SlotStates::new();
                 None
             }
             _ => None,
