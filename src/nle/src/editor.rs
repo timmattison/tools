@@ -58,6 +58,14 @@ pub enum Edit {
         /// The new start of the clip on the timeline.
         timeline_offset: Seconds,
     },
+    /// Put a clip at a new place in the play order of its track, and put the
+    /// clips of that track back to back.
+    ReorderClip {
+        /// The clip to move.
+        id: ClipId,
+        /// The new place of the clip in the play order of its track, from 0.
+        index: usize,
+    },
     /// Insert a filter at an index. The index may be the length of the list.
     AddFilter {
         /// Where the filter goes in the list.
@@ -172,6 +180,7 @@ impl Edit {
                     .timeline_offset = *timeline_offset;
                 Ok(())
             }
+            Self::ReorderClip { .. } => Ok(()),
             Self::AddFilter { index, filter } => {
                 if *index > project.filters.len() {
                     return Err(missing_filter(*index));
