@@ -124,9 +124,11 @@ pub struct SpanContext<'a> {
     /// True when a screen filter at an earlier step rewrote an event that is
     /// in the region at this step. A screen filter writes cells of the screen,
     /// so the output that it rewrote holds no line feed. A step that changes
-    /// times and overlaps such a part makes the part cover the whole answer of
-    /// that step, so the value can be true for an event that no screen filter
-    /// wrote.
+    /// times and overlaps such a part moves the part with its events when the
+    /// step answers as many events as its region held. When the step answers a
+    /// different count, for example a backspace removal, the part covers the
+    /// whole answer of that step, so the value can be true for an event that
+    /// no screen filter wrote.
     pub screen_rewritten: bool,
 }
 
@@ -150,30 +152,72 @@ impl RewrittenParts {
         self.0.iter().any(|&(a, b)| a < region_end && b >= start)
     }
 
-    /// Move each part through one step that changes times. The step has the
-    /// region `start` to `region_end`, answers events up to `answered_end`,
-    /// and moves the events after the region by `shift`. A part before the
+    /// Move each part through one step that changes times. A part before the
     /// region stays. A part after the region moves by `shift`. A part that
-    /// overlaps the region grows to cover the whole answer of the step.
-    fn move_through(&mut self, start: f64, region_end: f64, answered_end: f64, shift: f64) {
-        for part in &mut self.0 {
-            let (a, b) = *part;
-            *part = if b < start {
-                (a, b)
-            } else if a >= region_end {
-                (a + shift, b + shift)
-            } else {
-                (
-                    a.min(start),
-                    if b >= region_end {
-                        b + shift
+    /// overlaps the region goes to the new times of its own events when the
+    /// step answers as many events as its region held, because each shipped
+    /// step keeps the count and the order of its events. Then event `i` of the
+    /// region pairs with event `i` of the answer. When the count changes, the
+    /// part grows to cover `start` to `answered_end`. A part with no event
+    /// left in it drops.
+    fn move_through(&mut self, step: &TimeStep<'_>) {
+        let paired = step.answer.len() == step.old_times.len();
+        self.0 = self
+            .0
+            .iter()
+            .filter_map(|&(a, b)| {
+                let mut low = f64::INFINITY;
+                let mut high = f64::NEG_INFINITY;
+                let mut cover = |time: f64| {
+                    low = low.min(time);
+                    high = high.max(time);
+                };
+                // The piece before the region stays.
+                if a < step.start {
+                    cover(a);
+                    cover(b.min(step.start));
+                }
+                // The piece after the region moves by the shift.
+                if b >= step.region_end {
+                    cover(a.max(step.region_end) + step.shift);
+                    cover(b + step.shift);
+                }
+                // The piece inside the region goes where the step put its events.
+                if a < step.region_end && b >= step.start {
+                    if paired {
+                        for (&old, event) in step.old_times.iter().zip(step.answer) {
+                            if (a..=b).contains(&old) {
+                                cover(step.start + event.time);
+                            }
+                        }
                     } else {
-                        answered_end
-                    },
-                )
-            };
-        }
+                        cover(step.start);
+                        cover(step.answered_end);
+                    }
+                }
+                // A part with no event left in it drops.
+                (low <= high).then_some((low, high))
+            })
+            .collect();
     }
+}
+
+/// One step that changes times, as the rewritten parts see it.
+struct TimeStep<'a> {
+    /// The start of the region of the step on the timeline.
+    start: f64,
+    /// The end of the region. The region holds the events with
+    /// `start <= time < region_end`.
+    region_end: f64,
+    /// How far the step moves the events after its region.
+    shift: f64,
+    /// The time on the timeline of each event of the region before the step,
+    /// in the order of the region.
+    old_times: &'a [f64],
+    /// The answer of the step, with times relative to `start`.
+    answer: &'a [Event],
+    /// The end of the answer on the timeline.
+    answered_end: f64,
 }
 
 /// A region of the timeline as a span filter sees it.
@@ -387,7 +431,8 @@ impl FilterRegistry {
     /// a span filter gets the size of a VT100 and a screen filter fails.
     /// `rewritten` holds the parts of the timeline that the screen filters of
     /// earlier steps rewrote. A screen filter adds its part, and a step that
-    /// changes times moves each part.
+    /// changes times moves each part to the new times of its own events, or
+    /// over its whole answer when the step changes the count of events.
     fn apply(
         &self,
         events: Vec<Event>,
@@ -404,11 +449,14 @@ impl FilterRegistry {
 
         let mut before = Vec::new();
         let mut inside = Vec::new();
+        // The time on the timeline of each event that goes into `inside`.
+        let mut old_times = Vec::new();
         let mut after = Vec::new();
         for event in events {
             if event.time < start {
                 before.push(event);
             } else if event.time < region_end {
+                old_times.push(event.time);
                 inside.push(Event {
                     time: event.time - start,
                     ..event
@@ -433,7 +481,14 @@ impl FilterRegistry {
             Registered::Events(filter) => {
                 let answer = filter(&inside, &applied.options);
                 let shift = last_time(&answer) - last_time(&inside);
-                rewritten.move_through(start, region_end, start + last_time(&answer), shift);
+                rewritten.move_through(&TimeStep {
+                    start,
+                    region_end,
+                    shift,
+                    old_times: &old_times,
+                    answer: &answer,
+                    answered_end: start + last_time(&answer),
+                });
                 (answer, None, f64::INFINITY, shift)
             }
             Registered::InPlace(filter) => {
@@ -503,7 +558,14 @@ impl FilterRegistry {
                     )));
                 }
                 let shift = answer.length - length;
-                rewritten.move_through(start, region_end, start + answer.length, shift);
+                rewritten.move_through(&TimeStep {
+                    start,
+                    region_end,
+                    shift,
+                    old_times: &old_times,
+                    answer: &answer.events,
+                    answered_end: start + answer.length,
+                });
                 (answer.events, None, f64::INFINITY, shift)
             }
         };
