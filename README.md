@@ -6769,7 +6769,7 @@ The editing engine of the crate has five parts:
   The filters of issue #154 parse their options as a Rust type, so the render
   refuses a missing option, a value of the wrong type, and a key that the
   filter does not know. The window cannot add them yet. Issue #804 adds the
-  click on the timeline that places a pause. Issues #157 to #167 add more
+  click on the timeline that places a pause. Issues #161 to #167 add more
   filters.
 - **Render**: the registry flattens a project into one `beta` recording. It
   splices the clips by the rules above: the play order, the hard cut, the
