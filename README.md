@@ -33,68 +33,33 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
 - Used as the foundation for clipboard transformation tools like `htmlboard`, `jsonboard`, and `unescapeboard`
 
 ### portplz-core
-A shared Rust library that derives a deterministic, unprivileged TCP port from a git repository's root name,
-current branch, and the current user (or, with no git, a directory name plus the user). Mixing in the user means
-two people on the same machine get different ports for the same repo and branch, so they can run the same project
-side by side without colliding. It hides SHA-256 hashing, `gix` repository discovery, and user detection behind a
-single `derive()` entry point. `derive()` also takes an optional name. The name tells one application of a project
-apart from another, so a repo holding a site and an API gives each its own port. The name sits between two NUL bytes
-at the head of the hash input, and no unnamed input can start with a NUL. So a named derivation never hashes the same
-input as an unnamed one. Every port derived without a name keeps the value it has today. Used by `portplz` (which
-prints the port) and `sirn` (which serves on it), so both agree on the same port for a given project and user without
-`portplz` needing to be installed. Set `PORTPLZ_UID` to a fixed integer to override the detected user (handy for
-reproducing a teammate's port or pinning one in containers/CI).
+A shared Rust library that derives a deterministic, unprivileged TCP port for a project and a user. It gives:
+- One entry point, `derive()`, which hides the SHA-256 hash, the `gix` discovery, and the detection of the user
+- A port from the root name of the repository, the branch, and the user, or from a directory name and the user
+- Different ports for two users of one machine, on one repository and one branch
+- An optional name, which gives each application of one repository its own port
+- An override of the user through `PORTPLZ_UID`, for the port of a teammate or a fixed port in a container or in CI
+
+Used by `portplz`, which prints the port, and `sirn`, which serves on it.
+
+See [src/portplz-core/README.md](src/portplz-core/README.md) for detailed documentation.
 
 ### gitscratch
-A shared Rust library that owns the hardened "dry-run a git operation without touching anything real" harness.
-Answering "would this rebase conflict, and how badly?" means actually performing it against the developer's own
-repository, which is only safe because of a set of pinned settings — `rebase.updateRefs=false` so the replay
-doesn't rewrite the very branches being simulated, `rerere.enabled=false` so a simulated resolution never poisons
-the shared `rr-cache`, hooks redirected at an empty directory, `gc.auto=0`, `commit.gpgsign=false`, and an editor
-environment a halted rebase can't hang on. Path *names* get the same treatment: git will C-quote and octal-escape
-a name, which then matches no file on disk, so a conflicted `日本語.txt` came back under a name nobody typed *and*
-silently floored at "1 hunk" — a plausible-looking wrong total. `core.quotePath=false` is pinned against the
-common case, but it only governs non-ASCII, so the fix that actually holds is that every reader of a path asks
-git for `-z` — split on NUL, never trimmed — and no line-oriented alternative stands beside them to forget it
-for. A list of paths comes back through one of two readers, and what separates them is a name that is not valid
-UTF-8: `nul_separated_paths` hands over the bytes git wrote, since a path is a byte string on unix and decoding
-one lossily replaces exactly the names this exists to preserve, while `paths` decodes to text and refuses such a
-name outright rather than repairing it into one that opens no file. One path is a third reader, because
-`rev-parse` has no `-z` to ask with: it takes git's raw stdout, strips exactly one trailing newline, and hands
-back the rest as bytes. Never a trim, since `str::trim` is Unicode-aware and eats a trailing space or U+3000 off
-the end of a name that had one, and never a lossy decode, which turns any byte outside UTF-8 into a name that
-opens no file. The replay read the halted rebase's state directory through a reader that does both, and in a
-linked worktree git builds that answer out of the developer's own repository path — so a repository path holding
-such a byte reported no rebase in progress, and a real halt came out as "the rebase failed without leaving a
-rebase to resolve". A scratch worktree can only be built through `Scratch`, and a `Scratch` answers the
-operations it names — check out detached, replay a rebase, read the HEAD tree, write a squash commit — each
-under that configuration, so no tool can drift onto a weaker version of it. The runner that makes those calls
-never leaves the crate, and both halves of that are needed: nothing outside can build one, because `Git::new`
-is crate-private, and nothing outside is handed one, because a `Scratch` answers with the operation rather than
-with the thing that performs it. The second half matters because a scratch worktree is a *linked* worktree of
-the real repository and the hardening is configuration — it says nothing about `branch -D`, `update-ref`,
-`config --local` or `push`, so a runner in a consumer's hands reaches all of them. A `compile_fail` doc-test
-holds that door shut. Two more hold the doors the *answer* comes through. `Conflicts` has no `Default` derive,
-because the value a derive hands out — no files, no stops — is the clean verdict, the one that renders "hit no
-conflicts" and exits 0, and a derive puts it behind the spelling every caller reaches for first. The seed a fold
-genuinely needs says so by name instead, as `Conflicts::nothing_replayed()`. And the count newtypes have no
-`Display`, so a count renders only through `phrase()` (`4 hunks`, with the noun and its plural coming from the
-counter) or `digits()` (a table cell whose heading carries the noun) — with a `Display` on them,
-`format!("{} across {}", hunks, files)` compiles and prints `4 across 2`, which is the wording failure the
-newtypes exist to stop. A fourth holds the door the answer's *words* come through: `Report::for_tool` names the
-tool and hands back an `UnwordedReport`, which cannot render at all, and the action arrives through
-`describing`, which is what builds the `Report` — so a report with a hole where the action belongs
-(`grind: clean -  hit no conflicts`, two spaces and no phrase) is a value nobody can build rather than a line
-nobody reads until it ships. Inside the crate, the runner takes the git subcommand as a parameter of its own, so a
-caller's arguments always land after it rather than in git's own option position, where one more `-c` pair
-would undo any of the pins above (git's rule is that the last pair naming a key wins) and a `-C` would aim the
-whole run at another repository. A revision the caller
-supplies is kept out of that position too: `rev-parse` is asked with `--verify` and `--end-of-options`, and the
-commit-ish of `worktree add` and the upstream of `rebase` carry the same separator — because a bare `git
-rev-parse --root` prints its own argument back and exits 0, which read as a commit and let `grind` answer
-`clean` for a branch that does not exist. Teardown removes the scratch worktree by path and deliberately never
-runs the repo-wide `git worktree prune`, which would delete the administrative state of any worktree whose
-directory is merely missing right now. Used by `grist`, `grind` and `grime`.
+A shared Rust library that replays a git operation, such as a rebase or a merge, in a scratch worktree, and changes
+nothing real. It gives:
+- Pinned settings for each replay: `rebase.updateRefs=false`, `rerere.enabled=false`, an empty hooks directory,
+  `gc.auto=0`, no signing, and an editor that a halted rebase cannot hang on
+- Exact path names: each read of a list of paths asks git for `-z`, and no read trims a name or decodes it with loss
+- `Scratch` as the only entrance to a worktree, and a git runner that never leaves the crate
+- Answers that cannot lie: no `Default` on `Conflicts`, no `Display` on the count newtypes, and a
+  `Report::for_tool` that cannot render until `describing` gives it the action
+- Pins that the arguments of a caller cannot undo: each argument comes after the subcommand, and each revision
+  comes after `--end-of-options`
+- A teardown that removes only its own worktree, and never runs `git worktree prune`
+- A shared `testing` module (`write_executable`, `git_shim`, and fixture repositories), which about 30 crates of
+  this workspace take as a dev-dependency
+
+Used by `bibibi`, `grime`, `grind`, `grist` and `gsw`, which replay git operations through it.
 
 See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of guarantees.
 
@@ -1092,9 +1057,11 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
     `XDG_STATE_HOME` is unset, empty, or relative, the file is `~/.local/state/op-cache/audit.jsonl`.
     The audit trail has no switch. Each line is one JSON record, of one of two kinds:
     - `op_start`, before `op` runs: the time, the `request_id`, the attempt, the operation (`read`,
-      `read-binary`, or `item-get` for `list-fields`), the reference, the working directory, the
-      cache file, the zellij session and pane, `TERM_PROGRAM`, the Claude Code session, and the chain
-      of ancestor processes (at most 32, each command line cut to 1024 bytes). The Claude Code
+      `read-binary`, or `item-get` for `list-fields` and for the library function `field_labels`),
+      the reference (`op://<vault>/<item>` for `field_labels`), the working directory, the cache
+      file (empty for `field_labels`, which reads no cache), the zellij session and pane,
+      `TERM_PROGRAM`, the Claude Code session, and the chain of ancestor processes (at most 32, each
+      command line cut to 1024 bytes). The Claude Code
       session is the nearest ancestor that has a file `sessions/<pid>.json` in `$CLAUDE_CONFIG_DIR`,
       else in `~/.claude`. A file whose `startedAt` is earlier than the start of that ancestor is
       skipped, because that PID now belongs to a different process. The lookup then continues to the
@@ -2262,6 +2229,26 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
     `faulte kill` stops the old idle Claude Code sessions after a question. `faulte tui` is a live
     full-screen view with a history. It supports macOS only. See below for the full entry.
   - To install: `cargo install --git https://github.com/timmattison/tools faulte`
+- ufa (UniFi API)
+  - Drives a UniFi Network application through its Integration API, and the cloud consoles of an
+    Ubiquiti account through the Site Manager API. It lists the sites, the devices, the clients,
+    and the hotspot vouchers. It reports the statistics of one device or of every device at once,
+    it restarts a device, and it power cycles a port. It authorizes and unauthorizes a guest, and
+    it creates, shows, and deletes a voucher. `--output json` gives every command a
+    machine-readable answer, and a table is the default.
+  - The two APIs take two different keys. The controller key comes from **Settings -> Control
+    Plane -> Integrations** on the controller itself. The Site Manager key comes from the API
+    section of [unifi.ui.com](https://unifi.ui.com). `ufa config setup` finds a controller in
+    1Password or on the local network, then writes the config file for you. A key can stay in
+    1Password, because the config file holds an `op://` reference that `ufa` resolves through
+    `op-cache`.
+  - `--site-id` belongs to the command group and stands before the leaf subcommand:
+    `ufa devices --site-id <SITE_ID> list`. Leave it out and `ufa` finds the site for you.
+  - Usage: `ufa sites`, `ufa devices list`, `ufa devices stats --all`,
+    `ufa clients list --output json`,
+    `ufa vouchers create --name "Guest pass" --time-limit-minutes 1440 --count 5`,
+    `ufa cloud hosts`, `ufa config setup`
+  - To install: `cargo install --git https://github.com/timmattison/tools ufa`
 
 - ha (hot actions)
   - Shows the GitHub Actions workflow runs of many repositories and owners in one terminal view
@@ -2374,7 +2361,8 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
     It shows how much runner time the run used. The `TIME` column shows the wall-clock time of
     the run. A run with two parallel jobs of 15 minutes shows `15m 00s` under `TIME` and
     `30m 00s` under `JOB SUM`. Thus you can find the runs that use many runners in parallel,
-    and how much runner time a change costs.
+    and how much runner time a change costs. An active run row can show an estimate of the time
+    until the run finishes in place of its sum, as a later item tells.
     - The time of one job is the time that its job row shows after the job starts: from its
       start to its finish, or to now while it runs. Thus the sum of an active run increases
       each second. A job that waits for a runner or for an approval (`⏳`) adds nothing, because
@@ -2414,6 +2402,31 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
       - The estimate needs no more request to GitHub. It reads the jobs that `ha` already loads
         for the job sum. `ha` keeps no history after it stops. Thus after a start, the
         estimates fill in over the first refreshes, as the jobs of the recent runs load.
+    - An active run row shows an estimate of the time until the run finishes, in place of its
+      sum. It uses the same signs and the same text as a job row, with one more sign:
+      - `~9m 00s` means that the run finishes in about 9 minutes.
+      - `>12m` means that the run finishes in 12 minutes or more. The latest end comes from a
+        job that waits for a runner or for an approval. The start of that job is unknown, and
+        an approval can take hours.
+      - `+30s` means that the run is 30 seconds past its estimate.
+      - Each job of the run gives a time when the run can finish. A job that passed gives its
+        end. A job that runs gives the end of its estimate, or now when it is past its estimate.
+        A job that waits gives now plus the mean time of its name on any runner. Each of these
+        times then adds the tail of the job name. The latest time is the estimate.
+      - The tail of a job name is the mean time from the end of that job to the end of its run,
+        in the newest 5 passed runs of the same repository and workflow in the window. The end
+        of a run is the end of its last job. Thus the tail holds the time of each job that runs
+        after the job. This includes a job that GitHub did not create yet, for example a job
+        that `needs:` a job that still runs.
+      - A failed, cancelled, or skipped job of the active run does not change the estimate.
+      - The run row keeps its sum when a running job shows a blank cell on its job row, when a
+        waiting job has no passed match on any runner, and when a job name has no tail. It keeps
+        its sum when no job passed, runs, or waits, for example when each job failed, was
+        cancelled, or was skipped. It also keeps its sum before its jobs load, and after the run
+        finishes.
+      - A past run on a different branch can skip jobs that this run does not skip. Its tails
+        then mix two shapes of the run. In the estimate, a job that waits starts now, because
+        `ha` does not estimate when a runner gets free.
     - A finished run can show a `JOB SUM` smaller than its `TIME`, also when its jobs ran in
       parallel. The `TIME` cell of a finished run ends at the last update of the run, and GitHub
       sometimes makes that update some minutes after the last job finished.
@@ -5697,19 +5710,22 @@ The excerpt leaves out rows of the table and entries of the groups. The run was 
 
 `wdid defs` reports on each alias and each function of your interactive shell. Use it to find the definitions that you use, the definitions that you can remove, and the definitions that you forgot. The tools report shows an alias or a function only through a tool of the workspace that it runs. `wdid defs` shows each of your definitions, also an alias that runs `git` and a definition with zero uses.
 
-A definition that the shell runs without a typed name, for example a `precmd` hook or the function of a widget that a key starts, gets the state "runs without typing" with its reason. It does not show in "Never used". See [What runs without typing](#what-runs-without-typing).
+A definition that the shell runs without a typed name, for example a `precmd` hook or the function of a widget that a key starts, gets the state "runs without typing" with its reason. It does not show in "Never used, old" or "Never used, new". See [What runs without typing](#what-runs-without-typing).
 
 The report ends with the duplicates and the shadows: aliases with the same value, an alias and a function that do the same thing, an alias that your startup files define more than one time, an alias that hides a function, and a definition that hides a program. Each finding gives the use count of each name, so that you can choose which name to keep. See [Duplicates and shadows](#duplicates-and-shadows).
 
 Each definition gets its origin: the file that defined it. By default, the text report shows only your own definitions. A shell with oh-my-zsh has hundreds of aliases and functions from its plugins and its `lib` files, and those are not yours. `--all` shows each definition, and groups the others by the file that defined them.
 
-`wdid defs` reads the history and the shell definitions as the tools report does. It needs no cargo workspace, and it starts no `cargo` process and no `git` process. Thus it runs in any directory.
+Each of your definitions also gets its added date: the date of the oldest commit that adds it to its file. A definition that you added last week and did not use yet goes into "Never used, new". It does not go into "Never used, old" with the definitions that you forgot two years ago. See [The added date](#the-added-date).
+
+`wdid defs` reads the history and the shell definitions as the tools report does. It needs no cargo workspace, and it starts no `cargo` process. It starts `git` only to read the history of the files that defined your definitions. Thus it runs in any directory.
 
 ```bash
 wdid defs
 wdid defs --all
 wdid defs --json
 wdid defs --since 2026-01-01 --idle-days 90
+wdid defs --new-days 30
 ```
 
 #### What counts
@@ -5729,7 +5745,7 @@ A use through other definitions names the definition that you typed. With `a` th
 
 #### What runs without typing
 
-zsh and bash run some definitions when nobody types their names. The history has no row for these runs. Thus `wdid` asks the shell for each such start. Each definition that a start reaches gets the state "runs without typing" and its reasons. Such a definition does not show in "Never used" or in "Idle", whatever its uses. Its typed uses still count in the table.
+zsh and bash run some definitions when nobody types their names. The history has no row for these runs. Thus `wdid` asks the shell for each such start. Each definition that a start reaches gets the state "runs without typing" and its reasons. Such a definition does not show in "Never used, old", in "Never used, new", or in "Idle", whatever its uses. Its typed uses still count in the table.
 
 The starts of zsh:
 
@@ -5749,7 +5765,7 @@ The starts of bash:
 
 Each function that a start runs passes its reason to each function that it calls, to any depth. The reason then names the definition that the start runs, for example `precmd hook, through omz_termsupport_precmd`. The walk visits each function one time, thus a cycle stops. A function whose name starts with `_` passes its reason too, also when the report does not show it.
 
-A widget function that no key starts gets the reason `widget, no key`. Only a typed `zle` call or `execute-named-cmd` starts it. Thus it keeps the state that its uses give, and it can show in "Never used" with that reason.
+A widget function that no key starts gets the reason `widget, no key`. Only a typed `zle` call or `execute-named-cmd` starts it. Thus it keeps the state that its uses give, and it can show in "Never used, old" or in "Never used, new" with that reason.
 
 `wdid` does not find these starts:
 
@@ -5760,8 +5776,9 @@ A widget function that no key starts gets the reason `widget, no key`. Only a ty
 The groups of a run with a `precmd` hook, its callee, a widget with a key, and a widget with no key:
 
 ```text
-Never used:
+Never used, old (added 90 or more days ago):
   lonelyfn (function, widget, no key)
+Never used, new (added less than 90 days ago): none
 Idle (no use in the last 180 days): none
 Runs without typing:
   precmd (function, precmd hook)
@@ -5787,6 +5804,33 @@ A definition is mine when its origin is unknown, when its file is under `$ZSH_CU
 - A definition with an unknown origin is mine, so that the default report never hides it. zsh itself defines the aliases `run-help` and `which-command`, which have no file.
 - A definition from `$ZSH`, from `/usr/share/zsh`, from `/dev/fd` or `/proc/self/fd`, or from a different file outside `$HOME` is not mine. A definition from `source <(tsm shell-init)` is in `/dev/fd` on macOS and in `/proc/self/fd` on Linux, thus it is not mine.
 
+#### The added date
+
+The added date of a definition is the date of the oldest commit that adds a line that defines its name to its origin file. Only your definitions get an added date. Each other definition shows `unknown`.
+
+`wdid` reads the history of each origin file one time, with its full diff (`git log --follow --patch`). It finds each added line that defines a name:
+
+- An alias line starts with `alias`, then options such as `-g` and `-s`, then one or more `name=value` words. Each such word defines a name, thus `alias gs='git status' gd='git diff'` defines `gs` and `gd`. A word with no `=` defines nothing. The words end at the first operator or comment, thus `alias s1=x; s2=y` defines only `s1`. Blanks at the start of the line do not count. With `-s`, each name is a suffix alias (`*.md`). The quotes in a name do not count, thus `alias 'll=ls -l'` defines `ll`. The shell expands an unquoted brace list first, thus `alias -s {md,txt}=glow` defines `*.md` and `*.txt`. A name that holds an expansion, a glob, or a sequence such as `{1..3}` defines nothing. The value of a line that opens a quote and does not close it goes on to the next line, and the read closes the quote at the end of the line. Thus `alias a=1 b='x` defines `a` and `b`. When a different construct stays open, only the text up to the first `=` counts. Thus `alias x="$(date` defines `x`.
+- A function line is `name()`, `name ()`, or `function name`. A line that starts with `alias` and defines no alias can still be a function line, thus `alias () {` defines the function `alias`.
+
+An alias and a function with the same name each get the date of their own line. The three kinds of alias share their dates, thus an alias that becomes a global alias keeps its date. When the history adds a name two times, for example after a removal, the oldest commit gives the date. `--follow` reads the history through each rename of the file.
+
+Each origin file gets the history of the first source that applies:
+
+1. **yadm.** The file is under `$HOME`, and yadm tracks it. `yadm introspect repo` gives the git directory of yadm. `git` runs with that git directory and with `$HOME` as the work tree.
+2. **A yadm alternate.** The file is under `$HOME`, yadm does not track it, and yadm tracks one or more files `<file>##<condition>`. For example, yadm renders `~/.zshrc` from `~/.zshrc##template.default`, and only the template is tracked. `wdid` reads the history of each tracked alternate, and the oldest date of a name wins. A template and its rendered file have different line numbers, thus `wdid` matches the text of each line, not its number.
+3. **A git work tree.** `git` runs in the directory of the file and finds its repository there. When the file is a symbolic link, `git` runs in the directory of the file that the link names. Thus a `~/.zshrc` that links into a dotfiles repository gets the dates of that repository.
+
+If `yadm` is not installed, or if it fails, `wdid` skips the first two sources. A file that no source tracks gives no added date, for example a file outside each repository or a definition from `/dev/fd`. Some definitions have no added date for a different reason:
+
+- A definition with an unknown origin has no file.
+- A definition that an `eval` makes has no line that defines it in its file.
+- A definition that is not yours gets no added date.
+
+The report shows `unknown` for each of them. When such a definition never ran, it goes into "Never used, old", so that it never looks new by mistake.
+
+`wdid` starts one `git log` for each origin file of your definitions, not one for each definition. A file with two tracked yadm alternates costs one `git log` for each alternate. When an origin file is under `$HOME`, `wdid` also starts one `yadm introspect repo` and one `git ls-files` for the whole run. Each `git` process sheds the inherited git environment before `wdid` names its git directory. Thus a `GIT_DIR` that a git hook exports does not redirect the read.
+
 #### The report
 
 Three header lines start the report. The first line gives the history rows, the rows with exit code 127, and the rows that did not parse. The second line gives the shell, the number of aliases, and the number of functions. The third line gives the number of my definitions and the number of the others.
@@ -5799,6 +5843,7 @@ The table has one row for each of my definitions, the most used first:
 - `Typed`: the uses where you typed the name.
 - `Through`: the definitions that gave the other uses, each with its count. When `COLUMNS` or the terminal gives a width, a cell longer than 30 columns wraps. With no width, the cell is one line.
 - `First use` and `Last use`: the dates of the first and the last counted use.
+- `Added`: the added date, or `unknown`. See [The added date](#the-added-date).
 - `Origin`: the origin, with `~` for your home directory: `file:line` for an alias, the file for a function, or `-` when the origin is unknown.
 - `Definition`: the value of an alias, or the first line of a function body. The cell is one line. When `COLUMNS` or the terminal gives a width, `wdid` cuts the cell to fit that width and ends it with `…`.
 
@@ -5806,15 +5851,16 @@ An alias and a function can have the same name. They are two rows.
 
 With `--all`, the table of my definitions gets the heading `Mine` and a count. After it, the report has one table for each file that defined the others, in path order. The heading of each table is the file and its count of definitions, for example `~/.oh-my-zsh/plugins/git/git.plugin.zsh: 208 definitions`. The tables also hold the functions whose names start with `_`. Each completion function has a file of its own, thus a shell with the completion system gives one table for each completion function.
 
-Three groups follow the tables:
+Four groups follow the tables:
 
-- **Never used.** The definitions with zero uses, each with its kind, but not a definition that runs without typing.
+- **Never used, old.** The definitions with zero uses whose added date is `--new-days` days ago or more, or unknown, each with its kind. These are the candidates to delete.
+- **Never used, new.** The definitions with zero uses whose added date is less than `--new-days` days ago, each with its kind and its added date. They have had no time yet.
 - **Idle.** The definitions whose last use is older than `--idle-days` days, each with its kind, its uses, and the date of its last use, but not a definition that runs without typing.
 - **Runs without typing.** The definitions that the shell runs without a typed name, each with its kind and its reasons. `; ` divides two reasons. See [What runs without typing](#what-runs-without-typing).
 
-A widget function that no key starts ends its entry in "Never used" or in "Idle" with its reason, `widget, no key`.
+A definition that runs without typing is in none of the first three groups. A widget function that no key starts ends its entry in "Never used, old", in "Never used, new", or in "Idle" with its reason, `widget, no key`.
 
-Without `--all`, the three groups hold only my definitions. With `--all`, they hold each definition.
+Without `--all`, the four groups hold only my definitions. With `--all`, they hold each definition.
 
 The group `Duplicates and shadows` ends the report. See [Duplicates and shadows](#duplicates-and-shadows).
 
@@ -5863,38 +5909,42 @@ By default, the group shows only a finding that holds one or more of your defini
 
 - `--since <YYYY-MM-DD>`: Count only the rows from this date on. A row on this date counts.
 - `--all`: Show each definition. The text report also shows the others, grouped by the file that defined them, and the functions whose names start with `_`. The group `Duplicates and shadows` shows each finding, also a finding that holds none of your definitions.
-- `--json`: Print the report as one JSON document. `definitions` holds each definition, also the ones with zero uses and the ones that are not mine, and its `definition` is never cut. Each entry has `origin` and `mine`. `origin` holds `file` and `line`, or it is `null` when the origin is unknown. A function has no line, thus its `line` is `null`. `shell.mine` and `shell.others` give the two counts. Each entry has `reasons`, the text of each of its reasons as the text report writes it. The list is empty for most entries. `never_used`, `idle`, and `runs_without_typing` hold the name and the kind of each entry of the three groups, also the entries that are not mine. `findings` holds each finding of [Duplicates and shadows](#duplicates-and-shadows), also a finding that holds none of your definitions. Each finding has `kind` (`same_expansion`, `alias_and_function`, `defined_more_than_once`, `alias_hides_function`, or `hides_program`), `mine`, and `definitions`, with the `name`, `kind`, `origin`, `uses`, and `mine` of each definition. The `mine` of a finding is true when one of its definitions or one of its places is yours, thus it can be true while the `mine` of its definition is false. `words` holds the shared words of the first two kinds. Each word is as the shell reads it, in single quotes when it needs them. `places` holds each place of `defined_more_than_once` (an origin, or `null` when it is unknown), and `program` holds the path of `hides_program`. A field that a kind does not use is an empty list or `null`. With `--all`, the document also holds the functions whose names start with `_`.
+- `--json`: Print the report as one JSON document. `definitions` holds each definition, also the ones with zero uses and the ones that are not mine, and its `definition` is never cut. Each entry has `origin` and `mine`. `origin` holds `file` and `line`, or it is `null` when the origin is unknown. A function has no line, thus its `line` is `null`. `shell.mine` and `shell.others` give the two counts. Each entry has `added`, the added date, or `null` when it is unknown. Each entry has `reasons`, the text of each of its reasons as the text report writes it. The list is empty for most entries. `never_used_old`, `never_used_new`, `idle`, and `runs_without_typing` hold the name and the kind of each entry of the four groups, also the entries that are not mine. `new_days` gives the value of `--new-days`. `findings` holds each finding of [Duplicates and shadows](#duplicates-and-shadows), also a finding that holds none of your definitions. Each finding has `kind` (`same_expansion`, `alias_and_function`, `defined_more_than_once`, `alias_hides_function`, or `hides_program`), `mine`, and `definitions`, with the `name`, `kind`, `origin`, `uses`, and `mine` of each definition. The `mine` of a finding is true when one of its definitions or one of its places is yours, thus it can be true while the `mine` of its definition is false. `words` holds the shared words of the first two kinds. Each word is as the shell reads it, in single quotes when it needs them. `places` holds each place of `defined_more_than_once` (an origin, or `null` when it is unknown), and `program` holds the path of `hides_program`. A field that a kind does not use is an empty list or `null`. With `--all`, the document also holds the functions whose names start with `_`.
+- `--new-days <DAYS>`: A definition that never ran is new when its added date is less than this many days ago. Defaults to 90, as in the tools report.
 - `--idle-days <DAYS>`: A definition is idle when its last use is older than this. Defaults to 180.
 
-The options of the tools report (`--repo`, `--no-shell`, `--unparsed`, `--new-days`) do not apply. An option of the tools report before `defs` is a usage error.
+The options of the tools report (`--repo`, `--no-shell`, `--unparsed`) do not apply. An option of the tools report before `defs` is a usage error, also `--new-days` and `--idle-days`. Give them after `defs`.
 
 #### Example of wdid defs
 
-A run on a small history, with a stand-in of oh-my-zsh in `~/.oh-my-zsh`. Its git plugin defines `gst` and `gco`. zsh itself defines `run-help` and `which-command`.
+A run on 2026-11-26 on a small history, with a stand-in of oh-my-zsh in `~/.oh-my-zsh`. Its git plugin defines `gst` and `gco`. zsh itself defines `run-help` and `which-command`. yadm tracks `~/.zshrc##template.default`, and a commit added the alias `fresh` to it on 2026-11-20.
 
 ```text
 History: 14 rows. 1 not counted (exit 127). 0 did not parse.
-Shell: /bin/zsh, 9 aliases, 3 functions (0 did not parse).
-Definitions: 10 mine, 2 others (--all shows the others).
+Shell: /bin/zsh, 10 aliases, 3 functions (0 did not parse).
+Definitions: 11 mine, 2 others (--all shows the others).
 
-┌───────────────┬──────────────┬──────┬───────┬─────────┬────────────┬────────────┬────────────┬─────────────────────────┐
-│ Name          ┆ Kind         ┆ Uses ┆ Typed ┆ Through ┆ First use  ┆ Last use   ┆ Origin     ┆ Definition              │
-╞═══════════════╪══════════════╪══════╪═══════╪═════════╪════════════╪════════════╪════════════╪═════════════════════════╡
-│ wt            ┆ alias        ┆    4 ┆     1 ┆ wtf 3   ┆ 2026-11-23 ┆ 2026-11-25 ┆ ~/.zshrc:2 ┆ cwt                     │
-│ gs            ┆ alias        ┆    3 ┆     3 ┆         ┆ 2026-11-20 ┆ 2026-11-22 ┆ ~/.zshrc:3 ┆ git status              │
-│ wtf           ┆ alias        ┆    3 ┆     3 ┆         ┆ 2026-11-23 ┆ 2026-11-25 ┆ ~/.zshrc:4 ┆ wt -f                   │
-│ *.md          ┆ suffix alias ┆    1 ┆     1 ┆         ┆ 2026-11-24 ┆ 2026-11-24 ┆ ~/.zshrc:5 ┆ glow                    │
-│ G             ┆ global alias ┆    1 ┆     1 ┆         ┆ 2026-11-23 ┆ 2026-11-23 ┆ ~/.zshrc:6 ┆ | grep                  │
-│ helper        ┆ function     ┆    1 ┆     0 ┆ myf 1   ┆ 2026-11-25 ┆ 2026-11-25 ┆ ~/.zshrc   ┆ echo "helping $1"       │
-│ myf           ┆ function     ┆    1 ┆     1 ┆         ┆ 2026-11-25 ┆ 2026-11-25 ┆ ~/.zshrc   ┆ helper "$@"             │
-│ oldfn         ┆ function     ┆    1 ┆     1 ┆         ┆ 2026-03-21 ┆ 2026-03-21 ┆ ~/.zshrc   ┆ tar czf backup.tgz "$@" │
-│ run-help      ┆ alias        ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ -          ┆ man                     │
-│ which-command ┆ alias        ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ -          ┆ whence                  │
-└───────────────┴──────────────┴──────┴───────┴─────────┴────────────┴────────────┴────────────┴─────────────────────────┘
+┌───────────────┬──────────────┬──────┬───────┬─────────┬────────────┬────────────┬────────────┬────────────┬─────────────────────────┐
+│ Name          ┆ Kind         ┆ Uses ┆ Typed ┆ Through ┆ First use  ┆ Last use   ┆ Added      ┆ Origin     ┆ Definition              │
+╞═══════════════╪══════════════╪══════╪═══════╪═════════╪════════════╪════════════╪════════════╪════════════╪═════════════════════════╡
+│ wt            ┆ alias        ┆    4 ┆     1 ┆ wtf 3   ┆ 2026-11-23 ┆ 2026-11-25 ┆ 2024-02-10 ┆ ~/.zshrc:2 ┆ cwt                     │
+│ gs            ┆ alias        ┆    3 ┆     3 ┆         ┆ 2026-11-20 ┆ 2026-11-22 ┆ 2024-02-10 ┆ ~/.zshrc:3 ┆ git status              │
+│ wtf           ┆ alias        ┆    3 ┆     3 ┆         ┆ 2026-11-23 ┆ 2026-11-25 ┆ 2024-02-10 ┆ ~/.zshrc:4 ┆ wt -f                   │
+│ *.md          ┆ suffix alias ┆    1 ┆     1 ┆         ┆ 2026-11-24 ┆ 2026-11-24 ┆ 2025-07-01 ┆ ~/.zshrc:5 ┆ glow                    │
+│ G             ┆ global alias ┆    1 ┆     1 ┆         ┆ 2026-11-23 ┆ 2026-11-23 ┆ 2025-07-01 ┆ ~/.zshrc:6 ┆ | grep                  │
+│ helper        ┆ function     ┆    1 ┆     0 ┆ myf 1   ┆ 2026-11-25 ┆ 2026-11-25 ┆ 2025-03-15 ┆ ~/.zshrc   ┆ echo "helping $1"       │
+│ myf           ┆ function     ┆    1 ┆     1 ┆         ┆ 2026-11-25 ┆ 2026-11-25 ┆ 2025-03-15 ┆ ~/.zshrc   ┆ helper "$@"             │
+│ oldfn         ┆ function     ┆    1 ┆     1 ┆         ┆ 2026-03-21 ┆ 2026-03-21 ┆ 2023-11-02 ┆ ~/.zshrc   ┆ tar czf backup.tgz "$@" │
+│ fresh         ┆ alias        ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ 2026-11-20 ┆ ~/.zshrc:7 ┆ git switch -            │
+│ run-help      ┆ alias        ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ unknown    ┆ -          ┆ man                     │
+│ which-command ┆ alias        ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ unknown    ┆ -          ┆ whence                  │
+└───────────────┴──────────────┴──────┴───────┴─────────┴────────────┴────────────┴────────────┴────────────┴─────────────────────────┘
 
-Never used:
+Never used, old (added 90 or more days ago):
   run-help (alias)
   which-command (alias)
+Never used, new (added less than 90 days ago):
+  fresh (alias, added 2026-11-20)
 Idle (no use in the last 180 days):
   oldfn (function, 1 use, last use 2026-03-21)
 Runs without typing: none
@@ -5903,30 +5953,32 @@ Duplicates and shadows:
   Same expansion (git status): gs (alias, ~/.zshrc:3, 3 uses), gst (alias, ~/.oh-my-zsh/plugins/git/git.plugin.zsh:1, 2 uses)
 ```
 
-The same run with `--all` adds a table for the git plugin after the table of my definitions. This excerpt leaves out rows of the first table:
+The same run with `--all` adds a table for the git plugin after the table of my definitions. The definitions of the plugin are not mine, thus their added date is `unknown`. This excerpt leaves out rows of the first table:
 
 ```text
-Definitions: 10 mine, 2 others.
+Definitions: 11 mine, 2 others.
 
-Mine: 10 definitions
-┌───────────────┬──────────────┬──────┬───────┬─────────┬────────────┬────────────┬────────────┬─────────────────────────┐
-│ Name          ┆ Kind         ┆ Uses ┆ Typed ┆ Through ┆ First use  ┆ Last use   ┆ Origin     ┆ Definition              │
-╞═══════════════╪══════════════╪══════╪═══════╪═════════╪════════════╪════════════╪════════════╪═════════════════════════╡
-│ wt            ┆ alias        ┆    4 ┆     1 ┆ wtf 3   ┆ 2026-11-23 ┆ 2026-11-25 ┆ ~/.zshrc:2 ┆ cwt                     │
-└───────────────┴──────────────┴──────┴───────┴─────────┴────────────┴────────────┴────────────┴─────────────────────────┘
+Mine: 11 definitions
+┌───────────────┬──────────────┬──────┬───────┬─────────┬────────────┬────────────┬────────────┬────────────┬─────────────────────────┐
+│ Name          ┆ Kind         ┆ Uses ┆ Typed ┆ Through ┆ First use  ┆ Last use   ┆ Added      ┆ Origin     ┆ Definition              │
+╞═══════════════╪══════════════╪══════╪═══════╪═════════╪════════════╪════════════╪════════════╪════════════╪═════════════════════════╡
+│ wt            ┆ alias        ┆    4 ┆     1 ┆ wtf 3   ┆ 2026-11-23 ┆ 2026-11-25 ┆ 2024-02-10 ┆ ~/.zshrc:2 ┆ cwt                     │
+└───────────────┴──────────────┴──────┴───────┴─────────┴────────────┴────────────┴────────────┴────────────┴─────────────────────────┘
 
 ~/.oh-my-zsh/plugins/git/git.plugin.zsh: 2 definitions
-┌──────┬───────┬──────┬───────┬─────────┬────────────┬────────────┬───────────────────────────────────────────┬──────────────┐
-│ Name ┆ Kind  ┆ Uses ┆ Typed ┆ Through ┆ First use  ┆ Last use   ┆ Origin                                    ┆ Definition   │
-╞══════╪═══════╪══════╪═══════╪═════════╪════════════╪════════════╪═══════════════════════════════════════════╪══════════════╡
-│ gst  ┆ alias ┆    2 ┆     2 ┆         ┆ 2026-11-26 ┆ 2026-11-26 ┆ ~/.oh-my-zsh/plugins/git/git.plugin.zsh:1 ┆ git status   │
-│ gco  ┆ alias ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ ~/.oh-my-zsh/plugins/git/git.plugin.zsh:2 ┆ git checkout │
-└──────┴───────┴──────┴───────┴─────────┴────────────┴────────────┴───────────────────────────────────────────┴──────────────┘
+┌──────┬───────┬──────┬───────┬─────────┬────────────┬────────────┬─────────┬───────────────────────────────────────────┬──────────────┐
+│ Name ┆ Kind  ┆ Uses ┆ Typed ┆ Through ┆ First use  ┆ Last use   ┆ Added   ┆ Origin                                    ┆ Definition   │
+╞══════╪═══════╪══════╪═══════╪═════════╪════════════╪════════════╪═════════╪═══════════════════════════════════════════╪══════════════╡
+│ gst  ┆ alias ┆    2 ┆     2 ┆         ┆ 2026-11-26 ┆ 2026-11-26 ┆ unknown ┆ ~/.oh-my-zsh/plugins/git/git.plugin.zsh:1 ┆ git status   │
+│ gco  ┆ alias ┆    0 ┆     0 ┆         ┆ -          ┆ -          ┆ unknown ┆ ~/.oh-my-zsh/plugins/git/git.plugin.zsh:2 ┆ git checkout │
+└──────┴───────┴──────┴───────┴─────────┴────────────┴────────────┴─────────┴───────────────────────────────────────────┴──────────────┘
 
-Never used:
+Never used, old (added 90 or more days ago):
   gco (alias)
   run-help (alias)
   which-command (alias)
+Never used, new (added less than 90 days ago):
+  fresh (alias, added 2026-11-20)
 Idle (no use in the last 180 days):
   oldfn (function, 1 use, last use 2026-03-21)
 Runs without typing: none
@@ -5947,6 +5999,7 @@ One entry of the `--json` document:
   "through": [{ "name": "wtf", "uses": 3 }],
   "first_use": "2026-11-23",
   "last_use": "2026-11-25",
+  "added": "2024-02-10",
   "classification": "used",
   "origin": { "file": "/Users/me/.zshrc", "line": 2 },
   "mine": true,
@@ -5954,7 +6007,7 @@ One entry of the `--json` document:
 }
 ```
 
-`kind` is `alias`, `global_alias`, `suffix_alias`, or `function`. `classification` is `used`, `idle`, `never_used`, or `runs_without_typing`.
+`kind` is `alias`, `global_alias`, `suffix_alias`, or `function`. `classification` is `used`, `idle`, `never_used_old`, `never_used_new`, or `runs_without_typing`.
 
 The one entry of `findings` in the same document:
 
@@ -6538,9 +6591,9 @@ cargo tauri build --no-bundle   # the binary is target/release/msgs
 
 A desktop application for the terminal recordings that `beta` writes. It opens
 a `.json` or `.json.gz` recording, makes an edit project of it, shows its
-metadata, and plays the edited recording in its preview pane. The timeline
-(issue #150) is a placeholder with a playhead control. Under the placeholder,
-the timeline shows the marks of the filters on a strip of the edited recording.
+metadata, shows its clips on a timeline, and plays the edited recording in its
+preview pane. Under the tracks, the timeline shows the marks of the filters on
+a strip of the edited recording.
 
 The preview pane draws the terminal of the edited recording at the playhead.
 Drag the playhead control under **Timeline** to go to a time. **Play** plays
@@ -6552,6 +6605,25 @@ menu selects one of the palettes of `beta export --theme`: Auto, Dracula,
 Monokai, Solarized Dark, or Solarized Light. The terminal grows or shrinks to
 fit the pane, and each edit shows in the preview at once. A new recording opens
 stopped, at time zero.
+
+The timeline shows the clips of the project on their tracks, in project time:
+the times before the filters change them. Each clip is a block with the title
+of its recording, and the lines in the block show how many events each part of
+the clip holds. The ruler above the tracks shows the time, and its labels
+adapt to the zoom. A dashed line marks the start of a clip whose terminal size
+differs from the size of the clip before it, with the new size as its label.
+
+- Click **−** or **+** to zoom out or in, or click the tracks and press `-` or
+  `+`.
+- Hold Cmd or Ctrl and turn the wheel to zoom at the pointer.
+- Scroll horizontally, or hold Shift and turn the wheel, to move along the
+  timeline.
+- Click **Fit**, or press `0`, to show the whole project. A new recording opens
+  with the whole project in view.
+
+The playhead control above the tracks is in the time of the edited recording,
+after the filters. Thus a filter that changes the speed moves the playhead
+away from the time of the ruler.
 
 The speed panel under the metadata changes the speed of a region. Type the
 start and the end of the region in seconds and a speed, then click
@@ -6610,7 +6682,16 @@ sequences:
   own text. The AWS key preset uses it to keep the name of a key visible, and
   the token preset uses it to keep the word `Bearer`.
 
-The timeline (issue #150) does not show where the redactions are yet.
+The timeline does not show where the redactions are yet (issue #818).
+
+**Undo** and **Redo** in the menu bar take back the last edit of the project
+and apply it again, for example a speed change, a redaction, or the removal of
+a row. The keys are Cmd+Z and Cmd+Shift+Z on macOS, and Ctrl+Z and
+Ctrl+Shift+Z on Linux and Windows. The tooltip of each button names its keys.
+A button is disabled when the editor has nothing to undo or to redo. After each
+step, the preview, the timeline, and the panels show the project at once. While
+a text field has the focus, the keys undo and redo the typing in the field, and
+the project does not change. A new recording opens with an empty history.
 
 The application is one Rust crate on Dioxus 0.7, with the desktop (webview)
 renderer. Its components call the Rust code directly, and the open project is
@@ -6672,12 +6753,14 @@ The editing engine of the crate has five parts:
 
   The filters of issue #154 parse their options as a Rust type, so the render
   refuses a missing option, a value of the wrong type, and a key that the
-  filter does not know. The window cannot add them yet (issue #150). Issues
-  #157 to #166 add more filters.
+  filter does not know. The window cannot add them yet. Issue #804 adds the
+  click on the timeline that places a pause. Issues #157 to #166 add more
+  filters.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
-  undo and redo history.
+  undo and redo history. The Undo and Redo controls of the window step
+  through that history.
 - **Preview** (`preview::Preview`): replays the events of the rendered
   recording through the terminal emulator of `termstate`, which the video
   export of `beta` also uses. On the way it keeps snapshots of the terminal,
