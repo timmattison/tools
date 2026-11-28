@@ -1,6 +1,6 @@
 # cdva design
 
-`cdva` — "count da various attributes" — counts the lines of code of a tree, as
+`cdva` — "cloc DVA" — counts the lines of code of a tree, as
 `cloc` does, and reports the test code apart from the production code. It
 answers issue #406.
 

@@ -1,9 +1,11 @@
-# cdva (count da various attributes)
+# cdva (cloc DVA)
 
 Counts the lines of a tree the way `cloc` does — files, blank rows, comment
 rows, code rows — and reports the test code apart from the production code. It
 finds the test code *inside* a production file, which `cloc`, `tokei`, `scc`,
 and `gocloc` cannot do.
+
+The tool replaces `cloc`, and its name comes from the band Clock DVA.
 
 ```console
 $ cdva src/gsw

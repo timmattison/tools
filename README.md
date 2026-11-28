@@ -77,7 +77,7 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
 - [bm](src/bm/README.md) — Bulk Move — recursively find and move files matching a pattern to a destination.
 - [cctop](src/cctop/README.md) — Claude Code top — one row for each live Claude Code session with its state, and a macOS notification when a session needs you.
 - [cdknuke](src/cdknuke/README.md) — Removes `cdk.out` directories from AWS CDK projects throughout a repo.
-- [cdva](src/cdva/README.md) — Count da various attributes — counts the lines of a tree the way `cloc` does, and reports the test code apart from the production code.
+- [cdva](src/cdva/README.md) — cloc DVA — counts the lines of a tree the way `cloc` does, and reports the test code apart from the production code.
 - [cf](src/cf/README.md) — Count Files — recursively counts files, with optional suffix/prefix/substring filters.
 - [chf](src/chf/README.md) — ch find — finds a Claude Code session by the words in its messages, from any directory, and resumes it with `ch` or `che`.
 - [clipboard-random](src/clipboard-random/README.md) — Generates random binary or Zalgo text data and copies it to the clipboard.
