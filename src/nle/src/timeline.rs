@@ -348,21 +348,14 @@ pub struct SizeMark {
 
 /// The marks where the terminal size of `project` changes.
 ///
-/// The clips are in the order of their start on the timeline. A tie goes to
-/// the clip that comes first in track order, then in the order on its track,
-/// as in the render of the pipeline. A mark is at the start of each clip
+/// The clips are in the play order of the render (`splice::play_order`): by
+/// their start on the timeline, and on a tie in track order, then in the
+/// order on the track. A mark is at the start of each clip
 /// whose source has a different width or height from the source of the clip
 /// before it.
 #[must_use]
 pub fn size_marks(project: &EditProject) -> Vec<SizeMark> {
-    let mut ordered: Vec<&Clip> = project
-        .timeline
-        .iter()
-        .flat_map(|track| &track.clips)
-        .filter_map(|id| project.clips.iter().find(|clip| clip.id == *id))
-        .collect();
-    // A stable sort keeps track order, then clip order, on a tie.
-    ordered.sort_by(|a, b| a.timeline_offset.get().total_cmp(&b.timeline_offset.get()));
+    let ordered = crate::splice::play_order(project);
     let size = |clip: &Clip| (clip.source.width, clip.source.height);
     ordered
         .windows(2)
