@@ -95,16 +95,36 @@ pub enum Edit {
 }
 
 impl Edit {
-    /// The edit that adds the whole of `source` as a new clip of `project`.
+    /// The edit that adds the whole of `source` as a new clip of `project`:
+    /// an `Edit::AddClip` on the first track, with the id of
+    /// `EditProject::next_clip_id`, that starts at the end of the timeline
+    /// (`EditProject::duration`). Thus the new clip plays after every clip.
     ///
     /// # Errors
-    /// Returns `NleError::EditError` for every call.
+    /// Returns `NleError::EditError` when the project has no track, and
+    /// `NleError::InvalidTime` when the duration of `source`, or the end of
+    /// the timeline, is not a valid time.
     pub fn append_recording(
         project: &EditProject,
         source: Arc<Recording>,
     ) -> Result<Self, NleError> {
-        let _ = (project, source);
-        Err(NleError::EditError("not yet".to_owned()))
+        let track = project
+            .timeline
+            .first()
+            .ok_or_else(|| NleError::EditError("the project has no track".to_owned()))?
+            .id;
+        let out_point = Seconds::new(source.duration)?;
+        let timeline_offset = Seconds::new(project.duration())?;
+        Ok(Self::AddClip {
+            clip: Clip {
+                id: project.next_clip_id(),
+                source,
+                in_point: Seconds::ZERO,
+                out_point,
+                timeline_offset,
+            },
+            track,
+        })
     }
 
     /// Apply this edit to `project`. It may leave `project` half changed when
