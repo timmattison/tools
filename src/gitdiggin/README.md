@@ -1,6 +1,7 @@
 # gitdiggin
 
 A tool to recursively search Git repositories for commits containing a specific string.
+Useful for finding when and where specific changes were made across multiple repositories.
 This is the Rust version of the original Go-based `gitdiggin` tool.
 
 ## Usage

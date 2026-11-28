@@ -1,6 +1,6 @@
 # gitrdun (Rust Port)
 
-A high-performance Rust port of the `gitrdun` tool for finding and summarizing recent Git commits across multiple repositories.
+A high-performance Rust port of the `gitrdun` tool for finding and summarizing recent Git commits across multiple repositories. Useful for finding what you've been working on recently across different projects.
 
 ## Overview
 

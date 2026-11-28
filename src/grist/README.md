@@ -1,4 +1,4 @@
-# grist
+# grist (git ranks its squash trials)
 
 Git Ranks Its Squash Trials — work out which order to squash-merge branches in,
 before you commit to one. A trial is one ordering, replayed and costed.
@@ -138,6 +138,10 @@ dropped work as zero and handing you a ranking of orderings it never measured.
 That matters most when the cause is systematic, since a failure that hits every
 branch would otherwise make every ordering tie and turn the answer into a
 confident "pick whichever you prefer".
+
+## Install
+
+To install: `cargo install --git https://github.com/timmattison/tools grist`
 
 ## Development
 

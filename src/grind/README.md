@@ -1,4 +1,4 @@
-# grind
+# grind (git rebase in another dimension)
 
 Git Rebase In aNother Dimension — would rebasing HEAD onto that branch conflict,
 and by how much?
@@ -503,6 +503,10 @@ after it — and both are matched exactly, so a line of file content that merely
 begins with brackets is not one. `merge.conflictStyle` is pinned beside that
 rule, because `diff3` and `zdiff3` put the base version inside the region, so
 the same replay measures the same file whatever your own git config says.
+
+## Install
+
+To install: `cargo install --git https://github.com/timmattison/tools grind`
 
 ## Development
 

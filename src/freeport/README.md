@@ -58,6 +58,10 @@ If no free port is found in the specified range, the tool exits with an error co
 - **Default (Random Search)**: The tool randomly shuffles the port range and tests ports in random order. This helps avoid conflicts when multiple instances run simultaneously.
 - **Sequential Search (`--first-available`)**: The tool tests ports sequentially from the start of the range, returning the first available port found. This provides consistent, predictable results.
 
+## Install
+
+To install: `cargo install --git https://github.com/timmattison/tools freeport`
+
 ## Building
 
 ```bash

@@ -1,4 +1,4 @@
-# grime
+# grime (Git ReadIness for Merging Externally)
 
 Git ReadIness for Merging Externally — would merging that branch into HEAD
 conflict, and by how much?
@@ -496,6 +496,10 @@ Treat the numbers as a **cost index measured under identical rules** — good fo
 comparing this merge against that one, or today's against last week's — rather
 than as a prediction of exactly how much thinking each region will take. The
 verdict and the exit code are the product. The totals are supporting evidence.
+
+## Install
+
+To install: `cargo install --git https://github.com/timmattison/tools grime`
 
 ## Development
 
