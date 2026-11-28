@@ -132,6 +132,39 @@ fn report(on_result: EventHandler<Result<(), String>>, outcome: Result<(), Strin
     on_result.call(outcome.map_err(|reason| format!("{FAILED_PREFIX}: {reason}")));
 }
 
+/// The text of the chapter form, and the marker that the form edits.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Form {
+    time: String,
+    label: String,
+    /// The marker that Edit put in the form, as the project held it then.
+    /// `None` when the form adds a marker.
+    target: Option<ChapterMarker>,
+}
+
+impl Form {
+    /// The form as it is for a project with these `chapters`. An undo or a
+    /// redo can remove the marker, change it, or give its id to a different
+    /// marker. Thus a form whose marker the project does not hold exactly is an
+    /// empty form. A redo that gives back the exact marker gives back the edit
+    /// too.
+    fn for_chapters(&self, chapters: &[ChapterMarker]) -> Self {
+        match &self.target {
+            Some(marker) if !chapters.contains(marker) => Self::default(),
+            _ => self.clone(),
+        }
+    }
+}
+
+/// The form as the panel shows it for the project now.
+fn current_form(form: Signal<Form>, loaded: Signal<Option<Document>>) -> Form {
+    let document = loaded.read();
+    let chapters = document
+        .as_ref()
+        .map_or(&[][..], |open| &open.editor.project().chapters[..]);
+    form.read().for_chapters(chapters)
+}
+
 /// The chapter panel: the form, the search field, and one row for each marker
 /// that matches the search. `on_result` gets the outcome of each Add Chapter,
 /// Save Chapter, and Remove. Edit and Cancel change no project, so they send
@@ -141,12 +174,11 @@ pub(super) fn ChaptersPanel(
     loaded: Signal<Option<Document>>,
     on_result: EventHandler<Result<(), String>>,
 ) -> Element {
-    let mut time_text = use_signal(String::new);
-    let mut label_text = use_signal(String::new);
+    let mut form = use_signal(Form::default);
     let mut search = use_signal(String::new);
-    let mut editing = use_signal(|| None::<ChapterId>);
     let Listing { total, rows } = listing(loaded.read().as_ref(), &search.read());
-    let button_label = if editing().is_some() {
+    let shown = current_form(form, loaded);
+    let button_label = if shown.target.is_some() {
         SAVE_LABEL
     } else {
         ADD_LABEL
@@ -159,23 +191,32 @@ pub(super) fn ChaptersPanel(
                 input {
                     r#type: "text",
                     placeholder: TIME_PLACEHOLDER,
-                    value: "{time_text}",
-                    oninput: move |event| time_text.set(event.value()),
+                    value: "{shown.time}",
+                    oninput: move |event| {
+                        let mut next = current_form(form, loaded);
+                        next.time = event.value();
+                        form.set(next);
+                    },
                 }
             }
             label { class: "chapter-field",
                 {LABEL_LABEL}
                 input {
                     r#type: "text",
-                    value: "{label_text}",
-                    oninput: move |event| label_text.set(event.value()),
+                    value: "{shown.label}",
+                    oninput: move |event| {
+                        let mut next = current_form(form, loaded);
+                        next.label = event.value();
+                        form.set(next);
+                    },
                 }
             }
             button {
                 onclick: move |_| {
-                    let outcome = read_fields(&time_text.read(), &label_text.read())
+                    let current = current_form(form, loaded);
+                    let outcome = read_fields(&current.time, &current.label)
                         .and_then(|(time, label)| {
-                            let target = editing();
+                            let target = current.target.as_ref().map(|marker| marker.id);
                             edit_document(loaded, |project| match target {
                                 Some(id) => Edit::UpdateChapter { id, time, label },
                                 None => Edit::AddChapter {
@@ -188,21 +229,15 @@ pub(super) fn ChaptersPanel(
                             })
                         });
                     if outcome.is_ok() {
-                        time_text.set(String::new());
-                        label_text.set(String::new());
-                        editing.set(None);
+                        form.set(Form::default());
                     }
                     report(on_result, outcome);
                 },
                 {button_label}
             }
-            if editing().is_some() {
+            if shown.target.is_some() {
                 button {
-                    onclick: move |_| {
-                        time_text.set(String::new());
-                        label_text.set(String::new());
-                        editing.set(None);
-                    },
+                    onclick: move |_| form.set(Form::default()),
                     {CANCEL_LABEL}
                 }
             }
@@ -228,9 +263,15 @@ pub(super) fn ChaptersPanel(
                         onclick: {
                             let label = row.label.clone();
                             move |_| {
-                                editing.set(Some(row.id));
-                                time_text.set(format!("{}", row.time.get()));
-                                label_text.set(label.clone());
+                                form.set(Form {
+                                    time: format!("{}", row.time.get()),
+                                    label: label.clone(),
+                                    target: Some(ChapterMarker {
+                                        id: row.id,
+                                        time: row.time,
+                                        label: label.clone(),
+                                    }),
+                                });
                             }
                         },
                         {EDIT_LABEL}
@@ -238,11 +279,12 @@ pub(super) fn ChaptersPanel(
                     button {
                         onclick: move |_| {
                             let id = row.id;
+                            let was_in_edit = current_form(form, loaded)
+                                .target
+                                .is_some_and(|marker| marker.id == id);
                             let outcome = edit_document(loaded, |_| Edit::RemoveChapter { id });
-                            if outcome.is_ok() && editing() == Some(id) {
-                                time_text.set(String::new());
-                                label_text.set(String::new());
-                                editing.set(None);
+                            if outcome.is_ok() && was_in_edit {
+                                form.set(Form::default());
                             }
                             report(on_result, outcome);
                         },
