@@ -6,7 +6,10 @@
 
 use dioxus::prelude::*;
 
-use super::{add_filter, filter_rows, range_from, region_text, Document, END_LABEL, START_LABEL};
+use super::{
+    add_filter, filter_rows, keep_keys_in_field, range_from, region_text, Document, END_LABEL,
+    START_LABEL,
+};
 use crate::filters::color_scheme::{self, ColorScheme, CubeRule, GrayscaleRule, TruecolorRule};
 use crate::preview::PreviewTheme;
 use crate::types::FilterRegion;
@@ -153,6 +156,7 @@ pub(super) fn ColorSchemePanel(
                     min: "0",
                     value: "{start}",
                     oninput: move |event| start.set(event.value()),
+                    onkeydown: keep_keys_in_field,
                 }
             }
             label { class: "color-scheme-field",
@@ -163,6 +167,7 @@ pub(super) fn ColorSchemePanel(
                     min: "0",
                     value: "{end}",
                     oninput: move |event| end.set(event.value()),
+                    onkeydown: keep_keys_in_field,
                 }
             }
             label { class: "color-scheme-field",
