@@ -51,6 +51,12 @@ const ALL_FILES_FILTER_NAME: &str = "All Files";
 const ALL_FILES_FILTER_EXTENSIONS: &[&str] = &["*"];
 /// The start of the message for a recording that does not open.
 const OPEN_FAILED_PREFIX: &str = "Failed to open recording";
+/// The text of the button that opens a recording as a new project.
+const OPEN_RECORDING_LABEL: &str = "Open Recording";
+/// The text of the button that adds a recording to the open project.
+const ADD_RECORDING_LABEL: &str = "Add Recording";
+/// The start of the message for a recording that does not join the project.
+const ADD_FAILED_PREFIX: &str = "Failed to add recording";
 
 /// The heading of the speed panel.
 const SPEED_HEADING: &str = "Speed";
@@ -296,6 +302,14 @@ pub(crate) fn App() -> Element {
                     }
                     Err(failure) => error.set(Some(format!("{OPEN_FAILED_PREFIX}: {failure}"))),
                 },
+                // An added recording plays after the end of the timeline,
+                // as one undo step.
+                on_added: move |recording: LoadedRecording| {
+                    let outcome = edit_document(loaded, |project| {
+                        Edit::append_recording(project, Arc::new(recording.recording))
+                    });
+                    error.set(outcome.err().map(|reason| format!("{ADD_FAILED_PREFIX}: {reason}")));
+                },
                 on_error: move |message| error.set(Some(message)),
             }
             if let Some(message) = error() {
@@ -314,45 +328,79 @@ pub(crate) fn App() -> Element {
     }
 }
 
-/// The menu bar: the Open Recording button, then the Undo button and the Redo
-/// button of the editor of `loaded`. Each click of Undo or Redo sends its step
-/// to `on_step`.
+/// The menu bar: the Open Recording button, the Add Recording button, then
+/// the Undo button and the Redo button of the editor of `loaded`.
+///
+/// Open Recording sends the loaded recording to `on_loaded`, which starts a
+/// new project. Add Recording sends it to `on_added`, which puts it on the
+/// timeline of the open project. Add Recording is disabled when no project is
+/// open. Both are disabled from a click until its dialog and its load end. A
+/// failed load sends the message of the banner to `on_error`. Each click of
+/// Undo or Redo sends its step to `on_step`.
 #[component]
 fn MenuBar(
     loaded: ReadSignal<Option<Document>>,
     on_step: EventHandler<HistoryStep>,
     on_loaded: EventHandler<LoadedRecording>,
+    on_added: EventHandler<LoadedRecording>,
     on_error: EventHandler<String>,
 ) -> Element {
     let services = use_context::<Services>();
-    // True from the click until the dialog and the load end.
-    let mut opening = use_signal(|| false);
+    // True from a click until the dialog and the load end.
+    let opening = use_signal(|| false);
+    let open = loaded.read().is_some();
+    let add_services = services.clone();
     rsx! {
         div { class: "menu-bar",
             button {
                 disabled: opening(),
                 onclick: move |_| {
-                    // A click that arrives during a dialog or a load starts nothing.
-                    if opening() {
-                        return;
-                    }
-                    opening.set(true);
-                    let services = services.clone();
-                    spawn(async move {
-                        if let Some(path) = services.pick_recording().await {
-                            match services.load_recording(path).await {
-                                Ok(recording) => on_loaded.call(recording),
-                                Err(error) => on_error.call(format!("{OPEN_FAILED_PREFIX}: {error}")),
-                            }
-                        }
-                        opening.set(false);
-                    });
+                    pick_and_load(services.clone(), opening, on_loaded, on_error, OPEN_FAILED_PREFIX);
                 },
-                "Open Recording"
+                {OPEN_RECORDING_LABEL}
+            }
+            button {
+                disabled: opening() || !open,
+                onclick: move |_| {
+                    // The webview sends no click to a disabled button, but a
+                    // click must not add to a project that is not there.
+                    if loaded.peek().is_some() {
+                        pick_and_load(add_services.clone(), opening, on_added, on_error, ADD_FAILED_PREFIX);
+                    }
+                },
+                {ADD_RECORDING_LABEL}
             }
             HistoryButtons { loaded, on_step }
         }
     }
+}
+
+/// Shows the file dialog, loads the picked recording, and sends it to
+/// `on_done`. A failed load sends its message, after `prefix`, to
+/// `on_error`. A cancelled dialog sends nothing.
+///
+/// `opening` is true from the call until the dialog and the load end. A call
+/// while it is true starts nothing, so one click at a time opens a dialog.
+fn pick_and_load(
+    services: Services,
+    mut opening: Signal<bool>,
+    on_done: EventHandler<LoadedRecording>,
+    on_error: EventHandler<String>,
+    prefix: &'static str,
+) {
+    if *opening.peek() {
+        return;
+    }
+    opening.set(true);
+    spawn(async move {
+        if let Some(path) = services.pick_recording().await {
+            match services.load_recording(path).await {
+                Ok(recording) => on_done.call(recording),
+                Err(error) => on_error.call(format!("{prefix}: {error}")),
+            }
+        }
+        opening.set(false);
+    });
 }
 
 /// The timeline of the open recording: its heading and summary, the playhead
@@ -595,19 +643,19 @@ fn RedactionPanel(
 }
 
 /// Applies the edit that `make` builds from the project to the editor of the
-/// open document. The answer is the text of the error of a refused edit. An
-/// edit after which the project does not render is refused too. With no open
-/// document, nothing changes and the answer is `Ok`.
+/// open document. The answer is the text of the error of a refused edit, or
+/// of an error of `make`. An edit after which the project does not render is
+/// refused too. With no open document, nothing changes and the answer is
+/// `Ok`.
 fn edit_document(
     mut loaded: Signal<Option<Document>>,
-    make: impl FnOnce(&EditProject) -> Edit,
+    make: impl FnOnce(&EditProject) -> Result<Edit, NleError>,
 ) -> Result<(), String> {
     // One write borrow holds the whole edit. No read borrow lives across it.
     loaded.with_mut(|document| {
         document.as_mut().map_or(Ok(()), |open| {
-            let edit = make(open.editor.project());
-            open.editor
-                .apply_renderable(edit)
+            make(open.editor.project())
+                .and_then(|edit| open.editor.apply_renderable(edit))
                 .map_err(|failure| failure.to_string())
         })
     })
@@ -630,9 +678,11 @@ fn add_filter(
     change: Result<AppliedFilter, String>,
 ) {
     let outcome = change.and_then(|filter| {
-        edit_document(loaded, |project| Edit::AddFilter {
-            index: project.filters.len(),
-            filter,
+        edit_document(loaded, |project| {
+            Ok(Edit::AddFilter {
+                index: project.filters.len(),
+                filter,
+            })
         })
     });
     report(on_result, prefix, outcome);
@@ -655,7 +705,7 @@ fn filter_rows(
                 span { "{text}" }
                 button {
                     onclick: move |_| {
-                        let outcome = edit_document(loaded, |_| Edit::RemoveFilter { index });
+                        let outcome = edit_document(loaded, |_| Ok(Edit::RemoveFilter { index }));
                         report(on_result, prefix, outcome);
                     },
                     {REMOVE_LABEL}

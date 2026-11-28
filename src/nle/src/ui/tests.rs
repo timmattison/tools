@@ -998,8 +998,8 @@ async fn an_added_recording_plays_after_the_end_of_the_timeline() {
     assert_eq!(
         clip_titles(&page),
         vec![
-            "Demo Recording: 0s to 1m 5.3s of the recording",
-            "Second Take: 0s to 5.0s of the recording",
+            "Demo Recording: 0m 0.0s to 1m 5.3s of the recording",
+            "Second Take: 0m 0.0s to 0m 5.0s of the recording",
         ]
     );
     assert!(page.contains("52 events | 1m 10.3s"), "{page}");
