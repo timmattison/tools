@@ -52,11 +52,13 @@
 //!
 //! # The times
 //!
-//! The filter removes the time of each removed run, so the recording looks as if
-//! the typist made no error. The cut of a run is the time from its first event
-//! to the next kept event, or to the end of the span. Each kept event moves
-//! earlier by the cuts before it. The length of the span becomes the old
-//! length less all cuts, but never below the last kept event.
+//! The filter marks the removed runs. The pipeline removes their time by the
+//! steps of `CutFilterFn`, so the recording looks as if the typist made no
+//! error. The rule that the pipeline obeys: the cut of a run is the time from
+//! its first event to the next kept event, or to the end of the region.
+//! Each kept event moves earlier by the cuts before it. The length of the
+//! region becomes the old length less all cuts, but never below the last
+//! kept event.
 //!
 //! The screen starts empty. The filter feeds the output events before the
 //! region into it, so a filter on a range sees the screen that the viewer
@@ -98,7 +100,7 @@ use std::ops::Range;
 use serde::Deserialize;
 use termstate::{TerminalState, TerminalTheme};
 
-use crate::pipeline::{FilterRegistry, Span, SpanContext};
+use crate::pipeline::{FilterRegistry, SpanContext};
 use crate::types::{Event, EventType, FilterKind, FilterOptions};
 
 /// The kind of the backspace removal filter.
@@ -214,14 +216,15 @@ pub fn kind() -> FilterKind {
 
 /// Add the backspace removal filter to `registry`.
 pub fn register(registry: &mut FilterRegistry) {
-    registry.register_span(kind(), remove_backspacing);
+    registry.register_cut(kind(), remove_backspacing);
 }
 
 /// Remove each typed key and the key that erases it, when the screen after
 /// the erase is the screen before the typed key. The erase keys are Backspace
 /// (DEL or BS), Ctrl+W, and Ctrl+U. The filter changes only input events and
-/// the output events that follow them. It removes the time of each removed run,
-/// so the viewer sees no pause for the typo.
+/// the output events that follow them. It answers one mark for each event. The
+/// pipeline removes the time of each removed run, so the viewer sees no pause
+/// for the typo.
 ///
 /// The filter takes no option. It replays the output events before the region
 /// into the screen first. When the first event after the region is an output
@@ -232,10 +235,10 @@ pub fn register(registry: &mut FilterRegistry) {
 /// column or no row or more than `MAX_CELLS` cells, or when the screen fails
 /// to read an output event.
 fn remove_backspacing(
-    span: Span,
+    events: &[Event],
     context: SpanContext<'_>,
     options: &FilterOptions,
-) -> Result<Span, String> {
+) -> Result<Vec<bool>, String> {
     reject_options(options)?;
     let (width, height) = (
         usize::from(context.size.width),
@@ -254,8 +257,7 @@ fn remove_backspacing(
         .after
         .first()
         .is_some_and(|event| event.event_type == EventType::Output);
-    let removed = mark_removed(&span.events, &mut screen, depth, last_unit_is_cut)?;
-    Ok(cut_removed(span, removed))
+    mark_removed(events, &mut screen, depth, last_unit_is_cut)
 }
 
 /// Walk `events` and mark the events that the filter removes. `screen` is the
@@ -436,39 +438,6 @@ fn feed(screen: &mut TerminalState, event: &Event) -> Result<(), String> {
     screen
         .process_output(&event.data)
         .map_err(|error| error.to_string())
-}
-
-/// Drop the events that `removed` marks, and take their time from the rest.
-///
-/// For each run of removed events, the cut is the time from the first event of
-/// the run to the next kept event, or to the end of the span. Each kept event
-/// moves earlier by the cuts before it. The length is the old length less all
-/// cuts, but never below the last kept event.
-fn cut_removed(span: Span, removed: Vec<bool>) -> Span {
-    let mut kept = Vec::new();
-    let mut cut = 0.0;
-    let mut run_start: Option<f64> = None;
-    for (event, gone) in span.events.into_iter().zip(removed) {
-        if gone {
-            run_start.get_or_insert(event.time);
-        } else {
-            if let Some(start) = run_start.take() {
-                cut += (event.time - start).max(0.0);
-            }
-            kept.push(Event {
-                time: (event.time - cut).max(0.0),
-                ..event
-            });
-        }
-    }
-    if let Some(start) = run_start {
-        cut += (span.length - start).max(0.0);
-    }
-    let last = kept.iter().map(|event| event.time).fold(0.0, f64::max);
-    Span {
-        events: kept,
-        length: (span.length - cut).max(last).max(0.0),
-    }
 }
 
 #[cfg(test)]

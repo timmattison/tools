@@ -69,11 +69,30 @@ fn render_in(
     events: Vec<Event>,
     region: FilterRegion,
 ) -> Result<Recording, NleError> {
+    render_with_chapters(width, height, events, &[], region)
+}
+
+/// Render like `render_in`, with the chapters `chapters` (time and label) in
+/// the source.
+fn render_with_chapters(
+    width: u16,
+    height: u16,
+    events: Vec<Event>,
+    chapters: &[(f64, &str)],
+    region: FilterRegion,
+) -> Result<Recording, NleError> {
     let mut source = Recording::test_fixture();
     source.width = width;
     source.height = height;
     source.duration = events.iter().map(|event| event.time).fold(0.0, f64::max);
     source.events = events;
+    source.chapters = chapters
+        .iter()
+        .map(|&(time, label)| crate::types::Chapter {
+            time,
+            label: label.to_string(),
+        })
+        .collect();
     let mut project = EditProject::from_recording(Arc::new(source))?;
     project.filters.push(applied_to(region));
     let mut registry = FilterRegistry::new();
@@ -122,6 +141,59 @@ fn the_rendered_recording_is_shorter_by_the_removed_time() {
     let rendered = render(80, 24, typo_then_backspace("\x7f")).unwrap();
     assert_eq!(rendered.events, without_the_typo());
     assert_eq!(rendered.duration, 1.5);
+}
+
+/// A chapter stays on its content when the filter removes a typo and its time.
+/// A chapter before the typo stays. A chapter at the typo, or inside it, moves
+/// to the place of the cut. A chapter after the typo moves earlier by the cut.
+#[test]
+fn a_chapter_moves_earlier_by_the_cut_of_each_typo_before_it() {
+    let mut events = typo_then_backspace("\x7f");
+    events.push(out(10.0, "\r\n$ "));
+    let chapters = [
+        (0.5, "before"),
+        (1.5, "at the typo"),
+        (1.75, "inside the typo"),
+        (6.0, "after"),
+    ];
+    let rendered = render_with_chapters(80, 24, events, &chapters, FilterRegion::All).unwrap();
+    assert_chapter_times(&rendered, &[0.5, 1.5, 1.5, 5.0]);
+    let labels: Vec<&str> = rendered.chapters.iter().map(|c| c.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        ["before", "at the typo", "inside the typo", "after"]
+    );
+}
+
+/// A removed typo at the end of a range has no kept event after it in the
+/// range. Its cut runs to the end of the range, and a chapter keeps its place
+/// all the same: a chapter before the typo stays, and a chapter inside the
+/// typo moves to the place of the cut.
+#[test]
+fn a_chapter_keeps_its_place_when_the_cut_runs_to_the_end_of_the_range() {
+    // Mutant that was run: `cut_events` leaves out the pair of the removed run
+    // at the end of the region. Then the chapters scale from the start of the
+    // range to its end, and go to 1.1 and 1.3.
+    let chapters = [(1.25, "before the typo"), (1.75, "inside the typo")];
+    let rendered = render_with_chapters(
+        80,
+        24,
+        typo_then_backspace("\x7f"),
+        &chapters,
+        range(1.0, 2.25),
+    )
+    .unwrap();
+    assert_chapter_times(&rendered, &[1.25, 1.5]);
+}
+
+/// Asserts that the chapters of `rendered` have the times `expected`, to
+/// within a nanosecond.
+fn assert_chapter_times(rendered: &Recording, expected: &[f64]) {
+    let times: Vec<f64> = rendered.chapters.iter().map(|c| c.time).collect();
+    assert_eq!(times.len(), expected.len(), "times: {times:?}");
+    for (time, want) in times.iter().zip(expected) {
+        assert!((time - want).abs() < 1e-9, "times: {times:?}");
+    }
 }
 
 #[test]
@@ -460,8 +532,9 @@ fn on_a_range_the_screen_before_the_region_counts() {
 
 #[test]
 fn a_typo_inside_a_range_goes_and_the_events_after_the_range_move_earlier() {
-    // Mutant that was run: the filter answers `length: span.length`. Then the
-    // events after the range stay at their old times and the test fails.
+    // Mutant that was run: `cut_events` answers the old `length` of the
+    // region. Then the events after the range stay at their old times and the
+    // test fails.
     let events = vec![
         out(0.0, "$ "),
         input(1.0, "h"),

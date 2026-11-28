@@ -82,6 +82,7 @@ fn try_render(
         title: "filters".to_string(),
         env: std::collections::BTreeMap::new(),
         events,
+        chapters: Vec::new(),
     };
     let mut project = EditProject::from_recording(Arc::new(source)).unwrap();
     project.filters = vec![filter];

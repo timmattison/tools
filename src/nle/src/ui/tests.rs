@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use crate::format::format_recorded;
 use crate::preview::PreviewTheme;
-use crate::types::{Event, EventType, Recording, RecordingMetadata};
+use crate::types::{Chapter, Event, EventType, Recording, RecordingMetadata};
 use dioxus::html::SerializedFormData;
 use dioxus_core::{ElementId, Mutation};
 use std::collections::BTreeMap;
@@ -35,7 +35,7 @@ const METADATA_TIMESTAMP: f64 = 1_600_000_000.0;
 
 /// A recording with the metadata of the React tests: 65.3 seconds, 42 events,
 /// 120x40 cells.
-fn fixture() -> LoadedRecording {
+pub(super) fn fixture() -> LoadedRecording {
     LoadedRecording {
         recording: Recording {
             version: 2,
@@ -53,6 +53,7 @@ fn fixture() -> LoadedRecording {
                     data: "x".into(),
                 })
                 .collect(),
+            chapters: Vec::new(),
         },
         metadata: RecordingMetadata {
             file_path: FIXTURE_PATH.into(),
@@ -568,7 +569,7 @@ impl Window {
 
     /// Sends a form event with `value` under the event `name`, and renders.
     fn send_form_event(&mut self, name: &str, id: ElementId, value: &str) {
-        let form = SerializedFormData::new(value.to_string(), vec![]);
+        let form = SerializedFormData::new(value.to_owned(), vec![]);
         let data = Rc::new(PlatformEventData::new(Box::new(form)));
         let event = dioxus::prelude::Event::new(data as Rc<dyn Any>, true);
         self.dom.runtime().handle_event(name, event, id);
@@ -629,14 +630,15 @@ impl Window {
         theme
     }
 
-    /// The input listeners that the open render created, in creation order:
-    /// the Start, End, and Speed fields of the speed panel, then the Find,
-    /// Pattern, Replace with, Replacement text, and Events fields of the
-    /// redaction panel, then the playhead control of the timeline. The
-    /// properties panel mounts before the timeline, so the playhead is the
+    /// The input listeners that the open render of one recording created, in
+    /// creation order: the Start, End, and Speed fields of the speed panel,
+    /// then the Find, Pattern, Replace with, Replacement text, and Events
+    /// fields of the redaction panel, then the time, the label, and the search
+    /// fields of the chapter panel, then the playhead control of the timeline.
+    /// The properties panel mounts before the timeline, so the playhead is the
     /// last one. An export bar that shows no video settings has no `input`
     /// listener.
-    fn open_inputs(&self) -> [ElementId; 9] {
+    fn open_inputs(&self) -> [ElementId; 12] {
         self.listeners
             .get("input")
             .cloned()
@@ -654,14 +656,42 @@ impl Window {
     /// The Find, Pattern, Replace with, Replacement text, and Events fields,
     /// in this order.
     fn redaction_fields(&self) -> [ElementId; 5] {
-        let [_, _, _, find, pattern, replace, replacement, events, _] = self.open_inputs();
+        let [_, _, _, find, pattern, replace, replacement, events, ..] = self.open_inputs();
         [find, pattern, replace, replacement, events]
+    }
+
+    /// The time, the label, and the search fields of the chapter panel, in
+    /// this order.
+    fn chapter_fields(&self) -> [ElementId; 3] {
+        let [.., time, label, search, _] = self.open_inputs();
+        [time, label, search]
     }
 
     /// The playhead control of the timeline.
     fn playhead_control(&self) -> ElementId {
         let [.., playhead] = self.open_inputs();
         playhead
+    }
+
+    /// The click listeners that the render of a load creates beside the Export
+    /// button of the export bar, in creation order: Apply Speed of the speed
+    /// panel, Apply Redaction of the redaction panel, Add Chapter of the
+    /// chapter panel, the Zoom out, Zoom in, and Fit buttons of the timeline,
+    /// then Play and Stop of the preview toolbar. The properties panel mounts
+    /// before the timeline, and the timeline before the preview toolbar, as for
+    /// the input listeners. A recording with chapters adds the buttons of its
+    /// rows, thus this list is for a recording with no chapter.
+    fn load_buttons(&self) -> [ElementId; 8] {
+        let export = self.export_button();
+        let buttons: Vec<ElementId> = self
+            .newest
+            .iter()
+            .copied()
+            .filter(|id| *id != export)
+            .collect();
+        buttons
+            .try_into()
+            .unwrap_or_else(|ids: Vec<ElementId>| panic!("the load made the buttons {ids:?}"))
     }
 
     /// The Apply Redaction button. `open_recording` noted it.
@@ -688,24 +718,11 @@ impl Window {
         self.click(self.redact_button());
     }
 
-    /// Notes the seven click listeners that the render of an open recording
-    /// created beside the Export button of the export bar. The render creates
-    /// them in this order: Apply Speed, Apply Redaction, the Zoom out, Zoom
-    /// in, and Fit buttons of the timeline, Play, Stop. The properties panel
-    /// mounts before the timeline, and the timeline before the preview
-    /// toolbar. The speed panel comes before the redaction panel, and the Play
-    /// button comes before the Stop button.
+    /// Notes the Apply Speed, Apply Redaction, Zoom in, Play, and Stop buttons
+    /// of the render of an open recording. `Window::load_buttons` gives their
+    /// order, thus the recording must hold no chapter.
     fn note_open_buttons(&mut self) {
-        let export = self.export_button();
-        let buttons: Vec<ElementId> = self
-            .newest
-            .iter()
-            .copied()
-            .filter(|id| *id != export)
-            .collect();
-        let [apply, redact, _, zoom_in, _, play, stop] = buttons[..] else {
-            panic!("the open render made {:?}", self.newest)
-        };
+        let [apply, redact, _, _, zoom_in, _, play, stop] = self.load_buttons();
         self.apply = Some(apply);
         self.redact = Some(redact);
         self.zoom_in = Some(zoom_in);
@@ -1092,6 +1109,98 @@ async fn a_load_after_an_error_removes_the_banner() {
     assert!(page.contains("Demo Recording"), "{page}");
 }
 
+#[test]
+fn properties_of_an_open_document_show_the_chapter_panel() {
+    let page = render_panels(fixture());
+    assert!(page.contains("class=\"chapters-panel\""), "{page}");
+    assert!(page.contains(">Chapters<"), "{page}");
+    assert!(page.contains("No chapters yet"), "{page}");
+}
+
+#[test]
+fn properties_with_no_recording_show_no_chapter_panel() {
+    let page = render_empty_app();
+    assert!(!page.contains("class=\"chapters-panel\""), "{page}");
+}
+
+#[tokio::test]
+async fn a_failed_chapter_action_shows_the_banner_and_a_good_one_removes_it() {
+    let fakes = Fakes::new()
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())));
+    let mut window = Window::open(&fakes);
+    window.click(window.open_button());
+    window.settle().await;
+    assert!(
+        !window.html().contains("role=\"alert\""),
+        "{}",
+        window.html()
+    );
+    let [_, _, add, ..] = window.load_buttons();
+    let [time, label, _] = window.chapter_fields();
+    window.click(add);
+    let page = window.html();
+    assert!(page.contains("role=\"alert\""), "{page}");
+    assert!(
+        page.contains("Failed to change the chapters: the time is empty"),
+        "{page}"
+    );
+    window.type_into(time, "5");
+    window.type_into(label, "Intro");
+    window.click(add);
+    let page = window.html();
+    assert!(!page.contains("role=\"alert\""), "{page}");
+    assert!(
+        page.contains("<span class=\"chapter-label\">Intro</span>"),
+        "{page}"
+    );
+}
+
+#[tokio::test]
+async fn a_second_recording_starts_the_chapter_panel_with_no_edit_and_no_search() {
+    let mut second = fixture();
+    second.recording.title = "Second Recording".into();
+    second.metadata.title = "Second Recording".into();
+    second.recording.chapters = vec![Chapter {
+        time: 1.0,
+        label: "Setup".into(),
+    }];
+    let fakes = Fakes::new()
+        .pick(picked())
+        .load(Answer::Ready(Ok(fixture())))
+        .pick(picked())
+        .load(Answer::Ready(Ok(second)));
+    let mut window = Window::open(&fakes);
+    window.click(window.open_button());
+    window.settle().await;
+    let [_, _, add, ..] = window.load_buttons();
+    let [time, label, search] = window.chapter_fields();
+    window.type_into(time, "5");
+    window.type_into(label, "Intro");
+    window.click(add);
+    // The render of the new row created its Edit button first.
+    let edit = window.newest[0];
+    window.click(edit);
+    window.type_into(search, "intro");
+    assert!(
+        window.html().contains(">Save Chapter<"),
+        "{}",
+        window.html()
+    );
+
+    window.click(window.open_button());
+    window.settle().await;
+
+    let page = window.html();
+    assert!(page.contains("Second Recording"), "{page}");
+    assert!(page.contains(">Add Chapter<"), "{page}");
+    assert!(!page.contains(">Save Chapter<"), "{page}");
+    assert!(
+        page.contains("<span class=\"chapter-label\">Setup</span>"),
+        "{page}"
+    );
+}
+
 /// The `class` attribute of the export bar. The style sheet in the page names
 /// the class too, so the bare class name proves nothing.
 const EXPORT_BAR_TAG: &str = "class=\"export-bar\"";
@@ -1474,15 +1583,15 @@ fn edited_row(text: &str) -> String {
     metadata_row("Edited duration", text, None)
 }
 
-/// Opens the fixture recording through the fakes, and notes the four click
-/// listeners that the open render creates beside the Export button
-/// (`Window::note_open_buttons`).
+/// Opens the fixture recording through the fakes, and notes the buttons of the
+/// open render beside the Export button that `Window::note_open_buttons`
+/// names.
 async fn open_recording() -> Window {
     open_loaded(fixture()).await
 }
 
-/// Opens `loaded` through the fakes, and notes the four click listeners as
-/// `open_recording` does.
+/// Opens `loaded` through the fakes, and notes the same buttons as
+/// `open_recording` does. `loaded` must hold no chapter.
 async fn open_loaded(loaded: LoadedRecording) -> Window {
     let fakes = Fakes::new().pick(picked()).load(Answer::Ready(Ok(loaded)));
     let mut window = window_with_recording(&fakes).await;
@@ -2526,6 +2635,156 @@ async fn an_undo_removes_the_banner_of_a_failed_edit() {
         window.html()
     );
     assert_original_speed(&window);
+}
+
+#[tokio::test]
+async fn an_undo_that_removes_the_chapter_in_edit_empties_the_chapter_form() {
+    let mut window = open_recording().await;
+    let [_, _, add, ..] = window.load_buttons();
+    let [time, label, _] = window.chapter_fields();
+    window.type_into(time, "5");
+    window.type_into(label, "Intro");
+    window.click(add);
+    // The render of the new row created its Edit button first.
+    let edit = window.newest[0];
+    window.click(edit);
+    let page = window.html();
+    assert!(page.contains(">Save Chapter<"), "{page}");
+
+    window.click(window.undo_button());
+
+    let page = window.html();
+    assert!(
+        !page.contains("<span class=\"chapter-label\">Intro</span>"),
+        "{page}"
+    );
+    assert!(page.contains(">Add Chapter<"), "{page}");
+    assert!(!page.contains(">Save Chapter<"), "{page}");
+    assert!(!page.contains(">Cancel<"), "{page}");
+    assert!(!page.contains("value=\"Intro\""), "{page}");
+    assert!(!page.contains("value=\"5\""), "{page}");
+
+    window.click(add);
+    let page = window.html();
+    assert!(!page.contains("does not exist"), "{page}");
+}
+
+#[tokio::test]
+async fn an_undo_that_gives_the_id_in_edit_to_another_chapter_empties_the_chapter_form() {
+    let mut window = open_recording().await;
+    let [_, _, add, ..] = window.load_buttons();
+    let [time, label, _] = window.chapter_fields();
+    window.type_into(time, "1");
+    window.type_into(label, "One");
+    window.click(add);
+    window.type_into(time, "2");
+    window.type_into(label, "Two");
+    window.click(add);
+    let remove_two = window.newest[1];
+    window.click(remove_two);
+    // X gets the id 2 of Two, because the next id is the highest id plus one.
+    window.type_into(time, "3");
+    window.type_into(label, "X");
+    window.click(add);
+    let edit_x = window.newest[0];
+    window.click(edit_x);
+
+    // The first undo removes X. The second puts Two back with the id 2.
+    window.click(window.undo_button());
+    window.click(window.undo_button());
+
+    let page = window.html();
+    assert!(
+        page.contains("<span class=\"chapter-label\">Two</span>"),
+        "{page}"
+    );
+    assert!(page.contains(">Add Chapter<"), "{page}");
+    assert!(!page.contains(">Save Chapter<"), "{page}");
+    assert!(!page.contains("value=\"X\""), "{page}");
+
+    window.click(add);
+    let page = window.html();
+    assert!(
+        page.contains("<span class=\"chapter-label\">Two</span>"),
+        "{page}"
+    );
+    assert!(
+        !page.contains("<span class=\"chapter-label\">X</span>"),
+        "{page}"
+    );
+}
+
+#[tokio::test]
+async fn a_redo_that_gives_back_the_chapter_in_edit_gives_back_the_edit() {
+    let mut window = open_recording().await;
+    let [_, _, add, ..] = window.load_buttons();
+    let [time, label, _] = window.chapter_fields();
+    window.type_into(time, "5");
+    window.type_into(label, "Intro");
+    window.click(add);
+    let edit = window.newest[0];
+    window.click(edit);
+    window.click(window.undo_button());
+    let page = window.html();
+    assert!(page.contains(">Add Chapter<"), "{page}");
+
+    window.click(window.redo_button());
+
+    let page = window.html();
+    assert!(page.contains(">Save Chapter<"), "{page}");
+    assert!(page.contains(">Cancel<"), "{page}");
+    assert!(page.contains("value=\"Intro\""), "{page}");
+    assert!(page.contains("value=\"5\""), "{page}");
+
+    // The edit is live: Save Chapter changes the chapter that came back.
+    window.type_into(label, "Opening");
+    window.click(add);
+    let page = window.html();
+    assert!(!page.contains("does not exist"), "{page}");
+    assert!(
+        page.contains("<span class=\"chapter-label\">Opening</span>"),
+        "{page}"
+    );
+    assert!(
+        !page.contains("<span class=\"chapter-label\">Intro</span>"),
+        "{page}"
+    );
+    assert!(page.contains(">Add Chapter<"), "{page}");
+}
+
+#[tokio::test]
+async fn a_redo_that_removes_the_chapter_in_edit_empties_the_chapter_form() {
+    let mut window = open_recording().await;
+    let [_, _, add, ..] = window.load_buttons();
+    let [time, label, _] = window.chapter_fields();
+    window.type_into(time, "5");
+    window.type_into(label, "Intro");
+    window.click(add);
+    let remove = window.newest[1];
+    window.click(remove);
+    window.click(window.undo_button());
+    // The undo renders the row again, and creates its Edit button first.
+    let edit = window.newest[0];
+    window.click(edit);
+    let page = window.html();
+    assert!(page.contains(">Save Chapter<"), "{page}");
+
+    window.click(window.redo_button());
+
+    let page = window.html();
+    assert!(
+        !page.contains("<span class=\"chapter-label\">Intro</span>"),
+        "{page}"
+    );
+    assert!(page.contains(">Add Chapter<"), "{page}");
+    assert!(!page.contains(">Save Chapter<"), "{page}");
+    assert!(!page.contains(">Cancel<"), "{page}");
+    assert!(!page.contains("value=\"Intro\""), "{page}");
+    assert!(!page.contains("value=\"5\""), "{page}");
+
+    window.click(add);
+    let page = window.html();
+    assert!(!page.contains("does not exist"), "{page}");
 }
 
 // The keys of Undo and Redo, and the tooltips that name them.

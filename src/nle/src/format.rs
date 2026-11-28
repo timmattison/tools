@@ -1,5 +1,7 @@
 //! Text formats of the values that the interface shows.
 
+use crate::types::Seconds;
+
 /// Tenths of a second in one minute.
 const TENTHS_PER_MINUTE: u64 = 600;
 /// Tenths of a second in one hour.
@@ -32,12 +34,13 @@ pub(crate) fn format_duration(total_seconds: f64) -> String {
     }
 }
 
-/// Formats a time in seconds for the ruler of the timeline: `m:ss` below one
-/// hour, and `h:mm:ss` from one hour. With `tenths`, the text ends in the
-/// tenths of a second, as in `0:01.5`.
+/// Formats a time in seconds for the ruler of the timeline and the chapter
+/// list: `m:ss` below one hour, and `h:mm:ss` from one hour. With `tenths`,
+/// the text ends in the tenths of a second, as in `0:01.5`.
 ///
 /// The function rounds to tenths of a second first, as `format_duration`
-/// does. A value that is not finite, or that is below zero, formats as zero.
+/// does, so 59.96 is `1:00.0` and never `0:60.0`. A value that is not
+/// finite, or that is below zero, formats as zero.
 pub(crate) fn format_clock(total_seconds: f64, tenths: bool) -> String {
     let count = tenths_of_a_second(total_seconds);
     let hours = count / TENTHS_PER_HOUR;
@@ -70,6 +73,80 @@ fn tenths_of_a_second(total_seconds: f64) -> u64 {
     )]
     let whole = tenths as u64;
     whole
+}
+
+/// The message of a time text that is empty.
+const CLOCK_EMPTY: &str = "the time is empty";
+/// The start of the message of a time text that is not a time.
+const CLOCK_BAD_PREFIX: &str = "the time";
+/// The end of the message of a time text that is not a time.
+const CLOCK_BAD_SUFFIX: &str = "is not in seconds, M:SS, or H:MM:SS";
+/// Seconds in one minute, as a count of whole units.
+const SECONDS_PER_MINUTE: u32 = 60;
+/// Seconds in one hour, as a count of whole units.
+const SECONDS_PER_HOUR: u32 = 3600;
+
+/// Reads a time that a person typed: `S`, `M:SS`, or `H:MM:SS`.
+///
+/// The text is trimmed first. The last part is seconds and can have a
+/// fraction. The hours and the minutes are ASCII digits. With a colon, the
+/// seconds are below 60 and have a digit before the point, and in `H:MM:SS`
+/// the minutes are below 60. A plain `S` is any number that a `Seconds`
+/// accepts.
+///
+/// # Errors
+/// Returns the text of the reason when the text is empty or not a time.
+pub(crate) fn parse_clock(text: &str) -> Result<Seconds, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(CLOCK_EMPTY.to_owned());
+    }
+    let bad = || format!("{CLOCK_BAD_PREFIX} \"{text}\" {CLOCK_BAD_SUFFIX}");
+    let parts: Vec<&str> = text.split(':').collect();
+    let total = match parts.as_slice() {
+        [seconds] => seconds.parse::<f64>().ok(),
+        [minutes, seconds] => clock_units(minutes)
+            .zip(clock_seconds(seconds))
+            .map(|(minutes, seconds)| f64::from(minutes) * f64::from(SECONDS_PER_MINUTE) + seconds),
+        [hours, minutes, seconds] => clock_units(hours)
+            .zip(clock_units(minutes).filter(|minutes| *minutes < SECONDS_PER_MINUTE))
+            .zip(clock_seconds(seconds))
+            .map(|((hours, minutes), seconds)| {
+                f64::from(hours) * f64::from(SECONDS_PER_HOUR)
+                    + f64::from(minutes) * f64::from(SECONDS_PER_MINUTE)
+                    + seconds
+            }),
+        _ => None,
+    };
+    total
+        .and_then(|total| Seconds::new(total).ok())
+        .ok_or_else(bad)
+}
+
+/// Reads the hours or the minutes of a time text: ASCII digits only.
+fn clock_units(part: &str) -> Option<u32> {
+    if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    part.parse().ok()
+}
+
+/// Reads the seconds of a time text that has a colon: digits, then an optional
+/// point and a fraction, below 60.
+fn clock_seconds(part: &str) -> Option<f64> {
+    let starts_with_digit = part
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_digit());
+    let only_number = part
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || byte == b'.');
+    if !starts_with_digit || !only_number {
+        return None;
+    }
+    part.parse::<f64>()
+        .ok()
+        .filter(|seconds| *seconds < f64::from(SECONDS_PER_MINUTE))
 }
 
 /// Returns the part of `path` after the last `/` or `\`.
@@ -168,8 +245,12 @@ mod tests {
             (1.5, "0:01.5"),
             // The sum is a little above 0.3 in an `f64`.
             (0.1 + 0.2, "0:00.3"),
+            (5.0, "0:05.0"),
+            (83.54, "1:23.5"),
             (59.96, "1:00.0"),
+            (3599.96, "1:00:00.0"),
             (3600.2, "1:00:00.2"),
+            (3723.4, "1:02:03.4"),
         ];
         for (seconds, expected) in cases {
             assert_eq!(format_clock(seconds, true), expected, "{seconds} seconds");
@@ -183,6 +264,73 @@ mod tests {
             assert_eq!(format_clock(seconds, true), "0:00.0", "{seconds}");
         }
         assert!(!format_clock(1e300, true).is_empty());
+    }
+
+    #[test]
+    fn parse_clock_reads_seconds_minutes_and_hours() {
+        let cases = [
+            ("83.5", 83.5),
+            (" 1:23.5 ", 83.5),
+            ("1:02:03.5", 3723.5),
+            ("0:05", 5.0),
+            ("90:00", 5400.0),
+            ("1e2", 100.0),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(
+                parse_clock(text).map(Seconds::get),
+                Ok(expected),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_clock_names_an_empty_text() {
+        for text in ["", "   "] {
+            assert_eq!(
+                parse_clock(text).map(Seconds::get),
+                Err("the time is empty".to_owned()),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_clock_refuses_a_text_that_is_not_a_time() {
+        let texts = [
+            "-1",
+            "inf",
+            "NaN",
+            "1:60",
+            "1:2x",
+            "1:-5",
+            "1::5",
+            "1:02:60",
+            "1:60:00",
+            "a:bc",
+            ":5",
+            "5:",
+            "1:.5",
+            "日本:05",
+        ];
+        for text in texts {
+            assert_eq!(
+                parse_clock(text).map(Seconds::get),
+                Err(format!(
+                    "the time \"{text}\" is not in seconds, M:SS, or H:MM:SS"
+                )),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_clock_trims_the_text_in_its_message() {
+        assert_eq!(
+            parse_clock("  日本  ").map(Seconds::get),
+            Err("the time \"日本\" is not in seconds, M:SS, or H:MM:SS".to_owned())
+        );
     }
 
     #[test]

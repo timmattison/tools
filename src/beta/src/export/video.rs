@@ -2,13 +2,14 @@ use super::tmux::{
     adjust_coordinates_for_tmux, debug_status_bar, detect_tmux_layout, is_status_bar_row,
     is_valid_cursor_position, protect_status_bar_area,
 };
-use crate::{EventType, Recording};
+use crate::{Chapter, EventType, Recording};
 use ab_glyph::{Font, FontVec, PxScale};
 use anyhow::{Context, Result};
 use image::{ImageBuffer, Rgb, RgbImage};
 use imageproc::drawing::{draw_filled_rect_mut, draw_text_mut};
 use imageproc::rect::Rect;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -169,10 +170,43 @@ pub async fn export_video(
     let (width, height) = parse_resolution(&resolution, &recording)?;
     let terminal_theme = TerminalTheme::from_name(&theme);
 
+    let chapters = if is_gif(&output_path) {
+        if !recording.chapters.is_empty() {
+            println!(
+                "GIF has no chapters: the {} chapter(s) are not in the GIF.",
+                recording.chapters.len()
+            );
+        }
+        None
+    } else {
+        chapter_metadata(&recording.chapters, recording.duration)
+    };
+    // The file must stay alive until FFmpeg exits.
+    let chapters_file = match &chapters {
+        Some(ChapterMetadata { text, .. }) => {
+            let mut file = tempfile::Builder::new()
+                .prefix("beta-chapters-")
+                .suffix(".txt")
+                .tempfile()
+                .context("Failed to create the chapters file")?;
+            file.write_all(text.as_bytes())
+                .context("Failed to write the chapters file")?;
+            file.flush().context("Failed to write the chapters file")?;
+            Some(file)
+        }
+        None => None,
+    };
+
     println!("Generating and encoding video...");
     println!("Resolution: {}x{}", width, height);
     println!("FPS: {}", fps);
     println!("Theme: {}", theme);
+    if !is_gif(&output_path) {
+        let kept = chapters.as_ref().map_or(0, |metadata| metadata.count);
+        for line in chapter_report(recording.chapters.len(), kept) {
+            println!("{line}");
+        }
+    }
 
     let total_frames = generate_and_encode_video(
         &recording,
@@ -182,6 +216,7 @@ pub async fn export_video(
         terminal_theme,
         optimize_web,
         font.as_deref(),
+        chapters_file.as_ref().map(|file| file.path()),
     )?;
 
     println!("Video export saved to: {}", output_path.display());
@@ -219,14 +254,19 @@ fn parse_resolution(resolution: &Option<String>, recording: &Recording) -> Resul
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a separate export setting, and a settings struct would only move the list"
+)]
 fn generate_and_encode_video(
     recording: &Recording,
-    output_path: &PathBuf,
+    output_path: &Path,
     size: (u32, u32),
     fps: u32,
     theme: TerminalTheme,
     optimize_web: bool,
     font: Option<&Path>,
+    chapters_file: Option<&Path>,
 ) -> Result<usize> {
     let (width, height) = size;
     let frame_duration = 1.0 / f64::from(fps);
@@ -245,7 +285,8 @@ fn generate_and_encode_video(
         font_manager.fonts.len()
     );
 
-    let mut ffmpeg_process = spawn_ffmpeg(output_path, width, height, fps, optimize_web)?;
+    let mut ffmpeg_process =
+        spawn_ffmpeg(output_path, width, height, fps, optimize_web, chapters_file)?;
     let mut stdin = ffmpeg_process
         .stdin
         .take()
@@ -556,69 +597,528 @@ fn render_terminal_to_image(
     Ok(image)
 }
 
-fn spawn_ffmpeg(
-    output_path: &PathBuf,
+/// Tells whether the output path names a GIF (case-insensitive `gif` extension).
+fn is_gif(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_lowercase() == "gif")
+        .unwrap_or(false)
+}
+
+/// The FFmpeg metadata text of the chapters of a recording, and the number of
+/// chapters that it holds.
+#[derive(Debug, PartialEq)]
+struct ChapterMetadata {
+    /// The text of the FFMETADATA file.
+    text: String,
+    /// The number of `[CHAPTER]` blocks in `text`.
+    count: usize,
+}
+
+/// Builds the FFmpeg metadata text that holds the chapters of a recording.
+///
+/// Returns `None` when no chapter is usable.
+///
+/// Keeps the chapters whose time is finite and within `0..=duration`, in time order.
+/// Times are whole milliseconds. A chapter ends where the next one starts, and the last
+/// one ends at `duration`. A chapter that would end at or before its start is dropped.
+fn chapter_metadata(chapters: &[Chapter], duration: f64) -> Option<ChapterMetadata> {
+    let mut usable: Vec<&Chapter> = chapters
+        .iter()
+        .filter(|c| c.time.is_finite() && c.time >= 0.0 && c.time <= duration)
+        .collect();
+    usable.sort_by(|a, b| a.time.total_cmp(&b.time));
+    let kept: Vec<(u64, &str)> = usable
+        .iter()
+        .map(|c| (to_millis(c.time), c.label.as_str()))
+        .collect();
+    let duration_ms = to_millis(duration);
+
+    let mut text = String::new();
+    let mut count = 0;
+    for (index, &(start, label)) in kept.iter().enumerate() {
+        let end = kept.get(index + 1).map_or(duration_ms, |&(next, _)| next);
+        if end <= start {
+            continue;
+        }
+        if text.is_empty() {
+            text.push_str(";FFMETADATA1\n");
+        }
+        text.push_str(&format!(
+            "[CHAPTER]\nTIMEBASE=1/1000\nSTART={start}\nEND={end}\ntitle={}\n",
+            escape_metadata(label)
+        ));
+        count += 1;
+    }
+    (count > 0).then_some(ChapterMetadata { text, count })
+}
+
+/// Why an MP4 export drops a chapter: the rules of `chapter_metadata`.
+const DROPPED_CHAPTER_RULE: &str = "a chapter must start at 0 s or later, and at least 1 ms before the next chapter and before the end";
+
+/// The lines that an MP4 export prints about the chapters of a recording that
+/// has `total` chapters, of which the MP4 holds `kept`.
+///
+/// A recording with no chapter gives no line. Else the first line gives the
+/// count in the MP4, and a second line says how many chapters the export
+/// dropped, when it dropped any.
+fn chapter_report(total: usize, kept: usize) -> Vec<String> {
+    if total == 0 {
+        return Vec::new();
+    }
+    let mut lines = vec![format!("Chapters: {kept}")];
+    let dropped = total.saturating_sub(kept);
+    if dropped > 0 {
+        lines.push(format!(
+            "{dropped} of {total} chapter(s) are not in the MP4: {DROPPED_CHAPTER_RULE}."
+        ));
+    }
+    lines
+}
+
+/// Converts a finite, non-negative number of seconds to whole milliseconds.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the value is finite and not below zero here, and the saturating cast clamps a huge one"
+)]
+fn to_millis(seconds: f64) -> u64 {
+    (seconds * 1000.0).round() as u64
+}
+
+/// Escapes a text for the FFmpeg metadata format.
+///
+/// A backslash goes before `=`, `;`, `#`, `\`, a newline, and a carriage
+/// return. FFmpeg ends a line at each of the two, but it reads the character
+/// after a backslash as text.
+fn escape_metadata(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if matches!(ch, '=' | ';' | '#' | '\\' | '\n' | '\r') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+/// Builds the FFmpeg arguments for one export.
+///
+/// `chapters_file` names an FFMETADATA file; it is used only when the output is not a GIF.
+fn ffmpeg_args(
+    output_path: &Path,
     width: u32,
     height: u32,
     fps: u32,
     optimize_web: bool,
-) -> Result<std::process::Child> {
-    let is_gif = output_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_lowercase() == "gif")
-        .unwrap_or(false);
-
-    let mut cmd = childenv::command("ffmpeg");
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+    chapters_file: Option<&Path>,
+) -> Vec<OsString> {
+    let mut args: Vec<OsString> = Vec::new();
+    let mut push = |value: &str| args.push(OsString::from(value));
 
     // Input format specification for raw RGB data
-    cmd.arg("-y")
-        .arg("-f")
-        .arg("rawvideo")
-        .arg("-pix_fmt")
-        .arg("rgb24")
-        .arg("-s")
-        .arg(format!("{}x{}", width, height))
-        .arg("-framerate")
-        .arg(fps.to_string())
-        .arg("-i")
-        .arg("pipe:0")
-        .arg("-r")
-        .arg(fps.to_string())
-        .arg("-sws_flags")
-        .arg("neighbor"); // Use nearest-neighbor scaling for crisp pixels
+    push("-y");
+    push("-f");
+    push("rawvideo");
+    push("-pix_fmt");
+    push("rgb24");
+    push("-s");
+    push(&format!("{}x{}", width, height));
+    push("-framerate");
+    push(&fps.to_string());
+    push("-i");
+    push("pipe:0");
+    let chapters_file = chapters_file.filter(|_| !is_gif(output_path));
+    if let Some(file) = chapters_file {
+        args.push(OsString::from("-f"));
+        args.push(OsString::from("ffmetadata"));
+        args.push(OsString::from("-i"));
+        args.push(file.as_os_str().to_os_string());
+    }
+    let mut push = |value: &str| args.push(OsString::from(value));
+    push("-r");
+    push(&fps.to_string());
+    push("-sws_flags");
+    push("neighbor"); // Use nearest-neighbor scaling for crisp pixels
 
-    if is_gif {
-        cmd.arg("-vf")
-            .arg("fps=15,scale=-1:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=256:stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle");
+    if is_gif(output_path) {
+        push("-vf");
+        push("fps=15,scale=-1:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=256:stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle");
     } else {
-        cmd.arg("-c:v")
-            .arg("libx265")
-            .arg("-pix_fmt")
-            .arg("yuv444p"); // Full color resolution without chroma subsampling
+        push("-c:v");
+        push("libx265");
+        push("-pix_fmt");
+        push("yuv444p"); // Full color resolution without chroma subsampling
 
         if optimize_web {
             // Use lossy H.265 with good quality for web
-            cmd.arg("-crf")
-                .arg("18") // Lower CRF for better quality with H.265
-                .arg("-preset")
-                .arg("medium")
-                .arg("-movflags")
-                .arg("faststart");
+            push("-crf");
+            push("18"); // Lower CRF for better quality with H.265
+            push("-preset");
+            push("medium");
+            push("-movflags");
+            push("faststart");
         } else {
             // Use lossless H.265 by default
-            cmd.arg("-x265-params").arg("lossless=1");
+            push("-x265-params");
+            push("lossless=1");
         }
 
         // Add hvc1 tag for better Apple device compatibility
-        cmd.arg("-tag:v").arg("hvc1");
+        push("-tag:v");
+        push("hvc1");
     }
 
-    cmd.arg(output_path);
+    if chapters_file.is_some() {
+        for value in ["-map", "0:v", "-map_chapters", "1"] {
+            args.push(OsString::from(value));
+        }
+    }
+    args.push(output_path.as_os_str().to_os_string());
+    args
+}
+
+fn spawn_ffmpeg(
+    output_path: &Path,
+    width: u32,
+    height: u32,
+    fps: u32,
+    optimize_web: bool,
+    chapters_file: Option<&Path>,
+) -> Result<std::process::Child> {
+    let mut cmd = childenv::command("ffmpeg");
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .args(ffmpeg_args(
+            output_path,
+            width,
+            height,
+            fps,
+            optimize_web,
+            chapters_file,
+        ));
 
     // Spawn and return the FFmpeg process
     cmd.spawn().context("Failed to spawn FFmpeg")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chapter(time: f64, label: &str) -> Chapter {
+        Chapter {
+            time,
+            label: label.to_string(),
+        }
+    }
+
+    fn strings(args: Vec<OsString>) -> Vec<String> {
+        args.into_iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn list(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    const GIF_FILTER: &str = "fps=15,scale=-1:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=256:stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle";
+
+    #[test]
+    fn two_chapters_give_the_metadata_text() {
+        let text = chapter_metadata(&[chapter(2.5, "Setup"), chapter(5.0, "Build")], 10.0);
+        assert_eq!(
+            text.as_ref().map(|metadata| metadata.text.as_str()),
+            Some(
+                ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=2500\nEND=5000\ntitle=Setup\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=5000\nEND=10000\ntitle=Build\n"
+            )
+        );
+    }
+
+    #[test]
+    fn the_count_is_the_number_of_chapters() {
+        let two = chapter_metadata(&[chapter(2.5, "Setup"), chapter(5.0, "Build")], 10.0);
+        assert_eq!(two.map(|metadata| metadata.count), Some(2));
+
+        // A label can hold the text of a block header, also after a newline.
+        let one = chapter_metadata(&[chapter(1.0, "[CHAPTER]\n[CHAPTER] x")], 10.0);
+        assert_eq!(one.map(|metadata| metadata.count), Some(1));
+    }
+
+    /// The lines of an FFMETADATA text, as FFmpeg reads them.
+    ///
+    /// A line ends at a `\n` or at a `\r`. A backslash makes the next character
+    /// part of the line, also a `\n` or a `\r`. Each line keeps its backslashes.
+    fn ffmetadata_lines(text: &str) -> Vec<String> {
+        let mut lines = Vec::new();
+        let mut line = String::new();
+        let mut chars = text.chars();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '\\' => {
+                    line.push(ch);
+                    if let Some(next) = chars.next() {
+                        line.push(next);
+                    }
+                }
+                '\n' | '\r' => lines.push(std::mem::take(&mut line)),
+                _ => line.push(ch),
+            }
+        }
+        if !line.is_empty() {
+            lines.push(line);
+        }
+        lines
+    }
+
+    #[test]
+    fn a_line_break_in_a_label_cannot_start_a_chapter_block() {
+        for label in ["a\r[CHAPTER]", "b\n[CHAPTER]", "c\r\n[CHAPTER]"] {
+            let metadata = chapter_metadata(&[chapter(1.0, label)], 10.0).expect("one chapter");
+            let lines = ffmetadata_lines(&metadata.text);
+            let blocks = lines
+                .iter()
+                .filter(|line| line.starts_with("[CHAPTER]"))
+                .count();
+            assert_eq!(blocks, 1, "label {label:?} gives the lines {lines:?}");
+        }
+    }
+
+    #[test]
+    fn no_chapter_gives_none() {
+        assert_eq!(chapter_metadata(&[], 10.0), None);
+    }
+
+    #[test]
+    fn unusable_times_give_none() {
+        let chapters = [
+            chapter(f64::NAN, "nan"),
+            chapter(f64::INFINITY, "inf"),
+            chapter(f64::NEG_INFINITY, "neg inf"),
+            chapter(-1.0, "negative"),
+            chapter(10.5, "late"),
+        ];
+        assert_eq!(chapter_metadata(&chapters, 10.0), None);
+    }
+
+    #[test]
+    fn chapters_out_of_order_come_out_in_time_order() {
+        let text = chapter_metadata(&[chapter(5.0, "B"), chapter(1.0, "A")], 10.0);
+        assert_eq!(
+            text.as_ref().map(|metadata| metadata.text.as_str()),
+            Some(
+                ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=1000\nEND=5000\ntitle=A\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=5000\nEND=10000\ntitle=B\n"
+            )
+        );
+    }
+
+    #[test]
+    fn two_chapters_at_one_millisecond_keep_the_later_one() {
+        let text = chapter_metadata(&[chapter(3.0, "first"), chapter(3.0004, "second")], 10.0);
+        assert_eq!(
+            text.as_ref().map(|metadata| metadata.text.as_str()),
+            Some(";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=3000\nEND=10000\ntitle=second\n")
+        );
+    }
+
+    #[test]
+    fn a_chapter_at_the_duration_is_dropped() {
+        let text = chapter_metadata(&[chapter(1.0, "A"), chapter(10.0, "end")], 10.0);
+        assert_eq!(
+            text.as_ref().map(|metadata| metadata.text.as_str()),
+            Some(";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=1000\nEND=10000\ntitle=A\n")
+        );
+    }
+
+    #[test]
+    fn the_report_of_a_recording_with_no_chapter_is_empty() {
+        assert!(chapter_report(0, 0).is_empty());
+    }
+
+    #[test]
+    fn the_report_gives_the_count_when_the_export_keeps_each_chapter() {
+        assert_eq!(chapter_report(2, 2), list(&["Chapters: 2"]));
+    }
+
+    #[test]
+    fn the_report_says_how_many_chapters_the_export_drops() {
+        assert_eq!(
+            chapter_report(3, 1),
+            list(&[
+                "Chapters: 1",
+                "2 of 3 chapter(s) are not in the MP4: a chapter must start at 0 s or later, and at least 1 ms before the next chapter and before the end.",
+            ])
+        );
+    }
+
+    #[test]
+    fn the_report_says_so_when_the_export_drops_each_chapter() {
+        assert_eq!(
+            chapter_report(2, 0),
+            list(&[
+                "Chapters: 0",
+                "2 of 2 chapter(s) are not in the MP4: a chapter must start at 0 s or later, and at least 1 ms before the next chapter and before the end.",
+            ])
+        );
+    }
+
+    #[test]
+    fn the_escape_puts_a_backslash_before_each_special_character() {
+        assert_eq!(
+            escape_metadata("a=b;c#d\\e\nf\rg"),
+            "a\\=b\\;c\\#d\\\\e\\\nf\\\rg"
+        );
+    }
+
+    #[test]
+    fn the_escape_keeps_multi_byte_text() {
+        assert_eq!(escape_metadata("日本語テスト"), "日本語テスト");
+        assert_eq!(escape_metadata("café 🎉"), "café 🎉");
+    }
+
+    #[test]
+    fn args_without_a_chapter_file_for_lossless_mp4() {
+        let args = ffmpeg_args(Path::new("out.mp4"), 640, 480, 30, false, None);
+        assert_eq!(
+            strings(args),
+            list(&[
+                "-y",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-s",
+                "640x480",
+                "-framerate",
+                "30",
+                "-i",
+                "pipe:0",
+                "-r",
+                "30",
+                "-sws_flags",
+                "neighbor",
+                "-c:v",
+                "libx265",
+                "-pix_fmt",
+                "yuv444p",
+                "-x265-params",
+                "lossless=1",
+                "-tag:v",
+                "hvc1",
+                "out.mp4",
+            ])
+        );
+    }
+
+    #[test]
+    fn args_without_a_chapter_file_for_web_mp4() {
+        let args = ffmpeg_args(Path::new("out.mp4"), 640, 480, 30, true, None);
+        assert_eq!(
+            strings(args),
+            list(&[
+                "-y",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-s",
+                "640x480",
+                "-framerate",
+                "30",
+                "-i",
+                "pipe:0",
+                "-r",
+                "30",
+                "-sws_flags",
+                "neighbor",
+                "-c:v",
+                "libx265",
+                "-pix_fmt",
+                "yuv444p",
+                "-crf",
+                "18",
+                "-preset",
+                "medium",
+                "-movflags",
+                "faststart",
+                "-tag:v",
+                "hvc1",
+                "out.mp4",
+            ])
+        );
+    }
+
+    #[test]
+    fn args_without_a_chapter_file_for_gif() {
+        let args = ffmpeg_args(Path::new("out.gif"), 640, 480, 30, false, None);
+        assert_eq!(
+            strings(args),
+            list(&[
+                "-y",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-s",
+                "640x480",
+                "-framerate",
+                "30",
+                "-i",
+                "pipe:0",
+                "-r",
+                "30",
+                "-sws_flags",
+                "neighbor",
+                "-vf",
+                GIF_FILTER,
+                "out.gif",
+            ])
+        );
+    }
+
+    #[test]
+    fn args_for_mp4_with_a_chapter_file_read_it_as_second_input() {
+        let args = strings(ffmpeg_args(
+            Path::new("out.mp4"),
+            640,
+            480,
+            30,
+            false,
+            Some(Path::new("/tmp/ch.txt")),
+        ));
+        let pipe = args.iter().position(|a| a == "pipe:0").unwrap();
+        assert_eq!(
+            args[pipe + 1..pipe + 5],
+            list(&["-f", "ffmetadata", "-i", "/tmp/ch.txt"])
+        );
+        let n = args.len();
+        assert_eq!(
+            args[n - 5..],
+            list(&["-map", "0:v", "-map_chapters", "1", "out.mp4"])
+        );
+    }
+
+    #[test]
+    fn args_for_gif_ignore_the_chapter_file() {
+        let with = ffmpeg_args(
+            Path::new("out.gif"),
+            640,
+            480,
+            30,
+            false,
+            Some(Path::new("/tmp/ch.txt")),
+        );
+        let without = ffmpeg_args(Path::new("out.gif"), 640, 480, 30, false, None);
+        assert_eq!(with, without);
+    }
+
+    #[test]
+    fn is_gif_matches_the_extension_without_case() {
+        assert!(is_gif(Path::new("x.gif")));
+        assert!(is_gif(Path::new("x.GIF")));
+        assert!(!is_gif(Path::new("x.mp4")));
+        assert!(!is_gif(Path::new("x")));
+    }
 }

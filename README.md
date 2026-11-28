@@ -6231,7 +6231,8 @@ cargo tauri build --no-bundle   # the binary is target/release/msgs
 A desktop application for the terminal recordings that `beta` writes. It opens
 a `.json` or `.json.gz` recording, makes an edit project of it, shows its
 metadata, shows its clips on a timeline, plays the edited recording in its
-preview pane, and exports the edited recording.
+preview pane, and exports the edited recording. The window can add, edit, and
+remove the chapter markers of the project, and the timeline shows them.
 
 The preview pane draws the terminal of the edited recording at the playhead.
 Drag the playhead control under **Timeline** to go to a time. **Play** plays
@@ -6250,6 +6251,7 @@ of its recording, and the lines in the block show how many events each part of
 the clip holds. The ruler above the tracks shows the time, and its labels
 adapt to the zoom. A dashed line marks the start of a clip whose terminal size
 differs from the size of the clip before it, with the new size as its label.
+A blue line marks the time of each chapter, with its label on the ruler.
 
 - Click **−** or **+** to zoom out or in, or click the tracks and press `-` or
   `+`.
@@ -6325,7 +6327,8 @@ Dioxus state, thus no IPC layer and no frontend package exist.
 The editing engine of the crate has five parts:
 
 - **Edit project** (`EditProject`): clips of source recordings, placed on the
-  tracks of the timeline, and the filters that apply to the result. An edit
+  tracks of the timeline, the filters that apply to the result, and the chapter
+  markers. An edit
   never changes a source recording. A project saves to JSON, plain or gzip, and
   loads back. A save writes each source recording once, also when several clips
   cut it.
@@ -6340,15 +6343,19 @@ The editing engine of the crate has five parts:
   a new length, and the later events move by the change in the length. A span
   filter also gets the events before and after its region and the size of the
   terminal: the size of the clip that starts first, or 80 by 24 in
-  `FilterRegistry::run`. A screen filter (`register_screen`) also gets the
-  size of the screen and the events before its region. It rewrites its region,
-  moves nothing, and on the region `All` it can change the size of the screen.
-  A later span filter gets that size, and the rendered recording has the size
-  that the last screen filter gives. `FilterRegistry::run` has no header, so a
-  screen filter fails there.
+  `FilterRegistry::run`. A cut filter (`register_cut`) gets the events of its
+  region and the same events and size as a span filter. It marks each event
+  to keep or to remove. The pipeline removes the marked events and their time,
+  and the later events move earlier by that time. A screen filter
+  (`register_screen`) gets the same view as an in-place filter, the size of
+  the screen, and the events before its region. It rewrites its region, moves
+  nothing, and on the region `All` it can change the size of the screen. A
+  later span filter or cut filter gets that size, and the rendered recording
+  has the size that the last screen filter gives. `FilterRegistry::run` has no
+  header, so a screen filter fails there.
   `filters::registry()` holds the filters that ship. The cursor filter is an
-  in-place filter, the viewport filter is a screen filter, and each other one
-  is a span filter:
+  in-place filter, the backspace removal filter is a cut filter, the viewport
+  filter is a screen filter, and each other one is a span filter:
   - `cursor` (`visibility`, `shape`, `blink`, `color`, issue #168): sets how
     the cursor looks. [The cursor filter](#the-cursor-filter) below gives its
     options.
@@ -6381,7 +6388,8 @@ The editing engine of the crate has five parts:
   filter does not know. The window cannot add them yet. Issue #804 adds the
   click on the timeline that places a pause. Issues #157 to #167 add more
   filters.
-- **Render**: the registry flattens a project into one `beta` recording.
+- **Render**: the registry flattens a project into one `beta` recording. The
+  chapter markers go into the `chapters` list of the recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
   undo and redo history. The Undo and Redo controls of the window step
@@ -6404,6 +6412,45 @@ becomes shorter, the delay becomes shorter by the same ratio. The option
 `jitter` (0 when missing, and below 1) changes each interval by up to that
 fraction, so the typing does not look mechanical. Each render gives the same
 times. The window cannot add the filter to a project yet.
+
+### Chapters
+
+The properties panel holds a chapter panel. To add a chapter, type its time and
+its label, then click **Add Chapter**. The time can be seconds (`83.5`),
+`M:SS` (`1:23.5`), or `H:MM:SS` (`1:02:03.5`). **Edit** puts a chapter back in
+the form, and **Remove** deletes it. When an undo or a redo removes or changes
+the chapter in the form, the form is empty again and shows **Add Chapter**. If a
+redo returns the same chapter before you type in the form or click another
+**Edit**, the form shows that edit again. The search field shows only the
+chapters whose label holds the search text, with no attention to case.
+
+The list shows the chapters in time order. A chapter after the end of the
+timeline gets the note `after the end`. Each change is an edit, thus undo and
+redo include it, and the project file keeps the chapters.
+
+When `nle` opens a recording, each chapter of the recording becomes a marker.
+Thus a render with no filter keeps the chapters of the recording. A chapter
+time below zero stops the open, and the banner gives the time. A chapter label
+that is empty or holds only white space also stops the open, and the banner
+gives the number of the chapter in the recording.
+
+The time of a chapter is on the timeline before the filters. The render moves
+each chapter with the events around it. Thus a filter that changes the timing,
+for example a speed change, keeps the chapter on the same content. A speed
+change scales a chapter also in a region with no event, for example a silent
+build step. The backspace removal filter moves a chapter earlier by the time of
+the typos before it, and a chapter inside a removed typo moves to the place of
+the typo. The cursor filter moves no chapter. A chapter after the end of the
+rendered recording is not in it.
+
+`beta export web` shows the chapters of a rendered recording as markers on the
+progress bar. A click on a marker moves the player to that chapter.
+`beta export video` writes them into an MP4 as chapters. The timeline
+shows a marker at the time of each chapter, with its label. A click on a marker
+that moves the playhead to its chapter waits for the playhead on the timeline
+(issue #820). The chapter panel does not read or move the
+playhead. The playhead is a time of the edited recording, but the time of a
+chapter is before the filters.
 
 ### The cursor filter
 

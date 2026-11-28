@@ -98,6 +98,18 @@ pub struct Recording {
     pub title: String,
     pub env: std::collections::HashMap<String, String>,
     pub events: Vec<Event>,
+    /// The chapters in time order. `beta record` writes none; the `nle` editor writes them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chapters: Vec<Chapter>,
+}
+
+/// A chapter of a recording: a labeled time where a part of the recording starts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Chapter {
+    /// The time in seconds from the start of the recording.
+    pub time: f64,
+    /// The name of the chapter.
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

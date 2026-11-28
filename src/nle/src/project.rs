@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::NleError;
 use crate::json_file;
 use crate::types::{
-    AppliedFilter, Clip, ClipId, EditProject, Event, FilterRegion, Recording, Seconds,
-    TimelineTrack, TrackId,
+    AppliedFilter, ChapterId, ChapterMarker, Clip, ClipId, EditProject, Event, FilterRegion,
+    Recording, Seconds, TimelineTrack, TrackId,
 };
 
 /// The form of a project in its file. Each source is written once, and each
@@ -23,6 +23,8 @@ pub(crate) struct ProjectFile {
     clips: Vec<ClipFile>,
     timeline: Vec<TimelineTrack>,
     filters: Vec<AppliedFilter>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    chapters: Vec<ChapterMarker>,
 }
 
 /// A clip in the file of a project: `source` is an index in `ProjectFile::sources`.
@@ -62,6 +64,7 @@ impl From<EditProject> for ProjectFile {
             clips,
             timeline: project.timeline,
             filters: project.filters,
+            chapters: project.chapters,
         }
     }
 }
@@ -94,18 +97,34 @@ impl TryFrom<ProjectFile> for EditProject {
             clips,
             timeline: file.timeline,
             filters: file.filters,
+            chapters: file.chapters,
         })
     }
 }
 
 impl EditProject {
     /// Make a project of one clip that holds the whole `source`, on one track.
+    /// The project has one chapter marker for each chapter of `source`, in the
+    /// order of `source`, with the ids 1, 2, 3, and so on.
     ///
     /// # Errors
-    /// Returns `NleError::InvalidTime` when the duration of `source` is not a
-    /// valid time.
+    /// Returns `NleError::InvalidTime` when the duration of `source` or the
+    /// time of one of its chapters is not a valid time, and
+    /// `NleError::InvalidProject` when the project breaks a rule of
+    /// `EditProject::validate`, for example a chapter label that holds only
+    /// white space.
     pub fn from_recording(source: Arc<Recording>) -> Result<Self, NleError> {
         let out_point = Seconds::new(source.duration)?;
+        let chapters = (1..)
+            .zip(&source.chapters)
+            .map(|(id, chapter)| {
+                Ok(ChapterMarker {
+                    id: ChapterId(id),
+                    time: Seconds::new(chapter.time)?,
+                    label: chapter.label.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, NleError>>()?;
         let clip = Clip {
             id: ClipId(1),
             source,
@@ -113,14 +132,17 @@ impl EditProject {
             out_point,
             timeline_offset: Seconds::ZERO,
         };
-        Ok(Self {
+        let project = Self {
             clips: vec![clip],
             timeline: vec![TimelineTrack {
                 id: TrackId(1),
                 clips: vec![ClipId(1)],
             }],
             filters: Vec::new(),
-        })
+            chapters,
+        };
+        project.validate()?;
+        Ok(project)
     }
 
     /// The id for a new clip: one more than the largest id in use, or 1 when
@@ -134,6 +156,32 @@ impl EditProject {
                 .max()
                 .map_or(1, |m| m.saturating_add(1)),
         )
+    }
+
+    /// The id for a new chapter marker: one more than the largest id in use, or
+    /// 1 when there is no marker. The id saturates at `u64::MAX`.
+    #[must_use]
+    pub fn next_chapter_id(&self) -> ChapterId {
+        ChapterId(
+            self.chapters
+                .iter()
+                .map(|c| c.id.0)
+                .max()
+                .map_or(1, |m| m.saturating_add(1)),
+        )
+    }
+
+    /// The chapter markers sorted by time, then by id.
+    #[must_use]
+    pub fn chapters_in_order(&self) -> Vec<&ChapterMarker> {
+        let mut ordered: Vec<&ChapterMarker> = self.chapters.iter().collect();
+        ordered.sort_by(|a, b| {
+            a.time
+                .get()
+                .total_cmp(&b.time.get())
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        ordered
     }
 
     /// The id for a new track: one more than the largest id in use, or 1 when
@@ -201,7 +249,8 @@ impl EditProject {
     /// The rules, in order: each clip id and each track id is unique; each clip
     /// has `in_point <= out_point <= source duration`; each clip id on a track
     /// names a clip, and each clip is on exactly one track, exactly once; each
-    /// filter range has `start <= end`.
+    /// filter range has `start <= end`; each chapter id is unique; each chapter
+    /// label holds a character that is not white space.
     ///
     /// # Errors
     /// Returns `NleError::InvalidProject` for the first broken rule.
@@ -272,6 +321,18 @@ impl EditProject {
                         end.get()
                     ));
                 }
+            }
+        }
+
+        let mut chapter_ids = HashSet::new();
+        for chapter in &self.chapters {
+            if !chapter_ids.insert(chapter.id) {
+                return invalid(format!("chapter id {} is used twice", chapter.id.0));
+            }
+        }
+        for chapter in &self.chapters {
+            if chapter.label.trim().is_empty() {
+                return invalid(format!("chapter {} has an empty label", chapter.id.0));
             }
         }
 

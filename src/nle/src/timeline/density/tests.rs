@@ -27,6 +27,7 @@ fn recording(duration: f64, times: &[f64]) -> Arc<Recording> {
                 data: "x".into(),
             })
             .collect(),
+        chapters: Vec::new(),
     })
 }
 

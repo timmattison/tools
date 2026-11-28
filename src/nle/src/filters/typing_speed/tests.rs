@@ -114,6 +114,7 @@ fn a_render_moves_the_duration_by_the_change_of_the_last_key() {
         title: String::new(),
         env: BTreeMap::new(),
         events: vec![key(1.0, "a"), key(2.0, "b"), out(5.0, "x")],
+        chapters: Vec::new(),
     };
     let mut project = EditProject::from_recording(Arc::new(recording)).unwrap();
     project

@@ -2,7 +2,9 @@
 
 use super::*;
 use crate::export::{ExportProgress, ExportRequest, ExportTarget};
-use crate::types::{EventType, FilterKind, FilterOptions, FilterRegion, TimelineTrack};
+use crate::types::{
+    ChapterId, ChapterMarker, EventType, FilterKind, FilterOptions, FilterRegion, TimelineTrack,
+};
 
 fn secs(value: f64) -> Seconds {
     Seconds::new(value).unwrap()
@@ -46,6 +48,7 @@ fn project() -> EditProject {
             },
         ],
         filters: vec![],
+        chapters: Vec::new(),
     }
 }
 
@@ -563,6 +566,7 @@ fn edits_renders_and_undo_never_change_the_source() {
             clips: vec![ClipId(1)],
         }],
         filters: vec![],
+        chapters: Vec::new(),
     };
     let mut editor = Editor::new(project, registry()).unwrap();
 
@@ -665,6 +669,132 @@ async fn save_recording_refuses_a_txt_name() {
 
     assert!(matches!(result, Err(NleError::SaveError(_))), "{result:?}");
     assert!(!file.exists());
+}
+
+// Tests of chapter edits.
+
+fn chapter(id: u64, time: f64, label: &str) -> ChapterMarker {
+    ChapterMarker {
+        id: ChapterId(id),
+        time: secs(time),
+        label: label.to_string(),
+    }
+}
+
+#[test]
+fn add_chapter_appends_the_marker_and_undo_and_redo_move_it() {
+    let mut editor = editor();
+    let before = editor.project().clone();
+
+    editor
+        .apply(Edit::AddChapter {
+            chapter: chapter(1, 2.5, "Intro"),
+        })
+        .unwrap();
+    assert_eq!(editor.project().chapters, vec![chapter(1, 2.5, "Intro")]);
+
+    assert!(editor.undo());
+    assert_eq!(editor.project(), &before);
+
+    assert!(editor.redo().unwrap());
+    assert_eq!(editor.project().chapters, vec![chapter(1, 2.5, "Intro")]);
+}
+
+#[test]
+fn add_chapter_with_an_id_in_use_is_refused_and_changes_nothing() {
+    let mut editor = editor();
+    editor
+        .apply(Edit::AddChapter {
+            chapter: chapter(1, 2.5, "Intro"),
+        })
+        .unwrap();
+    let before = editor.project().clone();
+
+    assert_edit_error(editor.apply(Edit::AddChapter {
+        chapter: chapter(1, 4.0, "Other"),
+    }));
+
+    assert_eq!(editor.project(), &before);
+}
+
+#[test]
+fn remove_chapter_of_a_missing_id_is_refused() {
+    let mut editor = editor();
+    let before = editor.project().clone();
+
+    assert_edit_error(editor.apply(Edit::RemoveChapter { id: ChapterId(5) }));
+
+    assert_eq!(editor.project(), &before);
+}
+
+#[test]
+fn remove_chapter_removes_the_marker_and_undo_gives_it_back() {
+    let mut editor = editor();
+    editor
+        .apply(Edit::AddChapter {
+            chapter: chapter(1, 2.5, "Intro"),
+        })
+        .unwrap();
+
+    editor
+        .apply(Edit::RemoveChapter { id: ChapterId(1) })
+        .unwrap();
+    assert!(editor.project().chapters.is_empty());
+
+    assert!(editor.undo());
+    assert_eq!(editor.project().chapters, vec![chapter(1, 2.5, "Intro")]);
+}
+
+#[test]
+fn update_chapter_changes_the_time_and_the_label_and_undo_restores_them() {
+    let mut editor = editor();
+    editor
+        .apply(Edit::AddChapter {
+            chapter: chapter(1, 2.5, "Intro"),
+        })
+        .unwrap();
+
+    editor
+        .apply(Edit::UpdateChapter {
+            id: ChapterId(1),
+            time: secs(3.0),
+            label: "日本語".to_string(),
+        })
+        .unwrap();
+    assert_eq!(editor.project().chapters, vec![chapter(1, 3.0, "日本語")]);
+
+    assert!(editor.undo());
+    assert_eq!(editor.project().chapters, vec![chapter(1, 2.5, "Intro")]);
+}
+
+#[test]
+fn update_chapter_of_a_missing_id_is_refused() {
+    let mut editor = editor();
+
+    assert_edit_error(editor.apply(Edit::UpdateChapter {
+        id: ChapterId(5),
+        time: secs(1.0),
+        label: "x".to_string(),
+    }));
+}
+
+#[test]
+fn update_chapter_with_a_blank_label_is_refused_and_changes_nothing() {
+    let mut editor = editor();
+    editor
+        .apply(Edit::AddChapter {
+            chapter: chapter(1, 2.5, "Intro"),
+        })
+        .unwrap();
+    let before = editor.project().clone();
+
+    assert_invalid_project(editor.apply(Edit::UpdateChapter {
+        id: ChapterId(1),
+        time: secs(3.0),
+        label: " ".to_string(),
+    }));
+
+    assert_eq!(editor.project(), &before);
 }
 
 // Tests of `Editor::export`.

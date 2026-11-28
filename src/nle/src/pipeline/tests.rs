@@ -380,6 +380,7 @@ fn source(title: &str, event_times: &[f64], duration: f64) -> Recording {
         title: title.to_string(),
         env,
         events: event_times.iter().copied().map(ev).collect(),
+        chapters: Vec::new(),
     }
 }
 
@@ -399,6 +400,26 @@ fn render_of_an_empty_project_fails() {
 fn render_of_a_whole_recording_with_no_filter_equals_its_source() {
     let mut recording = source("whole", &[0.0, 0.5, 1.25, 3.0], 3.0);
     recording.events[1] = data_event(0.5, "日本語🎉");
+    let project = EditProject::from_recording(Arc::new(recording.clone())).unwrap();
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    assert_eq!(rendered, recording);
+}
+
+#[test]
+fn render_of_a_whole_recording_with_chapters_and_no_filter_equals_its_source() {
+    let mut recording = source("chaptered", &[0.0, 1.0, 2.0], 3.0);
+    recording.chapters = vec![
+        Chapter {
+            time: 0.5,
+            label: "日本語テスト".to_string(),
+        },
+        Chapter {
+            time: 2.0,
+            label: "café 🎉".to_string(),
+        },
+    ];
     let project = EditProject::from_recording(Arc::new(recording.clone())).unwrap();
 
     let rendered = FilterRegistry::new().render(&project).unwrap();
@@ -441,6 +462,7 @@ fn two_clip_project() -> EditProject {
         clips: vec![clip_of(1, late, 2.0), clip_of(2, early, 0.0)],
         timeline: vec![track_of(1, 1), track_of(2, 2)],
         filters: Vec::new(),
+        chapters: Vec::new(),
     }
 }
 
@@ -573,6 +595,7 @@ fn render_of_a_clip_whose_events_overflow_the_timeline_fails() {
         clips: vec![clip_of(1, source("big", &[0.0, 1e308], 1e308), 1e308)],
         timeline: vec![track_of(1, 1)],
         filters: Vec::new(),
+        chapters: Vec::new(),
     };
 
     let result = FilterRegistry::new().render(&project);
@@ -591,6 +614,7 @@ fn render_of_a_clip_whose_end_overflows_the_timeline_fails() {
         clips: vec![clip_of(1, source("end", &[0.0], 1e308), 1e308)],
         timeline: vec![track_of(1, 1)],
         filters: Vec::new(),
+        chapters: Vec::new(),
     };
 
     let result = FilterRegistry::new().render(&project);
@@ -599,6 +623,341 @@ fn render_of_a_clip_whose_end_overflows_the_timeline_fails() {
         matches!(result, Err(NleError::RenderError(_))),
         "{result:?}"
     );
+}
+
+// Tests of the chapters in the render.
+
+use crate::types::{Chapter, ChapterId, ChapterMarker};
+
+fn marker(id: u64, time: f64, label: &str) -> ChapterMarker {
+    ChapterMarker {
+        id: ChapterId(id),
+        time: Seconds::new(time).unwrap(),
+        label: label.to_string(),
+    }
+}
+
+/// One clip with events at `event_times`, a duration of `duration`, the
+/// `markers`, and the `filters`.
+fn chapter_project(
+    event_times: &[f64],
+    duration: f64,
+    markers: Vec<ChapterMarker>,
+    filters: Vec<AppliedFilter>,
+) -> EditProject {
+    EditProject {
+        clips: vec![clip_of(1, source("chap", event_times, duration), 0.0)],
+        timeline: vec![track_of(1, 1)],
+        filters,
+        chapters: markers,
+    }
+}
+
+fn chapter_times(recording: &Recording) -> Vec<f64> {
+    recording.chapters.iter().map(|c| c.time).collect()
+}
+
+fn assert_close(actual: &[f64], expected: &[f64]) {
+    assert_eq!(actual.len(), expected.len(), "{actual:?} vs {expected:?}");
+    for (a, e) in actual.iter().zip(expected) {
+        assert!((a - e).abs() < 1e-9, "{actual:?} vs {expected:?}");
+    }
+}
+
+fn doubling_registry() -> FilterRegistry {
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("double"), mapper(|t| t * 2.0));
+    registry
+}
+
+#[test]
+fn with_no_filter_the_chapters_come_out_in_time_order_with_their_labels() {
+    let project = chapter_project(
+        &[0.0, 1.0],
+        5.0,
+        vec![
+            marker(1, 4.0, "café 🎉"),
+            marker(2, 1.0, "first"),
+            marker(3, 2.5, "日本語テスト"),
+        ],
+        Vec::new(),
+    );
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    assert_eq!(
+        rendered.chapters,
+        vec![
+            Chapter {
+                time: 1.0,
+                label: "first".to_string()
+            },
+            Chapter {
+                time: 2.5,
+                label: "日本語テスト".to_string()
+            },
+            Chapter {
+                time: 4.0,
+                label: "café 🎉".to_string()
+            },
+        ]
+    );
+}
+
+#[test]
+fn with_no_marker_the_recording_has_no_chapter() {
+    let project = chapter_project(&[0.0, 1.0], 5.0, Vec::new(), vec![all("double")]);
+
+    let rendered = doubling_registry().render(&project).unwrap();
+
+    assert!(rendered.chapters.is_empty());
+}
+
+#[test]
+fn a_marker_after_the_end_is_dropped_and_a_marker_at_the_end_is_kept() {
+    let project = chapter_project(
+        &[0.0, 1.0],
+        5.0,
+        vec![marker(1, 5.0, "at end"), marker(2, 5.5, "after end")],
+        Vec::new(),
+    );
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    assert_eq!(chapter_times(&rendered), vec![5.0]);
+    assert_eq!(
+        rendered.chapters.first().map(|c| c.label.as_str()),
+        Some("at end")
+    );
+}
+
+#[test]
+fn a_marker_whose_time_overflows_is_dropped_and_the_render_works() {
+    // The range 0..0.5 holds the event 0. It goes to 1e308, so the shift is
+    // 1e308. The event 1 and the end go to about 1e308, which is finite. The
+    // marker at f64::MAX is after the range and moves to infinity, which is
+    // after the end.
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("far"), |_, _| vec![ev(1e308)]);
+    let project = chapter_project(
+        &[0.0, 1.0],
+        1.0,
+        vec![marker(1, 0.0, "start"), marker(2, f64::MAX, "far")],
+        vec![range("far", 0.0, 0.5)],
+    );
+
+    let rendered = registry.render(&project).unwrap();
+
+    let labels: Vec<&str> = rendered.chapters.iter().map(|c| c.label.as_str()).collect();
+    assert_eq!(labels, ["start"]);
+}
+
+#[test]
+fn a_marker_on_an_event_goes_to_the_new_time_of_that_event() {
+    // The events 1, 2, 4 go to 2, 4, 8.
+    let project = chapter_project(
+        &[1.0, 2.0, 4.0],
+        8.0,
+        vec![marker(1, 2.0, "on event")],
+        vec![all("double")],
+    );
+
+    let rendered = doubling_registry().render(&project).unwrap();
+
+    assert_eq!(chapter_times(&rendered), vec![4.0]);
+}
+
+#[test]
+fn a_marker_between_two_events_keeps_its_fraction_of_the_gap() {
+    // 3 is halfway between the events 2 and 4, thus it is halfway between 4 and 8.
+    let project = chapter_project(
+        &[1.0, 2.0, 4.0],
+        8.0,
+        vec![marker(1, 3.0, "between")],
+        vec![all("double")],
+    );
+
+    let rendered = doubling_registry().render(&project).unwrap();
+
+    assert_eq!(chapter_times(&rendered), vec![6.0]);
+}
+
+#[test]
+fn a_marker_before_the_first_event_scales_from_the_region_start() {
+    let project = chapter_project(
+        &[1.0, 2.0, 4.0],
+        8.0,
+        vec![marker(1, 0.5, "before first")],
+        vec![all("double")],
+    );
+
+    let rendered = doubling_registry().render(&project).unwrap();
+
+    assert_eq!(chapter_times(&rendered), vec![1.0]);
+}
+
+#[test]
+fn a_marker_after_the_last_event_keeps_its_gap_to_that_event() {
+    // The last event goes from 4 to 8. The marker is 2 s after it.
+    let project = chapter_project(
+        &[1.0, 2.0, 4.0],
+        8.0,
+        vec![marker(1, 6.0, "after last")],
+        vec![all("double")],
+    );
+
+    let rendered = doubling_registry().render(&project).unwrap();
+
+    assert_eq!(chapter_times(&rendered), vec![10.0]);
+}
+
+#[test]
+fn a_range_filter_moves_the_markers_after_it_and_not_those_before_it() {
+    // The range 2..5 holds the events 2 and 4. They go to 2 and 6, so the shift is 2.
+    let project = chapter_project(
+        &[1.0, 2.0, 4.0, 6.0],
+        8.0,
+        vec![
+            marker(1, 1.0, "before"),
+            marker(2, 5.0, "at range end"),
+            marker(3, 7.0, "after"),
+        ],
+        vec![range("double", 2.0, 5.0)],
+    );
+
+    let rendered = doubling_registry().render(&project).unwrap();
+
+    assert_eq!(chapter_times(&rendered), vec![1.0, 7.0, 9.0]);
+}
+
+fn dropping_registry() -> FilterRegistry {
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("drop-last"), |events, _| {
+        events
+            .split_last()
+            .map(|(_, rest)| rest.to_vec())
+            .unwrap_or_default()
+    });
+    registry
+}
+
+#[test]
+fn when_a_filter_drops_an_event_a_marker_inside_the_span_moves_in_proportion() {
+    // The events 2, 4, 6 become 2, 4. The span 6 becomes 4, so 3 goes to 2 and 6 goes to 4.
+    let project = chapter_project(
+        &[2.0, 4.0, 6.0],
+        10.0,
+        vec![marker(1, 3.0, "inside"), marker(2, 6.0, "at last")],
+        vec![all("drop-last")],
+    );
+
+    let rendered = dropping_registry().render(&project).unwrap();
+
+    assert_close(&chapter_times(&rendered), &[2.0, 4.0]);
+}
+
+#[test]
+fn when_a_filter_drops_an_event_a_marker_after_the_span_moves_by_the_shift() {
+    // The shift is 4 - 6 = -2, and the end goes from 10 to 8.
+    let project = chapter_project(
+        &[2.0, 4.0, 6.0],
+        10.0,
+        vec![marker(1, 8.0, "after")],
+        vec![all("drop-last")],
+    );
+
+    let rendered = dropping_registry().render(&project).unwrap();
+
+    assert_close(&chapter_times(&rendered), &[6.0]);
+    assert_close(&[rendered.duration], &[8.0]);
+}
+
+#[test]
+fn a_marker_moves_through_two_filters_in_a_row() {
+    // The first filter takes the events 1, 2, 4 to 2, 4, 8 and the marker 3 to 6.
+    // The second adds 1 to each time: 3, 5, 9. The marker 6 is halfway
+    // between 4 and 8, thus it goes to halfway between 5 and 9, which is 7.
+    let mut registry = doubling_registry();
+    registry.register(kind("plus-one"), mapper(|t| t + 1.0));
+    let project = chapter_project(
+        &[1.0, 2.0, 4.0],
+        8.0,
+        vec![marker(1, 3.0, "both")],
+        vec![all("double"), all("plus-one")],
+    );
+
+    let rendered = registry.render(&project).unwrap();
+
+    assert_eq!(chapter_times(&rendered), vec![7.0]);
+}
+
+#[test]
+fn two_markers_at_one_time_keep_the_order_of_their_ids() {
+    let project = chapter_project(
+        &[0.0, 1.0],
+        5.0,
+        vec![marker(9, 2.0, "nine"), marker(3, 2.0, "three")],
+        Vec::new(),
+    );
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    let labels: Vec<&str> = rendered.chapters.iter().map(|c| c.label.as_str()).collect();
+    assert_eq!(labels, vec!["three", "nine"]);
+}
+
+#[test]
+fn when_a_filter_returns_no_event_a_marker_up_to_the_last_seen_event_goes_to_the_region_start() {
+    // The range 2..7 holds the events 3 and 5, at 1 and 3 from its start. The
+    // filter returns no event, thus the shift is 0 - 3 = -3. The markers 4 and
+    // 5 go to the region start. The marker 6 is after the last seen event and
+    // moves by the shift, as do the marker 7 at the range end and the marker 9.
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("drop-all"), |_, _| Vec::new());
+    let project = chapter_project(
+        &[1.0, 3.0, 5.0, 8.0],
+        10.0,
+        vec![
+            marker(1, 1.5, "before"),
+            marker(2, 4.0, "inside"),
+            marker(3, 5.0, "at last seen"),
+            marker(4, 6.0, "after last seen"),
+            marker(5, 7.0, "at range end"),
+            marker(6, 9.0, "after"),
+        ],
+        vec![range("drop-all", 2.0, 7.0)],
+    );
+
+    let rendered = registry.render(&project).unwrap();
+
+    assert_close(&chapter_times(&rendered), &[1.5, 2.0, 2.0, 3.0, 4.0, 6.0]);
+    assert_close(&[rendered.duration], &[7.0]);
+}
+
+#[test]
+fn in_a_range_that_holds_no_event_a_marker_after_the_region_start_moves_by_the_shift() {
+    // The range 2..6 holds no event. The filter adds one event 1 s after the
+    // region start, thus the shift is 1 - 0 = 1. A marker at the region start
+    // stays. The marker 4 is after it and moves by the shift, as does the
+    // marker 7 after the range.
+    let mut registry = FilterRegistry::new();
+    registry.register(kind("insert"), |_, _| vec![ev(1.0)]);
+    let project = chapter_project(
+        &[1.0, 7.0],
+        10.0,
+        vec![
+            marker(1, 1.5, "before"),
+            marker(2, 2.0, "at range start"),
+            marker(3, 4.0, "inside"),
+            marker(4, 7.0, "after"),
+        ],
+        vec![range("insert", 2.0, 6.0)],
+    );
+
+    let rendered = registry.render(&project).unwrap();
+
+    assert_close(&chapter_times(&rendered), &[1.5, 2.0, 5.0, 8.0]);
+    assert_close(&[rendered.duration], &[11.0]);
 }
 
 // Tests of the in-place form.
@@ -991,6 +1350,85 @@ fn register_span_and_register_replace_each_other_under_one_kind() {
     assert_eq!(times(&out), vec![2.0, 4.0]);
 }
 
+// Tests of the chapters through the in-place form and the span form.
+
+#[test]
+fn an_in_place_filter_that_adds_events_moves_no_chapter() {
+    // The spy adds a mark at the end of its region, as the cursor filter does
+    // when it sets the state of the recording back.
+    let (registry, _seen) = in_place_spy(|view| view.length);
+    let project = chapter_project(
+        &[1.0, 2.0, 5.0, 8.0, 12.0],
+        15.0,
+        vec![marker(1, 4.0, "inside"), marker(2, 9.0, "late")],
+        vec![range("spot", 0.0, 10.0)],
+    );
+
+    let rendered = registry.render(&project).unwrap();
+
+    assert_close(&chapter_times(&rendered), &[4.0, 9.0]);
+}
+
+#[test]
+fn a_span_filter_scales_a_chapter_in_a_region_with_no_event() {
+    // A silent build step from 10 s to 20 s, at twice the speed.
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("halve"), scale_span(0.5));
+    let project = chapter_project(
+        &[1.0, 25.0],
+        30.0,
+        vec![
+            marker(1, 12.0, "build"),
+            marker(2, 15.0, "link"),
+            marker(3, 22.0, "deploy"),
+        ],
+        vec![range("halve", 10.0, 20.0)],
+    );
+
+    let rendered = registry.render(&project).unwrap();
+
+    assert_close(&chapter_times(&rendered), &[11.0, 12.5, 17.0]);
+}
+
+#[test]
+fn a_span_filter_scales_a_chapter_after_the_last_event_of_its_region() {
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("halve"), scale_span(0.5));
+    let project = chapter_project(
+        &[1.0, 11.0, 25.0],
+        30.0,
+        vec![marker(1, 10.5, "start"), marker(2, 16.0, "middle")],
+        vec![range("halve", 10.0, 20.0)],
+    );
+
+    let rendered = registry.render(&project).unwrap();
+
+    assert_close(&chapter_times(&rendered), &[10.25, 13.0]);
+}
+
+#[test]
+fn a_span_filter_that_drops_an_event_scales_a_chapter_by_the_length_of_its_region() {
+    // The filter halves its region and drops the last event of it, thus the
+    // count of times before the filter is not the count after it.
+    let mut registry = FilterRegistry::new();
+    let halve = scale_span(0.5);
+    registry.register_span(kind("halve-and-drop"), move |span, context, options| {
+        let mut answer = halve(span, context, options)?;
+        answer.events.pop();
+        Ok(answer)
+    });
+    let project = chapter_project(
+        &[1.0, 11.0, 13.0, 25.0],
+        30.0,
+        vec![marker(1, 16.0, "middle")],
+        vec![range("halve-and-drop", 10.0, 20.0)],
+    );
+
+    let rendered = registry.render(&project).unwrap();
+
+    assert_close(&chapter_times(&rendered), &[13.0]);
+}
+
 // Tests of the screen form.
 
 /// What a screen spy saw: the region view, the size, and the events before the
@@ -1230,7 +1668,7 @@ fn a_screen_view_says_whether_the_region_is_all() {
 fn register_screen_and_each_other_form_replace_each_other_under_one_kind() {
     // Each row registers one filter of another form under the kind "f".
     type Register = fn(&mut FilterRegistry);
-    let forms: [(&str, Register); 3] = [
+    let forms: [(&str, Register); 4] = [
         ("event", |registry| {
             registry.register(kind("f"), add_one());
         }),
@@ -1239,6 +1677,9 @@ fn register_screen_and_each_other_form_replace_each_other_under_one_kind() {
         }),
         ("span", |registry| {
             registry.register_span(kind("f"), scale_span(2.0));
+        }),
+        ("cut", |registry| {
+            registry.register_cut(kind("f"), |events, _, _| Ok(vec![false; events.len()]));
         }),
     ];
 
@@ -1278,6 +1719,23 @@ fn register_screen_and_each_other_form_replace_each_other_under_one_kind() {
             "the screen filter did not replace the {name} form"
         );
     }
+}
+
+#[test]
+fn a_screen_filter_that_adds_events_moves_no_chapter() {
+    // The spy adds a mark at the end of its region, thus the count of times
+    // before the filter is not the count after it.
+    let (registry, _seen) = screen_spy(size(40, 10));
+    let project = chapter_project(
+        &[1.0, 2.0, 5.0, 8.0, 12.0],
+        15.0,
+        vec![marker(1, 4.0, "inside"), marker(2, 9.0, "late")],
+        vec![all("crop")],
+    );
+
+    let rendered = registry.render(&project).unwrap();
+
+    assert_close(&chapter_times(&rendered), &[4.0, 9.0]);
 }
 
 // Tests of the context of a span filter.
@@ -1379,4 +1837,67 @@ fn a_span_filter_after_a_screen_filter_gets_the_size_that_the_screen_filter_gave
         .unwrap();
 
     assert_eq!(seen.lock().unwrap()[0].1, size(40, 10));
+}
+
+// Tests of the cut form.
+
+#[test]
+fn a_cut_filter_that_marks_another_count_of_events_fails_the_render() {
+    for count in [2_usize, 4] {
+        let mut registry = FilterRegistry::new();
+        registry.register_cut(kind("short"), move |_, _, _| Ok(vec![false; count]));
+
+        let result = registry.run(events(&[1.0, 2.0, 3.0]), &[all("short")]);
+
+        match result {
+            Err(NleError::RenderError(message)) => {
+                let expected = format!(
+                    "filter \"short\" answered {count} marks for the 3 events of its region"
+                );
+                assert!(message.contains(&expected), "count {count}: {message}");
+            }
+            other => panic!("count {count}: expected a RenderError, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_cut_filter_that_answers_an_error_fails_the_render_with_its_message() {
+    let mut registry = FilterRegistry::new();
+    registry.register_cut(kind("cut"), |_, _, _| Err("no screen".to_string()));
+
+    let result = registry.run(events(&[1.0]), &[all("cut")]);
+
+    match result {
+        Err(NleError::RenderError(message)) => {
+            assert!(
+                message.contains("filter \"cut\" failed: no screen"),
+                "{message}"
+            );
+        }
+        other => panic!("expected a RenderError, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_cut_filter_gets_the_size_of_a_vt100_from_run_and_the_size_of_a_screen_filter_from_render() {
+    let seen = TestArc::new(Mutex::new(Vec::new()));
+    let captured = TestArc::clone(&seen);
+    let mut registry = FilterRegistry::new();
+    registry.register_cut(kind("cut"), move |events, context, _| {
+        captured.lock().unwrap().push(context.size);
+        Ok(vec![false; events.len()])
+    });
+    let screens = TestArc::new(Mutex::new(Vec::new()));
+    register_screen_spy(&mut registry, "crop", size(40, 10), &screens);
+
+    registry.run(events(&[1.0]), &[all("cut")]).unwrap();
+    registry
+        .render(&one_clip_project(vec![all("crop"), all("cut")]))
+        .unwrap();
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![TerminalSize::VT100, size(40, 10)]
+    );
 }

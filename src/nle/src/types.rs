@@ -18,6 +18,18 @@ pub struct Recording {
     pub title: String,
     pub env: BTreeMap<String, String>,
     pub events: Vec<Event>,
+    /// The chapters in time order. A recording from `beta record` has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chapters: Vec<Chapter>,
+}
+
+/// A chapter of a recording: a labeled time where a part of the recording starts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Chapter {
+    /// The time in seconds from the start of the recording.
+    pub time: f64,
+    /// The name of the chapter.
+    pub label: String,
 }
 
 /// A single event in a recording (output or input).
@@ -138,6 +150,23 @@ pub struct ClipId(pub u64);
 #[serde(transparent)]
 pub struct TrackId(pub u64);
 
+/// The identifier of a chapter marker. It is unique within one project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ChapterId(pub u64);
+
+/// A chapter marker: a labeled time on the timeline of a project.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChapterMarker {
+    /// The identifier of the marker.
+    pub id: ChapterId,
+    /// The time on the timeline, before the filters: the time that the clips
+    /// of the project have. It can be after the end of the timeline.
+    pub time: Seconds,
+    /// The name of the chapter. It holds a character that is not white space.
+    pub label: String,
+}
+
 /// A clip: a range of one source recording, placed on the timeline.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Clip {
@@ -243,6 +272,8 @@ pub struct EditProject {
     pub clips: Vec<Clip>,
     pub timeline: Vec<TimelineTrack>,
     pub filters: Vec<AppliedFilter>,
+    /// The chapter markers, in the order that they were added.
+    pub chapters: Vec<ChapterMarker>,
 }
 
 impl Recording {
@@ -306,6 +337,7 @@ impl Recording {
                     data: "q".to_string(),
                 },
             ],
+            chapters: Vec::new(),
         }
     }
 }
@@ -315,6 +347,51 @@ mod tests {
     use std::io::Write;
 
     use super::*;
+
+    #[test]
+    fn a_recording_with_chapters_serializes_a_chapters_array() {
+        let mut recording = Recording::test_fixture();
+        recording.chapters = vec![
+            Chapter {
+                time: 12.5,
+                label: "Build".to_string(),
+            },
+            Chapter {
+                time: 20.0,
+                label: "日本語".to_string(),
+            },
+        ];
+
+        let value = serde_json::to_value(&recording).unwrap();
+
+        assert_eq!(
+            value.get("chapters"),
+            Some(&serde_json::json!([
+                {"time": 12.5, "label": "Build"},
+                {"time": 20.0, "label": "日本語"},
+            ]))
+        );
+    }
+
+    #[test]
+    fn a_recording_with_no_chapter_has_no_chapters_key_in_its_json() {
+        let value = serde_json::to_value(Recording::test_fixture()).unwrap();
+
+        assert!(value.get("chapters").is_none(), "{value}");
+    }
+
+    #[test]
+    fn json_without_a_chapters_key_loads_with_no_chapters() {
+        let mut value = serde_json::to_value(Recording::test_fixture()).unwrap();
+        if let Some(object) = value.as_object_mut() {
+            object.remove("chapters");
+        }
+
+        let loaded: Result<Recording, _> = serde_json::from_value(value);
+
+        assert!(loaded.is_ok(), "{loaded:?}");
+        assert!(loaded.unwrap().chapters.is_empty());
+    }
 
     #[test]
     fn test_load_plain_json() {

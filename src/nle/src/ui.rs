@@ -2,11 +2,11 @@
 //!
 //! This module holds the window settings, the root component, and the four
 //! regions of the window: the menu bar, the preview pane, the timeline, and
-//! the properties panel. The menu bar holds the Open Recording button, the
-//! Undo button and the Redo button of the `history` module, and the export bar
-//! of the `export` module. The open document lives in the state of
-//! `App`: the `Editor` of its project, and the metadata of the recording file
-//! that it came from.
+//! the properties panel, which holds the chapter panel. The menu bar holds the
+//! Open Recording button, the Undo button and the Redo button of the `history`
+//! module, and the export bar of the `export` module. The open document lives
+//! in the state of `App`: the `Editor` of its project, and the metadata of the
+//! recording file that it came from.
 //!
 //! `App` also owns one `busy` signal. It is true from a click on Open Recording
 //! or Export until its dialog and its work end, and it disables both buttons.
@@ -14,6 +14,7 @@
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
@@ -27,6 +28,8 @@ use crate::filters::time_dilation::{self, Speed};
 use crate::pipeline::FilterRegistry;
 use crate::timeline::View;
 use crate::types::{AppliedFilter, EditProject, FilterRegion, Seconds};
+
+use chapters::ChaptersPanel;
 
 use crate::format::{file_name, format_duration, format_recorded};
 use crate::types::{LoadedRecording, RecordingMetadata};
@@ -300,11 +303,18 @@ impl Services {
     }
 }
 
+/// The serial of the next document that `Document::open` builds.
+static NEXT_DOCUMENT_SERIAL: AtomicU64 = AtomicU64::new(1);
+
 /// The open document of the window: the editor of its project, and the
 /// metadata of the recording file that it came from.
 struct Document {
     editor: Editor,
     metadata: RecordingMetadata,
+    /// A number that no other document of this process has. A component that
+    /// keeps state about one document takes it as its key, thus each new
+    /// document gets a new component.
+    serial: u64,
 }
 
 impl Document {
@@ -315,6 +325,7 @@ impl Document {
         Ok(Self {
             editor: Editor::new(project, filters)?,
             metadata: loaded.metadata,
+            serial: NEXT_DOCUMENT_SERIAL.fetch_add(1, Ordering::Relaxed),
         })
     }
 }
@@ -499,22 +510,29 @@ fn summary(open: &Document) -> String {
     )
 }
 
-/// The metadata of the open recording, the speed panel, and the redaction
-/// panel. `on_result` gets the outcome of each edit: `Ok`, or the message of
-/// the banner.
+/// The metadata of the open recording, the speed panel, the redaction panel,
+/// and the chapter panel. `on_result` gets the outcome of each edit: `Ok`, or
+/// the message of the banner.
 #[component]
 fn PropertiesPanel(
     loaded: Signal<Option<Document>>,
     on_result: EventHandler<Result<(), String>>,
 ) -> Element {
-    let metadata = loaded.read().as_ref().map(|open| open.metadata.clone());
+    let open = loaded
+        .read()
+        .as_ref()
+        .map(|open| (open.metadata.clone(), open.serial));
     rsx! {
         div { class: "properties-panel",
             h3 { "Properties" }
-            if let Some(metadata) = metadata {
+            if let Some((metadata, serial)) = open {
                 {metadata_rows(&metadata)}
                 SpeedPanel { loaded, on_result }
                 RedactionPanel { loaded, on_result }
+                // A key counts only on the first node of a block. A keyed node
+                // in its own block gets the keyed diff, thus each new document
+                // gets a new panel, with no edit and no search.
+                {rsx! { ChaptersPanel { key: "{serial}", loaded, on_result } }}
             } else {
                 div { class: "placeholder", "No recording loaded" }
             }
@@ -908,6 +926,7 @@ fn metadata_rows(metadata: &RecordingMetadata) -> Element {
     }
 }
 
+mod chapters;
 mod export;
 
 #[cfg(test)]

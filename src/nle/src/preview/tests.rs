@@ -27,6 +27,7 @@ fn recording(width: u16, height: u16, events: Vec<Event>) -> Arc<Recording> {
         title: String::new(),
         env: Default::default(),
         events,
+        chapters: Vec::new(),
     })
 }
 

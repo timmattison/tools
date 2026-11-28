@@ -482,6 +482,7 @@ fn sized(width: u16, height: u16) -> Arc<Recording> {
         title: String::new(),
         env: BTreeMap::new(),
         events: Vec::new(),
+        chapters: Vec::new(),
     })
 }
 

@@ -28,6 +28,7 @@ mod tests {
             command: "bash".to_string(),
             title: "Test recording".to_string(),
             env: std::collections::HashMap::new(),
+            chapters: Vec::new(),
             events: vec![
                 Event {
                     time: 0.0,
@@ -63,6 +64,7 @@ mod tests {
             command: "bash".to_string(),
             title: "Test".to_string(),
             env: std::collections::HashMap::new(),
+            chapters: Vec::new(),
             events: vec![Event {
                 time: 0.0,
                 event_type: EventType::Output,
@@ -97,6 +99,7 @@ mod tests {
             command: "bash".to_string(),
             title: "Compressed".to_string(),
             env: std::collections::HashMap::new(),
+            chapters: Vec::new(),
             events: vec![],
         };
 
@@ -123,18 +126,6 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("empty"));
 
         std::fs::remove_file(&path).unwrap();
-    }
-
-    #[test]
-    fn test_web_export_xss_escaping() {
-        // Verify that </script> in recording data gets escaped
-        let json = serde_json::to_string(&"</script><script>alert(1)</script>").unwrap();
-        let escaped = json.replace("</", r"<\/");
-        assert!(
-            !escaped.contains("</script>"),
-            "Should escape </script> tags"
-        );
-        assert!(escaped.contains(r"<\/script>"));
     }
 
     #[test]

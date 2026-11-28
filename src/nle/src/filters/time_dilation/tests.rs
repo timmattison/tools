@@ -92,6 +92,7 @@ fn render_with_the_whole_region_scales_events_and_duration() {
         title: String::new(),
         env: BTreeMap::new(),
         events: events(&[0.0, 2.0, 4.0, 8.0]),
+        chapters: Vec::new(),
     };
     let mut project = EditProject::from_recording(Arc::new(recording)).unwrap();
     project.filters.push(applied(FilterRegion::All, speed(2.0)));
