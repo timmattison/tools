@@ -2096,6 +2096,83 @@ async fn an_undo_removes_the_banner_of_a_failed_edit() {
     assert_original_speed(&window);
 }
 
+#[tokio::test]
+async fn an_undo_that_removes_the_chapter_in_edit_empties_the_chapter_form() {
+    let mut window = open_recording().await;
+    let [_, _, add, ..] = window.load_buttons();
+    let [time, label, _] = window.chapter_fields();
+    window.type_into(time, "5");
+    window.type_into(label, "Intro");
+    window.click(add);
+    // The render of the new row created its Edit button first.
+    let edit = window.newest[0];
+    window.click(edit);
+    let page = window.html();
+    assert!(page.contains(">Save Chapter<"), "{page}");
+
+    window.click(window.undo_button());
+
+    let page = window.html();
+    assert!(
+        !page.contains("<span class=\"chapter-label\">Intro</span>"),
+        "{page}"
+    );
+    assert!(page.contains(">Add Chapter<"), "{page}");
+    assert!(!page.contains(">Save Chapter<"), "{page}");
+    assert!(!page.contains(">Cancel<"), "{page}");
+    assert!(!page.contains("value=\"Intro\""), "{page}");
+    assert!(!page.contains("value=\"5\""), "{page}");
+
+    window.click(add);
+    let page = window.html();
+    assert!(!page.contains("does not exist"), "{page}");
+}
+
+#[tokio::test]
+async fn an_undo_that_gives_the_id_in_edit_to_another_chapter_empties_the_chapter_form() {
+    let mut window = open_recording().await;
+    let [_, _, add, ..] = window.load_buttons();
+    let [time, label, _] = window.chapter_fields();
+    window.type_into(time, "1");
+    window.type_into(label, "One");
+    window.click(add);
+    window.type_into(time, "2");
+    window.type_into(label, "Two");
+    window.click(add);
+    let remove_two = window.newest[1];
+    window.click(remove_two);
+    // X gets the id 2 of Two, because the next id is the highest id plus one.
+    window.type_into(time, "3");
+    window.type_into(label, "X");
+    window.click(add);
+    let edit_x = window.newest[0];
+    window.click(edit_x);
+
+    // The first undo removes X. The second puts Two back with the id 2.
+    window.click(window.undo_button());
+    window.click(window.undo_button());
+
+    let page = window.html();
+    assert!(
+        page.contains("<span class=\"chapter-label\">Two</span>"),
+        "{page}"
+    );
+    assert!(page.contains(">Add Chapter<"), "{page}");
+    assert!(!page.contains(">Save Chapter<"), "{page}");
+    assert!(!page.contains("value=\"X\""), "{page}");
+
+    window.click(add);
+    let page = window.html();
+    assert!(
+        page.contains("<span class=\"chapter-label\">Two</span>"),
+        "{page}"
+    );
+    assert!(
+        !page.contains("<span class=\"chapter-label\">X</span>"),
+        "{page}"
+    );
+}
+
 // The keys of Undo and Redo, and the tooltips that name them.
 
 /// One key press: the value of the key, its place on the keyboard, and the
