@@ -221,7 +221,13 @@ pub(super) fn PreviewPane(
                                     for (column, run) in row.runs.iter().enumerate() {
                                         span {
                                             key: "{column}",
-                                            class: if run.single_cell { "cell" } else { "" },
+                                            class: if run.wide {
+                                                "cell wide"
+                                            } else if run.single_cell {
+                                                "cell"
+                                            } else {
+                                                ""
+                                            },
                                             style: "{run.style.css()}",
                                             "{run.text}"
                                         }
