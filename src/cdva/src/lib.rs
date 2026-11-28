@@ -1,4 +1,4 @@
-//! `cdva` — "count da various attributes".
+//! `cdva` — "cloc DVA".
 //!
 //! The library behind the `cdva` binary: a code counter that reports the test
 //! code of a tree apart from its production code.

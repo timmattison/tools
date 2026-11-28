@@ -1,4 +1,4 @@
-//! `cdva` — "count da various attributes".
+//! `cdva` — "cloc DVA".
 //!
 //! Counts the lines of code of a tree, as `cloc` does, and reports the test
 //! code apart from the production code.
@@ -80,7 +80,7 @@ const DEFAULT_PATH: &str = ".";
 #[command(
     name = "cdva",
     version = version_string!(),
-    about = "Count da various attributes: count the lines of a tree, and report the test code apart from the production code"
+    about = "cloc DVA: count the lines of a tree, and report the test code apart from the production code"
 )]
 struct Cli {
     /// The paths to count.
