@@ -2235,6 +2235,19 @@ These tools keep their long entries in this file until each one moves to `src/<t
       queue two times has two rows.
     - These rows show no workflow runs and no jobs. The runs of a merge group show in "Running"
       and in "Last 8h", on a branch that starts with `gh-readonly-queue/`.
+    - Enter on a "Merge queue" row opens the run of the merge group of that entry. Thus one key
+      press shows the live checks. The runs of an entry are the runs on the board of the same
+      repository that test the commit of its merge group (`head_sha`), on a branch that starts
+      with `gh-readonly-queue/`. Two attempts of one pull request on one base have the same
+      branch, thus only the commit tells them apart. The `push` run of the merged commit tests the
+      same commit, but its branch is the default branch. When a merge group has more than one run,
+      Enter opens a failed run, because that failure takes the entry out of the queue. Else it
+      opens an active run, else the run that GitHub created last, and in a tie the run with the
+      lowest ID. When the board holds no run of the merge group, Enter opens the pull request,
+      and the status line says `no run of the merge group of #<N>: opened the pull request`.
+      This occurs while the entry waits for its turn, because GitHub did not make its merge group
+      yet, and before GitHub starts a run of the merge group. Enter sends no request to GitHub.
+    - Enter on a "Merge history" row opens the pull request.
     - When the queue merges a pull request, `github-merge-queue[bot]` removes it from the queue, and
       GitHub writes the `merged` event in the same second or the next second. `ha` reads the two
       events as one merge. A merge more than 60 seconds after a removal by the queue, or after a
@@ -2489,7 +2502,9 @@ These tools keep their long entries in this file until each one moves to `src/<t
     press of Right or Left on a pull request row does nothing. Two fast presses of Right expand
     every run, and two fast presses of Left collapse every run, also from a pull request row. A
     held Right or Left does the same, because the terminal sends each repeat as a new press. Enter
-    opens the highlighted pull request, run, or job in the browser, and `ha` keeps running. The
+    opens the highlighted run or job in the browser, and `ha` keeps running. On a "Merge queue"
+    row, Enter opens the run of the merge group of the entry, or the pull request when the board
+    holds no such run. On a "Merge history" row, Enter opens the pull request. The
     page of a job shows its log. A job that has no address opens the page of its run. The highlight
     stays on the same job through each refresh. It also stays on the same pull request. When a pull
     request leaves the queue, the highlight stays at the same position.
@@ -6215,8 +6230,8 @@ cargo tauri build --no-bundle   # the binary is target/release/msgs
 
 A desktop application for the terminal recordings that `beta` writes. It opens
 a `.json` or `.json.gz` recording, makes an edit project of it, shows its
-metadata, shows its clips on a timeline, and plays the edited recording in its
-preview pane.
+metadata, shows its clips on a timeline, plays the edited recording in its
+preview pane, and exports the edited recording.
 
 The preview pane draws the terminal of the edited recording at the playhead.
 Drag the playhead control under **Timeline** to go to a time. **Play** plays
@@ -6468,11 +6483,6 @@ The limits of the HUD:
   the viewer gets that sequence twice: first cut at the last draw of the HUD,
   then whole.
 
-The crate also has functions that save the rendered recording
-(`Editor::save_recording`), list the recordings in a directory, and export a
-recording through the `beta` CLI as a video or a web player. The window does
-not call them yet.
-
 ### The cursor filter
 
 The `cursor` filter sets how the cursor looks in the rendered recording. It
@@ -6630,7 +6640,50 @@ The limits:
   keys keeps its oldest keys. A terminal of more than 1,048,576 cells fails the
   render.
 
-The export functions run `beta` with the PATH of the app, then
+### Export
+
+The export bar in the menu bar writes the edited recording. The editor first
+renders the project into one `beta` recording, with each filter, clip, and time
+change applied. Then it writes that recording in the format that you pick:
+
+| Format | File | How |
+| ------ | ---- | --- |
+| Beta recording | `.json` or `.json.gz` | The editor writes it. `beta play` plays it, and the editor opens it again. |
+| Web page | `.html` | `beta export web`, with a theme and an option to compress the embedded recording. |
+| MP4 video or GIF | `.mp4` or `.gif` | `beta export video`, with a theme, the frame rate (FPS), the resolution (`WIDTHxHEIGHT`), and an option to optimize for the web. An empty field leaves the value to `beta`. |
+
+To export:
+
+1. Open a recording.
+2. Select the format and the settings in the export bar.
+3. Click **Export**, then select the file in the save dialog.
+
+The save dialog offers `<name>-edited` with the ending of the format, in the
+folder of the recording. If the file name that you type has a different
+ending, the editor replaces it with the ending of the format. If the file that
+you select is a symbolic link, the export writes the file that the link points
+to, and keeps the link. That file must have the same ending as the link, so a
+link `out.mp4` to `real.gif` is refused.
+
+Open Recording and Export are disabled while a dialog, a load, or an export
+runs. Thus a new recording cannot open during an export, and an export cannot
+start during an open.
+
+For a web page or a video, the editor writes the rendered recording to a
+temporary file and runs `beta export` on it. The editor deletes the temporary
+file when `beta` stops. During a video export, the bar shows the frame count
+that `beta` reports (`Processed frame N / M`). When the export ends, the bar
+shows the path of the file. If the export fails, the error banner shows the
+reason.
+
+In code, `Editor::export` does the render and the export, and reports each
+stage through an `ExportProgress` callback. `Editor::save_recording` writes the
+rendered recording only.
+
+The crate also has functions that list the recordings in a directory, and
+export a recording file through the `beta` CLI as a video or a web player.
+
+The export runs `beta` with the PATH of the app, then
 `$CARGO_HOME/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.
 A macOS app that starts from Finder or the Dock gets only the system PATH.
 `beta` runs `ffmpeg` through the same PATH.

@@ -24,6 +24,14 @@ pub fn span(from: DateTime<Utc>, to: DateTime<Utc>) -> std::time::Duration {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RunId(pub u64);
 
+/// The SHA of one git commit, as GitHub writes it.
+///
+/// A run gives the commit that it tests (`head_sha`), and an entry of a merge
+/// queue gives the commit of its merge group (`headCommit.oid`). The board
+/// finds the runs of an entry when the two are equal.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CommitSha(pub String);
+
 /// Whether a repository is public or private.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Visibility {
@@ -132,6 +140,10 @@ pub struct Run {
     pub workflow: String,
     /// The head branch. The text is empty when GitHub gives none.
     pub branch: String,
+    /// The commit that the run tests (`head_sha`), or `None` when GitHub
+    /// gives none. For a run of a merge group, this is the commit of the
+    /// merge group.
+    pub head_sha: Option<CommitSha>,
     /// The display title of the run. The name of the workflow is the fallback.
     pub title: String,
     /// What the run is doing now, or how it ended.
@@ -169,6 +181,7 @@ mod tests {
     fn run_with(id: u64, title: &str) -> Run {
         let time = DateTime::<Utc>::UNIX_EPOCH;
         Run {
+            head_sha: None,
             visibility: crate::run::Visibility::Private,
             id: RunId(id),
             repo: RepoName::parse("o/r").expect("a valid repository"),

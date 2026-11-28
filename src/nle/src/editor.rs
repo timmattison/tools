@@ -1,9 +1,11 @@
 //! The editing state of the app: the edit operations, the project with its
-//! undo and redo history, and the save of the rendered recording.
+//! undo and redo history, and the export of the rendered recording.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::error::NleError;
+use crate::export::{ExportProgress, ExportRequest, ExportTarget};
 use crate::pipeline::FilterRegistry;
 use crate::types::{
     AppliedFilter, Clip, ClipId, EditProject, Recording, Seconds, TimelineTrack, TrackId,
@@ -381,6 +383,29 @@ impl Editor {
         self.filters.render(&self.project)
     }
 
+    /// Render the project in its present state, and export it as `request`
+    /// asks. The future holds a copy of the state, so it borrows nothing from
+    /// the editor. It reports `ExportProgress::Rendering` first, then the
+    /// stages of `export::export_recording`.
+    ///
+    /// # Errors
+    /// The future gives the errors of `FilterRegistry::render` and of
+    /// `export::export_recording`, and `NleError::TaskError` when the render
+    /// panics.
+    pub fn export(
+        &self,
+        request: ExportRequest,
+        mut progress: impl FnMut(ExportProgress) + Send + 'static,
+    ) -> impl std::future::Future<Output = Result<PathBuf, NleError>> + Send + 'static {
+        let project = self.project.clone();
+        let filters = Arc::clone(&self.filters);
+        async move {
+            progress(ExportProgress::Rendering);
+            let recording = crate::commands::run_blocking(move || filters.render(&project)).await?;
+            crate::export::export_recording(recording, request, progress).await
+        }
+    }
+
     /// The duration of the render of the project in its present state. It
     /// renders the project only when the check of the last edit did not.
     ///
@@ -406,12 +431,14 @@ impl Editor {
         path: String,
         compress: Option<bool>,
     ) -> impl std::future::Future<Output = Result<(), NleError>> + Send + 'static {
-        let project = self.project.clone();
-        let filters = Arc::clone(&self.filters);
-        crate::commands::run_blocking(move || {
-            let recording = filters.render(&project)?;
-            crate::commands::save_recording_to(&path, &recording, compress)
-        })
+        let export = self.export(
+            ExportRequest {
+                output_path: PathBuf::from(path),
+                target: ExportTarget::Recording { compress },
+            },
+            |_| {},
+        );
+        async move { export.await.map(|_| ()) }
     }
 }
 
