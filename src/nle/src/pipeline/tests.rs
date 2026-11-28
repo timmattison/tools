@@ -1283,20 +1283,21 @@ fn register_screen_and_each_other_form_replace_each_other_under_one_kind() {
 // Tests of the context of a span filter.
 
 /// The contexts that a spy got: the events before its region and the size.
-type SeenContexts = TestArc<Mutex<Vec<(Vec<Event>, TerminalSize)>>>;
+type SeenContexts = TestArc<Mutex<Vec<(Vec<Event>, TerminalSize, bool)>>>;
 
 /// Registers a span filter under "look" that records each context that it
-/// gets, as the events before its region and the size, and answers with the
-/// span that it got.
+/// gets, as the events before its region, the size, and whether a screen
+/// filter rewrote part of the region, and answers with the span that it got.
 fn context_spy_registry() -> (FilterRegistry, SeenContexts) {
     let seen = TestArc::new(Mutex::new(Vec::new()));
     let captured = TestArc::clone(&seen);
     let mut registry = FilterRegistry::new();
     registry.register_span(kind("look"), move |span, context, _| {
-        captured
-            .lock()
-            .unwrap()
-            .push((context.before.to_vec(), context.size));
+        captured.lock().unwrap().push((
+            context.before.to_vec(),
+            context.size,
+            context.screen_rewritten,
+        ));
         Ok(span)
     });
     (registry, seen)
@@ -1379,4 +1380,45 @@ fn a_span_filter_after_a_screen_filter_gets_the_size_that_the_screen_filter_gave
         .unwrap();
 
     assert_eq!(seen.lock().unwrap()[0].1, size(40, 10));
+}
+
+#[test]
+fn a_span_filter_after_a_screen_filter_that_rewrote_its_region_is_told_so() {
+    let (mut registry, seen) = context_spy_registry();
+    let screens = TestArc::new(Mutex::new(Vec::new()));
+    register_screen_spy(&mut registry, "crop", size(80, 24), &screens);
+
+    registry
+        .render(&one_clip_project(vec![all("crop"), all("look")]))
+        .unwrap();
+
+    assert!(seen.lock().unwrap()[0].2);
+}
+
+#[test]
+fn a_span_filter_after_a_screen_filter_that_changed_nothing_is_not_told_so() {
+    let (mut registry, seen) = context_spy_registry();
+    registry.register_screen(kind("same"), |events, view, _| {
+        Ok(Screen {
+            events: events.to_vec(),
+            size: view.size,
+        })
+    });
+
+    registry
+        .render(&one_clip_project(vec![all("same"), all("look")]))
+        .unwrap();
+
+    assert!(!seen.lock().unwrap()[0].2);
+}
+
+#[test]
+fn a_span_filter_with_no_screen_filter_before_it_is_not_told_so() {
+    let (registry, seen) = context_spy_registry();
+
+    registry
+        .render(&one_clip_project(vec![all("look")]))
+        .unwrap();
+
+    assert!(!seen.lock().unwrap()[0].2);
 }

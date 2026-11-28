@@ -9,7 +9,11 @@
 //! The summary drops the middle lines and each terminal change that they hold,
 //! for example a color, a cursor movement, or a screen clear. It suits
 //! line-oriented output, such as a build log. It does not suit a full-screen
-//! application.
+//! application. A summary also fails the render when a screen filter at an
+//! earlier step, for example viewport, rewrote part of its region. Such a
+//! filter writes cells of the screen with no line feed, so the summary would
+//! count no lines and change nothing. The summary must come before the screen
+//! filter.
 
 use crate::error::NleError;
 use crate::filters::time_dilation::{self, Speed};
@@ -106,6 +110,9 @@ pub enum Mode {
     /// the last dropped output goes away. The marker appears where the first
     /// dropped line started. The time between the first and the last dropped
     /// output goes away, and the tail keeps its own timing.
+    ///
+    /// The render fails when a screen filter at an earlier step rewrote part
+    /// of the region, because that part holds no line feed.
     Summary {
         /// The number of lines that the summary keeps at the start of the
         /// output of the region.
@@ -163,16 +170,23 @@ pub fn register(registry: &mut FilterRegistry) {
     registry.register_span(kind(), fast_forward);
 }
 
-/// Compress a span in the mode of its options.
+/// Compress a span in the mode of its options. A summary fails when a screen
+/// filter at an earlier step rewrote part of the span, because it counts line
+/// feeds and a screen filter writes none.
 fn fast_forward(
     span: Span,
-    _context: SpanContext<'_>,
+    context: SpanContext<'_>,
     options: &FilterOptions,
 ) -> Result<Span, String> {
     Ok(match mode_from(options)? {
         Mode::SkipToEnd => skip_to_end(span),
         Mode::Accelerate(acceleration) => time_dilation::scale(span, acceleration.speed()),
-        Mode::Summary { head, tail } => summarize(span, head, tail),
+        Mode::Summary { head, tail } => {
+            if context.screen_rewritten {
+                return Err(SUMMARY_AFTER_SCREEN_FILTER.to_string());
+            }
+            summarize(span, head, tail)
+        }
     })
 }
 

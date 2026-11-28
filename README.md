@@ -6649,7 +6649,11 @@ buttons:
   place of the lines between them. The time of the dropped lines goes away. A
   summary also drops each terminal change that the dropped lines hold, for
   example a color or a cursor movement. Thus it suits line-oriented output,
-  such as a build log, and not a full-screen application.
+  such as a build log, and not a full-screen application. A summary after a
+  screen filter, for example `viewport`, on the same part of the timeline
+  fails, because the screen filter writes no line feed. The banner gives the
+  reason. In the `filters` list of the project file, put the summary before the
+  screen filter.
 
 A button reads only the fields that its mode uses. Each fast-forward gets a row
 with a **Remove** button. The panel does not find a burst of output itself, so
@@ -6723,7 +6727,8 @@ The editing engine of the crate has five parts:
   whether anything comes after it. It rewrites its region and moves nothing. A
   span filter (`register_span`) also gets the length of its region and answers
   a new length, and the later events move by the change in the length. A span
-  filter also gets the events before and after its region and the size of the
+  filter also gets the events before and after its region, whether a screen
+  filter at an earlier step rewrote part of its region, and the size of the
   terminal: the size of the clip that starts first, or 80 by 24 in
   `FilterRegistry::run`. A screen filter (`register_screen`) also gets the
   size of the screen and the events before its region. It rewrites its region,
