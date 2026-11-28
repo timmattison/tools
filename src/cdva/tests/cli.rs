@@ -300,6 +300,26 @@ fn the_help_names_every_flag_of_the_command() {
     }
 }
 
+/// The long name of the tool. `cdva` replaces `cloc`, and its name comes from
+/// Clock DVA.
+const LONG_NAME: &str = "cloc DVA";
+
+#[test]
+fn the_help_gives_the_long_name_of_the_tool() {
+    let output = cdva().arg("--help").output().expect("the binary runs");
+
+    assert!(
+        output.status.success(),
+        "the help flag succeeds: {}",
+        stderr(&output)
+    );
+    let help = testcolor::strip_ansi(&stdout(&output));
+    assert!(
+        help.contains(LONG_NAME),
+        "the help gives the long name {LONG_NAME:?}:\n{help}"
+    );
+}
+
 #[test]
 fn a_tree_of_production_and_test_files_reports_both() {
     let root = tempfile::tempdir().expect("a temporary directory is made");
