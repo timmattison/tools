@@ -2191,6 +2191,7 @@ mod tests {
         updated: &str,
     ) -> Run {
         Run {
+            head_sha: None,
             visibility: crate::run::Visibility::Private,
             id: RunId(id),
             repo: repo(repo_text),

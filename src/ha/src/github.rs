@@ -148,6 +148,7 @@ fn run_of(json: RunJson, repo: &RepoName) -> Run {
         Some(true) | None => Visibility::Private,
     };
     Run {
+        head_sha: None,
         visibility,
         id: RunId(json.id),
         repo: repo.clone(),
@@ -1765,6 +1766,7 @@ mod tests {
     use super::test_answers::{ACCEPTED, CREATED};
     use super::*;
     use crate::billing::EnterpriseSlug;
+    use crate::run::CommitSha;
 
     /// A time limit that no stub that finishes comes near.
     const GENEROUS_LIMIT: Duration = Duration::from_secs(60);
@@ -1800,6 +1802,7 @@ mod tests {
 
     const RUNS_JSON: &str = r#"{"total_count":2,"workflow_runs":[
         {"id":36064582280,"run_number":1234,"name":"CI","display_title":"Fix the thing","head_branch":"main",
+         "head_sha":"e8dc7f8f0a3c4b5d6e7f8091a2b3c4d5e6f70812",
          "status":"completed","conclusion":"failure","run_started_at":"2026-09-24T21:56:49Z",
          "created_at":"2026-09-24T21:50:00Z","updated_at":"2026-09-24T21:57:56Z",
          "html_url":"https://github.com/timmattison/tools/actions/runs/36064582280",
@@ -1848,6 +1851,9 @@ mod tests {
             page.runs,
             [
                 Run {
+                    head_sha: Some(CommitSha(
+                        "e8dc7f8f0a3c4b5d6e7f8091a2b3c4d5e6f70812".to_owned()
+                    )),
                     visibility: crate::run::Visibility::Private,
                     id: RunId(36_064_582_280),
                     repo: tools.clone(),
@@ -1861,6 +1867,7 @@ mod tests {
                     url: "https://github.com/timmattison/tools/actions/runs/36064582280".to_owned(),
                 },
                 Run {
+                    head_sha: None,
                     visibility: crate::run::Visibility::Private,
                     id: RunId(7),
                     repo: tools,
@@ -2257,6 +2264,7 @@ mod tests {
 
     /// The body that GitHub gives for one run. `created_at` differs from `run_started_at`.
     const RUN_JSON: &str = r#"{"id":42,"run_number":9,"name":"CI","display_title":"Fix it","head_branch":"main",
+        "head_sha":"1f99050c4d3e2b1a0f9e8d7c6b5a49382716f5e4",
         "status":"in_progress","conclusion":null,"run_started_at":"2026-09-24T21:56:49Z",
         "created_at":"2026-09-24T21:50:00Z","updated_at":"2026-09-24T21:57:56Z",
         "html_url":"https://github.com/o/r/actions/runs/42"}"#;
@@ -2273,6 +2281,9 @@ mod tests {
         assert_eq!(
             run,
             Ok(Some(Run {
+                head_sha: Some(CommitSha(
+                    "1f99050c4d3e2b1a0f9e8d7c6b5a49382716f5e4".to_owned()
+                )),
                 visibility: crate::run::Visibility::Private,
                 id: RunId(42),
                 repo: repo("o/r"),
