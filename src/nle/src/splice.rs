@@ -99,9 +99,9 @@ pub(crate) struct Spliced<'a> {
 /// 8. The events of each clip come after the events of the clips before it in
 ///    the play order. Then a stable sort puts them in time order. Thus an
 ///    event of a clip at the start of the next clip plays before the cut.
-/// 9. The end of the timeline is the latest end of the part of a clip, or 0
-///    for a project whose clips all start at 0 and play nothing. With no
-///    overlap, it is `EditProject::duration`.
+/// 9. The end of the timeline is the latest end of the part of a clip. The
+///    part of a clip that plays nothing ends at its start. With no overlap,
+///    the end is `EditProject::duration`.
 /// 10. The header is the first clip that plays, or the first clip in the play
 ///     order when no clip plays.
 pub(crate) fn splice(project: &EditProject) -> Option<Spliced<'_>> {
