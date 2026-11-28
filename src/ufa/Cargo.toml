@@ -1,0 +1,54 @@
+[package]
+name = "ufa"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Inherited from the workspace. `features` here are additive on top of the
+# workspace's own feature list, for the features only ufa needs.
+anyhow.workspace = true
+buildinfo.workspace = true
+chrono.workspace = true
+clap = { workspace = true, features = ["env"] }
+dialoguer.workspace = true
+dirs.workspace = true
+futures.workspace = true
+indicatif.workspace = true
+op-cache.workspace = true
+open.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+url.workspace = true
+uuid = { workspace = true, features = ["serde"] }
+
+# Crate-local: the workspace does not define these.
+dotenvy = "0.15"
+mdns-sd = "0.11"
+tabled = "0.22.0"
+
+# Crate-local deliberately: the workspace's reqwest keeps default features
+# (native-tls), and `default-features = false` cannot be expressed against an
+# inherited dependency that enables them. This list keeps native-tls out of a
+# build of ufa alone, such as `cargo install`.
+#
+# ufa talks to controllers over rustls only, but this list alone does not make
+# it so. In a build of the whole workspace, cargo unifies the features of
+# reqwest, native-tls comes back, and reqwest picks it when no builder names a
+# backend. Thus `crate::http::with_ufa_transport` names rustls for each client.
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+[dev-dependencies]
+# The process umask decides the mode a file is created at, and a test of that
+# mode has to state the umask rather than inherit whatever the developer's
+# shell set. `umask` is a system call, and no crate in the workspace wraps it.
+libc.workspace = true
+# A test that starts a child process starts it through the one entrance, so the
+# child sheds the GIT_ variables that a hook exports.
+childenv.workspace = true
+
+[lints]
+workspace = true

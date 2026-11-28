@@ -166,6 +166,11 @@ pub enum Row<'a> {
         /// holds no job. A failed fetch after a good one keeps the sum of
         /// the last good jobs.
         job_sum: Option<Duration>,
+        /// The estimate of the time until the run finishes, from
+        /// `Estimates::run_remaining` with the same last good jobs as
+        /// `job_sum`. It is `None` for a finished run and for an active run
+        /// with no estimate. The render shows it in place of the job sum.
+        remaining: Option<Remaining>,
         /// The end of a finished run (see `run_end`). `None` for an active
         /// run.
         ended: Option<DateTime<Utc>>,
@@ -931,7 +936,8 @@ impl Board {
     /// The `cost` of each run row and of each job row is the list-price cost at
     /// `now`, with the prices of the book from [`Board::set_prices`]. The method
     /// builds one [`Estimates`] index for the frame from the shown runs and
-    /// their last good jobs. Each job row carries its time left from it.
+    /// their last good jobs. Each job row carries its time left from it, and
+    /// each run row carries the estimate of the time until the run finishes.
     fn build_rows(&self, now: DateTime<Utc>) -> Vec<Row<'_>> {
         let selected = self.selected.as_ref();
         let mut rows = Vec::new();
@@ -1430,7 +1436,9 @@ fn job_sum(jobs: &[Job], now: DateTime<Utc>) -> Option<Duration> {
 /// times of the last good jobs at `view.now`, see `job_sum`. The `cost` of each
 /// run row is the list-price cost of the same jobs, see `run_cost`. The block of jobs
 /// of each run in `view.expanded` follows the row of that run. `estimates` is
-/// the index of the frame, and each job row reads its time left from it.
+/// the index of the frame. Each job row reads its time left from it. Each run
+/// row reads from it the estimate of the time until the run finishes, with the
+/// same last good jobs as the job sum.
 fn push_runs<'a>(
     rows: &mut Vec<Row<'a>>,
     runs: &[&'a Run],
@@ -1454,6 +1462,7 @@ fn push_runs<'a>(
             selected: here.is_some_and(|selection| selection.job.is_none()),
             stale: view.errors.contains_key(&run.repo),
             job_sum: job_sum(jobs, view.now),
+            remaining: estimates.run_remaining(run, jobs, view.now),
             ended,
             cost: run_cost(
                 jobs,
@@ -3196,6 +3205,17 @@ mod tests {
             Row::Run { run, state, .. } if run.id == RunId(id) => Some(*state),
             _ => None,
         })
+    }
+
+    /// The run estimate that the row of run `id` carries. It panics when no
+    /// row holds the run.
+    fn run_remaining_of(rows: &[Row<'_>], id: u64) -> Option<Remaining> {
+        rows.iter()
+            .find_map(|row| match row {
+                Row::Run { run, remaining, .. } if run.id == RunId(id) => Some(*remaining),
+                _ => None,
+            })
+            .expect("a row for the run")
     }
 
     /// The job sum that the row of run `id` shows. It panics when no row
@@ -5543,6 +5563,17 @@ mod tests {
             )],
         );
         board
+    }
+
+    #[test]
+    fn a_run_row_carries_the_estimate_of_the_time_until_the_run_finishes() {
+        let mut board = estimate_board(50);
+        let rows = board.rows(now());
+        assert_eq!(
+            run_remaining_of(&rows, 2),
+            Some(Remaining::Left(Duration::from_secs(180)))
+        );
+        assert_eq!(run_remaining_of(&rows, 1), None);
     }
 
     #[test]

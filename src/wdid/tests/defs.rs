@@ -1,8 +1,10 @@
 //! Tests of the count of the uses of each alias and each function.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use chrono::{Days, NaiveDate, NaiveDateTime};
+use wdid::added::{AddedDates, Defined};
 use wdid::command_words::{command_words, Aliases, Parsed};
 use wdid::defs::{tally, Classification, Kind, Reason, Tally, Usage, Window};
 use wdid::history::{Exit, HistoryEntry};
@@ -12,6 +14,9 @@ use wdid::starts::Trigger;
 
 /// The idle limit of the default window.
 const IDLE_DAYS: u32 = 30;
+
+/// The new limit of the default window.
+const NEW_DAYS: u32 = 90;
 
 /// The date of the run in every test.
 fn today() -> NaiveDate {
@@ -28,6 +33,7 @@ fn window() -> Window {
     Window {
         today: today(),
         since: None,
+        new_days: NEW_DAYS,
         idle_days: IDLE_DAYS,
         all: false,
     }
@@ -304,7 +310,7 @@ fn the_classification_follows_the_last_use() {
     let result = run(&[entry(40, 0, "idle"), entry(3, 0, "fresh")], &defs);
     assert_eq!(
         usage(&result, "never", Kind::Alias).classification,
-        Classification::NeverUsed
+        Classification::NeverUsedOld
     );
     assert_eq!(
         usage(&result, "idle", Kind::Alias).classification,
@@ -617,7 +623,7 @@ fn a_function_that_a_hook_function_calls_runs_through_it() {
         );
     }
     let other = function(&result, "other");
-    assert_eq!(other.classification, Classification::NeverUsed);
+    assert_eq!(other.classification, Classification::NeverUsedOld);
     assert!(other.reasons.is_empty());
 }
 
@@ -705,7 +711,7 @@ fn a_widget_with_no_key_keeps_its_state_and_gets_the_reason() {
     .into();
     let result = run(&[row("typedfn")], &defs);
     let lonely = function(&result, "lonelyfn");
-    assert_eq!(lonely.classification, Classification::NeverUsed);
+    assert_eq!(lonely.classification, Classification::NeverUsedOld);
     assert_eq!(lonely.reasons, [Reason::WidgetWithoutKey]);
     let typed = function(&result, "typedfn");
     assert_eq!(typed.classification, Classification::Used);
@@ -877,4 +883,172 @@ fn the_reasons_are_sorted_and_unique() {
         function(&result, "both").reasons,
         [runs(hook("chpwd")), runs(hook("preexec"))]
     );
+}
+
+/// The file of [`with_origins`] that holds my definitions.
+const ZSHRC: &str = "/home/me/.zshrc";
+
+/// Gives the added dates of [`with_origins`]: each of my definitions in
+/// [`ZSHRC`] at `days` days ago, and the definitions of [`GIT_PLUGIN`] too.
+fn added_at(days: &[(Defined, u64)]) -> AddedDates {
+    let mut dates = AddedDates::default();
+    for (defined, ago) in days {
+        dates.record(ZSHRC, defined.clone(), days_ago(*ago));
+    }
+    dates.record(GIT_PLUGIN, Defined::alias("gst"), days_ago(1));
+    dates.record(GIT_PLUGIN, Defined::function("gfun"), days_ago(1));
+    dates
+}
+
+#[test]
+fn a_definition_that_never_ran_is_old_and_has_no_added_date_without_dates() {
+    let result = run(&[], &with_origins());
+    for entry in &result.definitions {
+        assert_eq!(
+            entry.classification,
+            Classification::NeverUsedOld,
+            "{}",
+            entry.name
+        );
+        assert_eq!(entry.added, None, "{}", entry.name);
+    }
+}
+
+#[test]
+fn the_origin_files_of_my_definitions_are_each_file_one_time() {
+    let mut defs = with_origins();
+    defs.function_origins.insert(
+        "myf".to_string(),
+        origin("/home/me/.zsh/functions.zsh", None),
+    );
+    let result = run(&[], &defs);
+    assert_eq!(
+        result.my_origin_files(),
+        BTreeSet::from([
+            PathBuf::from("/home/me/.zsh/functions.zsh"),
+            PathBuf::from(ZSHRC),
+        ]),
+        "a file of the others and an unknown origin give no file"
+    );
+}
+
+#[test]
+fn an_added_date_younger_than_new_days_makes_a_definition_that_never_ran_new() {
+    let mut result = run(&[], &with_origins());
+    let limit = u64::from(NEW_DAYS);
+    let dates = added_at(&[
+        (Defined::alias("wt"), 10),
+        (Defined::alias("G"), limit - 1),
+        (Defined::alias("*.md"), limit),
+        (Defined::function("myf"), 400),
+    ]);
+
+    result.apply_added_dates(&dates, &window());
+
+    let rows = [
+        ("wt", Kind::Alias, Some(10), Classification::NeverUsedNew),
+        (
+            "G",
+            Kind::GlobalAlias,
+            Some(limit - 1),
+            Classification::NeverUsedNew,
+        ),
+        (
+            "*.md",
+            Kind::SuffixAlias,
+            Some(limit),
+            Classification::NeverUsedOld,
+        ),
+        (
+            "myf",
+            Kind::Function,
+            Some(400),
+            Classification::NeverUsedOld,
+        ),
+        ("bare", Kind::Alias, None, Classification::NeverUsedOld),
+    ];
+    for (name, kind, ago, classification) in rows {
+        let entry = usage(&result, name, kind);
+        assert_eq!(entry.added, ago.map(days_ago), "{name}");
+        assert_eq!(entry.classification, classification, "{name}");
+    }
+}
+
+#[test]
+fn a_definition_that_is_not_mine_gets_no_added_date() {
+    let mut result = run(&[], &with_origins());
+
+    result.apply_added_dates(&added_at(&[]), &window());
+
+    for (name, kind) in [("gst", Kind::Alias), ("gfun", Kind::Function)] {
+        let entry = usage(&result, name, kind);
+        assert_eq!(entry.added, None, "{name}");
+        assert_eq!(entry.classification, Classification::NeverUsedOld, "{name}");
+    }
+}
+
+#[test]
+fn an_alias_and_a_function_of_one_name_get_the_date_of_their_own_line() {
+    let mut defs = definitions(&[("x", "ls")], &[], &[], &[("x", "\techo")]);
+    defs.alias_origins
+        .insert("x".to_string(), origin(ZSHRC, Some(1)));
+    defs.function_origins
+        .insert("x".to_string(), origin(ZSHRC, None));
+    defs.places = places();
+    let mut result = run(&[], &defs);
+
+    result.apply_added_dates(
+        &added_at(&[(Defined::alias("x"), 300), (Defined::function("x"), 5)]),
+        &window(),
+    );
+
+    let alias = usage(&result, "x", Kind::Alias);
+    assert_eq!(
+        (alias.added, alias.classification),
+        (Some(days_ago(300)), Classification::NeverUsedOld)
+    );
+    let function = usage(&result, "x", Kind::Function);
+    assert_eq!(
+        (function.added, function.classification),
+        (Some(days_ago(5)), Classification::NeverUsedNew)
+    );
+}
+
+#[test]
+fn the_added_date_keeps_the_state_of_a_used_an_idle_and_a_started_definition() {
+    let mut defs = definitions(
+        &[("fresh", "a"), ("idle", "b")],
+        &[],
+        &[],
+        &[("precmd", "\ttrue")],
+    );
+    for name in ["fresh", "idle"] {
+        defs.alias_origins
+            .insert(name.to_string(), origin(ZSHRC, Some(1)));
+    }
+    defs.function_origins
+        .insert("precmd".to_string(), origin(ZSHRC, None));
+    defs.starts.functions = vec![(hook("precmd"), "precmd".to_owned())];
+    defs.places = places();
+    let mut result = run(&[entry(3, 0, "fresh"), entry(40, 0, "idle")], &defs);
+
+    result.apply_added_dates(
+        &added_at(&[
+            (Defined::alias("fresh"), 5),
+            (Defined::alias("idle"), 5),
+            (Defined::function("precmd"), 5),
+        ]),
+        &window(),
+    );
+
+    let rows = [
+        ("fresh", Kind::Alias, Classification::Used),
+        ("idle", Kind::Alias, Classification::Idle),
+        ("precmd", Kind::Function, Classification::RunsWithoutTyping),
+    ];
+    for (name, kind, classification) in rows {
+        let entry = usage(&result, name, kind);
+        assert_eq!(entry.added, Some(days_ago(5)), "{name}");
+        assert_eq!(entry.classification, classification, "{name}");
+    }
 }

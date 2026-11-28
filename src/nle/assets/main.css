@@ -120,7 +120,179 @@ body,
   background: #181825;
   border-top: 1px solid #313244;
   padding: 12px;
-  overflow-x: auto;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.timeline-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.timeline-summary {
+  color: #6c7086;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.timeline-zoom {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  display: flex;
+  gap: 4px;
+}
+
+.timeline-zoom button {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+/* A border would move the padding edge, where the ticks start, 1 px right
+   of the box that a wheel event measures from. The ring draws outside the
+   box and takes no space. */
+.timeline-view {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: #1e1e2e;
+  box-shadow: 0 0 0 1px #313244;
+  border-radius: 4px;
+}
+
+.timeline-view:focus-visible {
+  outline: 1px solid #89b4fa;
+}
+
+.timeline-ruler {
+  position: relative;
+  height: 24px;
+  border-bottom: 1px solid #313244;
+  overflow: hidden;
+}
+
+.timeline-tick {
+  position: absolute;
+  bottom: 0;
+  width: 1px;
+  height: 5px;
+  background: #585b70;
+}
+
+.timeline-tick-major {
+  height: 10px;
+  background: #a6adc8;
+}
+
+.timeline-tick-label {
+  position: absolute;
+  bottom: 10px;
+  left: 3px;
+  color: #a6adc8;
+  font-family: monospace;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+/* The ruler is 24 px high, with a border of 1 px under it. */
+.timeline-tracks {
+  position: absolute;
+  top: 25px;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.timeline-track {
+  position: relative;
+  height: 40px;
+  border-bottom: 1px solid #313244;
+  overflow: hidden;
+}
+
+.timeline-track-label {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  z-index: 2;
+  color: #6c7086;
+  font-size: 10px;
+  pointer-events: none;
+}
+
+.timeline-content {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  will-change: transform;
+}
+
+/* A border would move the tiles 1 px right of the start of the clip, and
+   cut 2 px from the last tile. The inset ring takes no space. */
+.timeline-clip {
+  position: absolute;
+  top: 3px;
+  height: 34px;
+  background: #313244;
+  box-shadow: inset 0 0 0 1px #89b4fa;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.timeline-clip-label {
+  position: absolute;
+  top: 1px;
+  z-index: 1;
+  padding: 0 4px;
+  color: #cdd6f4;
+  font-size: 10px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* The path of a tile scales to the height of the clip. */
+.timeline-tile {
+  position: absolute;
+  top: 0;
+  height: 100%;
+}
+
+.timeline-tile path {
+  fill: none;
+  stroke: #89b4fa;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.size-mark {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 3;
+  border-left: 1px dashed #f9e2af;
+  pointer-events: none;
+}
+
+.size-mark-label {
+  position: absolute;
+  top: 25px;
+  left: 2px;
+  padding: 0 3px;
+  border-radius: 2px;
+  background: #f9e2af;
+  color: #1e1e2e;
+  font-size: 10px;
+  white-space: nowrap;
+  pointer-events: auto;
 }
 
 .properties-panel {
@@ -141,8 +313,13 @@ button {
   font-size: 13px;
 }
 
-button:hover {
+button:hover:where(:not(:disabled)) {
   background: #585b70;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .placeholder {
