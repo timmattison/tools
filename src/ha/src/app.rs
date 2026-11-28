@@ -417,10 +417,10 @@ where
                 Flow::Continue
             }
             KeyCode::Enter => {
-                if let Some(url) = self.board.selected_url((self.now)()) {
-                    self.status.message = match self.opener.open(&url) {
+                if let Some(link) = self.board.selected_link((self.now)()) {
+                    self.status.message = match self.opener.open(&link.url) {
                         Ok(()) => None,
-                        Err(reason) => Some(failed_open(&url, &reason, (self.now)())),
+                        Err(reason) => Some(failed_open(&link.url, &reason, (self.now)())),
                     };
                 }
                 Flow::Continue

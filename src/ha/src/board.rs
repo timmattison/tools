@@ -1309,7 +1309,7 @@ impl Board {
     /// selected. The value is `None` when the board has no item, and when a
     /// pull request row is selected.
     ///
-    /// It calls `settle` first, as `selected_url` does.
+    /// It calls `settle` first, as `selected_link` does.
     pub fn selected_target(&mut self, now: DateTime<Utc>) -> Option<(&Run, Option<&Job>)> {
         match self.selected_item(now)? {
             (Item::Run(run), job) => Some((run, job)),
@@ -1327,18 +1327,32 @@ impl Board {
         }
     }
 
-    /// The address of the selected row, or `None` when the board has no item.
+    /// What Enter opens for the selected row, or `None` when the board has no
+    /// item.
     ///
     /// On a pull request row, this is the address of the pull request. On a
     /// run row, this is the address of the run. On a job row, this is the
     /// address of the job, and the address of the run when the job has none.
-    pub fn selected_url(&mut self, now: DateTime<Utc>) -> Option<String> {
+    pub fn selected_link(&mut self, now: DateTime<Utc>) -> Option<Link> {
         let (item, job) = self.selected_item(now)?;
         let job_url = job
             .map(|job| job.url.as_str())
             .filter(|url| !url.is_empty());
-        Some(job_url.unwrap_or(item.url()).to_owned())
+        Some(Link {
+            url: job_url.unwrap_or(item.url()).to_owned(),
+            notice: None,
+        })
     }
+}
+
+/// What Enter opens for one row: an address, and as an option a notice for
+/// the status line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    /// The address of the page to open.
+    pub url: String,
+    /// The text that the status line shows after the page opens, or `None`.
+    pub notice: Option<String>,
 }
 
 /// True when `selected` marks the item row at `position` itself, and not one
@@ -1978,7 +1992,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            board.selected_url(now()).as_deref(),
+            board.selected_link(now()).map(|link| link.url).as_deref(),
             Some("https://example.test/a/x/runs/2")
         );
     }
@@ -2427,7 +2441,7 @@ mod tests {
         let mut board = board();
         let rows = board.rows(now());
         assert!(marked(&rows).iter().all(|row| !row.ends_with('*')));
-        assert_eq!(board.selected_url(now()), None);
+        assert_eq!(board.selected_link(now()).map(|link| link.url), None);
     }
 
     /// The text of the one selected row, or `None` when no row is selected.
@@ -2523,13 +2537,13 @@ mod tests {
     fn selected_url_is_the_url_of_the_selected_run() {
         let mut board = four_runs_in_two_sections();
         assert_eq!(
-            board.selected_url(now()).as_deref(),
+            board.selected_link(now()).map(|link| link.url).as_deref(),
             Some("https://example.test/a/x/runs/1")
         );
         board.select_next(now());
         board.select_next(now());
         assert_eq!(
-            board.selected_url(now()).as_deref(),
+            board.selected_link(now()).map(|link| link.url).as_deref(),
             Some("https://example.test/a/x/runs/3")
         );
     }
@@ -2642,7 +2656,7 @@ mod tests {
         select_third(&mut board);
         board.replace(repo("a/x"), Vec::new(), now());
         assert_eq!(selected_text(&mut board), None);
-        assert_eq!(board.selected_url(now()), None);
+        assert_eq!(board.selected_link(now()).map(|link| link.url), None);
 
         board.replace(
             repo("a/x"),
@@ -4353,7 +4367,7 @@ mod tests {
         board.select_next(now());
         assert_eq!(selected_text(&mut board).as_deref(), Some("LastJob(12)*"));
         assert_eq!(
-            board.selected_url(now()).as_deref(),
+            board.selected_link(now()).map(|link| link.url).as_deref(),
             Some("https://example.test/a/x/runs/1/job/12")
         );
     }
@@ -4364,7 +4378,7 @@ mod tests {
         select_job(&mut board, &[(11, "a")], 0);
         assert_eq!(selected_text(&mut board).as_deref(), Some("LastJob(11)*"));
         assert_eq!(
-            board.selected_url(now()).as_deref(),
+            board.selected_link(now()).map(|link| link.url).as_deref(),
             Some("https://example.test/a/x/runs/1")
         );
     }
@@ -4868,13 +4882,13 @@ mod tests {
     fn the_address_of_a_queue_row_is_the_page_of_its_pull_request() {
         let mut board = mixed_board();
         assert_eq!(
-            board.selected_url(now()).as_deref(),
+            board.selected_link(now()).map(|link| link.url).as_deref(),
             Some("https://github.com/a/x/pull/7")
         );
         board.select_next(now());
         board.select_next(now());
         assert_eq!(
-            board.selected_url(now()).as_deref(),
+            board.selected_link(now()).map(|link| link.url).as_deref(),
             Some("https://github.com/a/x/pull/2")
         );
     }
