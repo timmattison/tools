@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use dioxus::prelude::*;
 
+use super::history::keep_keys_in_field;
 use super::{Document, Services};
 use crate::error::NleError;
 use crate::export::{
@@ -381,6 +382,7 @@ pub(super) fn ExportBar(
                         placeholder: FPS_PLACEHOLDER,
                         value: "{current.fps}",
                         oninput: move |event| settings.write().fps = event.value(),
+                        onkeydown: keep_keys_in_field,
                     }
                 }
                 label { "{RESOLUTION_LABEL}"
@@ -390,6 +392,7 @@ pub(super) fn ExportBar(
                         title: RESOLUTION_TITLE,
                         value: "{current.resolution}",
                         oninput: move |event| settings.write().resolution = event.value(),
+                        onkeydown: keep_keys_in_field,
                     }
                 }
                 label {
