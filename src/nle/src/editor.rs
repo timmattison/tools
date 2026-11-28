@@ -250,34 +250,32 @@ impl Edit {
 /// of its track, then start each clip of the track at the end of the clip
 /// before it, from the earliest start on the track.
 ///
-/// The play order of a track is the order of the starts of its clips. A tie
-/// keeps the order on the track. After the edit, the order on the track is
-/// the new play order.
+/// The play order of a track is `EditProject::track_order`. After the edit,
+/// the order on the track is the new play order.
 fn reorder_clip(project: &mut EditProject, id: ClipId, index: usize) -> Result<(), NleError> {
     clip_position(project, id)?;
+    let position = project
+        .timeline
+        .iter()
+        .position(|track| track.clips.contains(&id))
+        .ok_or_else(|| NleError::EditError(format!("clip {} is on no track", id.0)))?;
     let track = project
         .timeline
-        .iter_mut()
-        .find(|track| track.clips.contains(&id))
-        .ok_or_else(|| NleError::EditError(format!("clip {} is on no track", id.0)))?;
-    let clips = &mut project.clips;
-    let start_of = |clip_id: &ClipId| {
-        clips
-            .iter()
-            .find(|clip| clip.id == *clip_id)
-            .map_or(f64::INFINITY, |clip| clip.timeline_offset.get())
-    };
-    let mut order = track.clips.clone();
-    // A stable sort keeps the order on the track on a tie.
-    order.sort_by(|a, b| start_of(a).total_cmp(&start_of(b)));
-    if index >= order.len() {
+        .get(position)
+        .ok_or_else(|| missing_clip(id))?;
+    let played = project.track_order(track);
+    if index >= played.len() {
         return Err(NleError::EditError(format!(
             "place {index} is past the end of track {}, which holds {} clips",
             track.id.0,
-            order.len()
+            played.len()
         )));
     }
-    let mut at = order.iter().map(start_of).fold(f64::INFINITY, f64::min);
+    // The first clip of the play order starts earliest.
+    let mut at = played
+        .first()
+        .map_or(0.0, |clip| clip.timeline_offset.get());
+    let mut order: Vec<ClipId> = played.iter().map(|clip| clip.id).collect();
     let from = order
         .iter()
         .position(|clip_id| *clip_id == id)
@@ -285,14 +283,17 @@ fn reorder_clip(project: &mut EditProject, id: ClipId, index: usize) -> Result<(
     let moved = order.remove(from);
     order.insert(index, moved);
     for clip_id in &order {
-        let clip = clips
+        let clip = project
+            .clips
             .iter_mut()
             .find(|clip| clip.id == *clip_id)
             .ok_or_else(|| missing_clip(*clip_id))?;
         clip.timeline_offset = Seconds::new(at)?;
         at += clip.out_point.get() - clip.in_point.get();
     }
-    track.clips = order;
+    if let Some(track) = project.timeline.get_mut(position) {
+        track.clips = order;
+    }
     Ok(())
 }
 
