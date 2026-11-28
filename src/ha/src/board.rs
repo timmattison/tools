@@ -433,6 +433,9 @@ struct QueueBook {
 const QUEUE_ERROR_PREFIX: &str = "merge queue: ";
 /// The text before the error of a failed read of the events of a queue.
 const HISTORY_ERROR_PREFIX: &str = "merge history: ";
+/// The start of the branch of each run of a merge group. GitHub names the
+/// branch `gh-readonly-queue/<base branch>/pr-<number>-<base commit>`.
+const MERGE_GROUP_BRANCH_PREFIX: &str = "gh-readonly-queue/";
 
 /// How long a run can wait (`⏳`) and still show in the active section. The
 /// wait starts at the end of the newest finished job of the run, or at the
@@ -1290,6 +1293,13 @@ impl Board {
     /// selected. The value is `None` when the board has no item.
     fn selected_item(&mut self, now: DateTime<Utc>) -> Option<(Item<'_>, Option<&Job>)> {
         self.settle(now);
+        self.settled_item(now)
+    }
+
+    /// Does the work of `selected_item` with no `settle`. The caller calls
+    /// `settle` first. A shared borrow lets the caller read the board while
+    /// it holds the item.
+    fn settled_item(&self, now: DateTime<Utc>) -> Option<(Item<'_>, Option<&Job>)> {
         let Selection {
             item: (key, _),
             job,
@@ -1309,7 +1319,7 @@ impl Board {
     /// selected. The value is `None` when the board has no item, and when a
     /// pull request row is selected.
     ///
-    /// It calls `settle` first, as `selected_url` does.
+    /// It calls `settle` first, as `selected_link` does.
     pub fn selected_target(&mut self, now: DateTime<Utc>) -> Option<(&Run, Option<&Job>)> {
         match self.selected_item(now)? {
             (Item::Run(run), job) => Some((run, job)),
@@ -1327,18 +1337,99 @@ impl Board {
         }
     }
 
-    /// The address of the selected row, or `None` when the board has no item.
+    /// What Enter opens for the selected row, or `None` when the board has no
+    /// item.
     ///
-    /// On a pull request row, this is the address of the pull request. On a
-    /// run row, this is the address of the run. On a job row, this is the
-    /// address of the job, and the address of the run when the job has none.
-    pub fn selected_url(&mut self, now: DateTime<Utc>) -> Option<String> {
-        let (item, job) = self.selected_item(now)?;
+    /// On a merge queue row, this is the address of the run of the merge
+    /// group of the entry (see `Board::merge_group_run`). When the board
+    /// holds no such run, it is the address of the pull request, with a
+    /// notice that tells why. On a merge history row, this is the address of
+    /// the pull request. On a run row, this is the address of the run. On a
+    /// job row, this is the address of the job, and the address of the run
+    /// when the job has none.
+    pub fn selected_link(&mut self, now: DateTime<Utc>) -> Option<Link> {
+        self.settle(now);
+        let (item, job) = self.settled_item(now)?;
+        if let Item::Entry(entry) = item {
+            return Some(self.entry_link(entry));
+        }
         let job_url = job
             .map(|job| job.url.as_str())
             .filter(|url| !url.is_empty());
-        Some(job_url.unwrap_or(item.url()).to_owned())
+        Some(Link {
+            url: job_url.unwrap_or(item.url()).to_owned(),
+            notice: None,
+        })
     }
+
+    /// What Enter opens on the row of `entry`: the run of its merge group,
+    /// or the page of its pull request with a notice when the board holds no
+    /// run of its merge group.
+    fn entry_link(&self, entry: &QueueEntry) -> Link {
+        match self.merge_group_run(entry) {
+            Some(run) => Link {
+                url: run.url.clone(),
+                notice: None,
+            },
+            None => Link {
+                url: entry.url.clone(),
+                notice: Some(format!(
+                    "no run of the merge group of #{}: opened the pull request",
+                    entry.pull.0
+                )),
+            },
+        }
+    }
+
+    /// The run of the merge group of `entry` that Enter opens, or `None`
+    /// when the board holds no run of that merge group.
+    ///
+    /// The runs of an entry are the runs that the board holds for the
+    /// repository of the entry, whose `head_sha` is the merge group commit
+    /// of the entry, and whose branch starts with
+    /// [`MERGE_GROUP_BRANCH_PREFIX`]. The name of that branch holds the base
+    /// commit, thus two attempts of one pull request on one base have the
+    /// same branch, and only the commit tells them apart. The prefix keeps
+    /// out the `push` run of the merged commit, which has the same
+    /// `head_sha`. An entry with no merge group commit has no runs.
+    ///
+    /// A merge group can start more than one workflow. The run that opens is
+    /// the first in this order:
+    ///
+    /// 1. A failed run, because a failure takes the entry out of the queue.
+    /// 2. An active run.
+    /// 3. The run that GitHub created last.
+    /// 4. The run with the lowest ID.
+    ///
+    /// Each step only breaks the ties of the steps above it.
+    fn merge_group_run(&self, entry: &QueueEntry) -> Option<&Run> {
+        let commit = entry.merge_group_commit.as_ref()?;
+        self.runs
+            .get(&entry.repo)?
+            .iter()
+            .filter(|run| {
+                run.head_sha.as_ref() == Some(commit)
+                    && run.branch.starts_with(MERGE_GROUP_BRANCH_PREFIX)
+            })
+            .min_by_key(|run| {
+                (
+                    run.state != RunState::Failed,
+                    !run.state.is_active(),
+                    std::cmp::Reverse(run.created_at),
+                    run.id,
+                )
+            })
+    }
+}
+
+/// What Enter opens for one row: an address, and as an option a notice for
+/// the status line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    /// The address of the page to open.
+    pub url: String,
+    /// The text that the status line shows after the page opens, or `None`.
+    pub notice: Option<String>,
 }
 
 /// True when `selected` marks the item row at `position` itself, and not one
@@ -1542,6 +1633,7 @@ mod tests {
     use crate::cost::{Prices, Sku};
     use crate::money::Usd;
     use crate::queue::{EntryState, Outcome};
+    use crate::run::CommitSha;
     use crate::target::OwnerName;
     use chrono::{Duration as Span, TimeZone};
 
@@ -1560,6 +1652,7 @@ mod tests {
     /// Builds a run. The times are minutes before `now()`.
     fn run(id: u64, repo_text: &str, state: RunState, started: i64, updated: i64) -> Run {
         Run {
+            head_sha: None,
             visibility: crate::run::Visibility::Private,
             id: RunId(id),
             repo: repo(repo_text),
@@ -1977,7 +2070,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            board.selected_url(now()).as_deref(),
+            board.selected_link(now()).map(|link| link.url).as_deref(),
             Some("https://example.test/a/x/runs/2")
         );
     }
@@ -2426,7 +2519,7 @@ mod tests {
         let mut board = board();
         let rows = board.rows(now());
         assert!(marked(&rows).iter().all(|row| !row.ends_with('*')));
-        assert_eq!(board.selected_url(now()), None);
+        assert_eq!(board.selected_link(now()).map(|link| link.url), None);
     }
 
     /// The text of the one selected row, or `None` when no row is selected.
@@ -2519,16 +2612,16 @@ mod tests {
     }
 
     #[test]
-    fn selected_url_is_the_url_of_the_selected_run() {
+    fn selected_link_is_the_url_of_the_selected_run() {
         let mut board = four_runs_in_two_sections();
         assert_eq!(
-            board.selected_url(now()).as_deref(),
+            board.selected_link(now()).map(|link| link.url).as_deref(),
             Some("https://example.test/a/x/runs/1")
         );
         board.select_next(now());
         board.select_next(now());
         assert_eq!(
-            board.selected_url(now()).as_deref(),
+            board.selected_link(now()).map(|link| link.url).as_deref(),
             Some("https://example.test/a/x/runs/3")
         );
     }
@@ -2641,7 +2734,7 @@ mod tests {
         select_third(&mut board);
         board.replace(repo("a/x"), Vec::new(), now());
         assert_eq!(selected_text(&mut board), None);
-        assert_eq!(board.selected_url(now()), None);
+        assert_eq!(board.selected_link(now()).map(|link| link.url), None);
 
         board.replace(
             repo("a/x"),
@@ -4332,7 +4425,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_url_on_a_job_row_is_the_url_of_the_job() {
+    fn selected_link_on_a_job_row_is_the_url_of_the_job() {
         let mut board = two_run_board();
         board.expand(now());
         board.set_jobs(
@@ -4352,18 +4445,18 @@ mod tests {
         board.select_next(now());
         assert_eq!(selected_text(&mut board).as_deref(), Some("LastJob(12)*"));
         assert_eq!(
-            board.selected_url(now()).as_deref(),
+            board.selected_link(now()).map(|link| link.url).as_deref(),
             Some("https://example.test/a/x/runs/1/job/12")
         );
     }
 
     #[test]
-    fn selected_url_on_a_job_row_without_a_url_is_the_url_of_the_run() {
+    fn selected_link_on_a_job_row_without_a_url_is_the_url_of_the_run() {
         let mut board = two_run_board();
         select_job(&mut board, &[(11, "a")], 0);
         assert_eq!(selected_text(&mut board).as_deref(), Some("LastJob(11)*"));
         assert_eq!(
-            board.selected_url(now()).as_deref(),
+            board.selected_link(now()).map(|link| link.url).as_deref(),
             Some("https://example.test/a/x/runs/1")
         );
     }
@@ -4401,6 +4494,7 @@ mod tests {
     /// `position`. It joined the queue `minutes` before `now()`.
     fn queue_entry(repo_text: &str, pull: u64, position: u32, minutes: i64) -> QueueEntry {
         QueueEntry {
+            merge_group_commit: None,
             repo: repo(repo_text),
             pull: PullNumber(pull),
             title: format!("pull {pull}"),
@@ -4862,18 +4956,210 @@ mod tests {
         );
     }
 
+    /// The commit of the merge group of pull request 7 in the tests of Enter
+    /// on a queue row.
+    const GROUP: &str = "e8dc7f8f0a3c4b5d6e7f8091a2b3c4d5e6f70812";
+    /// The commit of an older attempt of pull request 7 on the same base.
+    const OLD_GROUP: &str = "8220d8a80b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e";
+    /// The branch of each merge group of pull request 7 on the base
+    /// `2a5e21d6`. Two attempts on the same base have the same branch.
+    const GROUP_BRANCH: &str =
+        "gh-readonly-queue/main/pr-7-2a5e21d6c3b4a5968778695a4b3c2d1e0f9a8b7c";
+    /// The notice of Enter on the row of pull request 7 with no run.
+    const NO_RUN_NOTICE: &str = "no run of the merge group of #7: opened the pull request";
+
+    /// The entry of pull request 7 in the queue of `a/x`, whose merge group
+    /// tests `commit`.
+    fn entry_of_group(commit: Option<&str>) -> QueueEntry {
+        QueueEntry {
+            state: EntryState::AwaitingChecks,
+            merge_group_commit: commit.map(|sha| CommitSha(sha.to_owned())),
+            ..queue_entry("a/x", 7, 1, 3)
+        }
+    }
+
+    /// A run of `repo_text` on `branch` that tests `commit`. GitHub made it
+    /// `created` minutes before `now()`.
+    fn run_of_commit(
+        id: u64,
+        repo_text: &str,
+        state: RunState,
+        branch: &str,
+        commit: Option<&str>,
+        created: i64,
+    ) -> Run {
+        Run {
+            branch: branch.to_owned(),
+            head_sha: commit.map(|sha| CommitSha(sha.to_owned())),
+            ..run(id, repo_text, state, created, 0)
+        }
+    }
+
+    /// What Enter opens on the row of `entry`, when the board holds `runs`
+    /// for `a/x`. The row of the entry is the first row, thus it is selected.
+    fn link_of_entry(entry: QueueEntry, runs: Vec<Run>) -> Link {
+        let mut board = queue_board(vec![entry], Vec::new());
+        board.replace(repo("a/x"), runs, now());
+        board.selected_link(now()).expect("a link")
+    }
+
+    /// The link of the page of run `id` of `a/x`, with no notice.
+    fn run_link(id: u64) -> Link {
+        Link {
+            url: format!("https://example.test/a/x/runs/{id}"),
+            notice: None,
+        }
+    }
+
+    /// The link of the page of pull request 7, with the notice of no run.
+    fn pull_link_with_notice() -> Link {
+        Link {
+            url: "https://github.com/a/x/pull/7".to_owned(),
+            notice: Some(NO_RUN_NOTICE.to_owned()),
+        }
+    }
+
     #[test]
-    fn the_address_of_a_queue_row_is_the_page_of_its_pull_request() {
-        let mut board = mixed_board();
-        assert_eq!(
-            board.selected_url(now()).as_deref(),
-            Some("https://github.com/a/x/pull/7")
+    fn enter_on_a_queue_row_opens_the_run_of_its_merge_group() {
+        let link = link_of_entry(
+            entry_of_group(Some(GROUP)),
+            vec![run_of_commit(
+                11,
+                "a/x",
+                RunState::Running,
+                GROUP_BRANCH,
+                Some(GROUP),
+                2,
+            )],
         );
+        assert_eq!(link, run_link(11));
+    }
+
+    #[test]
+    fn enter_on_a_queue_row_opens_no_old_attempt_no_push_run_and_no_run_of_another_repository() {
+        let mut board = queue_board(vec![entry_of_group(Some(GROUP))], Vec::new());
+        // Each run that is not of the merge group failed, thus the order
+        // would pick it first if the rule let it in.
+        board.replace(
+            repo("a/x"),
+            vec![
+                run_of_commit(
+                    21,
+                    "a/x",
+                    RunState::Failed,
+                    GROUP_BRANCH,
+                    Some(OLD_GROUP),
+                    30,
+                ),
+                run_of_commit(22, "a/x", RunState::Failed, "main", Some(GROUP), 0),
+                run_of_commit(23, "a/x", RunState::Running, GROUP_BRANCH, Some(GROUP), 2),
+            ],
+            now(),
+        );
+        board.replace(
+            repo("b/y"),
+            vec![run_of_commit(
+                24,
+                "b/y",
+                RunState::Failed,
+                GROUP_BRANCH,
+                Some(GROUP),
+                1,
+            )],
+            now(),
+        );
+        assert_eq!(board.selected_link(now()), Some(run_link(23)));
+    }
+
+    /// What Enter opens on the row of the entry of [`GROUP`], when the
+    /// board holds a run of that merge group for each `(id, state, created)`,
+    /// in that order. `created` is in minutes before `now()`.
+    fn link_of_group_runs(runs: &[(u64, RunState, i64)]) -> Link {
+        let runs = runs
+            .iter()
+            .map(|&(id, state, created)| {
+                run_of_commit(id, "a/x", state, GROUP_BRANCH, Some(GROUP), created)
+            })
+            .collect();
+        link_of_entry(entry_of_group(Some(GROUP)), runs)
+    }
+
+    #[test]
+    fn a_failed_run_of_the_merge_group_opens_before_an_active_run_and_a_newer_run() {
+        let link = link_of_group_runs(&[
+            (31, RunState::Running, 1),
+            (32, RunState::Passed, 0),
+            (33, RunState::Failed, 5),
+        ]);
+        assert_eq!(link, run_link(33));
+    }
+
+    #[test]
+    fn an_active_run_of_the_merge_group_opens_before_a_newer_finished_run() {
+        let link = link_of_group_runs(&[(41, RunState::Passed, 1), (42, RunState::Queued, 5)]);
+        assert_eq!(link, run_link(42));
+    }
+
+    #[test]
+    fn with_no_failed_or_active_run_the_newest_run_of_the_merge_group_opens() {
+        let link = link_of_group_runs(&[(51, RunState::Passed, 10), (52, RunState::Cancelled, 2)]);
+        assert_eq!(link, run_link(52));
+    }
+
+    #[test]
+    fn in_a_tie_the_run_of_the_merge_group_with_the_lowest_id_opens() {
+        let link = link_of_group_runs(&[(62, RunState::Running, 3), (61, RunState::Running, 3)]);
+        assert_eq!(link, run_link(61));
+    }
+
+    #[test]
+    fn enter_on_a_queue_row_with_no_run_of_its_merge_group_opens_the_pull_request_with_a_notice() {
+        let link = link_of_entry(
+            entry_of_group(Some(GROUP)),
+            vec![
+                run_of_commit(
+                    21,
+                    "a/x",
+                    RunState::Running,
+                    GROUP_BRANCH,
+                    Some(OLD_GROUP),
+                    30,
+                ),
+                run_of_commit(22, "a/x", RunState::Running, "main", Some(GROUP), 0),
+            ],
+        );
+        assert_eq!(link, pull_link_with_notice());
+    }
+
+    #[test]
+    fn enter_on_a_queue_row_with_no_merge_group_opens_the_pull_request_with_a_notice() {
+        // A run that gives no head_sha is not a run of an entry that has no
+        // merge group.
+        let link = link_of_entry(
+            entry_of_group(None),
+            vec![run_of_commit(
+                31,
+                "a/x",
+                RunState::Running,
+                GROUP_BRANCH,
+                None,
+                2,
+            )],
+        );
+        assert_eq!(link, pull_link_with_notice());
+    }
+
+    #[test]
+    fn enter_on_a_merge_history_row_opens_the_pull_request_with_no_notice() {
+        let mut board = mixed_board();
         board.select_next(now());
         board.select_next(now());
         assert_eq!(
-            board.selected_url(now()).as_deref(),
-            Some("https://github.com/a/x/pull/2")
+            board.selected_link(now()),
+            Some(Link {
+                url: "https://github.com/a/x/pull/2".to_owned(),
+                notice: None,
+            })
         );
     }
 
@@ -5191,6 +5477,7 @@ mod tests {
     /// changed its `updated_at` 18 minutes after the last job ended.
     fn late_run() -> Run {
         Run {
+            head_sha: None,
             visibility: crate::run::Visibility::Private,
             id: RunId(41_874_496_263),
             repo: repo("Lock-Free-Labs/nvr-tools"),
