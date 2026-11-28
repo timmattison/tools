@@ -27,6 +27,11 @@ use crate::types::{AppliedFilter, EditProject, FilterRegion, Seconds};
 use crate::format::{file_name, format_duration, format_recorded};
 use crate::types::{LoadedRecording, RecordingMetadata};
 
+mod history;
+use history::{
+    keep_keys_in_field, key_forwarder, step_history, window_shortcut, HistoryButtons, HistoryStep,
+};
+
 mod preview;
 use preview::{end_of, render_of, PreviewPane, RenderedState};
 mod timeline;
@@ -165,6 +170,10 @@ const REDACTION_FAILED_PREFIX: &str = "Failed to redact";
 /// The accessible label of the playhead control.
 const PLAYHEAD_LABEL: &str = "Playhead";
 
+/// The id of the root element of the app. The script of `key_forwarder` sends
+/// to it each key press that lands outside the app.
+const APP_ROOT_ID: &str = "nle-app";
+
 /// The title of the application window.
 const WINDOW_TITLE: &str = "NLE - Terminal Recording Editor";
 /// The width of the application window, in logical pixels.
@@ -173,14 +182,18 @@ const WINDOW_WIDTH: f64 = 1280.0;
 const WINDOW_HEIGHT: f64 = 800.0;
 
 /// The window settings of the application: a resizable window with the title
-/// and the size above.
+/// and the size above. The head of the page holds the script of
+/// `key_forwarder`, so the keys of the window work when no element has the
+/// focus.
 pub(crate) fn window_config() -> Config {
-    Config::new().with_window(
-        WindowBuilder::new()
-            .with_title(WINDOW_TITLE)
-            .with_resizable(true)
-            .with_inner_size(LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT)),
-    )
+    Config::new()
+        .with_window(
+            WindowBuilder::new()
+                .with_title(WINDOW_TITLE)
+                .with_resizable(true)
+                .with_inner_size(LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT)),
+        )
+        .with_custom_head(key_forwarder(APP_ROOT_ID))
 }
 
 /// A future that the interface runs on its own thread. It needs no `Send`.
@@ -280,11 +293,28 @@ pub(crate) fn App() -> Element {
     let mut playing = use_signal(|| false);
     let mut view = use_signal(View::default);
     let rendered = use_memo(move || render_of(&loaded.read()));
+    // A step that changed the project clears the banner, as an edit does.
+    let take_step = use_callback(move |step: HistoryStep| match step_history(loaded, step) {
+        Ok(true) => error.set(None),
+        Ok(false) => {}
+        Err(message) => error.set(Some(message)),
+    });
 
     rsx! {
         style { {STYLE} }
-        div { class: "app-layout",
+        div {
+            id: APP_ROOT_ID,
+            class: "app-layout",
+            // Each key press of the window comes here, except the keys of a
+            // text field, which stay in the field.
+            onkeydown: move |event| {
+                if let Some(step) = window_shortcut(&event) {
+                    take_step.call(step);
+                }
+            },
             MenuBar {
+                loaded,
+                on_step: take_step,
                 on_loaded: move |recording| match Document::open(recording, filters.clone()) {
                     Ok(document) => {
                         loaded.set(Some(document));
@@ -315,9 +345,16 @@ pub(crate) fn App() -> Element {
     }
 }
 
-/// The menu bar with the Open Recording button.
+/// The menu bar: the Open Recording button, then the Undo button and the Redo
+/// button of the editor of `loaded`. Each click of Undo or Redo sends its step
+/// to `on_step`.
 #[component]
-fn MenuBar(on_loaded: EventHandler<LoadedRecording>, on_error: EventHandler<String>) -> Element {
+fn MenuBar(
+    loaded: ReadSignal<Option<Document>>,
+    on_step: EventHandler<HistoryStep>,
+    on_loaded: EventHandler<LoadedRecording>,
+    on_error: EventHandler<String>,
+) -> Element {
     let services = use_context::<Services>();
     // True from the click until the dialog and the load end.
     let mut opening = use_signal(|| false);
@@ -344,6 +381,7 @@ fn MenuBar(on_loaded: EventHandler<LoadedRecording>, on_error: EventHandler<Stri
                 },
                 "Open Recording"
             }
+            HistoryButtons { loaded, on_step }
         }
     }
 }
@@ -465,6 +503,7 @@ fn SpeedPanel(
                     min: "0",
                     value: "{start}",
                     oninput: move |event| start.set(event.value()),
+                    onkeydown: keep_keys_in_field,
                 }
             }
             label { class: "edit-field",
@@ -475,6 +514,7 @@ fn SpeedPanel(
                     min: "0",
                     value: "{end}",
                     oninput: move |event| end.set(event.value()),
+                    onkeydown: keep_keys_in_field,
                 }
             }
             label { class: "edit-field",
@@ -485,6 +525,7 @@ fn SpeedPanel(
                     min: "0",
                     value: "{speed}",
                     oninput: move |event| speed.set(event.value()),
+                    onkeydown: keep_keys_in_field,
                 }
             }
             button {
@@ -629,6 +670,7 @@ fn RedactionPanel(
                     value: "{pattern}",
                     disabled: find() != FIND_TEXT && find() != FIND_REGEX,
                     oninput: move |event| pattern.set(event.value()),
+                    onkeydown: keep_keys_in_field,
                 }
             }
             label { class: "edit-field",
@@ -648,6 +690,7 @@ fn RedactionPanel(
                     value: "{replacement}",
                     disabled: replace() != REPLACE_TEXT,
                     oninput: move |event| replacement.set(event.value()),
+                    onkeydown: keep_keys_in_field,
                 }
             }
             label { class: "edit-field",

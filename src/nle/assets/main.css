@@ -309,8 +309,13 @@ button {
   font-size: 13px;
 }
 
-button:hover {
+button:hover:where(:not(:disabled)) {
   background: #585b70;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .placeholder {
