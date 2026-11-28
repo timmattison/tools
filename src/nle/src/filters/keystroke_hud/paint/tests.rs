@@ -480,6 +480,9 @@ fn the_paint_keeps_a_pending_wrap_of_the_program() {
         ("\x1b[2;1Habcdefghijklmnopqr日", 2),
         // A row that ends in `q` of the ASCII set, then the line drawing set.
         ("\x1b[1;1Habcdefghijklmnopqrsq\x1b(0", 1),
+        // A row that ends in `e` of the ASCII set, then the line drawing set,
+        // which shows `e` as a symbol for line feed.
+        ("\x1b[1;1Habcdefghijklmnopqrse\x1b(0", 1),
     ];
     for (row, next) in rows {
         let mut rig = Rig::new(screen, &TerminalTheme::auto());

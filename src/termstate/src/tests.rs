@@ -815,13 +815,52 @@ fn line_drawing_is_on_after_the_designation_of_the_special_set() {
 
 #[test]
 fn the_line_drawing_glyph_is_the_glyph_of_a_print_in_that_set() {
-    assert_eq!(line_drawing_glyph('q'), '─');
-    assert_eq!(line_drawing_glyph('a'), 'a');
-    assert_eq!(line_drawing_glyph('─'), '─');
-    let mut state = TerminalState::new(20, 2, TerminalTheme::auto());
-    state.process_output("\x1b(0jklmnqtuvwxaZ").unwrap();
-    for (cell, ch) in state.get_grid()[0].iter().zip("jklmnqtuvwxaZ".chars()) {
-        assert_eq!(cell.ch, line_drawing_glyph(ch), "{ch:?}");
+    // The glyph that a terminal shows for each character from 0x5F to 0x7E.
+    const GLYPHS: [(char, char); 32] = [
+        ('_', ' '),
+        ('`', '◆'),
+        ('a', '▒'),
+        ('b', '\u{2409}'),
+        ('c', '\u{240c}'),
+        ('d', '\u{240d}'),
+        ('e', '\u{240a}'),
+        ('f', '°'),
+        ('g', '±'),
+        ('h', '\u{2424}'),
+        ('i', '\u{240b}'),
+        ('j', '┘'),
+        ('k', '┐'),
+        ('l', '┌'),
+        ('m', '└'),
+        ('n', '┼'),
+        ('o', '⎺'),
+        ('p', '⎻'),
+        ('q', '─'),
+        ('r', '⎼'),
+        ('s', '⎽'),
+        ('t', '├'),
+        ('u', '┤'),
+        ('v', '┴'),
+        ('w', '┬'),
+        ('x', '│'),
+        ('y', '≤'),
+        ('z', '≥'),
+        ('{', 'π'),
+        ('|', '≠'),
+        ('}', '£'),
+        ('~', '·'),
+    ];
+    for (ch, glyph) in GLYPHS {
+        assert_eq!(line_drawing_glyph(ch), glyph, "{ch:?}");
+    }
+    for ch in ['^', 'A', 'Z', '0', '─'] {
+        assert_eq!(line_drawing_glyph(ch), ch, "{ch:?}");
+    }
+    let mut state = TerminalState::new(40, 2, TerminalTheme::auto());
+    let printed: String = GLYPHS.iter().map(|&(ch, _)| ch).collect();
+    state.process_output(&format!("\x1b(0{printed}")).unwrap();
+    for (cell, (ch, glyph)) in state.get_grid()[0].iter().zip(GLYPHS) {
+        assert_eq!(cell.ch, glyph, "{ch:?}");
     }
 }
 
