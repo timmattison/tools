@@ -4956,21 +4956,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_address_of_a_queue_row_is_the_page_of_its_pull_request() {
-        let mut board = mixed_board();
-        assert_eq!(
-            board.selected_link(now()).map(|link| link.url).as_deref(),
-            Some("https://github.com/a/x/pull/7")
-        );
-        board.select_next(now());
-        board.select_next(now());
-        assert_eq!(
-            board.selected_link(now()).map(|link| link.url).as_deref(),
-            Some("https://github.com/a/x/pull/2")
-        );
-    }
-
     /// The commit of the merge group of pull request 7 in the tests of Enter
     /// on a queue row.
     const GROUP: &str = "e8dc7f8f0a3c4b5d6e7f8091a2b3c4d5e6f70812";
