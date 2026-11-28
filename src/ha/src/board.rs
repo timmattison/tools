@@ -433,6 +433,9 @@ struct QueueBook {
 const QUEUE_ERROR_PREFIX: &str = "merge queue: ";
 /// The text before the error of a failed read of the events of a queue.
 const HISTORY_ERROR_PREFIX: &str = "merge history: ";
+/// The start of the branch of each run of a merge group. GitHub names the
+/// branch `gh-readonly-queue/<base branch>/pr-<number>-<base commit>`.
+const MERGE_GROUP_BRANCH_PREFIX: &str = "gh-readonly-queue/";
 
 /// How long a run can wait (`⏳`) and still show in the active section. The
 /// wait starts at the end of the newest finished job of the run, or at the
@@ -1290,6 +1293,13 @@ impl Board {
     /// selected. The value is `None` when the board has no item.
     fn selected_item(&mut self, now: DateTime<Utc>) -> Option<(Item<'_>, Option<&Job>)> {
         self.settle(now);
+        self.settled_item(now)
+    }
+
+    /// Does the work of `selected_item` with no `settle`. The caller calls
+    /// `settle` first. A shared borrow lets the caller read the board while
+    /// it holds the item.
+    fn settled_item(&self, now: DateTime<Utc>) -> Option<(Item<'_>, Option<&Job>)> {
         let Selection {
             item: (key, _),
             job,
@@ -1330,17 +1340,63 @@ impl Board {
     /// What Enter opens for the selected row, or `None` when the board has no
     /// item.
     ///
-    /// On a pull request row, this is the address of the pull request. On a
-    /// run row, this is the address of the run. On a job row, this is the
-    /// address of the job, and the address of the run when the job has none.
+    /// On a merge queue row, this is the address of the run of the merge
+    /// group of the entry (see `Board::merge_group_run`). When the board
+    /// holds no such run, it is the address of the pull request, with a
+    /// notice that tells why. On a merge history row, this is the address of
+    /// the pull request. On a run row, this is the address of the run. On a
+    /// job row, this is the address of the job, and the address of the run
+    /// when the job has none.
     pub fn selected_link(&mut self, now: DateTime<Utc>) -> Option<Link> {
-        let (item, job) = self.selected_item(now)?;
+        self.settle(now);
+        let (item, job) = self.settled_item(now)?;
+        if let Item::Entry(entry) = item {
+            return Some(self.entry_link(entry));
+        }
         let job_url = job
             .map(|job| job.url.as_str())
             .filter(|url| !url.is_empty());
         Some(Link {
             url: job_url.unwrap_or(item.url()).to_owned(),
             notice: None,
+        })
+    }
+
+    /// What Enter opens on the row of `entry`: the run of its merge group,
+    /// or the page of its pull request with a notice when the board holds no
+    /// run of its merge group.
+    fn entry_link(&self, entry: &QueueEntry) -> Link {
+        match self.merge_group_run(entry) {
+            Some(run) => Link {
+                url: run.url.clone(),
+                notice: None,
+            },
+            None => Link {
+                url: entry.url.clone(),
+                notice: Some(format!(
+                    "no run of the merge group of #{}: opened the pull request",
+                    entry.pull.0
+                )),
+            },
+        }
+    }
+
+    /// The run of the merge group of `entry` that Enter opens, or `None`
+    /// when the board holds no run of that merge group.
+    ///
+    /// The runs of an entry are the runs that the board holds for the
+    /// repository of the entry, whose `head_sha` is the merge group commit
+    /// of the entry, and whose branch starts with
+    /// [`MERGE_GROUP_BRANCH_PREFIX`]. The name of that branch holds the base
+    /// commit, thus two attempts of one pull request on one base have the
+    /// same branch, and only the commit tells them apart. The prefix keeps
+    /// out the `push` run of the merged commit, which has the same
+    /// `head_sha`. An entry with no merge group commit has no runs.
+    fn merge_group_run(&self, entry: &QueueEntry) -> Option<&Run> {
+        let commit = entry.merge_group_commit.as_ref()?;
+        self.runs.get(&entry.repo)?.iter().find(|run| {
+            run.head_sha.as_ref() == Some(commit)
+                && run.branch.starts_with(MERGE_GROUP_BRANCH_PREFIX)
         })
     }
 }
