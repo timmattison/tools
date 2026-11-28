@@ -85,6 +85,7 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
 - [cwt](src/cwt/README.md) — Change Worktree — navigate, cycle, or jump between the git worktrees of a repository and of the repositories inside it.
 - [dirc](src/dirc/README.md) — Copies the current directory to the clipboard, or emits a `cd` from a clipboard path.
 - [dirhash](src/dirhash/README.md) — SHA256 hash of a directory tree's contents to compare directories for equality.
+- [diskhog](src/diskhog/README.md) — Live terminal UI of per-process disk I/O on macOS (IOPS with sudo).
 
 ### Not moved yet
 
@@ -310,11 +311,6 @@ These tools keep their long entries in this file until each one moves to `src/<t
       remove a prefix from, a broken symlink target. `--dry-run` prints every planned change and touches nothing.
       Useful after moving directories or restructuring a project.
     - To install: `cargo install --git https://github.com/timmattison/tools symfix`
-- diskhog
-    - Shows per-process disk I/O usage on macOS in a continuously updating terminal UI. Displays disk bandwidth
-      (read/write bytes per second) for all processes. When run with sudo, also shows IOPS (operations per second)
-      using fs_usage. Features include configurable refresh rate, process count limits, and keyboard controls (q/Esc to quit).
-    - To install: `cargo install --git https://github.com/timmattison/tools diskhog`
 - gitdiggin
     - Recursively searches Git repositories for commits containing a specific string. Can search in commit messages by
       default and optionally in commit contents (diffs). Useful for finding when and where specific changes were made
