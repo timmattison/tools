@@ -23,13 +23,12 @@ their slices make them final.
    the comparison.
 2. **The ABI is one WIT package, `nle:plugin`**, with one world for each plugin
    type: `filter-plugin`, `in-place-filter-plugin`, `span-filter-plugin`,
-   `analyzer-plugin`, and `renderer-plugin`. The three filter worlds match the
-   three forms of a filter in `src/nle`: the event form `FilterFn`, the
-   in-place form `InPlaceFilterFn`, and the span form `SpanFilterFn`. The cut
-   form `CutFilterFn` came later, in issue #164, for the backspace removal filter
-   (issue #152), and it has no world yet. Each world exports a versioned
-   interface, thus the host reads the API version of a plugin from the plugin
-   itself.
+   `analyzer-plugin`, and `renderer-plugin`. The three filter worlds match
+   three of the forms of a filter in `src/nle`: the event form `FilterFn`, the
+   in-place form `InPlaceFilterFn`, and the span form `SpanFilterFn`. The
+   other forms that `FilterRegistry` registers have no world yet. Each world
+   exports a versioned interface, thus the host reads the API version of a
+   plugin from the plugin itself.
 3. **One plugin is one folder, one manifest, one component, and one function.**
 4. **Each call gets a new instance.** No state survives from one call to the
    next, and the same input always gives the same output. A failure at the
