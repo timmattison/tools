@@ -535,18 +535,11 @@ impl Replay {
         // line-drawing set, because the real terminal is in the ASCII set.
         let wrap_pending = self.terminal.is_wrap_pending();
         if wrap_pending {
-            let cells = self.terminal.get_grid().get(cursor_y);
-            let cell = cells.and_then(|cells| cells.get(cursor_x));
             // A wide character in the last two columns holds the pending wrap
             // in the last column, thus the write starts at its first cell.
-            let column = if cell.is_some_and(Cell::is_wide_continuation) {
-                cursor_x.saturating_sub(1)
-            } else {
-                cursor_x
-            };
-            let glyph = cells.and_then(|cells| cells.get(column)).map(glyph_of);
-            if let Some(glyph) = glyph {
-                self.writer.rewrite(column, cursor_y, glyph, &mut data);
+            if let Some((column, cell)) = self.terminal.character_at(cursor_x, cursor_y) {
+                self.writer
+                    .rewrite(column, cursor_y, glyph_of(cell), &mut data);
             }
         }
         if self.terminal.uses_line_drawing() {

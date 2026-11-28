@@ -18,7 +18,9 @@
 use super::options::{HudOptions, Position, Rgb};
 use super::timeline::{Piece, Shown};
 use crate::pipeline::TerminalSize;
-use termstate::{Cell, ColorSource, TerminalState, TerminalTheme, WIDE_CONTINUATION};
+use termstate::{
+    line_drawing_glyph, Cell, ColorSource, TerminalState, TerminalTheme, WIDE_CONTINUATION,
+};
 use unicode_width::UnicodeWidthChar;
 
 /// The cells between the box and the edge of the screen.
@@ -325,12 +327,15 @@ fn move_to(row: usize, column: usize) -> String {
     format!("\x1b[{};{}H", row + 1, column + 1)
 }
 
-/// The state of a screen that the HUD can disturb: the cursor, the current
-/// attributes and the character set.
+/// The state of a screen that the HUD can disturb: the cursor, the pending
+/// wrap, the current attributes and the character set.
 #[derive(PartialEq)]
 struct Pen {
     /// The cursor, as column and row.
     cursor: (usize, usize),
+    /// Whether a wrap is pending. The next character of the program then goes
+    /// to the start of the next row, not over the cell under the cursor.
+    wrap_pending: bool,
     /// The source of the current foreground.
     fg: ColorSource,
     /// The source of the current background.
@@ -360,6 +365,7 @@ impl Pen {
     fn of(screen: &TerminalState) -> Self {
         Self {
             cursor: screen.get_cursor_position(),
+            wrap_pending: screen.is_wrap_pending(),
             fg: screen.current_fg_source,
             bg: screen.current_bg_source,
             bold: screen.bold,
@@ -374,11 +380,37 @@ impl Pen {
         }
     }
 
-    /// The sequences that put a screen in the pen `from` into this state. The
-    /// character set is selected only when it differs from the one of `from`,
-    /// so that a repair of the cursor writes no set of the replay.
-    fn restore(&self, from: &Self) -> String {
-        let cell = Cell {
+    /// The sequences that put the screen `shown` into this state. The
+    /// character set is selected only when it differs from the one of
+    /// `shown`, so that a repair of the cursor writes no set of the replay.
+    ///
+    /// A move of the cursor ends a pending wrap, and only a print in the last
+    /// column sets one. Thus the repair of a pending wrap prints the cell that
+    /// `shown` holds under the cursor again, in the style of that cell, and
+    /// writes no move after it. The print selects the ASCII set first only
+    /// when the line drawing set changes the character of that cell.
+    fn restore(&self, shown: &TerminalState) -> String {
+        let (column, row) = self.cursor;
+        let mut output = String::new();
+        let mut use_acs = shown.uses_line_drawing();
+        let again = if self.wrap_pending {
+            shown.character_at(column, row)
+        } else {
+            None
+        };
+        match again {
+            Some((start, cell)) => {
+                if use_acs && line_drawing_glyph(cell.ch) != cell.ch {
+                    output.push_str(SELECT_ASCII);
+                    use_acs = false;
+                }
+                output.push_str(&move_to(row, start));
+                output.push_str(&sgr(cell));
+                output.push(cell.ch);
+            }
+            None => output.push_str(&move_to(row, column)),
+        }
+        let pen = Cell {
             fg_source: self.fg,
             bg_source: self.bg,
             bold: self.bold,
@@ -391,16 +423,13 @@ impl Pen {
             strikethrough: self.strikethrough,
             ..Cell::default()
         };
-        let charset = match (self.use_acs, from.use_acs) {
+        output.push_str(&sgr(&pen));
+        output.push_str(match (self.use_acs, use_acs) {
             (true, false) => SELECT_LINE_DRAWING,
             (false, true) => SELECT_ASCII,
             _ => "",
-        };
-        format!(
-            "{}{}{charset}",
-            move_to(self.cursor.1, self.cursor.0),
-            sgr(&cell)
-        )
+        });
+        output
     }
 }
 
@@ -554,24 +583,28 @@ impl Painter {
                 last = Some((row, column, style));
             }
         }
-        let (shown_pen, clean_pen) = (Pen::of(&self.shown), Pen::of(&self.clean));
-        let repair = (shown_pen != clean_pen).then(|| clean_pen.restore(&shown_pen));
-        self.synced = (overlay.is_none() && !any_cell && repair.is_none())
-            .then(|| self.clean.restore_count());
         let mut output = String::new();
         if any_cell {
             output.push_str("\x1b7\x0f\x1b(B\x1b[?6l");
             output.push_str(&body);
             output.push_str("\x1b8");
+            self.shown.process_output(&output).ok();
         }
+        // The pen of the viewer after the cells, because their ESC 8 ends a
+        // pending wrap.
+        let clean_pen = Pen::of(&self.clean);
+        let repair = (Pen::of(&self.shown) != clean_pen).then(|| clean_pen.restore(&self.shown));
+        self.synced = (overlay.is_none() && !any_cell && repair.is_none())
+            .then(|| self.clean.restore_count());
         if let Some(repair) = repair {
+            self.shown.process_output(&repair).ok();
             output.push_str(&repair);
         }
         if output.is_empty() {
             return None;
         }
+        self.shown.process_output(reopen).ok();
         output.push_str(reopen);
-        self.shown.process_output(&output).ok();
         Some(output)
     }
 }

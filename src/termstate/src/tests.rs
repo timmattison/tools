@@ -1,4 +1,4 @@
-use crate::{Cell, ColorSource, TerminalState, TerminalTheme};
+use crate::{line_drawing_glyph, Cell, ColorSource, TerminalState, TerminalTheme};
 
 #[test]
 fn test_terminal_theme_creation() {
@@ -811,6 +811,35 @@ fn line_drawing_is_on_after_the_designation_of_the_special_set() {
 
     state.process_output("\x1b(B").unwrap();
     assert!(!state.uses_line_drawing());
+}
+
+#[test]
+fn the_line_drawing_glyph_is_the_glyph_of_a_print_in_that_set() {
+    assert_eq!(line_drawing_glyph('q'), '─');
+    assert_eq!(line_drawing_glyph('a'), 'a');
+    assert_eq!(line_drawing_glyph('─'), '─');
+    let mut state = TerminalState::new(20, 2, TerminalTheme::auto());
+    state.process_output("\x1b(0jklmnqtuvwxaZ").unwrap();
+    for (cell, ch) in state.get_grid()[0].iter().zip("jklmnqtuvwxaZ".chars()) {
+        assert_eq!(cell.ch, line_drawing_glyph(ch), "{ch:?}");
+    }
+}
+
+#[test]
+fn the_character_at_the_second_cell_of_a_wide_character_starts_one_cell_before() {
+    let mut state = TerminalState::new(6, 2, TerminalTheme::auto());
+    state.process_output("ab日c").unwrap();
+    let at = |x: usize, y: usize| {
+        state
+            .character_at(x, y)
+            .map(|(column, cell)| (column, cell.ch))
+    };
+    assert_eq!(at(1, 0), Some((1, 'b')));
+    assert_eq!(at(2, 0), Some((2, '日')));
+    assert_eq!(at(3, 0), Some((2, '日')));
+    assert_eq!(at(4, 0), Some((4, 'c')));
+    assert_eq!(at(6, 0), None);
+    assert_eq!(at(0, 2), None);
 }
 
 /// The text of row `y`, with the trailing blanks cut off.

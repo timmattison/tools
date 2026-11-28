@@ -27,6 +27,26 @@ use vte::{Parser, Perform};
 /// printed character has this value.
 pub const WIDE_CONTINUATION: char = '\0';
 
+/// The glyph that the DEC line drawing set shows for `ch`, or `ch` when that
+/// set shows it unchanged. A print of `ch` while the set is on puts this glyph
+/// into the cell.
+pub fn line_drawing_glyph(ch: char) -> char {
+    match ch {
+        'j' => '┘', // Lower right corner
+        'k' => '┐', // Upper right corner
+        'l' => '┌', // Upper left corner
+        'm' => '└', // Lower left corner
+        'n' => '┼', // Cross
+        'q' => '─', // Horizontal line
+        't' => '├', // Left T
+        'u' => '┤', // Right T
+        'v' => '┴', // Bottom T
+        'w' => '┬', // Top T
+        'x' => '│', // Vertical line
+        _ => ch,
+    }
+}
+
 /// Narrows an SGR colour offset to the palette index it names.
 ///
 /// Callers reach this only from a match arm that has already pinned the SGR
@@ -978,6 +998,21 @@ impl TerminalState {
         &self.grid
     }
 
+    /// Returns the cell that starts the character at column `x` and row `y`,
+    /// and the column of that cell, or `None` outside the grid. The second
+    /// cell of a wide character gives the first cell. A print of this cell at
+    /// this column writes the character again, and in the last column the
+    /// print sets a pending wrap.
+    pub fn character_at(&self, x: usize, y: usize) -> Option<(usize, &Cell)> {
+        let row = self.grid.get(y)?;
+        let start = if row.get(x)?.is_wide_continuation() {
+            x.checked_sub(1)?
+        } else {
+            x
+        };
+        Some((start, row.get(start)?))
+    }
+
     /// Returns the theme of this terminal.
     pub fn get_theme(&self) -> &TerminalTheme {
         &self.theme
@@ -1303,20 +1338,7 @@ impl TerminalState {
     fn put_char(&mut self, ch: char) {
         // Convert ACS characters to Unicode box drawing if needed
         let display_char = if self.use_acs {
-            match ch {
-                'j' => '┘', // Lower right corner
-                'k' => '┐', // Upper right corner
-                'l' => '┌', // Upper left corner
-                'm' => '└', // Lower left corner
-                'n' => '┼', // Cross
-                'q' => '─', // Horizontal line
-                't' => '├', // Left T
-                'u' => '┤', // Right T
-                'v' => '┴', // Bottom T
-                'w' => '┬', // Top T
-                'x' => '│', // Vertical line
-                _ => ch,
-            }
+            line_drawing_glyph(ch)
         } else {
             ch
         };
