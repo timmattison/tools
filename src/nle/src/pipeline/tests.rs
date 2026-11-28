@@ -691,6 +691,61 @@ fn render_puts_no_cut_at_a_clip_that_plays_nothing() {
     );
 }
 
+/// A clip of `source` at `offset` with no length: its out point is its in
+/// point.
+fn no_length_clip_of(id: u64, source: Recording, offset: f64) -> Clip {
+    let mut clip = clip_of(id, source, offset);
+    clip.out_point = clip.in_point;
+    clip
+}
+
+#[test]
+fn render_lets_a_clip_with_no_length_cut_no_clip() {
+    let times: Vec<f64> = (0..10).map(f64::from).collect();
+    let project = one_clip_per_track(vec![
+        clip_of(1, texts("a", &times, 10.0), 0.0),
+        no_length_clip_of(2, texts("z", &[0.0], 1.0), 5.0),
+        clip_of(3, texts("b", &[0.0, 1.0], 3.0), 8.0),
+    ]);
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    // "z" plays nothing, so "a" plays until the start of "b" at 8.
+    assert_eq!(
+        timed_data(&rendered),
+        vec![
+            (0.0, "a0"),
+            (1.0, "a1"),
+            (2.0, "a2"),
+            (3.0, "a3"),
+            (4.0, "a4"),
+            (5.0, "a5"),
+            (6.0, "a6"),
+            (7.0, "a7"),
+            (8.0, CUT),
+            (8.0, "b0"),
+            (9.0, "b1"),
+        ]
+    );
+    assert_eq!(rendered.duration, 11.0);
+}
+
+#[test]
+fn render_ends_at_the_duration_when_a_clip_with_no_length_starts_inside_a_clip() {
+    let seconds: Vec<f64> = (0..10).map(f64::from).collect();
+    let project = one_clip_per_track(vec![
+        clip_of(1, texts("a", &seconds, 10.0), 0.0),
+        no_length_clip_of(2, texts("z", &[0.0], 1.0), 5.0),
+    ]);
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    // With no overlap, the end is the duration of the project.
+    assert_eq!(times(&rendered.events), seconds);
+    assert_eq!(rendered.duration, project.duration());
+    assert_eq!(rendered.duration, 10.0);
+}
+
 #[test]
 fn render_takes_the_header_from_the_clip_that_starts_first() {
     let project = two_clip_project();
