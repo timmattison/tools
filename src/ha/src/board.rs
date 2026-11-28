@@ -5065,6 +5065,47 @@ mod tests {
         assert_eq!(board.selected_link(now()), Some(run_link(23)));
     }
 
+    /// What Enter opens on the row of the entry of [`GROUP`], when the
+    /// board holds a run of that merge group for each `(id, state, created)`,
+    /// in that order. `created` is in minutes before `now()`.
+    fn link_of_group_runs(runs: &[(u64, RunState, i64)]) -> Link {
+        let runs = runs
+            .iter()
+            .map(|&(id, state, created)| {
+                run_of_commit(id, "a/x", state, GROUP_BRANCH, Some(GROUP), created)
+            })
+            .collect();
+        link_of_entry(entry_of_group(Some(GROUP)), runs)
+    }
+
+    #[test]
+    fn a_failed_run_of_the_merge_group_opens_before_an_active_run_and_a_newer_run() {
+        let link = link_of_group_runs(&[
+            (31, RunState::Running, 1),
+            (32, RunState::Passed, 0),
+            (33, RunState::Failed, 5),
+        ]);
+        assert_eq!(link, run_link(33));
+    }
+
+    #[test]
+    fn an_active_run_of_the_merge_group_opens_before_a_newer_finished_run() {
+        let link = link_of_group_runs(&[(41, RunState::Passed, 1), (42, RunState::Queued, 5)]);
+        assert_eq!(link, run_link(42));
+    }
+
+    #[test]
+    fn with_no_failed_or_active_run_the_newest_run_of_the_merge_group_opens() {
+        let link = link_of_group_runs(&[(51, RunState::Passed, 10), (52, RunState::Cancelled, 2)]);
+        assert_eq!(link, run_link(52));
+    }
+
+    #[test]
+    fn in_a_tie_the_run_of_the_merge_group_with_the_lowest_id_opens() {
+        let link = link_of_group_runs(&[(62, RunState::Running, 3), (61, RunState::Running, 3)]);
+        assert_eq!(link, run_link(61));
+    }
+
     #[test]
     fn enter_on_a_queue_row_with_no_run_of_its_merge_group_opens_the_pull_request_with_a_notice() {
         let link = link_of_entry(
