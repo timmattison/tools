@@ -1815,7 +1815,7 @@ gitscratch = { workspace = true, features = ["testing"] }
   and by how much?
 - [`grime`](../grime/README.md) — would merging this branch into HEAD conflict,
   and by how much?
-- [`bibibi`](../../README.md#bibibi-bye-bye-bye) — which commit caused this
+- [`bibibi`](../bibibi/README.md) — which commit caused this
   regression, found with a test from a later commit?
 - [`gsw`](../../README.md) — the rebase and the merge that one press of `m`
   measures, with the same calls that `grind` and `grime` make
