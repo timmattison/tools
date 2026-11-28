@@ -1,7 +1,9 @@
 //! The splice of the clips of a project into one stream of events, before the
-//! filters: the order in which the clips play, and the hard cut at the start
-//! of each clip after the first.
+//! filters: the order in which the clips play, the part of each clip that
+//! plays, the hard cut at the start of each clip after the first, and the
+//! size of the terminal that holds every clip.
 
+use crate::pipeline::TerminalSize;
 use crate::types::{Clip, EditProject, Event, EventType};
 
 /// The sequence that resets the attributes of the text (SGR 0).
@@ -28,12 +30,29 @@ pub(crate) fn play_order(project: &EditProject) -> Vec<&Clip> {
     ordered
 }
 
+/// The largest width and the largest height of the sources of `clips`, or
+/// `None` when there is no clip.
+fn largest_size<'a>(clips: impl IntoIterator<Item = &'a Clip>) -> Option<TerminalSize> {
+    clips
+        .into_iter()
+        .map(|clip| TerminalSize {
+            width: clip.source.width,
+            height: clip.source.height,
+        })
+        .reduce(|a, b| TerminalSize {
+            width: a.width.max(b.width),
+            height: a.height.max(b.height),
+        })
+}
+
 /// The clips of a project, spliced into one stream of events.
 pub(crate) struct Spliced<'a> {
     /// The events on the timeline, in time order, with the cuts.
     pub(crate) events: Vec<Event>,
     /// The end of the timeline.
     pub(crate) end: f64,
+    /// The size of the terminal that holds every clip.
+    pub(crate) size: TerminalSize,
     /// The clip whose source gives the header of the recording.
     pub(crate) header: &'a Clip,
 }
@@ -53,20 +72,29 @@ pub(crate) struct Spliced<'a> {
 ///    no cut, and its events do not play.
 /// 4. A clip that plays holds the events of `Clip::timeline_events`. A clip
 ///    that a later start cuts holds only the events before that start.
-/// 5. Each clip that plays, after the first one, starts with a hard cut: one
-///    output event at its start that resets the attributes and the scroll
+/// 5. The terminal has the largest width and the largest height of the
+///    clips.
+/// 6. Each clip that plays, after the first one, starts with a hard cut: one
+///    output event at its start that resets the attributes, sets the scroll
 ///    region, clears the screen, and moves the cursor home.
-/// 6. The events of each clip come after the events of the clips before it in
+/// 7. The scroll region of a clip with fewer rows than the terminal holds the
+///    rows of the clip, so the clip scrolls in its own rows. The first clip
+///    that plays gets that scroll region in one output event at its start.
+///    The cut into a clip with all the rows resets the scroll region. A
+///    narrower clip keeps the whole width, because the terminal has no left
+///    and right margins.
+/// 8. The events of each clip come after the events of the clips before it in
 ///    the play order. Then a stable sort puts them in time order. Thus an
 ///    event of a clip at the start of the next clip plays before the cut.
-/// 7. The end of the timeline is the latest end of the part of a clip, or 0
+/// 9. The end of the timeline is the latest end of the part of a clip, or 0
 ///    for a project whose clips all start at 0 and play nothing. With no
 ///    overlap, it is `EditProject::duration`.
-/// 8. The header is the first clip that plays, or the first clip in the play
-///    order when no clip plays.
+/// 10. The header is the first clip that plays, or the first clip in the play
+///     order when no clip plays.
 pub(crate) fn splice(project: &EditProject) -> Option<Spliced<'_>> {
     let order = play_order(project);
     let first = *order.first()?;
+    let size = largest_size(order.iter().copied())?;
     let mut header = None;
     let mut events = Vec::new();
     let mut end = 0.0_f64;
@@ -82,11 +110,18 @@ pub(crate) fn splice(project: &EditProject) -> Option<Spliced<'_>> {
         if part_end <= start {
             continue;
         }
-        if header.is_some() {
+        let rows = clip.source.height;
+        let shorter = rows < size.height;
+        let opening = if header.is_some() {
+            Some(cut_text(shorter.then_some(rows)))
+        } else {
+            shorter.then(|| scroll_region(rows))
+        };
+        if let Some(data) = opening {
             events.push(Event {
                 time: start,
                 event_type: EventType::Output,
-                data: cut_text(),
+                data,
             });
         }
         header.get_or_insert(*clip);
@@ -101,11 +136,21 @@ pub(crate) fn splice(project: &EditProject) -> Option<Spliced<'_>> {
     Some(Spliced {
         events,
         end,
+        size,
         header: header.unwrap_or(first),
     })
 }
 
-/// The text of the output event of a hard cut.
-fn cut_text() -> String {
-    format!("{RESET_ATTRIBUTES}{RESET_SCROLL_REGION}{CLEAR_SCREEN}{CURSOR_HOME}")
+/// The text of the output event of a hard cut. `rows` is the height of the
+/// scroll region for a clip with fewer rows than the terminal, or `None` for
+/// the whole screen.
+fn cut_text(rows: Option<u16>) -> String {
+    let region = rows.map_or_else(|| RESET_SCROLL_REGION.to_owned(), scroll_region);
+    format!("{RESET_ATTRIBUTES}{region}{CLEAR_SCREEN}{CURSOR_HOME}")
+}
+
+/// The sequence that sets the scroll region to the rows from 1 to `rows`
+/// (DECSTBM).
+fn scroll_region(rows: u16) -> String {
+    format!("\x1b[1;{rows}r")
 }

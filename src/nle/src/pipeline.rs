@@ -445,11 +445,12 @@ impl FilterRegistry {
     /// 3. The filters of the project run on them by the steps of their form,
     ///    with the end of the timeline starting at the end of the splice: the
     ///    latest end of the part of a clip that plays. With no overlap, it is
-    ///    `EditProject::duration`. A span filter gets the terminal size of
-    ///    the header clip.
-    /// 4. The header (`version`, `width`, `height`, `timestamp`, `command`,
-    ///    `title`, `env`) is the header of the source of the first clip that
-    ///    plays, or of the first clip in the play order when no clip plays.
+    ///    `EditProject::duration`. A span filter gets the padded size: the
+    ///    largest width and the largest height of the clips.
+    /// 4. `width` and `height` are the padded size. The rest of the header
+    ///    (`version`, `timestamp`, `command`, `title`, `env`) is the header of
+    ///    the source of the first clip that plays, or of the first clip in the
+    ///    play order when no clip plays.
     /// 5. `duration` is the end of the timeline after the filters.
     /// 6. Each event time and the duration must be finite. Else the render
     ///    fails with `NleError::RenderError`.
@@ -469,17 +470,14 @@ impl FilterRegistry {
             ));
         };
         let header = &spliced.header.source;
-        let size = TerminalSize {
-            width: header.width,
-            height: header.height,
-        };
+        let size = spliced.size;
         let (events, end) =
             self.run_with_end(spliced.events, &project.filters, spliced.end, size)?;
 
         Ok(Recording {
             version: header.version,
-            width: header.width,
-            height: header.height,
+            width: size.width,
+            height: size.height,
             timestamp: header.timestamp,
             duration: end,
             command: header.command.clone(),
