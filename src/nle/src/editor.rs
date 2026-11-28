@@ -60,6 +60,21 @@ pub enum Edit {
         /// The new start of the clip on the timeline.
         timeline_offset: Seconds,
     },
+    /// Put a clip at a new place in the play order of its track, and put the
+    /// clips of that track back to back. The play order of a track is the
+    /// order of the starts of its clips, and a tie keeps the order on the
+    /// track. The first clip in the new order starts at the earliest start on
+    /// the track, and each next clip starts at the end of the clip before it.
+    /// After the edit, the order on the track is the new play order. A place
+    /// at or past the number of clips of the track is refused with
+    /// `NleError::EditError`, and a start that is not a valid time with
+    /// `NleError::InvalidTime`.
+    ReorderClip {
+        /// The clip to move.
+        id: ClipId,
+        /// The new place of the clip in the play order of its track, from 0.
+        index: usize,
+    },
     /// Insert a filter at an index. The index may be the length of the list.
     AddFilter {
         /// Where the filter goes in the list.
@@ -82,6 +97,38 @@ pub enum Edit {
 }
 
 impl Edit {
+    /// The edit that adds the whole of `source` as a new clip of `project`:
+    /// an `Edit::AddClip` on the first track, with the id of
+    /// `EditProject::next_clip_id`, that starts at the end of the timeline
+    /// (`EditProject::duration`). Thus the new clip plays after every clip.
+    ///
+    /// # Errors
+    /// Returns `NleError::EditError` when the project has no track, and
+    /// `NleError::InvalidTime` when the duration of `source`, or the end of
+    /// the timeline, is not a valid time.
+    pub fn append_recording(
+        project: &EditProject,
+        source: Arc<Recording>,
+    ) -> Result<Self, NleError> {
+        let track = project
+            .timeline
+            .first()
+            .ok_or_else(|| NleError::EditError("the project has no track".to_owned()))?
+            .id;
+        let out_point = Seconds::new(source.duration)?;
+        let timeline_offset = Seconds::new(project.duration())?;
+        Ok(Self::AddClip {
+            clip: Clip {
+                id: project.next_clip_id(),
+                source,
+                in_point: Seconds::ZERO,
+                out_point,
+                timeline_offset,
+            },
+            track,
+        })
+    }
+
     /// Apply this edit to `project`. It may leave `project` half changed when
     /// it fails, so the caller gives it a copy. It does not validate the
     /// result.
@@ -174,6 +221,7 @@ impl Edit {
                     .timeline_offset = *timeline_offset;
                 Ok(())
             }
+            Self::ReorderClip { id, index } => reorder_clip(project, *id, *index),
             Self::AddFilter { index, filter } => {
                 if *index > project.filters.len() {
                     return Err(missing_filter(*index));
@@ -198,6 +246,57 @@ impl Edit {
             }
         }
     }
+}
+
+/// The edit `Edit::ReorderClip`: put clip `id` at `index` in the play order
+/// of its track, then start each clip of the track at the end of the clip
+/// before it, from the earliest start on the track.
+///
+/// The play order of a track is `EditProject::track_order`. After the edit,
+/// the order on the track is the new play order.
+fn reorder_clip(project: &mut EditProject, id: ClipId, index: usize) -> Result<(), NleError> {
+    clip_position(project, id)?;
+    let position = project
+        .timeline
+        .iter()
+        .position(|track| track.clips.contains(&id))
+        .ok_or_else(|| NleError::EditError(format!("clip {} is on no track", id.0)))?;
+    let track = project
+        .timeline
+        .get(position)
+        .ok_or_else(|| missing_clip(id))?;
+    let played = project.track_order(track);
+    if index >= played.len() {
+        return Err(NleError::EditError(format!(
+            "place {index} is past the end of track {}, which holds {} clips",
+            track.id.0,
+            played.len()
+        )));
+    }
+    // The first clip of the play order starts earliest.
+    let mut at = played
+        .first()
+        .map_or(0.0, |clip| clip.timeline_offset.get());
+    let mut order: Vec<ClipId> = played.iter().map(|clip| clip.id).collect();
+    let from = order
+        .iter()
+        .position(|clip_id| *clip_id == id)
+        .ok_or_else(|| missing_clip(id))?;
+    let moved = order.remove(from);
+    order.insert(index, moved);
+    for clip_id in &order {
+        let clip = project
+            .clips
+            .iter_mut()
+            .find(|clip| clip.id == *clip_id)
+            .ok_or_else(|| missing_clip(*clip_id))?;
+        clip.timeline_offset = Seconds::new(at)?;
+        at += clip.out_point.get() - clip.in_point.get();
+    }
+    if let Some(track) = project.timeline.get_mut(position) {
+        track.clips = order;
+    }
+    Ok(())
 }
 
 /// The edit error for a filter index that is out of range.

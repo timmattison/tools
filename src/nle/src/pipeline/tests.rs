@@ -444,8 +444,13 @@ fn two_clip_project() -> EditProject {
     }
 }
 
+/// The output event of a hard cut into a clip of the full size: reset the
+/// attributes, reset the scroll region, clear the screen, and move the cursor
+/// home.
+const CUT: &str = "\x1b[0m\x1b[r\x1b[2J\x1b[H";
+
 #[test]
-fn render_merges_two_clips_in_time_order_and_keeps_track_order_on_a_tie() {
+fn render_merges_two_clips_in_time_order_and_cuts_after_the_last_event_of_the_first() {
     let rendered = FilterRegistry::new().render(&two_clip_project()).unwrap();
 
     let got: Vec<(f64, &str)> = rendered
@@ -453,16 +458,292 @@ fn render_merges_two_clips_in_time_order_and_keeps_track_order_on_a_tie() {
         .iter()
         .map(|e| (e.time, e.data.as_str()))
         .collect();
+    // The last event of "early" is at its end, which is the start of "late".
+    // It plays before the cut, so the cut clears it.
     assert_eq!(
         got,
         vec![
             (0.0, "early0"),
             (1.0, "early1"),
-            (2.0, "late0"),
             (2.0, "early2"),
+            (2.0, CUT),
+            (2.0, "late0"),
             (3.0, "late1"),
         ]
     );
+}
+
+/// The events of `rendered` as their times and their texts.
+fn timed_data(rendered: &Recording) -> Vec<(f64, &str)> {
+    rendered
+        .events
+        .iter()
+        .map(|e| (e.time, e.data.as_str()))
+        .collect()
+}
+
+/// A recording named `title` with one output event for each of `times`. The
+/// text of each event is the title and the index of the event.
+fn texts(title: &str, times: &[f64], duration: f64) -> Recording {
+    let mut recording = source(title, &[], duration);
+    recording.events = times
+        .iter()
+        .enumerate()
+        .map(|(index, &time)| data_event(time, &format!("{title}{index}")))
+        .collect();
+    recording
+}
+
+#[test]
+fn render_puts_a_hard_cut_at_the_start_of_each_clip_after_the_first() {
+    let project = EditProject {
+        clips: vec![
+            clip_of(1, texts("a", &[0.0, 1.0], 2.0), 0.0),
+            clip_of(2, texts("b", &[0.0, 1.0], 3.0), 2.0),
+            clip_of(3, texts("c", &[0.5], 1.0), 6.0),
+        ],
+        timeline: vec![TimelineTrack {
+            id: TrackId(1),
+            clips: vec![ClipId(1), ClipId(2), ClipId(3)],
+        }],
+        filters: Vec::new(),
+    };
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    // Clip "b" starts at the end of "a". Clip "c" starts after a gap, and the
+    // screen of "b" stays until its cut.
+    assert_eq!(
+        timed_data(&rendered),
+        vec![
+            (0.0, "a0"),
+            (1.0, "a1"),
+            (2.0, CUT),
+            (2.0, "b0"),
+            (3.0, "b1"),
+            (6.0, CUT),
+            (6.5, "c0"),
+        ]
+    );
+    assert!(rendered
+        .events
+        .iter()
+        .all(|event| event.event_type == EventType::Output));
+    assert_eq!(rendered.duration, 7.0);
+}
+
+/// A project with one clip on each track, in the order of `clips`.
+fn one_clip_per_track(clips: Vec<Clip>) -> EditProject {
+    let timeline = clips
+        .iter()
+        .map(|clip| track_of(clip.id.0, clip.id.0))
+        .collect();
+    EditProject {
+        clips,
+        timeline,
+        filters: Vec::new(),
+    }
+}
+
+#[test]
+fn render_cuts_an_earlier_clip_at_the_start_of_a_later_clip_on_another_track() {
+    let times: Vec<f64> = (0..10).map(f64::from).collect();
+    let project = one_clip_per_track(vec![
+        clip_of(1, texts("a", &times, 10.0), 0.0),
+        clip_of(2, texts("b", &[0.0, 1.0], 2.0), 4.0),
+    ]);
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    // The start of "b" at 4 cuts "a", with its event at 4. After "b" ends at
+    // 6, the rest of "a" does not play, so the recording ends at 6.
+    assert_eq!(
+        timed_data(&rendered),
+        vec![
+            (0.0, "a0"),
+            (1.0, "a1"),
+            (2.0, "a2"),
+            (3.0, "a3"),
+            (4.0, CUT),
+            (4.0, "b0"),
+            (5.0, "b1"),
+        ]
+    );
+    assert_eq!(rendered.duration, 6.0);
+}
+
+#[test]
+fn render_gives_a_tie_of_two_starts_to_the_clip_later_in_track_order() {
+    let project = one_clip_per_track(vec![
+        clip_of(1, texts("a", &[0.0, 1.0], 3.0), 0.0),
+        clip_of(2, texts("b", &[0.0, 1.0], 2.0), 0.0),
+    ]);
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    // The start of "b" cuts "a" at its start, so "a" plays nothing. Thus "b"
+    // plays first, with no cut, and it gives the header.
+    assert_eq!(timed_data(&rendered), vec![(0.0, "b0"), (1.0, "b1")]);
+    assert_eq!(rendered.title, "b");
+    assert_eq!(rendered.duration, 2.0);
+}
+
+/// `recording` with a terminal of `width` columns and `height` rows.
+fn sized(mut recording: Recording, width: u16, height: u16) -> Recording {
+    recording.width = width;
+    recording.height = height;
+    recording
+}
+
+/// Three clips on one track, back to back: 80x24, then 120x40, then 100x40.
+fn three_sizes_project() -> EditProject {
+    EditProject {
+        clips: vec![
+            clip_of(1, sized(texts("a", &[0.0], 1.0), 80, 24), 0.0),
+            clip_of(2, sized(texts("b", &[0.0], 1.0), 120, 40), 1.0),
+            clip_of(3, sized(texts("c", &[0.0], 1.0), 100, 40), 2.0),
+        ],
+        timeline: vec![TimelineTrack {
+            id: TrackId(1),
+            clips: vec![ClipId(1), ClipId(2), ClipId(3)],
+        }],
+        filters: Vec::new(),
+    }
+}
+
+#[test]
+fn render_pads_the_terminal_to_the_largest_width_and_the_largest_height() {
+    let mut project = three_sizes_project();
+    project.clips[1].source = Arc::new(sized(texts("b", &[0.0], 1.0), 120, 30));
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    // The header names "a", and the size holds every clip.
+    assert_eq!(rendered.title, "a");
+    assert_eq!((rendered.width, rendered.height), (120, 40));
+}
+
+#[test]
+fn render_gives_a_clip_that_is_shorter_than_the_terminal_a_scroll_region_of_its_rows() {
+    let rendered = FilterRegistry::new()
+        .render(&three_sizes_project())
+        .unwrap();
+
+    // "a" has 24 of the 40 rows, so it starts with a scroll region of its rows.
+    // "b" and "c" have all 40 rows, so their cuts reset the scroll region. A
+    // narrower clip keeps the whole width.
+    assert_eq!(
+        timed_data(&rendered),
+        vec![
+            (0.0, "\x1b[1;24r"),
+            (0.0, "a0"),
+            (1.0, CUT),
+            (1.0, "b0"),
+            (2.0, CUT),
+            (2.0, "c0"),
+        ]
+    );
+}
+
+#[test]
+fn render_sets_the_scroll_region_at_a_cut_into_a_shorter_clip() {
+    let mut project = three_sizes_project();
+    project.clips.swap(0, 1);
+    project.clips[0].timeline_offset = Seconds::ZERO;
+    project.clips[1].timeline_offset = Seconds::new(1.0).unwrap();
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    assert_eq!(
+        timed_data(&rendered),
+        vec![
+            (0.0, "b0"),
+            (1.0, "\x1b[0m\x1b[1;24r\x1b[2J\x1b[H"),
+            (1.0, "a0"),
+            (2.0, CUT),
+            (2.0, "c0"),
+        ]
+    );
+}
+
+#[test]
+fn render_puts_no_cut_at_a_clip_that_plays_nothing() {
+    let mut empty = clip_of(2, texts("e", &[0.0], 1.0), 5.0);
+    empty.out_point = Seconds::ZERO;
+    let project = EditProject {
+        clips: vec![
+            clip_of(1, texts("a", &[0.0], 2.0), 0.0),
+            empty,
+            clip_of(3, texts("c", &[0.0], 1.0), 8.0),
+        ],
+        timeline: vec![TimelineTrack {
+            id: TrackId(1),
+            clips: vec![ClipId(1), ClipId(2), ClipId(3)],
+        }],
+        filters: Vec::new(),
+    };
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    assert_eq!(
+        timed_data(&rendered),
+        vec![(0.0, "a0"), (8.0, CUT), (8.0, "c0")]
+    );
+}
+
+/// A clip of `source` at `offset` with no length: its out point is its in
+/// point.
+fn no_length_clip_of(id: u64, source: Recording, offset: f64) -> Clip {
+    let mut clip = clip_of(id, source, offset);
+    clip.out_point = clip.in_point;
+    clip
+}
+
+#[test]
+fn render_lets_a_clip_with_no_length_cut_no_clip() {
+    let times: Vec<f64> = (0..10).map(f64::from).collect();
+    let project = one_clip_per_track(vec![
+        clip_of(1, texts("a", &times, 10.0), 0.0),
+        no_length_clip_of(2, texts("z", &[0.0], 1.0), 5.0),
+        clip_of(3, texts("b", &[0.0, 1.0], 3.0), 8.0),
+    ]);
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    // "z" plays nothing, so "a" plays until the start of "b" at 8.
+    assert_eq!(
+        timed_data(&rendered),
+        vec![
+            (0.0, "a0"),
+            (1.0, "a1"),
+            (2.0, "a2"),
+            (3.0, "a3"),
+            (4.0, "a4"),
+            (5.0, "a5"),
+            (6.0, "a6"),
+            (7.0, "a7"),
+            (8.0, CUT),
+            (8.0, "b0"),
+            (9.0, "b1"),
+        ]
+    );
+    assert_eq!(rendered.duration, 11.0);
+}
+
+#[test]
+fn render_ends_at_the_duration_when_a_clip_with_no_length_starts_inside_a_clip() {
+    let seconds: Vec<f64> = (0..10).map(f64::from).collect();
+    let project = one_clip_per_track(vec![
+        clip_of(1, texts("a", &seconds, 10.0), 0.0),
+        no_length_clip_of(2, texts("z", &[0.0], 1.0), 5.0),
+    ]);
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    // With no overlap, the end is the duration of the project.
+    assert_eq!(times(&rendered.events), seconds);
+    assert_eq!(rendered.duration, project.duration());
+    assert_eq!(rendered.duration, 10.0);
 }
 
 #[test]
@@ -1343,17 +1624,18 @@ fn run_gives_a_span_filter_the_size_of_a_vt100() {
 }
 
 #[test]
-fn render_gives_a_span_filter_the_size_of_the_clip_that_starts_first() {
+fn render_gives_a_span_filter_the_padded_size_of_the_clips() {
     let (registry, seen) = context_spy_registry();
     let mut project = two_clip_project();
-    // The clip "early" starts first. A size of "late" must not reach the filter.
+    // The clip "early" starts first, and "late" is wider. The terminal holds
+    // the largest width and the largest height of the clips.
     let mut late = (*project.clips[0].source).clone();
     late.width = 132;
-    late.height = 43;
+    late.height = 30;
     project.clips[0].source = Arc::new(late);
     let mut early = (*project.clips[1].source).clone();
     early.width = 120;
-    early.height = 40;
+    early.height = 43;
     project.clips[1].source = Arc::new(early);
     project.filters.push(all("look"));
 
@@ -1362,8 +1644,8 @@ fn render_gives_a_span_filter_the_size_of_the_clip_that_starts_first() {
     assert_eq!(
         seen.lock().unwrap()[0].1,
         TerminalSize {
-            width: 120,
-            height: 40
+            width: 132,
+            height: 43
         }
     );
 }

@@ -401,11 +401,13 @@ h3 {
   font-size: 13px;
 }
 
+.clips-panel,
 .speed-panel,
 .redaction-panel {
   margin-top: 16px;
 }
 
+.clips-hint,
 .speed-hint,
 .redaction-hint {
   color: #6c7086;
@@ -433,6 +435,35 @@ h3 {
   border-radius: 4px;
   padding: 4px 8px;
   font-size: 13px;
+}
+
+.size-warning {
+  color: #f9e2af;
+  font-size: 12px;
+  margin: 4px 0;
+}
+
+.clip-track-label {
+  display: block;
+  color: #a6adc8;
+  font-size: 12px;
+  margin-top: 8px;
+}
+
+.clip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+  border-bottom: 1px solid #313244;
+  font-size: 13px;
+}
+
+.clip-row-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .speed-row,

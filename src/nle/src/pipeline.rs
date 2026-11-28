@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::error::NleError;
 use crate::types::{
-    AppliedFilter, Clip, EditProject, Event, FilterKind, FilterOptions, FilterRegion, Recording,
+    AppliedFilter, EditProject, Event, FilterKind, FilterOptions, FilterRegion, Recording,
 };
 
 /// A filter: a pure function from the events of a region to new events.
@@ -200,8 +200,9 @@ pub struct Screen {
 ///    is true only for the region `All`. A range that holds each event is not
 ///    `All`, thus a filter reads `whole_timeline` and not `RegionView::open`
 ///    to know if it can change the size. The size of the first step
-///    is the width and the height of the header that `FilterRegistry::render`
-///    takes. A later step gets the size that the step before it gave.
+///    is the padded size that `FilterRegistry::render` gives: the largest
+///    width and the largest height of the clips. A later step gets the size
+///    that the step before it gave.
 /// 2. The filter answers `Ok` with a `Screen`, or `Err` with a message. An
 ///    `Err` fails the pipeline with a render error. Its text names the kind
 ///    and holds the message, as for an in-place filter.
@@ -556,20 +557,24 @@ impl FilterRegistry {
     /// The rules:
     /// 0. A project that breaks a rule of `EditProject::validate` is refused.
     /// 1. A project with no clip fails with `NleError::RenderError`.
-    /// 2. The events are the events of each clip on the timeline, track by
-    ///    track and clip by clip, in a stable time order. Events at one time
-    ///    keep track order, then clip order.
+    /// 2. The events are the clips spliced by the rules of the private
+    ///    `splice` module. The clips play in the order of their start (a tie
+    ///    keeps track order, then clip order). The start of a clip with a
+    ///    length cuts each clip that still plays at that time, and each clip
+    ///    that plays after the first starts with a hard cut that clears the
+    ///    screen.
     /// 3. The filters of the project run on them by the steps of their form,
-    ///    with the end of the timeline starting at `EditProject::duration`,
-    ///    and the size of the screen starting at the header size of rule 4:
-    ///    the terminal size of the clip that starts first. A span filter gets
-    ///    the size at its step, which a screen filter before it can change.
-    /// 4. The header (`version`, `width`, `height`, `timestamp`, `command`,
-    ///    `title`, `env`) is the header of the source of the clip that starts
-    ///    first on the timeline. A tie goes to the clip that comes first in
-    ///    track order, then in clip order. The exception is `width` and
-    ///    `height`: they are the size of the screen after the filters, which
-    ///    is the header size when no screen filter changes it.
+    ///    with the end of the timeline starting at the end of the splice: the
+    ///    latest end of the part of a clip that plays. With no overlap, it is
+    ///    `EditProject::duration`. The size of the screen starts at the padded
+    ///    size: the largest width and the largest height of the clips. A span
+    ///    filter gets the size at its step, which a screen filter before it
+    ///    can change.
+    /// 4. `width` and `height` are the size of the screen after the filters,
+    ///    which is the padded size when no screen filter changes it. The rest
+    ///    of the header (`version`, `timestamp`, `command`, `title`, `env`) is
+    ///    the header of the source of the first clip that plays, or of the
+    ///    first clip in the play order when no clip plays.
     /// 5. `duration` is the end of the timeline after the filters.
     /// 6. Each event time and the duration must be finite. Else the render
     ///    fails with `NleError::RenderError`.
@@ -583,47 +588,23 @@ impl FilterRegistry {
     /// and the errors of `FilterRegistry::run`.
     pub fn render(&self, project: &EditProject) -> Result<Recording, NleError> {
         project.validate()?;
-        // The clips in track order, then in the order on their track.
-        let ordered: Vec<&Clip> = project
-            .timeline
-            .iter()
-            .flat_map(|track| &track.clips)
-            .filter_map(|id| project.clips.iter().find(|clip| clip.id == *id))
-            .collect();
-        // `min_by` gives the first of several equal clips, so a tie goes to
-        // the earlier clip in that order.
-        let Some(first) = ordered
-            .iter()
-            .min_by(|a, b| a.timeline_offset.get().total_cmp(&b.timeline_offset.get()))
-        else {
+        let Some(spliced) = crate::splice::splice(project) else {
             return Err(NleError::RenderError(
                 "the project has no clip to render".to_string(),
             ));
         };
-
-        let mut events: Vec<Event> = ordered
-            .iter()
-            .flat_map(|clip| clip.timeline_events())
-            .collect();
-        // A stable sort keeps track order, then clip order, on a tie.
-        events.sort_by(|a, b| a.time.total_cmp(&b.time));
-        let header = &first.source;
+        let header = &spliced.header.source;
         let (events, end, size) = self.run_with_end(
-            events,
+            spliced.events,
             &project.filters,
-            project.duration(),
-            Some(TerminalSize {
-                width: header.width,
-                height: header.height,
-            }),
+            spliced.end,
+            Some(spliced.size),
         )?;
-        let (width, height) = size.map_or((header.width, header.height), |size| {
-            (size.width, size.height)
-        });
+        let size = size.unwrap_or(spliced.size);
         Ok(Recording {
             version: header.version,
-            width,
-            height,
+            width: size.width,
+            height: size.height,
             timestamp: header.timestamp,
             duration: end,
             command: header.command.clone(),

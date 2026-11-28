@@ -3,13 +3,14 @@
 //! This module holds the window settings, the root component, and the four
 //! regions of the window: the menu bar, the preview pane, the timeline, and
 //! the properties panel. The menu bar holds the Open Recording button, the
-//! Undo button and the Redo button of the `history` module, and the export bar
-//! of the `export` module. The open document lives in the state of
-//! `App`: the `Editor` of its project, and the metadata of the recording file
-//! that it came from.
+//! Add Recording button, the Undo button and the Redo button of the `history`
+//! module, and the export bar of the `export` module. The open document lives
+//! in the state of `App`: the `Editor` of its project, and the metadata of the
+//! recording file that it came from.
 //!
-//! `App` also owns one `busy` signal. It is true from a click on Open Recording
-//! or Export until its dialog and its work end, and it disables both buttons.
+//! `App` also owns one `busy` signal. It is true from a click on Open
+//! Recording, Add Recording or Export until its dialog and its work end, and
+//! it disables the three buttons.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -37,6 +38,8 @@ use history::{
     keep_keys_in_field, key_forwarder, step_history, window_shortcut, HistoryButtons, HistoryStep,
 };
 
+mod clips;
+use clips::ClipsPanel;
 mod preview;
 use preview::{end_of, render_of, PreviewPane, RenderedState};
 mod timeline;
@@ -58,6 +61,12 @@ const ALL_FILES_FILTER_NAME: &str = "All Files";
 const ALL_FILES_FILTER_EXTENSIONS: &[&str] = &["*"];
 /// The start of the message for a recording that does not open.
 const OPEN_FAILED_PREFIX: &str = "Failed to open recording";
+/// The text of the button that opens a recording as a new project.
+const OPEN_RECORDING_LABEL: &str = "Open Recording";
+/// The text of the button that adds a recording to the open project.
+const ADD_RECORDING_LABEL: &str = "Add Recording";
+/// The start of the message for a recording that does not join the project.
+const ADD_FAILED_PREFIX: &str = "Failed to add recording";
 
 /// The heading of the speed panel.
 const SPEED_HEADING: &str = "Speed";
@@ -142,6 +151,12 @@ const UNKNOWN_REPLACEMENT: &str = "unknown replacement";
 const APPLY_REDACTION_LABEL: &str = "Apply Redaction";
 /// The start of the message for a redaction that does not apply.
 const REDACTION_FAILED_PREFIX: &str = "Failed to redact";
+
+/// The start of the warning for clips of different terminal sizes.
+const SIZE_WARNING_PREFIX: &str =
+    "The clips have different terminal sizes. The render pads each clip to";
+/// The end of the warning for clips of different terminal sizes.
+const SIZE_WARNING_SUFFIX: &str = "at the top left.";
 
 /// The accessible label of the playhead control.
 const PLAYHEAD_LABEL: &str = "Playhead";
@@ -325,7 +340,8 @@ pub(crate) fn App() -> Element {
     let filters = use_hook(|| Arc::new(crate::filters::registry()));
     let mut loaded = use_signal(|| None::<Document>);
     let mut error = use_signal(|| None::<String>);
-    // True from a click on Open Recording or Export until its dialog and its work end.
+    // True from a click on Open Recording, Add Recording or Export until its
+    // dialog and its work end.
     let busy = use_signal(|| false);
     let mut playhead = use_signal(|| Seconds::ZERO);
     let mut playing = use_signal(|| false);
@@ -366,6 +382,14 @@ pub(crate) fn App() -> Element {
                     }
                     Err(failure) => error.set(Some(format!("{OPEN_FAILED_PREFIX}: {failure}"))),
                 },
+                // An added recording plays after the end of the timeline,
+                // as one undo step.
+                on_added: move |recording: LoadedRecording| {
+                    let outcome = edit_document(loaded, |project| {
+                        Edit::append_recording(project, Arc::new(recording.recording))
+                    });
+                    error.set(outcome.err().map(|reason| format!("{ADD_FAILED_PREFIX}: {reason}")));
+                },
                 on_error: move |message| error.set(Some(message)),
                 export::ExportBar {
                     loaded,
@@ -389,46 +413,53 @@ pub(crate) fn App() -> Element {
     }
 }
 
-/// The menu bar: the Open Recording button, then the Undo button and the Redo
-/// button of the editor of `loaded`, then `children`. Each click of Undo or
-/// Redo sends its step to `on_step`.
+/// The menu bar: the Open Recording button, the Add Recording button, then
+/// the Undo button and the Redo button of the editor of `loaded`, then
+/// `children`.
 ///
-/// The Open Recording button is disabled while `busy` is true. Thus no load
-/// starts during a dialog, a load, or an export.
+/// Open Recording sends the loaded recording to `on_loaded`, which starts a
+/// new project. Add Recording sends it to `on_added`, which puts it on the
+/// timeline of the open project. Add Recording is disabled when no project is
+/// open. A failed load sends the message of the banner to `on_error`. Each
+/// click of Undo or Redo sends its step to `on_step`.
+///
+/// Both buttons are disabled while `busy` is true. Thus no load starts during
+/// a dialog, a load, or an export.
 #[component]
 fn MenuBar(
-    /// True from a click on Open Recording or Export until its dialog and its
-    /// work end. Both buttons are disabled while it is true.
-    mut busy: Signal<bool>,
+    /// True from a click on Open Recording, Add Recording or Export until its
+    /// dialog and its work end. Each of the three buttons is disabled while it
+    /// is true.
+    busy: Signal<bool>,
     loaded: ReadSignal<Option<Document>>,
     on_step: EventHandler<HistoryStep>,
     on_loaded: EventHandler<LoadedRecording>,
+    on_added: EventHandler<LoadedRecording>,
     on_error: EventHandler<String>,
     children: Element,
 ) -> Element {
     let services = use_context::<Services>();
+    let open = loaded.read().is_some();
+    let add_services = services.clone();
     rsx! {
         div { class: "menu-bar",
             button {
                 disabled: busy(),
                 onclick: move |_| {
-                    // A click that arrives during a dialog, a load, or an export starts nothing.
-                    if busy() {
-                        return;
-                    }
-                    busy.set(true);
-                    let services = services.clone();
-                    spawn(async move {
-                        if let Some(path) = services.pick_recording().await {
-                            match services.load_recording(path).await {
-                                Ok(recording) => on_loaded.call(recording),
-                                Err(error) => on_error.call(format!("{OPEN_FAILED_PREFIX}: {error}")),
-                            }
-                        }
-                        busy.set(false);
-                    });
+                    pick_and_load(services.clone(), busy, on_loaded, on_error, OPEN_FAILED_PREFIX);
                 },
-                "Open Recording"
+                {OPEN_RECORDING_LABEL}
+            }
+            button {
+                disabled: busy() || !open,
+                onclick: move |_| {
+                    // The webview sends no click to a disabled button, but a
+                    // click must not add to a project that is not there.
+                    if loaded.peek().is_some() {
+                        pick_and_load(add_services.clone(), busy, on_added, on_error, ADD_FAILED_PREFIX);
+                    }
+                },
+                {ADD_RECORDING_LABEL}
             }
             HistoryButtons { loaded, on_step }
             {children}
@@ -436,8 +467,38 @@ fn MenuBar(
     }
 }
 
-/// The timeline of the open recording: its heading and summary, the playhead
-/// control, and the view of the tracks. `view` holds the zoom and the scroll
+/// Shows the file dialog, loads the picked recording, and sends it to
+/// `on_done`. A failed load sends its message, after `prefix`, to
+/// `on_error`. A cancelled dialog sends nothing.
+///
+/// `busy` is true from the call until the dialog and the load end. A call
+/// that arrives while it is true starts nothing. Thus no load starts during a
+/// dialog, a load, or an export.
+fn pick_and_load(
+    services: Services,
+    mut busy: Signal<bool>,
+    on_done: EventHandler<LoadedRecording>,
+    on_error: EventHandler<String>,
+    prefix: &'static str,
+) {
+    if *busy.peek() {
+        return;
+    }
+    busy.set(true);
+    spawn(async move {
+        if let Some(path) = services.pick_recording().await {
+            match services.load_recording(path).await {
+                Ok(recording) => on_done.call(recording),
+                Err(error) => on_error.call(format!("{prefix}: {error}")),
+            }
+        }
+        busy.set(false);
+    });
+}
+
+/// The timeline of the open recording: its heading and summary, a warning
+/// when the clips have different terminal sizes, the playhead control, and
+/// the view of the tracks. `view` holds the zoom and the scroll
 /// of the view.
 ///
 /// The playhead control is a plain range input in the time of the render,
@@ -458,6 +519,11 @@ fn Timeline(
                 div { class: "timeline-header",
                     h3 { "Timeline" }
                     span { class: "timeline-summary", "{summary(open)}" }
+                }
+                if let Some(size) = crate::splice::mixed_padded_size(open.editor.project()) {
+                    div { class: "size-warning", role: "status",
+                        "{SIZE_WARNING_PREFIX} {size.width}x{size.height}, {SIZE_WARNING_SUFFIX}"
+                    }
                 }
                 input {
                     class: "playhead",
@@ -499,9 +565,9 @@ fn summary(open: &Document) -> String {
     )
 }
 
-/// The metadata of the open recording, the speed panel, and the redaction
-/// panel. `on_result` gets the outcome of each edit: `Ok`, or the message of
-/// the banner.
+/// The metadata of the open recording, the clip list, the speed panel, and
+/// the redaction panel. `on_result` gets the outcome of each edit: `Ok`, or
+/// the message of the banner.
 #[component]
 fn PropertiesPanel(
     loaded: Signal<Option<Document>>,
@@ -513,6 +579,7 @@ fn PropertiesPanel(
             h3 { "Properties" }
             if let Some(metadata) = metadata {
                 {metadata_rows(&metadata)}
+                ClipsPanel { loaded, on_result }
                 SpeedPanel { loaded, on_result }
                 RedactionPanel { loaded, on_result }
             } else {
@@ -676,19 +743,19 @@ fn RedactionPanel(
 }
 
 /// Applies the edit that `make` builds from the project to the editor of the
-/// open document. The answer is the text of the error of a refused edit. An
-/// edit after which the project does not render is refused too. With no open
-/// document, nothing changes and the answer is `Ok`.
+/// open document. The answer is the text of the error of a refused edit, or
+/// of an error of `make`. An edit after which the project does not render is
+/// refused too. With no open document, nothing changes and the answer is
+/// `Ok`.
 fn edit_document(
     mut loaded: Signal<Option<Document>>,
-    make: impl FnOnce(&EditProject) -> Edit,
+    make: impl FnOnce(&EditProject) -> Result<Edit, NleError>,
 ) -> Result<(), String> {
     // One write borrow holds the whole edit. No read borrow lives across it.
     loaded.with_mut(|document| {
         document.as_mut().map_or(Ok(()), |open| {
-            let edit = make(open.editor.project());
-            open.editor
-                .apply_renderable(edit)
+            make(open.editor.project())
+                .and_then(|edit| open.editor.apply_renderable(edit))
                 .map_err(|failure| failure.to_string())
         })
     })
@@ -711,9 +778,11 @@ fn add_filter(
     change: Result<AppliedFilter, String>,
 ) {
     let outcome = change.and_then(|filter| {
-        edit_document(loaded, |project| Edit::AddFilter {
-            index: project.filters.len(),
-            filter,
+        edit_document(loaded, |project| {
+            Ok(Edit::AddFilter {
+                index: project.filters.len(),
+                filter,
+            })
         })
     });
     report(on_result, prefix, outcome);
@@ -736,7 +805,7 @@ fn filter_rows(
                 span { "{text}" }
                 button {
                     onclick: move |_| {
-                        let outcome = edit_document(loaded, |_| Edit::RemoveFilter { index });
+                        let outcome = edit_document(loaded, |_| Ok(Edit::RemoveFilter { index }));
                         report(on_result, prefix, outcome);
                     },
                     {REMOVE_LABEL}

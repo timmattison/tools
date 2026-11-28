@@ -149,6 +149,21 @@ impl EditProject {
         )
     }
 
+    /// The clips of `track` in their play order: by their start on the
+    /// timeline. A tie keeps the order on the track. An id that names no clip
+    /// of the project is skipped.
+    #[must_use]
+    pub fn track_order<'a>(&'a self, track: &TimelineTrack) -> Vec<&'a Clip> {
+        let mut clips: Vec<&Clip> = track
+            .clips
+            .iter()
+            .filter_map(|id| self.clips.iter().find(|clip| clip.id == *id))
+            .collect();
+        // A stable sort keeps the order on the track on a tie.
+        clips.sort_by(|a, b| a.timeline_offset.get().total_cmp(&b.timeline_offset.get()));
+        clips
+    }
+
     /// The end of the timeline in seconds: the largest
     /// `timeline_offset + (out_point - in_point)` over all clips, or 0.0 when
     /// the project has no clip.

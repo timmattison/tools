@@ -316,8 +316,9 @@ const COMPRESS_LABEL: &str = "Compress";
 #[component]
 pub(super) fn ExportBar(
     loaded: ReadSignal<Option<Document>>,
-    /// True from a click on Open Recording or Export until its dialog and its
-    /// work end. Both buttons are disabled while it is true.
+    /// True from a click on Open Recording, Add Recording or Export until its
+    /// dialog and its work end. Each of the three buttons is disabled while it
+    /// is true.
     mut busy: Signal<bool>,
     on_result: EventHandler<Result<(), String>>,
 ) -> Element {

@@ -316,6 +316,206 @@ fn move_clip_with_a_missing_clip_or_track_fails() {
     }));
 }
 
+/// Three clips of the fixture on track 1, with a gap at the start and a gap
+/// before the last: clip 1 (2 s) at 1, clip 2 (3 s) at 3, and clip 3 (1 s) at
+/// 7. Track 2 holds clip 4 (1 s) at 0.
+fn three_clip_editor() -> Editor {
+    let source = source();
+    let project = EditProject {
+        clips: vec![
+            clip(1, &source, 0.0, 2.0, 1.0),
+            clip(2, &source, 1.0, 4.0, 3.0),
+            clip(3, &source, 4.0, 5.0, 7.0),
+            clip(4, &source, 0.0, 1.0, 0.0),
+        ],
+        timeline: vec![
+            TimelineTrack {
+                id: TrackId(1),
+                clips: vec![ClipId(1), ClipId(2), ClipId(3)],
+            },
+            TimelineTrack {
+                id: TrackId(2),
+                clips: vec![ClipId(4)],
+            },
+        ],
+        filters: vec![],
+    };
+    Editor::new(project, registry()).unwrap()
+}
+
+/// The start of each clip of `ids`, in seconds.
+fn offsets(project: &EditProject, ids: &[u64]) -> Vec<f64> {
+    ids.iter()
+        .map(|&id| clip_in(project, id).timeline_offset.get())
+        .collect()
+}
+
+#[test]
+fn reorder_clip_moves_a_clip_and_puts_its_track_back_to_back() {
+    let mut editor = three_clip_editor();
+
+    editor
+        .apply(Edit::ReorderClip {
+            id: ClipId(3),
+            index: 0,
+        })
+        .unwrap();
+
+    // The track starts where it started, at 1, and each clip starts at the
+    // end of the clip before it. The order on the track is the new order.
+    let project = editor.project();
+    assert_eq!(
+        clip_ids_of(project, 1),
+        vec![ClipId(3), ClipId(1), ClipId(2)]
+    );
+    assert_eq!(offsets(project, &[3, 1, 2]), vec![1.0, 2.0, 4.0]);
+    // The other track, and the ranges of the sources, do not change.
+    assert_eq!(clip_ids_of(project, 2), vec![ClipId(4)]);
+    assert_eq!(offsets(project, &[4]), vec![0.0]);
+    assert_eq!(clip_in(project, 2).in_point, secs(1.0));
+    assert_eq!(clip_in(project, 2).out_point, secs(4.0));
+}
+
+#[test]
+fn reorder_clip_moves_a_clip_later() {
+    let mut editor = three_clip_editor();
+
+    editor
+        .apply(Edit::ReorderClip {
+            id: ClipId(1),
+            index: 1,
+        })
+        .unwrap();
+
+    let project = editor.project();
+    assert_eq!(
+        clip_ids_of(project, 1),
+        vec![ClipId(2), ClipId(1), ClipId(3)]
+    );
+    assert_eq!(offsets(project, &[2, 1, 3]), vec![1.0, 4.0, 6.0]);
+}
+
+#[test]
+fn reorder_clip_counts_the_place_in_the_play_order_of_the_track() {
+    let mut editor = three_clip_editor();
+    // A move puts clip 1 at the end of the list of the track, but it still
+    // starts first. The play order of the track is 1, 2, 3.
+    editor
+        .apply(Edit::MoveClip {
+            id: ClipId(1),
+            track: TrackId(1),
+            timeline_offset: secs(1.0),
+        })
+        .unwrap();
+    assert_eq!(
+        clip_ids_of(editor.project(), 1),
+        vec![ClipId(2), ClipId(3), ClipId(1)]
+    );
+
+    editor
+        .apply(Edit::ReorderClip {
+            id: ClipId(2),
+            index: 0,
+        })
+        .unwrap();
+
+    let project = editor.project();
+    assert_eq!(
+        clip_ids_of(project, 1),
+        vec![ClipId(2), ClipId(1), ClipId(3)]
+    );
+    assert_eq!(offsets(project, &[2, 1, 3]), vec![1.0, 4.0, 6.0]);
+}
+
+#[test]
+fn reorder_clip_to_a_place_past_the_end_of_its_track_fails() {
+    let mut editor = three_clip_editor();
+    let before = editor.project().clone();
+
+    assert_edit_error(editor.apply(Edit::ReorderClip {
+        id: ClipId(1),
+        index: 3,
+    }));
+    assert_edit_error(editor.apply(Edit::ReorderClip {
+        id: ClipId(4),
+        index: 1,
+    }));
+    assert_eq!(editor.project(), &before);
+}
+
+#[test]
+fn reorder_clip_with_a_missing_id_fails() {
+    let mut editor = three_clip_editor();
+
+    assert_edit_error(editor.apply(Edit::ReorderClip {
+        id: ClipId(50),
+        index: 0,
+    }));
+}
+
+#[test]
+fn one_undo_puts_a_reordered_track_back() {
+    let mut editor = three_clip_editor();
+    let before = editor.project().clone();
+    editor
+        .apply(Edit::ReorderClip {
+            id: ClipId(3),
+            index: 0,
+        })
+        .unwrap();
+
+    assert!(editor.undo());
+
+    assert_eq!(editor.project(), &before);
+    assert!(!editor.can_undo());
+}
+
+// Tests of `Edit::append_recording`.
+
+#[test]
+fn append_recording_adds_the_whole_recording_after_the_end_of_the_timeline_on_the_first_track() {
+    let mut editor = three_clip_editor();
+    let mut longer = Recording::test_fixture();
+    longer.duration = 3.5;
+    let longer = Arc::new(longer);
+
+    let edit = Edit::append_recording(editor.project(), Arc::clone(&longer)).unwrap();
+    editor.apply(edit).unwrap();
+
+    // The timeline ends at 8, the end of clip 3. The largest id was 4.
+    let project = editor.project();
+    let added = clip_in(project, 5);
+    assert!(Arc::ptr_eq(&added.source, &longer));
+    assert_eq!(added.in_point, Seconds::ZERO);
+    assert_eq!(added.out_point, secs(3.5));
+    assert_eq!(added.timeline_offset, secs(8.0));
+    assert_eq!(
+        clip_ids_of(project, 1),
+        vec![ClipId(1), ClipId(2), ClipId(3), ClipId(5)]
+    );
+    assert_eq!(project.duration(), 11.5);
+}
+
+#[test]
+fn append_recording_to_a_project_with_no_track_fails() {
+    let result = Edit::append_recording(&EditProject::default(), source());
+
+    assert!(matches!(result, Err(NleError::EditError(_))), "{result:?}");
+}
+
+#[test]
+fn append_recording_with_a_duration_that_is_not_a_time_fails() {
+    let mut broken = Recording::test_fixture();
+    broken.duration = f64::NAN;
+
+    let result = Edit::append_recording(&project(), Arc::new(broken));
+
+    assert!(
+        matches!(result, Err(NleError::InvalidTime(_))),
+        "{result:?}"
+    );
+}
+
 // Tests of filter edits.
 
 fn filter_names(project: &EditProject) -> Vec<&str> {
