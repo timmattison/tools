@@ -631,6 +631,7 @@ fn IdlePanel(
                     min: "0",
                     value: "{threshold}",
                     oninput: move |event| threshold.set(event.value()),
+                    onkeydown: keep_keys_in_field,
                 }
             }
             label { class: "speed-field",
@@ -641,6 +642,7 @@ fn IdlePanel(
                     min: "0",
                     value: "{compress_to}",
                     oninput: move |event| compress_to.set(event.value()),
+                    onkeydown: keep_keys_in_field,
                 }
             }
             label { class: "speed-field",
@@ -651,6 +653,7 @@ fn IdlePanel(
                     min: "0",
                     value: "{top}",
                     oninput: move |event| top.set(event.value()),
+                    onkeydown: keep_keys_in_field,
                 }
             }
             label { class: "speed-field",
@@ -661,6 +664,7 @@ fn IdlePanel(
                     min: "0",
                     value: "{bottom}",
                     oninput: move |event| bottom.set(event.value()),
+                    onkeydown: keep_keys_in_field,
                 }
             }
             button {
