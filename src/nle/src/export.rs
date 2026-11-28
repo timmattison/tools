@@ -6,6 +6,7 @@ use std::fmt;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 
 use crate::commands::{
     run_beta, run_blocking, save_recording_to, video_export_args, web_export_args,
@@ -172,7 +173,7 @@ pub struct ExportRequest {
 }
 
 /// Write the rendered `recording` as `request` asks, and report each stage
-/// through `progress`.
+/// through `progress`. The export reads `recording` and makes no copy of it.
 ///
 /// The output path goes to `beta` and to the writer of a recording as text.
 /// Thus an output path that is not valid UTF-8 is refused before the first
@@ -188,7 +189,7 @@ pub struct ExportRequest {
 /// cannot start, or when `beta` fails. A panic in the work becomes
 /// `NleError::TaskError`.
 pub async fn export_recording(
-    recording: Recording,
+    recording: Arc<Recording>,
     request: ExportRequest,
     progress: impl FnMut(ExportProgress) + Send + 'static,
 ) -> Result<PathBuf, NleError> {
@@ -201,7 +202,7 @@ const WORK_FILE_NAME: &str = "render.json";
 /// `export_recording` with the variables of the environment from `var`, so
 /// that a test finds a `beta` of its own.
 pub(crate) async fn export_recording_with(
-    recording: Recording,
+    recording: Arc<Recording>,
     request: ExportRequest,
     mut progress: impl FnMut(ExportProgress) + Send + 'static,
     var: impl Fn(&'static str) -> Option<OsString>,
@@ -257,7 +258,7 @@ pub(crate) async fn export_recording_with(
 /// Write `recording` to `output_path` as a recording file, and report the
 /// `Writing` stage. `compress: None` follows the `.gz` ending.
 async fn write_recording_file(
-    recording: Recording,
+    recording: Arc<Recording>,
     output_path: String,
     compress: Option<bool>,
     mut progress: impl FnMut(ExportProgress),

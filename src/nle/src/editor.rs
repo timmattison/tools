@@ -416,7 +416,7 @@ impl Editor {
     }
 
     /// Export the render of the project in its present state as `request`
-    /// asks. When the editor keeps that render, the export writes it. Else
+    /// asks. When the editor keeps that render, the export writes it with no copy. Else
     /// the export renders a copy of the state on a blocking thread. The future
     /// borrows nothing from the editor. It reports `ExportProgress::Rendering`
     /// first, then the stages of `export::export_recording`.
@@ -435,12 +435,13 @@ impl Editor {
         let filters = Arc::clone(&self.filters);
         async move {
             progress(ExportProgress::Rendering);
-            // The copy of a kept recording also runs on the blocking thread.
-            let recording = crate::commands::run_blocking(move || match kept {
-                Some(kept) => Ok(Arc::unwrap_or_clone(kept)),
-                None => filters.render(&project),
-            })
-            .await?;
+            let recording = match kept {
+                Some(kept) => kept,
+                None => {
+                    crate::commands::run_blocking(move || filters.render(&project).map(Arc::new))
+                        .await?
+                }
+            };
             crate::export::export_recording(recording, request, progress).await
         }
     }
