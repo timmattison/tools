@@ -38,6 +38,18 @@ const SHORT_LIFE_DEADLINE: Duration = Duration::from_secs(60);
 /// The time between two looks at a process that must end.
 const POLL: Duration = Duration::from_millis(100);
 
+/// The bundle identifier that macOS must give to a status item. It is a
+/// literal, so the test pins the value.
+const BUNDLE_IDENTIFIER: &str = "com.timmattison.glance";
+
+/// The path of the executable of the bundle, relative to the home directory.
+const BUNDLE_EXECUTABLE: &str =
+    "Library/Application Support/glance/Glance.app/Contents/MacOS/glance";
+
+/// The longest time that a test waits for LaunchServices to register a
+/// status item.
+const REGISTRATION_DEADLINE: Duration = Duration::from_secs(30);
+
 /// The directory of the lock files below the home directory.
 const LOCK_DIRECTORY: &str = "Library/Application Support/glance";
 
@@ -259,6 +271,23 @@ impl Home {
         assert!(!alive(pid), "the status item {pid} still runs");
     }
 
+    /// Asserts that the process `pid` runs from the bundle in this home
+    /// directory, and that macOS gave it the bundle identifier.
+    fn assert_runs_from_the_bundle(&self, pid: u32) {
+        assert_eq!(
+            registered_bundle_identifier(pid).as_deref(),
+            Some(BUNDLE_IDENTIFIER),
+            "the status item {pid} has no bundle identifier"
+        );
+        let program = ps_field(pid, "comm").expect("the status item runs");
+        assert_eq!(
+            fs::canonicalize(&program).expect("the program of the status item"),
+            fs::canonicalize(self.dir.path().join(BUNDLE_EXECUTABLE))
+                .expect("the executable of the bundle"),
+            "the status item {pid} runs from {program}"
+        );
+    }
+
     /// The path of the lock file `name` in this home directory.
     fn lock_file(&self, name: &str) -> PathBuf {
         self.dir.path().join(LOCK_DIRECTORY).join(name)
@@ -294,6 +323,34 @@ fn ps_field(pid: u32, keyword: &str) -> Option<String> {
         .expect("ps starts");
     let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     (output.status.success() && !text.is_empty()).then_some(text)
+}
+
+/// The bundle identifier that LaunchServices gives to the process `pid`, or
+/// `None` when it gives none.
+fn bundle_identifier(pid: u32) -> Option<String> {
+    let output = childenv::fixture_command("lsappinfo")
+        .args(["info", "-only", "bundleid", &pid.to_string()])
+        .output()
+        .expect("lsappinfo starts");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("bundleID="))
+        .and_then(|value| value.strip_prefix('"'))
+        .and_then(|value| value.split_once('"'))
+        .map(|(identifier, _)| identifier.to_owned())
+}
+
+/// Like [`bundle_identifier`], but waits until LaunchServices gives an
+/// answer. It can register a process after the ready line of that process.
+fn registered_bundle_identifier(pid: u32) -> Option<String> {
+    let deadline = Instant::now() + REGISTRATION_DEADLINE;
+    loop {
+        let answer = bundle_identifier(pid);
+        if answer.is_some() || Instant::now() >= deadline {
+            return answer;
+        }
+        thread::sleep(POLL);
+    }
 }
 
 /// Whether the process `pid` runs.
@@ -675,4 +732,42 @@ fn two_plain_starts_at_the_same_moment_give_at_most_one_status_item() {
     );
     let running = ready.iter().filter(|pid| alive(**pid)).count();
     assert!(running <= 1, "two status items run: {report}");
+}
+
+/// Each background status item runs from the executable in the app bundle, so
+/// that macOS gives it a bundle identifier.
+#[test]
+fn a_background_status_item_runs_from_the_bundle() {
+    let mut home = Home::new();
+    for target in [Target::Local, Target::Host(ALPHA)] {
+        let pid = home.start(target);
+        home.assert_runs_from_the_bundle(pid);
+    }
+}
+
+/// A foreground run that does not run from the bundle replaces itself with
+/// the executable of the bundle. The PID stays the same across the `exec`.
+#[test]
+fn a_foreground_status_item_runs_from_the_bundle_and_keeps_its_pid() {
+    let mut home = Home::new();
+    for target in [Target::Local, Target::Host(BETA)] {
+        let mut args = target.args();
+        args.extend([FOREGROUND, "--exit-after", LIFE_BOUND]);
+        let mut child = home
+            .command(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the glance binary starts");
+        home.started.push(child.id());
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().expect("the stdout of the status item"))
+            .read_line(&mut line)
+            .expect("read the stdout of the status item");
+        assert_eq!(line, target.ready_line(child.id()));
+        home.assert_runs_from_the_bundle(child.id());
+        home.assert_stops(target, &[], child.id());
+        let status = child.wait().expect("wait for the status item");
+        assert_eq!(status.code(), Some(0), "{status:?}");
+    }
 }

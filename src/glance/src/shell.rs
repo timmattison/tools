@@ -678,10 +678,19 @@ fn register_observers(monitor: &Monitor) {
 /// status item has its frames and its width from the start. In remote mode,
 /// that update starts the first connection.
 ///
+/// The status item gets `autosave_name` before its first update. AppKit
+/// keeps the position of the item under that name, and a menu bar manager
+/// keys the item on it (see [`crate::instance::Target::autosave_name`]).
+///
 /// The function calls `on_ready` once, when the status item is up and just
 /// before the run loop starts.
 #[must_use]
-pub fn run(interval: Interval, remote: Option<Remote>, on_ready: impl FnOnce()) -> ExitCode {
+pub fn run(
+    interval: Interval,
+    remote: Option<Remote>,
+    autosave_name: &str,
+    on_ready: impl FnOnce(),
+) -> ExitCode {
     let Some(mtm) = MainThreadMarker::new() else {
         eprintln!("{NOT_MAIN_THREAD}");
         return ExitCode::from(EXIT_NOT_MAIN_THREAD);
@@ -690,6 +699,7 @@ pub fn run(interval: Interval, remote: Option<Remote>, on_ready: impl FnOnce()) 
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     let status_item =
         NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
+    status_item.setAutosaveName(Some(&NSString::from_str(autosave_name)));
     let source = match remote {
         None => Source::Kernel {
             reader: Reader::new(),

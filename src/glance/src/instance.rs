@@ -39,7 +39,23 @@ use std::time::{Duration, Instant};
 use crate::connection::Destination;
 
 /// The name of the directory of `glance` in the data directory of the user.
-const DIRECTORY_NAME: &str = "glance";
+pub(crate) const DIRECTORY_NAME: &str = "glance";
+
+/// Gives the data directory of the current user. On macOS it is
+/// `~/Library/Application Support`.
+///
+/// # Errors
+///
+/// Returns an error of kind [`io::ErrorKind::NotFound`] when the data
+/// directory of the user is not known.
+pub(crate) fn user_data_directory() -> io::Result<PathBuf> {
+    dirs::data_dir().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "the data directory of this user is not known",
+        )
+    })
+}
 
 /// The name of the lock file of the local status item.
 const LOCAL_FILE_NAME: &str = "local.lock";
@@ -49,6 +65,12 @@ const HOST_FILE_PREFIX: &str = "host-";
 
 /// The end of the name of each lock file.
 const LOCK_FILE_SUFFIX: &str = ".lock";
+
+/// The autosave name of the local status item.
+const LOCAL_AUTOSAVE_NAME: &str = "glance.local";
+
+/// The start of the autosave name of the status item of a host.
+const HOST_AUTOSAVE_PREFIX: &str = "glance.host.";
 
 /// The `l_whence` of a lock record that starts at the start of the file. This
 /// is `SEEK_SET`, which `libc` gives as a wider integer than the field.
@@ -92,20 +114,47 @@ impl Target {
         match self {
             Target::Local => LOCAL_FILE_NAME.to_owned(),
             Target::Host(destination) => {
-                let mut name = HOST_FILE_PREFIX.to_owned();
-                for byte in destination.as_str().bytes() {
-                    if byte.is_ascii_lowercase() || byte.is_ascii_digit() || b".-_@".contains(&byte)
-                    {
-                        name.push(char::from(byte));
-                    } else {
-                        name.push_str(&format!("%{byte:02X}"));
-                    }
-                }
-                name.push_str(LOCK_FILE_SUFFIX);
-                name
+                format!(
+                    "{HOST_FILE_PREFIX}{}{LOCK_FILE_SUFFIX}",
+                    escaped(destination)
+                )
             }
         }
     }
+
+    /// Gives the autosave name of the status item of this target.
+    ///
+    /// AppKit keeps the position of a status item under its autosave name,
+    /// and a menu bar manager such as Bartender keys each item on that name
+    /// and the bundle identifier. With no name, each status item gets
+    /// `Item-0`, so all of them share one key. The local target gives
+    /// `glance.local`. A host gives `glance.host.` and the destination, with
+    /// the escape of [`Target::file_name`]. Thus two different destinations
+    /// never give the same name.
+    #[must_use]
+    pub fn autosave_name(&self) -> String {
+        match self {
+            Target::Local => LOCAL_AUTOSAVE_NAME.to_owned(),
+            Target::Host(destination) => format!("{HOST_AUTOSAVE_PREFIX}{}", escaped(destination)),
+        }
+    }
+}
+
+/// Gives `destination` with each byte that is not a lowercase ASCII letter, a
+/// digit, `.`, `-`, `_`, or `@` written as `%` and two uppercase hex digits.
+///
+/// The result holds no `/` and no uppercase letter from the destination, and
+/// two different destinations never give the same result.
+fn escaped(destination: &Destination) -> String {
+    let mut text = String::new();
+    for byte in destination.as_str().bytes() {
+        if byte.is_ascii_lowercase() || byte.is_ascii_digit() || b".-_@".contains(&byte) {
+            text.push(char::from(byte));
+        } else {
+            text.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    text
 }
 
 /// The lock file that marks the status item of one target.
@@ -129,14 +178,7 @@ impl LockFile {
     /// Returns an error of kind [`io::ErrorKind::NotFound`] when the data
     /// directory of the user is not known.
     pub fn for_user(target: &Target) -> io::Result<Self> {
-        dirs::data_dir()
-            .map(|data| Self::in_data_directory(&data, target))
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "the data directory of this user is not known",
-                )
-            })
+        user_data_directory().map(|data| Self::in_data_directory(&data, target))
     }
 
     /// Gives the path of the lock file.
@@ -570,6 +612,37 @@ mod tests {
     fn two_different_destinations_give_two_different_names() {
         assert_ne!(host("a/b").file_name(), host("a%2Fb").file_name());
         assert_ne!(host("local").file_name(), Target::Local.file_name());
+    }
+
+    #[test]
+    fn the_local_status_item_has_the_autosave_name_glance_local() {
+        assert_eq!(Target::Local.autosave_name(), "glance.local");
+    }
+
+    #[test]
+    fn the_autosave_name_of_a_host_is_glance_host_and_the_escaped_destination() {
+        assert_eq!(host("m1-ts").autosave_name(), "glance.host.m1-ts");
+        assert_eq!(
+            host("tim@M4 Pro/日").autosave_name(),
+            "glance.host.tim@%4D4%20%50ro%2F%E6%97%A5"
+        );
+    }
+
+    #[test]
+    fn two_different_destinations_give_two_different_autosave_names() {
+        for (a, b) in [
+            ("Alpha", "alpha"),
+            ("Tim@m1", "tim@m1"),
+            ("a/b", "a%2Fb"),
+            ("a b", "a%20b"),
+        ] {
+            assert_ne!(
+                host(a).autosave_name(),
+                host(b).autosave_name(),
+                "{a} and {b}"
+            );
+        }
+        assert_ne!(host("local").autosave_name(), Target::Local.autosave_name());
     }
 
     #[test]

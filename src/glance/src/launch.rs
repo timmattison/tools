@@ -13,6 +13,16 @@
 //! of the start cannot stop it, and it takes the lock itself. Thus two starts
 //! at the same moment can never give two status items for one target.
 //!
+//! Each status item runs from the app bundle of glance (see
+//! [`crate::bundle`]), so that macOS gives it a bundle identifier. A
+//! background start makes sure that the bundle holds a copy of this program.
+//! It starts its copy from the executable of the bundle. A foreground run that
+//! does not run from the bundle also makes sure of the bundle. It replaces
+//! itself with the executable of the bundle through `exec`, with the same
+//! arguments. The PID and the terminal stay the same. The `exec` comes before
+//! the run takes the lock, because Rust opens the lock file with
+//! close-on-exec. A run from the bundle does not `exec` again.
+//!
 //! The stdout and the stderr of the copy are pipes to the start. A thread of
 //! the start reads the stderr to its end, so a long text on it cannot block
 //! the copy. The copy writes one line into the stdout when its status item is
@@ -28,9 +38,12 @@ use std::env;
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::num::NonZeroU32;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::thread;
 
+use crate::bundle::Bundle;
 use crate::connection::{HostNaming, Remote};
 use crate::flags::{
     flag, flag_with_value, EXIT_AFTER, HOST, INTERVAL, REMOTE_BINARY, RESOLVE, SPAWNED_COPY,
@@ -130,7 +143,12 @@ pub fn run(mode: Mode, settings: Settings) -> ExitCode {
         }
     }
     match mode {
-        Mode::Foreground => run_here(&lock, settings, false),
+        // The `exec` must come before the claim: Rust opens the lock file with
+        // close-on-exec, so an `exec` after the claim would drop the lock.
+        Mode::Foreground => match run_from_bundle() {
+            Ok(()) => run_here(&lock, settings, false),
+            Err(message) => fail(&message),
+        },
         Mode::Background => start_in_background(&lock, &settings),
         Mode::SpawnedCopy => match instance::start_a_session() {
             Ok(()) => run_here(&lock, settings, true),
@@ -166,38 +184,44 @@ fn run_here(lock: &LockFile, settings: Settings, is_copy: bool) -> ExitCode {
     if let Err(error) = instance::end_with_success_on_terminate() {
         return fail(&format!("cannot catch SIGTERM: {error}"));
     }
-    let line = format!(
-        "{}\n",
-        ready_line(&settings.target(), Pid::of_this_process())
-    );
+    let target = settings.target();
+    let line = format!("{}\n", ready_line(&target, Pid::of_this_process()));
     let exit_after = settings.exit_after;
-    shell::run(settings.interval, settings.remote, move || {
-        say(&line);
-        if is_copy {
-            // The start has its line and nobody reads either pipe, so an
-            // error here has no channel to report on.
-            let _ = instance::send_output_nowhere();
-        }
-        if let Some(seconds) = exit_after {
-            instance::end_after(seconds);
-        }
-    })
+    let autosave_name = target.autosave_name();
+    shell::run(
+        settings.interval,
+        settings.remote,
+        &autosave_name,
+        move || {
+            say(&line);
+            if is_copy {
+                // The start has its line and nobody reads either pipe, so an
+                // error here has no channel to report on.
+                let _ = instance::send_output_nowhere();
+            }
+            if let Some(seconds) = exit_after {
+                instance::end_after(seconds);
+            }
+        },
+    )
 }
 
-/// Starts a copy that runs the status item, and waits until its status item
-/// is up. When the copy ends first, writes what the copy wrote to its stderr
-/// and its exit status, and gives the exit code of a failure.
+/// Starts a copy that runs the status item from the executable of the app
+/// bundle, and waits until its status item is up. When the copy ends first,
+/// writes what the copy wrote to its stderr and its exit status, and gives the
+/// exit code of a failure.
 fn start_in_background(lock: &LockFile, settings: &Settings) -> ExitCode {
     if let Err(error) = lock.prepare() {
         return fail(&lock_problem(lock, &error));
     }
-    let program = match env::current_exe() {
-        Ok(program) => program,
-        Err(error) => return fail(&format!("cannot find the path of glance: {error}")),
+    let bundle = match prepare_bundle() {
+        Ok(bundle) => bundle,
+        Err(message) => return fail(&message),
     };
-    let spawned = copy_pipes(childenv::command(program).args(child_arguments(settings)))
-        .current_dir(CHILD_DIRECTORY)
-        .spawn();
+    let spawned =
+        copy_pipes(childenv::command(bundle.executable()).args(child_arguments(settings)))
+            .current_dir(CHILD_DIRECTORY)
+            .spawn();
     let mut child = match spawned {
         Ok(child) => child,
         Err(error) => return fail(&format!("cannot start the background copy: {error}")),
@@ -212,6 +236,54 @@ fn start_in_background(lock: &LockFile, settings: &Settings) -> ExitCode {
             ExitCode::from(EXIT_FAILURE)
         }
     }
+}
+
+/// Makes sure that the app bundle of the user holds a copy of this program,
+/// and gives the bundle.
+fn prepare_bundle() -> Result<Bundle, String> {
+    let (current, bundle) = this_program_and_bundle()?;
+    ensure_bundle(&bundle, &current)?;
+    Ok(bundle)
+}
+
+/// Gives the path of this program and the app bundle of the user.
+fn this_program_and_bundle() -> Result<(PathBuf, Bundle), String> {
+    let current =
+        env::current_exe().map_err(|error| format!("cannot find the path of glance: {error}"))?;
+    let bundle =
+        Bundle::for_user().map_err(|error| format!("cannot find the bundle of glance: {error}"))?;
+    Ok((current, bundle))
+}
+
+/// Makes sure that `bundle` holds a copy of the program `current`.
+fn ensure_bundle(bundle: &Bundle, current: &Path) -> Result<(), String> {
+    bundle.ensure(current).map_err(|error| {
+        format!(
+            "cannot make the bundle {}: {error}",
+            bundle.path().display()
+        )
+    })
+}
+
+/// Makes sure that this process runs from the executable of the app bundle.
+///
+/// When this process does not, the function makes sure of the bundle and
+/// replaces this process with the executable of the bundle through `exec`,
+/// with the same arguments. The PID and the terminal stay the same. The
+/// function returns `Ok` only when this process runs from the bundle.
+fn run_from_bundle() -> Result<(), String> {
+    let (current, bundle) = this_program_and_bundle()?;
+    if bundle.runs(&current) {
+        return Ok(());
+    }
+    ensure_bundle(&bundle, &current)?;
+    let error = childenv::command(bundle.executable())
+        .args(env::args_os().skip(1))
+        .exec();
+    Err(format!(
+        "cannot start glance from the bundle {}: {error}",
+        bundle.path().display()
+    ))
 }
 
 /// Sets the pipes of the background copy: no stdin, and a pipe to the start
