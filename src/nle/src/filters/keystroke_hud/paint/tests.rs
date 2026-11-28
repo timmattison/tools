@@ -134,6 +134,19 @@ impl Rig {
         assert_eq!(self.viewer.bold, self.reference.bold);
         assert_eq!(self.viewer.italic, self.reference.italic);
         assert_eq!(self.viewer.underline, self.reference.underline);
+        assert_eq!(self.viewer.dim, self.reference.dim);
+        assert_eq!(self.viewer.blink, self.reference.blink);
+        assert_eq!(self.viewer.reverse, self.reference.reverse);
+        assert_eq!(self.viewer.hidden, self.reference.hidden);
+        assert_eq!(self.viewer.strikethrough, self.reference.strikethrough);
+        assert_eq!(
+            self.viewer.current_fg_source,
+            self.reference.current_fg_source
+        );
+        assert_eq!(
+            self.viewer.current_bg_source,
+            self.reference.current_bg_source
+        );
     }
 }
 
@@ -414,6 +427,21 @@ fn the_paint_restores_the_default_colors_that_sgr_39_and_49_set() {
         (cell.fg_source, cell.bg_source),
         (ColorSource::Default, ColorSource::Default)
     );
+}
+
+#[test]
+fn the_paint_restores_each_text_flag_of_the_cells_under_the_box() {
+    let screen = size(20, 6);
+    let mut rig = Rig::new(screen, &TerminalTheme::auto());
+    let overlay = box_of(screen, Position::TopRight, "ls");
+    assert_eq!((overlay.top, overlay.left), (1, 13));
+    // Each cell under the top border has one flag: dim, blink, reverse,
+    // hidden, and struck through. The pen keeps reverse and struck through.
+    rig.feed("\x1b[2;14H\x1b[2mA\x1b[0;5mB\x1b[0;7mC\x1b[0;8mD\x1b[0;9mE\x1b[0;7;9m");
+    rig.paint(Some(&overlay));
+    assert_eq!(rig.slice(1, 13, 6), "╭────╮");
+    rig.paint(None);
+    rig.assert_viewer_is_reference();
 }
 
 #[test]
