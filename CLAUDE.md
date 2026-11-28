@@ -234,7 +234,8 @@ in a terminal that does not set `COLORTERM`, set it on the command:
 
 ### Crates Currently Using testcolor
 
-- `cdva` - the long-help test of `--strict`
+- `cdva` - the help tests: the long help of `--strict`, and the long name of
+  the tool
 - `crap` - the tests of the `--expand` notes
 - `cwt` - family render tests, and the end-to-end helpers that read the output
   of the binary
