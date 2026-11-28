@@ -956,3 +956,32 @@ async fn an_export_after_a_kept_render_writes_that_render_with_no_second_render(
     assert_eq!(render_count(&renders), 1);
     assert_eq!(Recording::load(&file).unwrap(), *kept);
 }
+
+#[tokio::test]
+async fn an_export_of_a_kept_render_writes_that_render_with_no_copy() {
+    let (filters, _renders) = marking_registry();
+    let mut editor = Editor::new(project(), filters).unwrap();
+    editor.apply_renderable(add_mark()).unwrap();
+    let kept = Arc::downgrade(&editor.render().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("out.json");
+    let holders = Arc::new(std::sync::Mutex::new(None));
+    let seen = Arc::clone(&holders);
+
+    editor
+        .export(recording_request(&file), move |progress| {
+            if matches!(progress, ExportProgress::Writing) {
+                *seen.lock().unwrap() = Some(kept.strong_count());
+            }
+        })
+        .await
+        .unwrap();
+
+    // The editor holds the kept render. A second holder at the write is the
+    // export, which thus writes that render and not a copy of it.
+    let holders = *holders.lock().unwrap();
+    assert!(
+        matches!(holders, Some(count) if count > 1),
+        "holders of the kept render at the write: {holders:?}"
+    );
+}
