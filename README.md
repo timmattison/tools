@@ -33,68 +33,33 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
 - Used as the foundation for clipboard transformation tools like `htmlboard`, `jsonboard`, and `unescapeboard`
 
 ### portplz-core
-A shared Rust library that derives a deterministic, unprivileged TCP port from a git repository's root name,
-current branch, and the current user (or, with no git, a directory name plus the user). Mixing in the user means
-two people on the same machine get different ports for the same repo and branch, so they can run the same project
-side by side without colliding. It hides SHA-256 hashing, `gix` repository discovery, and user detection behind a
-single `derive()` entry point. `derive()` also takes an optional name. The name tells one application of a project
-apart from another, so a repo holding a site and an API gives each its own port. The name sits between two NUL bytes
-at the head of the hash input, and no unnamed input can start with a NUL. So a named derivation never hashes the same
-input as an unnamed one. Every port derived without a name keeps the value it has today. Used by `portplz` (which
-prints the port) and `sirn` (which serves on it), so both agree on the same port for a given project and user without
-`portplz` needing to be installed. Set `PORTPLZ_UID` to a fixed integer to override the detected user (handy for
-reproducing a teammate's port or pinning one in containers/CI).
+A shared Rust library that derives a deterministic, unprivileged TCP port for a project and a user. It gives:
+- One entry point, `derive()`, which hides the SHA-256 hash, the `gix` discovery, and the detection of the user
+- A port from the root name of the repository, the branch, and the user, or from a directory name and the user
+- Different ports for two users of one machine, on one repository and one branch
+- An optional name, which gives each application of one repository its own port
+- An override of the user through `PORTPLZ_UID`, for the port of a teammate or a fixed port in a container or in CI
+
+Used by `portplz`, which prints the port, and `sirn`, which serves on it.
+
+See [src/portplz-core/README.md](src/portplz-core/README.md) for detailed documentation.
 
 ### gitscratch
-A shared Rust library that owns the hardened "dry-run a git operation without touching anything real" harness.
-Answering "would this rebase conflict, and how badly?" means actually performing it against the developer's own
-repository, which is only safe because of a set of pinned settings — `rebase.updateRefs=false` so the replay
-doesn't rewrite the very branches being simulated, `rerere.enabled=false` so a simulated resolution never poisons
-the shared `rr-cache`, hooks redirected at an empty directory, `gc.auto=0`, `commit.gpgsign=false`, and an editor
-environment a halted rebase can't hang on. Path *names* get the same treatment: git will C-quote and octal-escape
-a name, which then matches no file on disk, so a conflicted `日本語.txt` came back under a name nobody typed *and*
-silently floored at "1 hunk" — a plausible-looking wrong total. `core.quotePath=false` is pinned against the
-common case, but it only governs non-ASCII, so the fix that actually holds is that every reader of a path asks
-git for `-z` — split on NUL, never trimmed — and no line-oriented alternative stands beside them to forget it
-for. A list of paths comes back through one of two readers, and what separates them is a name that is not valid
-UTF-8: `nul_separated_paths` hands over the bytes git wrote, since a path is a byte string on unix and decoding
-one lossily replaces exactly the names this exists to preserve, while `paths` decodes to text and refuses such a
-name outright rather than repairing it into one that opens no file. One path is a third reader, because
-`rev-parse` has no `-z` to ask with: it takes git's raw stdout, strips exactly one trailing newline, and hands
-back the rest as bytes. Never a trim, since `str::trim` is Unicode-aware and eats a trailing space or U+3000 off
-the end of a name that had one, and never a lossy decode, which turns any byte outside UTF-8 into a name that
-opens no file. The replay read the halted rebase's state directory through a reader that does both, and in a
-linked worktree git builds that answer out of the developer's own repository path — so a repository path holding
-such a byte reported no rebase in progress, and a real halt came out as "the rebase failed without leaving a
-rebase to resolve". A scratch worktree can only be built through `Scratch`, and a `Scratch` answers the
-operations it names — check out detached, replay a rebase, read the HEAD tree, write a squash commit — each
-under that configuration, so no tool can drift onto a weaker version of it. The runner that makes those calls
-never leaves the crate, and both halves of that are needed: nothing outside can build one, because `Git::new`
-is crate-private, and nothing outside is handed one, because a `Scratch` answers with the operation rather than
-with the thing that performs it. The second half matters because a scratch worktree is a *linked* worktree of
-the real repository and the hardening is configuration — it says nothing about `branch -D`, `update-ref`,
-`config --local` or `push`, so a runner in a consumer's hands reaches all of them. A `compile_fail` doc-test
-holds that door shut. Two more hold the doors the *answer* comes through. `Conflicts` has no `Default` derive,
-because the value a derive hands out — no files, no stops — is the clean verdict, the one that renders "hit no
-conflicts" and exits 0, and a derive puts it behind the spelling every caller reaches for first. The seed a fold
-genuinely needs says so by name instead, as `Conflicts::nothing_replayed()`. And the count newtypes have no
-`Display`, so a count renders only through `phrase()` (`4 hunks`, with the noun and its plural coming from the
-counter) or `digits()` (a table cell whose heading carries the noun) — with a `Display` on them,
-`format!("{} across {}", hunks, files)` compiles and prints `4 across 2`, which is the wording failure the
-newtypes exist to stop. A fourth holds the door the answer's *words* come through: `Report::for_tool` names the
-tool and hands back an `UnwordedReport`, which cannot render at all, and the action arrives through
-`describing`, which is what builds the `Report` — so a report with a hole where the action belongs
-(`grind: clean -  hit no conflicts`, two spaces and no phrase) is a value nobody can build rather than a line
-nobody reads until it ships. Inside the crate, the runner takes the git subcommand as a parameter of its own, so a
-caller's arguments always land after it rather than in git's own option position, where one more `-c` pair
-would undo any of the pins above (git's rule is that the last pair naming a key wins) and a `-C` would aim the
-whole run at another repository. A revision the caller
-supplies is kept out of that position too: `rev-parse` is asked with `--verify` and `--end-of-options`, and the
-commit-ish of `worktree add` and the upstream of `rebase` carry the same separator — because a bare `git
-rev-parse --root` prints its own argument back and exits 0, which read as a commit and let `grind` answer
-`clean` for a branch that does not exist. Teardown removes the scratch worktree by path and deliberately never
-runs the repo-wide `git worktree prune`, which would delete the administrative state of any worktree whose
-directory is merely missing right now. Used by `grist`, `grind` and `grime`.
+A shared Rust library that replays a git operation, such as a rebase or a merge, in a scratch worktree, and changes
+nothing real. It gives:
+- Pinned settings for each replay: `rebase.updateRefs=false`, `rerere.enabled=false`, an empty hooks directory,
+  `gc.auto=0`, no signing, and an editor that a halted rebase cannot hang on
+- Exact path names: each read of a list of paths asks git for `-z`, and no read trims a name or decodes it with loss
+- `Scratch` as the only entrance to a worktree, and a git runner that never leaves the crate
+- Answers that cannot lie: no `Default` on `Conflicts`, no `Display` on the count newtypes, and a
+  `Report::for_tool` that cannot render until `describing` gives it the action
+- Pins that the arguments of a caller cannot undo: each argument comes after the subcommand, and each revision
+  comes after `--end-of-options`
+- A teardown that removes only its own worktree, and never runs `git worktree prune`
+- A shared `testing` module (`write_executable`, `git_shim`, and fixture repositories), which about 30 crates of
+  this workspace take as a dev-dependency
+
+Used by `bibibi`, `grime`, `grind`, `grist` and `gsw`, which replay git operations through it.
 
 See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of guarantees.
 
@@ -2396,7 +2361,8 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
     It shows how much runner time the run used. The `TIME` column shows the wall-clock time of
     the run. A run with two parallel jobs of 15 minutes shows `15m 00s` under `TIME` and
     `30m 00s` under `JOB SUM`. Thus you can find the runs that use many runners in parallel,
-    and how much runner time a change costs.
+    and how much runner time a change costs. An active run row can show an estimate of the time
+    until the run finishes in place of its sum, as a later item tells.
     - The time of one job is the time that its job row shows after the job starts: from its
       start to its finish, or to now while it runs. Thus the sum of an active run increases
       each second. A job that waits for a runner or for an approval (`⏳`) adds nothing, because
@@ -2436,6 +2402,31 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
       - The estimate needs no more request to GitHub. It reads the jobs that `ha` already loads
         for the job sum. `ha` keeps no history after it stops. Thus after a start, the
         estimates fill in over the first refreshes, as the jobs of the recent runs load.
+    - An active run row shows an estimate of the time until the run finishes, in place of its
+      sum. It uses the same signs and the same text as a job row, with one more sign:
+      - `~9m 00s` means that the run finishes in about 9 minutes.
+      - `>12m` means that the run finishes in 12 minutes or more. The latest end comes from a
+        job that waits for a runner or for an approval. The start of that job is unknown, and
+        an approval can take hours.
+      - `+30s` means that the run is 30 seconds past its estimate.
+      - Each job of the run gives a time when the run can finish. A job that passed gives its
+        end. A job that runs gives the end of its estimate, or now when it is past its estimate.
+        A job that waits gives now plus the mean time of its name on any runner. Each of these
+        times then adds the tail of the job name. The latest time is the estimate.
+      - The tail of a job name is the mean time from the end of that job to the end of its run,
+        in the newest 5 passed runs of the same repository and workflow in the window. The end
+        of a run is the end of its last job. Thus the tail holds the time of each job that runs
+        after the job. This includes a job that GitHub did not create yet, for example a job
+        that `needs:` a job that still runs.
+      - A failed, cancelled, or skipped job of the active run does not change the estimate.
+      - The run row keeps its sum when a running job shows a blank cell on its job row, when a
+        waiting job has no passed match on any runner, and when a job name has no tail. It keeps
+        its sum when no job passed, runs, or waits, for example when each job failed, was
+        cancelled, or was skipped. It also keeps its sum before its jobs load, and after the run
+        finishes.
+      - A past run on a different branch can skip jobs that this run does not skip. Its tails
+        then mix two shapes of the run. In the estimate, a job that waits starts now, because
+        `ha` does not estimate when a runner gets free.
     - A finished run can show a `JOB SUM` smaller than its `TIME`, also when its jobs ran in
       parallel. The `TIME` cell of a finished run ends at the last update of the run, and GitHub
       sometimes makes that update some minutes after the last job finished.
@@ -6710,9 +6701,15 @@ The editing engine of the crate has five parts:
   a new length, and the later events move by the change in the length. A span
   filter also gets the events before and after its region and the size of the
   terminal: the size of the clip that starts first, or 80 by 24 in
-  `FilterRegistry::run`.
+  `FilterRegistry::run`. A screen filter (`register_screen`) also gets the
+  size of the screen and the events before its region. It rewrites its region,
+  moves nothing, and on the region `All` it can change the size of the screen.
+  A later span filter gets that size, and the rendered recording has the size
+  that the last screen filter gives. `FilterRegistry::run` has no header, so a
+  screen filter fails there.
   `filters::registry()` holds the filters that ship. The cursor filter is an
-  in-place filter, and each other one is a span filter:
+  in-place filter, the viewport filter is a screen filter, and each other one
+  is a span filter:
   - `cursor` (`visibility`, `shape`, `blink`, `color`, issue #168): sets how
     the cursor looks. [The cursor filter](#the-cursor-filter) below gives its
     options.
@@ -6736,6 +6733,9 @@ The editing engine of the crate has five parts:
     key after it, their output, and their time.
     [The backspace removal filter](#the-backspace-removal-filter) below gives
     its rules.
+  - `viewport` (`rows`, `columns`, `hide_rows`, `hide_columns`, issue #165):
+    crops the screen and hides rows and columns.
+    [The viewport filter](#the-viewport-filter) below gives its options.
 
   The filters of issue #154 parse their options as a Rust type, so the render
   refuses a missing option, a value of the wrong type, and a key that the
@@ -6802,6 +6802,60 @@ thus it takes the state before the range to be the default of a terminal: a
 visible cursor, DECSCUSR 0, and the default color. After a reset of the
 terminal (RIS or DECSTR) in the recording, the filter sets the cursor again.
 
+### The viewport filter
+
+The `viewport` filter crops the screen and hides rows and columns, for example
+the status bar of a multiplexer or an empty part of a wide terminal. It runs the
+terminal emulator of `termstate` over the recording, and it writes the visible
+cells again as escape sequences. Thus `beta play`, each export of `beta`, and
+the preview show the crop, and none of them changes. The colors go out as the
+recording gave them (a base color, a color of the 256-color palette, or a 24-bit
+color), thus the `--theme` of an export still applies.
+
+A project file names the filter in its `filters` list:
+
+```json
+{
+  "kind": "viewport",
+  "region": "All",
+  "options": { "rows": { "start": 1, "end": 24 }, "columns": { "start": 0, "end": 80 }, "hide_rows": [12] }
+}
+```
+
+| Option | Values | What it does |
+|---|---|---|
+| `rows` | `{ "start": n, "end": m }` | Shows only the rows from `start` up to, and not including, `end`. The count starts at 0. All rows show when it is missing. |
+| `columns` | `{ "start": n, "end": m }` | The same for the columns. |
+| `hide_rows` | a list of row numbers | Hides these rows of the full screen, also when they are not next to each other. |
+| `hide_columns` | a list of column numbers | The same for the columns. |
+
+On the region `All`, the rendered recording gets the size of the visible cells:
+a hidden row or column goes out, and the cells after it move up or left. On a
+range, the size stays, each cell keeps its place, and each cell that is not
+visible is blank during the range. At the end of the range, the filter writes
+the full screen again, and it sets the scrolling region, the autowrap mode, the
+pen, the saved cursor, a pending wrap, the character set, and the cursor back to
+the state of the recording.
+
+A wide character, for example 日, covers two cells. If a crop, a hidden column,
+or the mask cuts it in half, the visible half shows as a space. A character of
+no width, for example a combining mark, does not show in the output.
+
+An unknown key fails the render. A crop that does not start before its end, a
+crop or a hidden number that is not on the screen, and options that leave no
+row or no column visible also fail the render, and the message names the
+option. A screen larger than 500 by 500 fails too. When every row and every
+column is visible, the filter changes nothing.
+
+The output shows the screen as `termstate` models it, which is the model of the
+video export of `beta`. A sequence that `termstate` does not model, for example
+the insert mode or a second screen buffer for mode 1049, thus has no effect in
+the output. The filter keeps the OSC sequences (the title, the
+palette, the default colors, and the cursor color), DECSCUSR, mode 12, and BEL.
+The design is in `specs/2026-11-27-nle-viewport-filter-design.md`. A zoom into a
+region over time cannot go into escape sequences, thus it waits for the export
+of edited recordings (issue #158).
+
 ### The backspace removal filter
 
 The `backspace-removal` filter removes the typing errors of a recording. It
@@ -6847,10 +6901,9 @@ stays, because the filter cannot see all of its output.
 
 The limits:
 
-- The comparison is as exact as the emulator. The emulator does not wrap at the
-  right margin, it gives each character one cell, and it reads `CSI C` or
-  `CSI D` with no number as a move of zero columns. Thus a typo near such
-  output usually stays.
+- The comparison is as exact as the emulator. The emulator does not model each
+  sequence, for example the insert mode or a second screen buffer for mode
+  1049. Thus a typo near such output usually stays.
 - At a prompt that echoes nothing, more than one typed key leaves the screen as
   a Ctrl+W or a Ctrl+U leaves it. The filter cannot tell how many keys the
   erase removed, so it keeps them all.
