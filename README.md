@@ -6635,9 +6635,9 @@ away from the time of the ruler.
 
 **Add Recording** in the menu bar puts one more recording into the open
 project, for example a second take, a step of a tutorial that you recorded
-alone, or an intro. The recording becomes one clip of the whole recording,
-after the end of the timeline, on the first track. **Open Recording** still
-starts a new project. One **Undo** removes an added recording.
+alone, or an intro. The whole recording becomes one clip, after the end of the
+timeline, on the first track. **Open Recording** still starts a new project.
+One **Undo** removes an added recording.
 
 The edited recording plays the clips in the order of their start on the
 timeline:
