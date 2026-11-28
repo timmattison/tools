@@ -30,6 +30,8 @@ use history::{
     keep_keys_in_field, key_forwarder, step_history, window_shortcut, HistoryButtons, HistoryStep,
 };
 
+mod clips;
+use clips::ClipsPanel;
 mod preview;
 use preview::{end_of, render_of, PreviewPane, RenderedState};
 mod timeline;
@@ -466,9 +468,9 @@ fn summary(open: &Document) -> String {
     )
 }
 
-/// The metadata of the open recording, the speed panel, and the redaction
-/// panel. `on_result` gets the outcome of each edit: `Ok`, or the message of
-/// the banner.
+/// The metadata of the open recording, the clip list, the speed panel, and
+/// the redaction panel. `on_result` gets the outcome of each edit: `Ok`, or
+/// the message of the banner.
 #[component]
 fn PropertiesPanel(
     loaded: Signal<Option<Document>>,
@@ -480,6 +482,7 @@ fn PropertiesPanel(
             h3 { "Properties" }
             if let Some(metadata) = metadata {
                 {metadata_rows(&metadata)}
+                ClipsPanel { loaded, on_result }
                 SpeedPanel { loaded, on_result }
                 RedactionPanel { loaded, on_result }
             } else {

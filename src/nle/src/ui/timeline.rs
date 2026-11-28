@@ -43,7 +43,7 @@ const TICK_CLASS: &str = "timeline-tick";
 /// The class of a tick of the ruler with a label.
 const MAJOR_TICK_CLASS: &str = "timeline-tick timeline-tick-major";
 /// The text before the number of a track.
-const TRACK_PREFIX: &str = "Track";
+pub(super) const TRACK_PREFIX: &str = "Track";
 
 /// The view of the timeline of the open document. `view` holds the zoom and
 /// the scroll.
