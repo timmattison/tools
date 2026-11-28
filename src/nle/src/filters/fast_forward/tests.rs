@@ -722,6 +722,26 @@ fn summary_after_a_viewport_range_that_a_slow_down_moved_into_its_region_fails_t
 }
 
 #[test]
+fn summary_after_an_acceleration_that_moved_a_viewport_range_into_its_region_fails_the_render() {
+    let lines: Vec<(f64, String)> = (1..=30)
+        .map(|n| (f64::from(n), format!("l{n}\r\n")))
+        .collect();
+    let result = render_with(
+        &borrowed(&lines),
+        31.0,
+        vec![
+            crop(range(10.0, 20.0)),
+            applied(
+                range(0.0, 30.0),
+                Mode::Accelerate(Acceleration::new(10.0).unwrap()),
+            ),
+            summary(0.0, 3.0, 1, 1),
+        ],
+    );
+    assert_summary_refused(result);
+}
+
+#[test]
 fn summary_after_a_speed_up_that_moved_a_viewport_range_out_of_its_region_drops_the_middle_lines() {
     let lines: Vec<(f64, String)> = (1..=40)
         .map(|n| (f64::from(n), format!("l{n}\r\n")))

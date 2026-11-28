@@ -1422,3 +1422,138 @@ fn a_span_filter_with_no_screen_filter_before_it_is_not_told_so() {
 
     assert!(!seen.lock().unwrap()[0].2);
 }
+
+// Tests of the moves of the rewritten parts.
+
+fn moved_parts(parts: &[(f64, f64)], step: &TimeStep<'_>) -> Vec<(f64, f64)> {
+    let mut rewritten = RewrittenParts(parts.to_vec());
+    rewritten.move_through(step);
+    rewritten.0
+}
+
+#[test]
+fn a_part_before_a_step_stays() {
+    let answer = [ev(1.0), ev(3.0)];
+    let step = TimeStep {
+        start: 5.0,
+        region_end: 10.0,
+        shift: 3.0,
+        old_times: &[6.0, 8.0],
+        answer: &answer,
+        answered_end: 8.0,
+    };
+    assert_eq!(moved_parts(&[(1.0, 2.0)], &step), vec![(1.0, 2.0)]);
+}
+
+#[test]
+fn a_part_that_ends_at_the_start_of_a_step_goes_through_the_step() {
+    let answer = [ev(1.0), ev(3.0)];
+    let step = TimeStep {
+        start: 5.0,
+        region_end: 10.0,
+        shift: 1.0,
+        old_times: &[5.0, 7.0],
+        answer: &answer,
+        answered_end: 11.0,
+    };
+    assert_eq!(moved_parts(&[(1.0, 5.0)], &step), vec![(1.0, 6.0)]);
+}
+
+#[test]
+fn a_part_after_a_step_moves_by_the_shift() {
+    let answer = [ev(1.0)];
+    let step = TimeStep {
+        start: 5.0,
+        region_end: 10.0,
+        shift: 3.0,
+        old_times: &[6.0],
+        answer: &answer,
+        answered_end: 9.0,
+    };
+    assert_eq!(moved_parts(&[(12.0, 14.0)], &step), vec![(15.0, 17.0)]);
+    assert_eq!(moved_parts(&[(10.0, 14.0)], &step), vec![(13.0, 17.0)]);
+}
+
+#[test]
+fn a_part_inside_a_step_that_keeps_the_count_goes_to_the_new_times_of_its_events() {
+    let answer = [ev(2.5), ev(5.0), ev(7.5), ev(10.0), ev(15.0)];
+    let step = TimeStep {
+        start: 0.0,
+        region_end: f64::INFINITY,
+        shift: -20.0,
+        old_times: &[5.0, 10.0, 15.0, 20.0, 30.0],
+        answer: &answer,
+        answered_end: 20.0,
+    };
+    assert_eq!(moved_parts(&[(10.0, 20.0)], &step), vec![(5.0, 10.0)]);
+}
+
+#[test]
+fn a_part_over_the_start_of_a_step_keeps_its_piece_before_the_step() {
+    let answer = [ev(0.5), ev(1.5), ev(2.0)];
+    let step = TimeStep {
+        start: 5.0,
+        region_end: 10.0,
+        shift: -2.5,
+        old_times: &[6.0, 8.0, 9.0],
+        answer: &answer,
+        answered_end: 7.5,
+    };
+    assert_eq!(moved_parts(&[(2.0, 8.0)], &step), vec![(2.0, 6.5)]);
+}
+
+#[test]
+fn a_part_over_the_end_of_a_step_keeps_its_piece_after_the_step() {
+    let answer = [ev(0.5), ev(1.5), ev(2.0)];
+    let step = TimeStep {
+        start: 5.0,
+        region_end: 10.0,
+        shift: -2.5,
+        old_times: &[6.0, 8.0, 9.0],
+        answer: &answer,
+        answered_end: 7.5,
+    };
+    assert_eq!(moved_parts(&[(8.0, 14.0)], &step), vec![(6.5, 11.5)]);
+}
+
+#[test]
+fn a_part_inside_a_step_that_changes_the_count_covers_the_whole_answer() {
+    let answer = [ev(0.5)];
+    let step = TimeStep {
+        start: 5.0,
+        region_end: 10.0,
+        shift: -2.0,
+        old_times: &[6.0, 7.0, 8.0],
+        answer: &answer,
+        answered_end: 8.0,
+    };
+    assert_eq!(moved_parts(&[(6.0, 8.0)], &step), vec![(5.0, 8.0)]);
+}
+
+#[test]
+fn a_part_over_the_end_of_a_step_that_changes_the_count_covers_the_answer_and_the_rest() {
+    let answer = [ev(0.5)];
+    let step = TimeStep {
+        start: 5.0,
+        region_end: 10.0,
+        shift: -2.0,
+        old_times: &[6.0, 7.0, 8.0],
+        answer: &answer,
+        answered_end: 8.0,
+    };
+    assert_eq!(moved_parts(&[(8.0, 14.0)], &step), vec![(5.0, 12.0)]);
+}
+
+#[test]
+fn a_part_with_no_event_left_in_a_step_that_keeps_the_count_drops() {
+    let answer = [ev(0.1), ev(1.0)];
+    let step = TimeStep {
+        start: 5.0,
+        region_end: 10.0,
+        shift: 0.0,
+        old_times: &[5.5, 8.0],
+        answer: &answer,
+        answered_end: 10.0,
+    };
+    assert_eq!(moved_parts(&[(6.0, 7.0)], &step), Vec::<(f64, f64)>::new());
+}
