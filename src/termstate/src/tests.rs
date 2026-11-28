@@ -1,4 +1,4 @@
-use crate::{Cell, ColorSource, TerminalState, TerminalTheme};
+use crate::{line_drawing_glyph, Cell, ColorSource, TerminalState, TerminalTheme};
 
 #[test]
 fn test_terminal_theme_creation() {
@@ -193,6 +193,319 @@ fn the_replay_buffer_holds_only_an_unfinished_sequence() {
     assert_eq!(state.pending, b"\x1b[3");
     state.process_output("1mX").unwrap();
     assert!(state.pending.is_empty());
+}
+
+/// Feeds `text` to a new terminal of 20 columns and 12 rows.
+fn feed_new(text: &str) -> TerminalState {
+    let mut state = TerminalState::new(20, 12, TerminalTheme::auto());
+    state.process_output(text).unwrap();
+    state
+}
+
+/// Checks that a save and a restore bring back the red color and clear flags.
+fn assert_red_plain_x(state: &TerminalState) {
+    let red = state.theme.get_color(1);
+    let cell = &state.get_grid()[0][0];
+    assert_eq!(cell.ch, 'x');
+    assert_eq!(cell.fg_color, red);
+    assert!(!cell.bold);
+    assert!(!cell.italic);
+    assert!(!cell.underline);
+}
+
+#[test]
+fn decrc_restores_the_colors_and_the_flags_that_decsc_saved() {
+    let state = feed_new("\x1b[31m\x1b7\x1b[32;1;3;4m\x1b8x");
+    assert_red_plain_x(&state);
+}
+
+#[test]
+fn each_restore_brings_back_the_color_sources_and_each_attribute_that_the_save_saw() {
+    // The pen has an indexed foreground, a 24-bit background, and each flag
+    // that SGR 2, 5, 7, 8 and 9 set. The change after the save gives base
+    // colors and clears each flag.
+    let pen = "\x1b[38;5;1;48;2;1;2;3;2;5;7;8;9m";
+    let reference = feed_new(&format!("{pen}x"));
+    let pairs = [
+        ("\x1b7", "\x1b8"),
+        ("\x1b[s", "\x1b[u"),
+        ("\x1b[?1048h", "\x1b[?1048l"),
+        ("\x1b[?1049h", "\x1b[?1049l"),
+    ];
+    for (save, restore) in pairs {
+        let state = feed_new(&format!("{pen}{save}\x1b[0;31;41m{restore}x"));
+        assert_eq!(
+            state.get_grid()[0][0],
+            reference.get_grid()[0][0],
+            "{save:?} {restore:?}"
+        );
+    }
+}
+
+#[test]
+fn each_restore_of_the_cursor_ends_a_pending_wrap() {
+    let pairs = [
+        ("\x1b7", "\x1b8"),
+        ("\x1b[s", "\x1b[u"),
+        ("\x1b[?1048h", "\x1b[?1048l"),
+        ("\x1b[?1049h", "\x1b[?1049l"),
+    ];
+    for (save, restore) in pairs {
+        // The ten digits fill the first row of the 10 by 3 terminal, and a
+        // wrap is pending. The restore moves the cursor back to the start.
+        let state = feed_text(&format!("{save}0123456789{restore}x"));
+        assert_eq!(state.get_grid()[0][0].ch, 'x', "{save:?} {restore:?}");
+    }
+}
+
+#[test]
+fn csi_s_and_csi_u_save_and_restore_like_decsc() {
+    let state = feed_new("\x1b[31m\x1b[s\x1b[32;1;3;4m\x1b[ux");
+    assert_red_plain_x(&state);
+}
+
+#[test]
+fn decrc_restores_the_character_set_that_decsc_saved() {
+    let state = feed_new("\x1b7\x1b(0\x1b8q");
+    assert_eq!(state.get_grid()[0][0].ch, 'q');
+    let state = feed_new("\x1b(0\x1b7\x1b(B\x1b8q");
+    assert_eq!(state.get_grid()[0][0].ch, '─');
+}
+
+#[test]
+fn the_alternate_screen_has_its_own_save_slot() {
+    let mut state = feed_new("\x1b[3;5H\x1b[?1049h\x1b[10;10H\x1b7\x1b[1;1H\x1b8");
+    assert_eq!(state.get_cursor_position(), (9, 9));
+    state.process_output("\x1b[?1049l").unwrap();
+    assert_eq!(state.get_cursor_position(), (4, 2));
+}
+
+#[test]
+fn leaving_the_alternate_screen_restores_the_attributes_of_the_normal_screen() {
+    let state = feed_new("\x1b[31m\x1b[?1049h\x1b[32m\x1b[?1049lx");
+    assert_eq!(state.get_grid()[0][0].fg_color, state.theme.get_color(1));
+}
+
+#[test]
+fn ris_resets_the_save_slots() {
+    let state = feed_new("\x1b[5;5H\x1b[31m\x1b7\x1bc\x1b8x");
+    let cell = &state.get_grid()[0][0];
+    assert_eq!(cell.ch, 'x');
+    assert_eq!(cell.fg_color, state.theme.foreground);
+}
+
+#[test]
+fn modes_47_and_1047_switch_to_the_save_slot_of_the_alternate_screen() {
+    for mode in ["47", "1047"] {
+        let mut state = feed_new(&format!(
+            "\x1b[3;5H\x1b7\x1b[?{mode}h\x1b[10;10H\x1b7\x1b[1;1H\x1b8"
+        ));
+        assert_eq!(state.get_cursor_position(), (9, 9), "mode {mode}");
+        state
+            .process_output(&format!("\x1b[?{mode}l\x1b8"))
+            .unwrap();
+        assert_eq!(state.get_cursor_position(), (4, 2), "mode {mode}");
+    }
+}
+
+#[test]
+fn mode_1048_saves_and_restores_in_the_slot_of_the_current_screen() {
+    let state = feed_new("\x1b[3;5H\x1b[?1048h\x1b[1;1H\x1b[?1048l");
+    assert_eq!(state.get_cursor_position(), (4, 2));
+    // The save of 1048 and the restore of DECRC use one slot: 1048 does not
+    // switch the screen.
+    let state = feed_new("\x1b[3;5H\x1b[?1048h\x1b[1;1H\x1b8");
+    assert_eq!(state.get_cursor_position(), (4, 2));
+}
+
+#[test]
+fn ris_on_the_alternate_screen_resets_its_save_slot() {
+    let state = feed_new("\x1b[?1049h\x1b[10;10H\x1b7\x1bc\x1b[?1049h\x1b8");
+    assert_eq!(state.get_cursor_position(), (0, 0));
+}
+
+#[test]
+fn ris_on_the_alternate_screen_returns_to_the_normal_screen() {
+    let state = feed_new("\x1b[?1049h\x1bc\x1b[3;5H\x1b7\x1b[1;1H\x1b[?1049l");
+    assert_eq!(state.get_cursor_position(), (4, 2));
+}
+
+#[test]
+fn restore_count_increases_by_one_for_each_kind_of_restore() {
+    for restore in ["\x1b8", "\x1b[u", "\x1b[?1048l", "\x1b[?1049l"] {
+        let mut state = feed_new("\x1b7");
+        assert_eq!(state.restore_count(), 0, "a save is not a restore");
+        state.process_output(restore).unwrap();
+        assert_eq!(state.restore_count(), 1, "{restore:?}");
+        let copy = state.clone();
+        assert_eq!(copy.restore_count(), 1, "a clone keeps the count");
+    }
+}
+
+#[test]
+fn is_settled_is_false_inside_a_sequence_and_true_after_it() {
+    assert!(feed_new("").is_settled());
+    assert!(!feed_new("\x1b[").is_settled());
+    assert!(feed_new("\x1b[5;5H").is_settled());
+}
+
+#[test]
+fn unfinished_sequence_reopens_the_sequence_in_a_viewer_that_ended_it() {
+    let cases = [
+        ("", "X"),
+        ("\x1b[?25", "l"),
+        ("\x1b[\r\n1", "mX"),
+        ("\x1b[1\x18", "X"),
+        ("\x1b", "[?25l"),
+        ("\x1b(", "0q"),
+        ("\x1b]0;ti", "tle\x07X"),
+    ];
+    for (start, rest) in cases {
+        let reference = feed_new(&format!("ab{start}{rest}"));
+        let reopen = feed_new(&format!("ab{start}")).unfinished_sequence();
+        let viewer = feed_new(&format!("ab{start}\x1b7\x1b8{reopen}{rest}"));
+        assert_eq!(viewer.get_grid(), reference.get_grid(), "{start:?}");
+        assert_eq!(
+            viewer.get_cursor_position(),
+            reference.get_cursor_position(),
+            "{start:?}"
+        );
+        assert_eq!(
+            viewer.is_cursor_visible(),
+            reference.is_cursor_visible(),
+            "{start:?}"
+        );
+        assert_eq!(
+            viewer.uses_line_drawing(),
+            reference.uses_line_drawing(),
+            "{start:?}"
+        );
+    }
+}
+
+#[test]
+fn unfinished_sequence_is_empty_when_settled() {
+    assert_eq!(feed_new("ab").unfinished_sequence(), "");
+    assert_eq!(feed_new("\x1b[5;5H").unfinished_sequence(), "");
+    assert_eq!(feed_new("\x1b[1\x18").unfinished_sequence(), "");
+    assert_eq!(feed_new("\x1b[?25").unfinished_sequence(), "\x1b[?25");
+    assert_eq!(feed_new("\x1b[\r\n1").unfinished_sequence(), "\x1b[1");
+}
+
+#[test]
+fn unfinished_sequence_keeps_the_c0_bytes_after_a_dcs_introducer() {
+    // vte 0.15 runs none of these controls in a DCS. In the payload, it gives
+    // them to `put`. CAN and SUB end the DCS, and ESC starts a new sequence.
+    let controls: String = (0x00..=0x1f_u8)
+        .filter(|byte| !matches!(byte, 0x18 | 0x1a | 0x1b))
+        .map(char::from)
+        .collect();
+    let start = format!("\x1bP{controls}q#0{controls}~-");
+    assert_eq!(feed_new(&format!("ab{start}")).unfinished_sequence(), start);
+    // Before the `P`, the parser is in the escape state, and a control runs.
+    assert_eq!(
+        feed_new("ab\x1b\r\x07P1$q\x01m").unfinished_sequence(),
+        "\x1bP1$q\x01m"
+    );
+}
+
+#[test]
+fn a_sequence_that_can_or_sub_ends_leaves_the_parser_settled() {
+    let starts = [
+        "\x1b",
+        "\x1b[1",
+        "\x1b[1;?",
+        "\x1b(",
+        "\x1b]0;ti",
+        "\x1bP1$q",
+        "\x1b_Ga",
+    ];
+    for end in ["\x18", "\x1a"] {
+        for start in starts {
+            let state = feed_new(&format!("ab{start}{end}"));
+            assert!(state.is_settled(), "{start:?} {end:?}");
+            assert_eq!(state.unfinished_sequence(), "", "{start:?} {end:?}");
+        }
+    }
+}
+
+#[test]
+fn a_csi_sequence_that_vte_ignores_leaves_the_parser_settled_at_its_final_byte() {
+    let sequences = [
+        "\x1b[1;?h",
+        "\x1b[1;?\r\nh",
+        "\x1b[ 1m",
+        "\x1b[1;?h\r\n",
+        "\x1b\r[1;?h",
+        "\x1b\x7f[1;?h",
+        "\x1bé[1;?h",
+    ];
+    for sequence in sequences {
+        assert!(
+            feed_new(&format!("ab{sequence}")).is_settled(),
+            "{sequence:?}"
+        );
+    }
+    assert!(!feed_new("ab\x1b[1;?").is_settled());
+}
+
+/// A performer that records whether the parser printed a character.
+#[derive(Default)]
+struct Printed(bool);
+
+impl vte::Perform for Printed {
+    fn print(&mut self, _: char) {
+        self.0 = true;
+    }
+}
+
+/// Tells if a new parser of vte is in the ground state after it reads `text`,
+/// one byte at a time. Only the ground state prints the next `x`.
+fn vte_is_in_ground(text: &str) -> bool {
+    let mut parser = vte::Parser::new();
+    for byte in text.as_bytes() {
+        parser.advance(&mut Printed::default(), &[*byte]);
+    }
+    let mut probe = Printed::default();
+    parser.advance(&mut probe, b"x");
+    probe.0
+}
+
+/// The characters of the walks of
+/// `is_settled_agrees_with_vte_after_each_character`. Each one moves the parser
+/// in a different way. `ESC` and `[` are in the list twice, so that more
+/// sequences start.
+const WALK: [char; 22] = [
+    '\x1b', '\x1b', '[', '[', ']', 'P', '_', '?', '1', ';', ' ', 'h', 'q', '\\', '\x18', '\x1a',
+    '\x07', '\r', '\x7f', 'é', '\u{9c}', 'x',
+];
+
+#[test]
+fn is_settled_agrees_with_vte_after_each_character() {
+    let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+    let count = u64::try_from(WALK.len()).unwrap();
+    for cloned in [false, true] {
+        for _ in 0..400 {
+            let mut state = TerminalState::new(20, 12, TerminalTheme::auto());
+            let mut text = String::new();
+            for _ in 0..40 {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let ch = WALK[usize::try_from(seed % count).unwrap()];
+                text.push(ch);
+                if cloned {
+                    state = state.clone();
+                }
+                state.process_output(ch.encode_utf8(&mut [0; 4])).unwrap();
+                assert_eq!(
+                    state.is_settled(),
+                    vte_is_in_ground(&text),
+                    "{text:?}, cloned {cloned}"
+                );
+            }
+        }
+    }
 }
 
 /// Feeds `text` to a 10 by 3 terminal with the automatic theme.
@@ -461,7 +774,7 @@ fn a_new_terminal_has_the_saved_cursor_at_the_top_left() {
 
 #[test]
 fn each_save_of_the_cursor_gives_the_saved_position() {
-    for save in ["\x1b7", "\x1b[s", "\x1b[?1049h"] {
+    for save in ["\x1b7", "\x1b[s", "\x1b[?1048h"] {
         let mut state = TerminalState::new(80, 24, TerminalTheme::auto());
 
         state.process_output("\x1b[3;4H").unwrap();
@@ -470,6 +783,22 @@ fn each_save_of_the_cursor_gives_the_saved_position() {
 
         assert_eq!(state.saved_cursor_position(), (3, 2), "{save:?}");
     }
+}
+
+#[test]
+fn the_save_of_mode_1049_goes_into_the_slot_of_the_normal_screen() {
+    let mut state = TerminalState::new(80, 24, TerminalTheme::auto());
+
+    // The alternate screen has a save slot of its own, and nothing saved there.
+    state
+        .process_output("\x1b[3;4H\x1b[?1049h\x1b[1;1H")
+        .unwrap();
+    assert_eq!(state.saved_cursor_position(), (0, 0));
+
+    // Mode 1047 goes back to the normal screen and restores nothing.
+    state.process_output("\x1b[?1047l").unwrap();
+    assert_eq!(state.saved_cursor_position(), (3, 2));
+    assert_eq!(state.get_cursor_position(), (0, 0));
 }
 
 #[test]
@@ -482,6 +811,74 @@ fn line_drawing_is_on_after_the_designation_of_the_special_set() {
 
     state.process_output("\x1b(B").unwrap();
     assert!(!state.uses_line_drawing());
+}
+
+#[test]
+fn the_line_drawing_glyph_is_the_glyph_of_a_print_in_that_set() {
+    // The glyph that a terminal shows for each character from 0x5F to 0x7E.
+    const GLYPHS: [(char, char); 32] = [
+        ('_', ' '),
+        ('`', '◆'),
+        ('a', '▒'),
+        ('b', '\u{2409}'),
+        ('c', '\u{240c}'),
+        ('d', '\u{240d}'),
+        ('e', '\u{240a}'),
+        ('f', '°'),
+        ('g', '±'),
+        ('h', '\u{2424}'),
+        ('i', '\u{240b}'),
+        ('j', '┘'),
+        ('k', '┐'),
+        ('l', '┌'),
+        ('m', '└'),
+        ('n', '┼'),
+        ('o', '⎺'),
+        ('p', '⎻'),
+        ('q', '─'),
+        ('r', '⎼'),
+        ('s', '⎽'),
+        ('t', '├'),
+        ('u', '┤'),
+        ('v', '┴'),
+        ('w', '┬'),
+        ('x', '│'),
+        ('y', '≤'),
+        ('z', '≥'),
+        ('{', 'π'),
+        ('|', '≠'),
+        ('}', '£'),
+        ('~', '·'),
+    ];
+    for (ch, glyph) in GLYPHS {
+        assert_eq!(line_drawing_glyph(ch), glyph, "{ch:?}");
+    }
+    for ch in ['^', 'A', 'Z', '0', '─'] {
+        assert_eq!(line_drawing_glyph(ch), ch, "{ch:?}");
+    }
+    let mut state = TerminalState::new(40, 2, TerminalTheme::auto());
+    let printed: String = GLYPHS.iter().map(|&(ch, _)| ch).collect();
+    state.process_output(&format!("\x1b(0{printed}")).unwrap();
+    for (cell, (ch, glyph)) in state.get_grid()[0].iter().zip(GLYPHS) {
+        assert_eq!(cell.ch, glyph, "{ch:?}");
+    }
+}
+
+#[test]
+fn the_character_at_the_second_cell_of_a_wide_character_starts_one_cell_before() {
+    let mut state = TerminalState::new(6, 2, TerminalTheme::auto());
+    state.process_output("ab日c").unwrap();
+    let at = |x: usize, y: usize| {
+        state
+            .character_at(x, y)
+            .map(|(column, cell)| (column, cell.ch))
+    };
+    assert_eq!(at(1, 0), Some((1, 'b')));
+    assert_eq!(at(2, 0), Some((2, '日')));
+    assert_eq!(at(3, 0), Some((2, '日')));
+    assert_eq!(at(4, 0), Some((4, 'c')));
+    assert_eq!(at(6, 0), None);
+    assert_eq!(at(0, 2), None);
 }
 
 /// The text of row `y`, with the trailing blanks cut off.
@@ -1351,6 +1748,25 @@ fn the_saved_cursor_counts_although_the_cursor_is_the_same() {
 }
 
 #[test]
+fn the_alternate_screen_counts_although_the_screen_is_the_same() {
+    // Mode 47 sets only the flag: it does not clear the grid or save a cursor.
+    // A later save goes to the other slot.
+    assert!(feed_text("") != feed_text("\x1b[?47h"));
+}
+
+#[test]
+fn the_saved_cursor_of_the_alternate_screen_counts() {
+    assert!(feed_text("\x1b[?47h") != feed_text("\x1b[?47h\x1b[5C\x1b7\x1b[5D"));
+}
+
+#[test]
+fn the_count_of_restores_does_not_count() {
+    // No later byte reads the count, so a restore that brings back the same
+    // state gives an equal terminal.
+    assert!(feed_text("\x1b7\x1b8") == feed_text("\x1b7"));
+}
+
+#[test]
 fn an_unfinished_sequence_counts_until_it_ends() {
     let mut unfinished = feed_text("x\x1b[");
     assert!(unfinished != feed_text("x"));
@@ -1416,7 +1832,9 @@ fn a_change_of_one_field_makes_the_terminals_unequal() {
         ("height", |t| t.height += 1),
         ("current_fg", |t| t.current_fg = (1, 2, 3)),
         ("current_bg", |t| t.current_bg = (1, 2, 3)),
-        ("saved_cursor_y", |t| t.saved_cursor_y += 1),
+        ("saved", |t| t.saved[0].y += 1),
+        ("alt_screen", |t| t.alt_screen = !t.alt_screen),
+        ("track", |t| t.track = crate::Track::Csi),
         ("scroll_top", |t| t.scroll_top += 1),
         ("scroll_bottom", |t| t.scroll_bottom -= 1),
         ("use_acs", |t| t.use_acs = !t.use_acs),

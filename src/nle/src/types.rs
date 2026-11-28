@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::error::NleError;
 use crate::json_file;
+use crate::pipeline::TerminalSize;
 
 /// A terminal recording, compatible with the beta recorder format.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -246,6 +247,15 @@ pub struct EditProject {
 }
 
 impl Recording {
+    /// The size of the terminal that made this recording.
+    #[must_use]
+    pub fn size(&self) -> TerminalSize {
+        TerminalSize {
+            width: self.width,
+            height: self.height,
+        }
+    }
+
     /// Load a recording from a file, auto-detecting gzip compression via magic bytes.
     ///
     /// # Errors

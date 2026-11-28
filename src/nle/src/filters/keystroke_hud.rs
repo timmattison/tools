@@ -1,0 +1,212 @@
+//! The keystroke HUD filter: it shows the keys that the presenter presses in a
+//! box on the screen. Issue #161.
+//!
+//! The filter reads the input events of its region. It shows the keys in a box
+//! with rounded corners. Fast typing goes into one box. A key that the user
+//! holds shows once, with a count. The box fades in and out in steps of 24-bit
+//! color.
+//!
+//! The filter draws with output events. Each one saves the cursor, draws the
+//! box, and restores the cursor. The filter replays the events through the
+//! emulator of `termstate`. Thus it knows the cells under the box. It puts
+//! them back when the box goes away, and it keeps the box in place when the
+//! output scrolls. Thus `beta play`, `beta export web`, and `beta export video`
+//! show the HUD with no change.
+//!
+//! The filter draws nothing while the output of the program stops inside an
+//! escape sequence. The first `ESC` of a draw ends that sequence in the viewer.
+//! At the end of the region, the last draw writes the start of that sequence
+//! again, so the output after the region finishes it.
+//!
+//! The options, with their defaults:
+//! - `position`: `top-right`. The corner or the edge of the box.
+//! - `duration`: 1.5. The seconds that a box stays after its last key.
+//! - `fade`: 0.2. The seconds of each fade. 0 turns the fade off.
+//! - `theme`: `auto`. The theme of the export. The fade starts from its
+//!   background.
+//! - `text`: `#ffffff`. The color of typed text.
+//! - `accent`: `#ffc83c`. The color of the labels of special keys.
+//! - `background`: `#303030`. The color of the inside of the box.
+//! - `border`: `#808080`. The color of the border.
+//!
+//! A redaction of input events (issue #156) must run before this filter, in the
+//! list of filters of the project. Then the HUD does not show the hidden keys.
+//! A redaction after this filter does not protect the keys. It finds a match in
+//! the text that the output writes, but a draw of a box writes only the cells
+//! that change. Thus a box can show all of the hidden keys, for example a whole
+//! password.
+//!
+//! The limits:
+//! - A modifier key alone (Ctrl, Alt, Shift) shows nothing. A terminal sends
+//!   no byte for it. The kitty keyboard protocol sends a code, and the HUD
+//!   skips it.
+//! - The HUD never makes a region longer. A box that is still on the screen at
+//!   the end of the region goes away there.
+//! - While the edge of a box covers one half of a wide character of the
+//!   program (for example `日`), the other half shows blank. A terminal cannot
+//!   show one half of a wide character.
+//! - A character of no width, for example a combining accent, does not show in
+//!   a label. `termstate` gives it no cell.
+//! - The HUD saves and restores the cursor with `ESC 7` and `ESC 8`, and the
+//!   program shares that one save of the terminal. When the program saves the
+//!   cursor, the HUD draws, and then the program restores the cursor, the
+//!   viewer gets the cursor of the draw. The output of that event goes there
+//!   first, and the HUD then repairs the screen. If that place is the last
+//!   row, a newline scrolls the viewer and puts one more line into its
+//!   scrollback.
+//! - When the region ends inside a string sequence of the program (OSC or
+//!   DCS), the viewer gets that sequence twice: first cut at the last draw of
+//!   the HUD, then whole.
+
+mod keys;
+mod options;
+mod paint;
+mod timeline;
+
+pub use options::{
+    HudOptions, Position, Rgb, ACCENT_OPTION, BACKGROUND_OPTION, BORDER_OPTION, DURATION_OPTION,
+    FADE_OPTION, POSITION_OPTION, TEXT_OPTION, THEME_OPTION,
+};
+
+use crate::pipeline::{FilterRegistry, Screen, ScreenView};
+use crate::types::{AppliedFilter, Event, EventType, FilterKind, FilterOptions, FilterRegion};
+use paint::{layout, Painter};
+use timeline::{Press, Timeline, Timing};
+
+/// The kind of the keystroke HUD filter.
+pub const KIND: &str = "keystroke-hud";
+
+/// The kind of the keystroke HUD filter, as a `FilterKind`.
+#[must_use]
+pub fn kind() -> FilterKind {
+    FilterKind::new(KIND)
+}
+
+/// A keystroke HUD filter for `region` with `options`.
+#[must_use]
+pub fn applied(region: FilterRegion, options: &HudOptions) -> AppliedFilter {
+    AppliedFilter {
+        kind: kind(),
+        region,
+        options: options.to_options(),
+    }
+}
+
+/// The most cells of a screen that the HUD replays. A larger size fails the
+/// render, so that a header with a bad size does not take all the memory.
+pub const MAX_CELLS: usize = 1_000_000;
+
+/// Add the keystroke HUD filter to `registry`.
+pub fn register(registry: &mut FilterRegistry) {
+    registry.register_screen(kind(), draw);
+}
+
+/// The screen filter of the HUD. It answers the events of its region, with the
+/// output events of the box added in time order, and it keeps the size of the
+/// screen.
+///
+/// # Errors
+/// Returns a message when an option is not valid, or when the screen has more
+/// than `MAX_CELLS` cells.
+fn draw(events: &[Event], view: ScreenView<'_>, options: &FilterOptions) -> Result<Screen, String> {
+    let options = HudOptions::from_options(options)?;
+    let size = view.size;
+    let unchanged = |events: Vec<Event>| Screen { events, size };
+    let (columns, rows) = (size.width, size.height);
+    if usize::from(columns) * usize::from(rows) > MAX_CELLS {
+        return Err(format!(
+            "the terminal is {columns} x {rows} cells, which is more than the {MAX_CELLS} cells that the keystroke HUD replays"
+        ));
+    }
+    let Some(mut painter) = Painter::new(size) else {
+        return Ok(unchanged(events.to_vec()));
+    };
+    for event in view.before {
+        if event.event_type == EventType::Output {
+            painter.feed(&event.data);
+        }
+    }
+
+    let mut events = events.to_vec();
+    // The pipeline gives no order inside a region.
+    events.sort_by(|a, b| a.time.total_cmp(&b.time));
+    let mut reader = keys::KeyReader::new();
+    let mut presses: Vec<Press> = Vec::new();
+    for event in events
+        .iter()
+        .filter(|event| event.event_type == EventType::Input)
+    {
+        presses.extend(
+            reader
+                .feed(event.time, &event.data)
+                .into_iter()
+                .map(|(time, key)| Press { time, key }),
+        );
+    }
+    presses.extend(
+        reader
+            .finish()
+            .into_iter()
+            .map(|(time, key)| Press { time, key }),
+    );
+    let timeline = Timeline::new(
+        presses,
+        Timing {
+            duration: options.duration,
+            fade: options.fade,
+            limit: view.region.length,
+        },
+    );
+    let frames = timeline.frames();
+
+    let mut result = Vec::with_capacity(events.len());
+    let paint = |painter: &mut Painter, result: &mut Vec<Event>, time: f64| {
+        let overlay = timeline
+            .at(time)
+            .and_then(|shown| layout(size, &options, &shown));
+        if let Some(data) = painter.paint(overlay.as_ref()) {
+            result.push(Event {
+                time,
+                event_type: EventType::Output,
+                data,
+            });
+        }
+    };
+    let mut next_frame = 0;
+    for event in events {
+        // A frame at the time of an event comes after it.
+        while let Some(&time) = frames.get(next_frame).filter(|time| **time < event.time) {
+            paint(&mut painter, &mut result, time);
+            next_frame += 1;
+        }
+        let time = event.time;
+        let is_output = event.event_type == EventType::Output;
+        if is_output {
+            painter.feed(&event.data);
+        }
+        result.push(event);
+        if is_output {
+            paint(&mut painter, &mut result, time);
+        }
+    }
+    for &time in frames.iter().skip(next_frame) {
+        paint(&mut painter, &mut result, time);
+    }
+    // The last draw takes the box away, also inside a sequence of the program.
+    // The time is never after the end of the region.
+    let end = result
+        .last()
+        .map_or(0.0, |event| event.time)
+        .max(frames.last().copied().unwrap_or(0.0));
+    if let Some(data) = painter.finish() {
+        result.push(Event {
+            time: end,
+            event_type: EventType::Output,
+            data,
+        });
+    }
+    Ok(unchanged(result))
+}
+
+#[cfg(test)]
+mod tests;

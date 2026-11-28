@@ -74,8 +74,10 @@
 //! and an ESC stops the open sequence in the real terminal. No character goes
 //! before it, because the cursor of the output is not known at the start.
 //!
-//! A `ESC 7` in a real terminal also saves the pen. The restore saves the
-//! position only, as `termstate` does.
+//! A `ESC 7` saves the pen and the character set too, in a real terminal and
+//! in `termstate`. The restore writes the pen of the emulator before its
+//! `ESC 7`. Thus after the range, the save holds that pen and the ASCII set,
+//! and not the pen and the set that the program saved.
 //!
 //! For each output event of the region, the filter first writes the
 //! sequences that do not change a cell, in their order: each OSC, each
@@ -533,18 +535,11 @@ impl Replay {
         // line-drawing set, because the real terminal is in the ASCII set.
         let wrap_pending = self.terminal.is_wrap_pending();
         if wrap_pending {
-            let cells = self.terminal.get_grid().get(cursor_y);
-            let cell = cells.and_then(|cells| cells.get(cursor_x));
             // A wide character in the last two columns holds the pending wrap
             // in the last column, thus the write starts at its first cell.
-            let column = if cell.is_some_and(Cell::is_wide_continuation) {
-                cursor_x.saturating_sub(1)
-            } else {
-                cursor_x
-            };
-            let glyph = cells.and_then(|cells| cells.get(column)).map(glyph_of);
-            if let Some(glyph) = glyph {
-                self.writer.rewrite(column, cursor_y, glyph, &mut data);
+            if let Some((column, cell)) = self.terminal.character_at(cursor_x, cursor_y) {
+                self.writer
+                    .rewrite(column, cursor_y, glyph_of(cell), &mut data);
             }
         }
         if self.terminal.uses_line_drawing() {

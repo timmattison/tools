@@ -27,6 +27,47 @@ use vte::{Parser, Perform};
 /// printed character has this value.
 pub const WIDE_CONTINUATION: char = '\0';
 
+/// The glyph that the DEC line drawing set shows for `ch`, or `ch` when that
+/// set shows it unchanged. A print of `ch` while the set is on puts this glyph
+/// into the cell. The set changes each character from `_` (0x5F) to `~` (0x7E).
+pub fn line_drawing_glyph(ch: char) -> char {
+    match ch {
+        '_' => ' ',        // Blank
+        '`' => '◆',        // Diamond
+        'a' => '▒',        // Checkerboard
+        'b' => '\u{2409}', // Symbol for horizontal tabulation
+        'c' => '\u{240c}', // Symbol for form feed
+        'd' => '\u{240d}', // Symbol for carriage return
+        'e' => '\u{240a}', // Symbol for line feed
+        'f' => '°',        // Degree sign
+        'g' => '±',        // Plus or minus sign
+        'h' => '\u{2424}', // Symbol for newline
+        'i' => '\u{240b}', // Symbol for vertical tabulation
+        'j' => '┘',        // Lower right corner
+        'k' => '┐',        // Upper right corner
+        'l' => '┌',        // Upper left corner
+        'm' => '└',        // Lower left corner
+        'n' => '┼',        // Cross
+        'o' => '⎺',        // Scan line 1
+        'p' => '⎻',        // Scan line 3
+        'q' => '─',        // Horizontal line (scan line 5)
+        'r' => '⎼',        // Scan line 7
+        's' => '⎽',        // Scan line 9
+        't' => '├',        // Left T
+        'u' => '┤',        // Right T
+        'v' => '┴',        // Bottom T
+        'w' => '┬',        // Top T
+        'x' => '│',        // Vertical line
+        'y' => '≤',        // Less than or equal to
+        'z' => '≥',        // Greater than or equal to
+        '{' => 'π',        // Pi
+        '|' => '≠',        // Not equal to
+        '}' => '£',        // Pound sign
+        '~' => '·',        // Centered dot
+        _ => ch,
+    }
+}
+
 /// Narrows an SGR colour offset to the palette index it names.
 ///
 /// Callers reach this only from a match arm that has already pinned the SGR
@@ -403,8 +444,10 @@ pub struct Cell {
 
 /// Tells if the parser is settled after one character: in the ground state, with
 /// no unfinished sequence. `was_settled` is the answer before the character.
-/// `printed` tells that the parser called `print` for the character, and `ended`
-/// that it called `csi_dispatch`, `esc_dispatch`, `osc_dispatch`, or `unhook`.
+/// `printed` tells that the parser called `print` for the character. `ended`
+/// tells that it called `csi_dispatch`, `esc_dispatch`, `osc_dispatch`, or
+/// `unhook`, that it ran CAN or SUB, or that the character is the final byte of
+/// a CSI sequence.
 ///
 /// The proof, for vte 0.15 and for text that arrives as valid UTF-8, one whole
 /// character at a time:
@@ -414,14 +457,62 @@ pub struct Cell {
 /// - `print` fires only in the ground state. The character is whole, so the
 ///   print takes all of it, and no part of a UTF-8 sequence stays behind.
 /// - A CSI dispatch or an ESC dispatch returns the parser to the ground state.
-///   An OSC string ends in the ground state on BEL, CAN, or SUB. A DCS string
-///   ends in the ground state on CAN, SUB, or 0x9C. They end in the Escape state
-///   only on ESC, and the rule excludes ESC.
-/// - A settle point that the rule misses, for example the end of an ignored CSI
-///   sequence, which calls nothing, only keeps bytes in the buffer until the next
-///   print or dispatch. That makes the replay longer. It never makes it wrong.
+///   An OSC string ends in the ground state on BEL. A DCS string ends in the
+///   ground state on 0x9C. They end in the Escape state only on ESC, and the
+///   rule excludes ESC.
+/// - CAN and SUB move the parser from each state to the ground state, and the
+///   parser runs them.
+/// - A CSI sequence ends in the ground state on its final byte, 0x40 to 0x7E.
+///   When vte ignores the sequence, for example `ESC [ 1 ; ? h`, it calls
+///   nothing at that byte. [`Track`] tells that the parser is in a CSI sequence.
+///
+/// These are all the ways back to the ground state, thus the rule misses no
+/// settle point.
 fn ends_settled(ch: char, was_settled: bool, printed: bool, ended: bool) -> bool {
     ch != '\x1b' && (printed || ended || was_settled)
+}
+
+/// Where the parser of vte 0.15 is, for the one end of a sequence that calls
+/// back nothing: the final byte of a CSI sequence that vte ignores.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Track {
+    /// The parser is in no state below.
+    #[default]
+    Elsewhere,
+    /// The parser is in the escape state. A `[` starts a CSI sequence.
+    Escape,
+    /// The parser is in a CSI sequence. A final byte ends it.
+    Csi,
+}
+
+impl Track {
+    /// Returns where the parser is after `ch`, from where it was before.
+    ///
+    /// ESC moves the parser from each state to the escape state, and CAN and
+    /// SUB move it to the ground state. In the escape state and in a CSI
+    /// sequence, a control, DEL, and each byte of a character that is not ASCII
+    /// keep the state. In a CSI sequence, each byte from 0x20 to 0x3F does too.
+    fn after(self, ch: char) -> Self {
+        match (self, ch) {
+            (_, '\x1b') => Self::Escape,
+            (_, '\x18' | '\x1a') => Self::Elsewhere,
+            (Self::Escape, '[') => Self::Csi,
+            (Self::Escape, ch) if ch.is_ascii_control() || !ch.is_ascii() => Self::Escape,
+            (Self::Csi, ch) if Self::is_final_byte(ch) => Self::Elsewhere,
+            (Self::Csi, _) => Self::Csi,
+            _ => Self::Elsewhere,
+        }
+    }
+
+    /// Tells if `ch` ends the CSI sequence that the parser is in.
+    fn ends_csi(self, ch: char) -> bool {
+        self == Self::Csi && Self::is_final_byte(ch)
+    }
+
+    /// Tells if `ch` is a final byte of a CSI sequence: 0x40 to 0x7E.
+    fn is_final_byte(ch: char) -> bool {
+        ('\x40'..='\x7e').contains(&ch)
+    }
 }
 
 /// Makes a parser in the state that `Parser::new()` reaches after it has read
@@ -433,6 +524,20 @@ fn replayed_parser(pending: &[u8]) -> Parser {
     }
     parser
 }
+
+/// The byte `ESC`, which starts an escape sequence.
+const ESC: u8 = 0x1b;
+/// The byte `CAN`, which ends each sequence.
+const CAN: u8 = 0x18;
+/// The byte `SUB`, which ends each sequence.
+const SUB: u8 = 0x1a;
+/// The last C0 control byte.
+const LAST_C0: u8 = 0x1f;
+/// The byte after `ESC` that starts a DCS string.
+const DCS_INTRODUCER: u8 = b'P';
+/// The bytes that move the parser out of the escape state. Each other byte
+/// runs there, or the parser ignores it.
+const ESCAPE_EXIT: std::ops::RangeInclusive<u8> = 0x20..=0x7e;
 
 /// The count that parameter `index` of `params` gives: its value, or 1 when
 /// the parameter is missing or 0. A terminal reads a count of 0 as 1.
@@ -466,6 +571,9 @@ impl Perform for Feed<'_> {
     }
 
     fn execute(&mut self, byte: u8) {
+        if matches!(byte, CAN | SUB) {
+            self.ended = true;
+        }
         self.state.execute(byte);
     }
 
@@ -526,8 +634,10 @@ impl Clone for TerminalState {
             strikethrough: self.strikethrough,
             parser: replayed_parser(&self.pending),
             pending: self.pending.clone(),
-            saved_cursor_x: self.saved_cursor_x,
-            saved_cursor_y: self.saved_cursor_y,
+            track: self.track,
+            saved: self.saved,
+            restores: self.restores,
+            alt_screen: self.alt_screen,
             scroll_top: self.scroll_top,
             scroll_bottom: self.scroll_bottom,
             use_acs: self.use_acs,
@@ -553,15 +663,19 @@ impl Cell {
 
 /// Two terminals are equal when each later byte has the same effect on both.
 ///
-/// Thus they hold the same screen, cursor, pen, saved cursor, scroll region,
-/// character set, autowrap mode, pending wrap, cursor visibility, palette,
-/// selection and override colors, theme, and size, and the same unfinished
-/// escape sequence. The pen is the colors, the source of each color, and each
-/// attribute that the next printed character gets.
+/// Thus they hold the same screen, cursor, pen, saved cursor of each screen,
+/// alternate screen state, scroll region, character set, autowrap mode,
+/// pending wrap, cursor visibility, palette, selection and override colors,
+/// theme, and size, and the same unfinished escape sequence. The pen is the
+/// colors, the source of each color, and each attribute that the next printed
+/// character gets.
 ///
 /// The parser is not compared. By the argument on `Clone`, a parser is in the
 /// state that `Parser::new()` reaches after it reads `pending`, so two equal
 /// `pending` buffers give two parsers in the same state.
+///
+/// The count of restores (`TerminalState::restore_count`) is not compared. It
+/// counts the restores that came before, and no later byte reads it.
 ///
 /// The marks of `take_changed_rows` are not compared. They record which rows
 /// changed, and no later byte reads them.
@@ -591,8 +705,10 @@ impl PartialEq for TerminalState {
             strikethrough,
             parser: _,
             pending,
-            saved_cursor_x,
-            saved_cursor_y,
+            track,
+            restores: _,
+            saved,
+            alt_screen,
             scroll_top,
             scroll_bottom,
             use_acs,
@@ -622,8 +738,9 @@ impl PartialEq for TerminalState {
             && *hidden == other.hidden
             && *strikethrough == other.strikethrough
             && *pending == other.pending
-            && *saved_cursor_x == other.saved_cursor_x
-            && *saved_cursor_y == other.saved_cursor_y
+            && *track == other.track
+            && *saved == other.saved
+            && *alt_screen == other.alt_screen
             && *scroll_top == other.scroll_top
             && *scroll_bottom == other.scroll_bottom
             && *use_acs == other.use_acs
@@ -660,6 +777,28 @@ impl Default for Cell {
             strikethrough: false,
         }
     }
+}
+
+/// The state that DECSC saves in xterm: the cursor position, the pen, and the
+/// character set. The pen is the colors, the source of each color, and each
+/// text flag. DECRC restores all of them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SavedCursor {
+    x: usize,
+    y: usize,
+    fg: (u8, u8, u8),
+    bg: (u8, u8, u8),
+    fg_source: ColorSource,
+    bg_source: ColorSource,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    dim: bool,
+    blink: bool,
+    reverse: bool,
+    hidden: bool,
+    strikethrough: bool,
+    use_acs: bool,
 }
 
 /// The state of a virtual terminal: the screen grid, the cursor, the current
@@ -708,9 +847,15 @@ pub struct TerminalState {
     // The bytes fed since the parser was last settled: in the ground state with
     // no unfinished sequence. Empty means the parser equals `Parser::new()`.
     pending: Vec<u8>,
-    // Saved cursor position for ESC 7/8
-    saved_cursor_x: usize,
-    saved_cursor_y: usize,
+    // Where the parser is, for the end of a CSI sequence that calls nothing.
+    track: Track,
+    // The count of restores of a save slot.
+    restores: u64,
+    // The saved cursor states. Slot 0 is for the normal screen.
+    // Slot 1 is for the alternate screen.
+    saved: [SavedCursor; 2],
+    // Whether the alternate screen is on. The terminal keeps one grid.
+    alt_screen: bool,
     // Scrolling region
     scroll_top: usize,
     scroll_bottom: usize,
@@ -762,6 +907,24 @@ impl TerminalState {
             dynamic_palette.push(TerminalTheme::get_256_color(i));
         }
 
+        let initial_cursor = SavedCursor {
+            x: 0,
+            y: 0,
+            fg: theme.foreground,
+            bg: theme.background,
+            fg_source: ColorSource::Default,
+            bg_source: ColorSource::Default,
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            blink: false,
+            reverse: false,
+            hidden: false,
+            strikethrough: false,
+            use_acs: false,
+        };
+
         Self {
             grid,
             changed_rows: vec![false; height],
@@ -784,8 +947,10 @@ impl TerminalState {
             theme,
             parser: Parser::new(),
             pending: Vec::new(),
-            saved_cursor_x: 0,
-            saved_cursor_y: 0,
+            track: Track::default(),
+            saved: [initial_cursor; 2],
+            restores: 0,
+            alt_screen: false,
             scroll_top: 0,
             scroll_bottom: height - 1,
             use_acs: false,
@@ -823,7 +988,8 @@ impl TerminalState {
             for byte in bytes {
                 parser.advance(&mut feed, &[*byte]);
             }
-            let (printed, ended) = (feed.printed, feed.ended);
+            let (printed, ended) = (feed.printed, feed.ended || self.track.ends_csi(ch));
+            self.track = self.track.after(ch);
             if ends_settled(ch, was_settled, printed, ended) {
                 self.pending.clear();
             } else {
@@ -853,6 +1019,21 @@ impl TerminalState {
         &self.grid
     }
 
+    /// Returns the cell that starts the character at column `x` and row `y`,
+    /// and the column of that cell, or `None` outside the grid. The second
+    /// cell of a wide character gives the first cell. A print of this cell at
+    /// this column writes the character again, and in the last column the
+    /// print sets a pending wrap.
+    pub fn character_at(&self, x: usize, y: usize) -> Option<(usize, &Cell)> {
+        let row = self.grid.get(y)?;
+        let start = if row.get(x)?.is_wide_continuation() {
+            x.checked_sub(1)?
+        } else {
+            x
+        };
+        Some((start, row.get(start)?))
+    }
+
     /// Returns the theme of this terminal.
     pub fn get_theme(&self) -> &TerminalTheme {
         &self.theme
@@ -879,10 +1060,14 @@ impl TerminalState {
         (self.scroll_top, self.scroll_bottom)
     }
 
-    /// Returns the saved cursor position as `(column, row)`, counted from
-    /// zero. `ESC 7`, `CSI s`, and `CSI ? 1049 h` save it.
+    /// Returns the saved cursor position of the current screen as
+    /// `(column, row)`, counted from zero. A restore of the cursor goes there.
+    /// `ESC 7`, `CSI s`, and `CSI ? 1048 h` save it. `CSI ? 1049 h` saves it
+    /// for the normal screen, then switches to the alternate screen, which has
+    /// a save slot of its own.
     pub fn saved_cursor_position(&self) -> (usize, usize) {
-        (self.saved_cursor_x, self.saved_cursor_y)
+        let saved = self.saved_slot();
+        (saved.x, saved.y)
     }
 
     /// Returns whether the line-drawing character set is on. `ESC ( 0` turns it
@@ -907,6 +1092,51 @@ impl TerminalState {
     /// Returns whether the application has the cursor visible.
     pub fn is_cursor_visible(&self) -> bool {
         self.cursor_visible
+    }
+
+    /// Returns how many times a restore of the cursor state has run: ESC 8,
+    /// `CSI u`, `?1048l` and `?1049l`. A restore is the one event that lets a
+    /// save slot change what the terminal shows later. The count wraps.
+    pub fn restore_count(&self) -> u64 {
+        self.restores
+    }
+
+    /// Returns whether the parser holds no unfinished escape sequence.
+    pub fn is_settled(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    /// Returns the text that puts a parser in the ground state into the state
+    /// of this parser. The text is empty when this parser is settled.
+    ///
+    /// The text starts at the last `ESC` of the unfinished sequence. An `ESC`
+    /// moves the parser from each state to the escape state and clears its
+    /// parameters, thus the bytes before the last `ESC` do not matter.
+    ///
+    /// Before the `P` of a DCS, and in each other sequence, the text holds no
+    /// C0 control. There a control runs, or the parser ignores it, and it does
+    /// not change the state. A terminal that reads the text then runs no
+    /// control twice. After the `P` of a DCS, the text keeps each byte. vte 0.15
+    /// runs no control in a DCS, and it gives each control of the payload to
+    /// `put`.
+    pub fn unfinished_sequence(&self) -> String {
+        let Some(start) = self.pending.iter().rposition(|byte| *byte == ESC) else {
+            return String::new();
+        };
+        let tail = self.pending.get(start..).unwrap_or_default();
+        let dcs_at = tail
+            .iter()
+            .position(|byte| ESCAPE_EXIT.contains(byte))
+            .filter(|&index| tail.get(index) == Some(&DCS_INTRODUCER));
+        let kept: Vec<u8> = tail
+            .iter()
+            .enumerate()
+            .filter(|&(index, &byte)| {
+                byte == ESC || byte > LAST_C0 || dcs_at.is_some_and(|at| index > at)
+            })
+            .map(|(_, &byte)| byte)
+            .collect();
+        String::from_utf8_lossy(&kept).into_owned()
     }
 
     /// Returns the `(foreground, background)` colors that a cell is drawn with.
@@ -1001,6 +1231,79 @@ fn is_light_color_terminal(color: (u8, u8, u8)) -> bool {
 }
 
 impl TerminalState {
+    /// Returns the state that DECSC saves: the cursor, the pen, and the
+    /// character set.
+    fn cursor_state(&self) -> SavedCursor {
+        SavedCursor {
+            x: self.cursor_x,
+            y: self.cursor_y,
+            fg: self.current_fg,
+            bg: self.current_bg,
+            fg_source: self.current_fg_source,
+            bg_source: self.current_bg_source,
+            bold: self.bold,
+            italic: self.italic,
+            underline: self.underline,
+            dim: self.dim,
+            blink: self.blink,
+            reverse: self.reverse,
+            hidden: self.hidden,
+            strikethrough: self.strikethrough,
+            use_acs: self.use_acs,
+        }
+    }
+
+    /// The save slot of the current screen.
+    fn saved_slot(&self) -> &SavedCursor {
+        &self.saved[usize::from(self.alt_screen)]
+    }
+
+    /// Saves the cursor state into the slot of the current screen.
+    fn save_cursor(&mut self) {
+        self.saved[usize::from(self.alt_screen)] = self.cursor_state();
+    }
+
+    /// Restores the cursor state from the slot of the current screen. A
+    /// restore moves the cursor, thus it ends a pending wrap.
+    fn restore_cursor(&mut self) {
+        self.restores = self.restores.wrapping_add(1);
+        self.wrap_pending = false;
+        // A destructure, so that a new field fails to compile until the
+        // restore names it.
+        let SavedCursor {
+            x,
+            y,
+            fg,
+            bg,
+            fg_source,
+            bg_source,
+            bold,
+            italic,
+            underline,
+            dim,
+            blink,
+            reverse,
+            hidden,
+            strikethrough,
+            use_acs,
+        } = *self.saved_slot();
+        self.cursor_x = x;
+        self.cursor_y = y;
+        self.current_fg = fg;
+        self.current_bg = bg;
+        self.current_fg_source = fg_source;
+        self.current_bg_source = bg_source;
+        self.bold = bold;
+        self.italic = italic;
+        self.underline = underline;
+        self.dim = dim;
+        self.blink = blink;
+        self.reverse = reverse;
+        self.hidden = hidden;
+        self.strikethrough = strikethrough;
+        self.use_acs = use_acs;
+    }
+
     /// Moves the cursor down one row. On the bottom row of the scrolling
     /// region, the region scrolls up and the cursor stays. On the last row of
     /// the screen below the region, the cursor stays and nothing scrolls, as
@@ -1054,22 +1357,9 @@ impl TerminalState {
     }
 
     fn put_char(&mut self, ch: char) {
-        // Convert ACS characters to Unicode box drawing if needed
+        // A print in the line drawing set shows the glyph of that set.
         let display_char = if self.use_acs {
-            match ch {
-                'j' => '┘', // Lower right corner
-                'k' => '┐', // Upper right corner
-                'l' => '┌', // Upper left corner
-                'm' => '└', // Lower left corner
-                'n' => '┼', // Cross
-                'q' => '─', // Horizontal line
-                't' => '├', // Left T
-                'u' => '┤', // Right T
-                'v' => '┴', // Bottom T
-                'w' => '┬', // Top T
-                'x' => '│', // Vertical line
-                _ => ch,
-            }
+            line_drawing_glyph(ch)
         } else {
             ch
         };
@@ -1605,10 +1895,14 @@ impl TerminalState {
                             }
                             25 => self.cursor_visible = true,
                             1049 => {
-                                self.saved_cursor_x = self.cursor_x;
-                                self.saved_cursor_y = self.cursor_y;
+                                // Save into the slot of the current screen, then switch
+                                self.save_cursor();
+                                self.alt_screen = true;
                             }
-                            // 47, 1047, 1000, 1002, 1006, 2004: acknowledged but not rendered
+                            // The one grid stays. These modes only switch the save slot.
+                            47 | 1047 => self.alt_screen = true,
+                            1048 => self.save_cursor(),
+                            // 1000, 1002, 1006, 2004: acknowledged but not rendered
                             _ => {}
                         }
                     }
@@ -1623,10 +1917,12 @@ impl TerminalState {
                             }
                             25 => self.cursor_visible = false,
                             1049 => {
-                                self.wrap_pending = false;
-                                self.cursor_x = self.saved_cursor_x;
-                                self.cursor_y = self.saved_cursor_y;
+                                // Switch to the normal screen, then restore its slot
+                                self.alt_screen = false;
+                                self.restore_cursor();
                             }
+                            47 | 1047 => self.alt_screen = false,
+                            1048 => self.restore_cursor(),
                             _ => {}
                         }
                     }
@@ -1829,14 +2125,12 @@ impl TerminalState {
                 // We're not responding, just consuming it
             }
             's' => {
-                // Save cursor position (ANSI.SYS style) - similar to ESC 7
-                self.saved_cursor_x = self.cursor_x;
-                self.saved_cursor_y = self.cursor_y;
+                // Save cursor (ANSI.SYS style) - the same as ESC 7
+                self.save_cursor();
             }
             'u' => {
-                // Restore cursor position (ANSI.SYS style) - similar to ESC 8
-                self.cursor_x = self.saved_cursor_x;
-                self.cursor_y = self.saved_cursor_y;
+                // Restore cursor (ANSI.SYS style) - the same as ESC 8
+                self.restore_cursor();
             }
             'S' => {
                 // Scroll up
@@ -1953,14 +2247,12 @@ impl TerminalState {
         }
         match byte {
             b'7' => {
-                // Save cursor position (DECSC)
-                self.saved_cursor_x = self.cursor_x;
-                self.saved_cursor_y = self.cursor_y;
+                // Save the cursor, the attributes, and the character set (DECSC)
+                self.save_cursor();
             }
             b'8' => {
-                // Restore cursor position (DECRC)
-                self.cursor_x = self.saved_cursor_x;
-                self.cursor_y = self.saved_cursor_y;
+                // Restore the cursor, the attributes, and the character set (DECRC)
+                self.restore_cursor();
             }
             b'D' => {
                 // Index (IND) - a line feed
@@ -2017,6 +2309,8 @@ impl TerminalState {
                 self.use_acs = false;
                 self.autowrap = true;
                 self.wrap_pending = false;
+                self.alt_screen = false;
+                self.saved = [self.cursor_state(); 2];
             }
             _ => {
                 // Ignore unhandled escape sequences

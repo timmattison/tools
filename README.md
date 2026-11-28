@@ -6339,20 +6339,26 @@ The editing engine of the crate has five parts:
   span filter (`register_span`) also gets the length of its region and answers
   a new length, and the later events move by the change in the length. A span
   filter also gets the events before and after its region and the size of the
-  terminal: the size of the clip that starts first, or 80 by 24 in
-  `FilterRegistry::run`. A screen filter (`register_screen`) also gets the
-  size of the screen and the events before its region. It rewrites its region,
-  moves nothing, and on the region `All` it can change the size of the screen.
-  A later span filter gets that size, and the rendered recording has the size
-  that the last screen filter gives. `FilterRegistry::run` has no header, so a
+  terminal: the size of the clip that starts first, the size that
+  `FilterRegistry::run_on` gets, or 80 by 24 in `FilterRegistry::run`. A
+  screen filter (`register_screen`) also gets the size of the screen and the
+  events before its region, so that it can replay the screen. It rewrites its
+  region, moves nothing, and on the region `All` it can change the size of the
+  screen. A later span filter or screen filter gets that size, and the
+  rendered recording has the size that the last screen filter gives. `FilterRegistry::run_on` and the
+  render give a screen filter its size. `FilterRegistry::run` has no size, so a
   screen filter fails there.
   `filters::registry()` holds the filters that ship. The cursor filter is an
-  in-place filter, the viewport filter is a screen filter, and each other one
-  is a span filter:
+  in-place filter, the keystroke HUD and the viewport filter are screen
+  filters, and each other one is a span filter:
   - `cursor` (`visibility`, `shape`, `blink`, `color`, issue #168): sets how
     the cursor looks. [The cursor filter](#the-cursor-filter) below gives its
     options.
   - `time-dilation` (`speed`, issue #153): plays its region faster or slower.
+  - `keystroke-hud` (`position`, `duration`, `fade`, `theme`, `text`,
+    `accent`, `background`, `border`, issue #161): draws the keys of the
+    presenter in a box on the screen. The paragraphs on this filter below give
+    its rules and its options.
   - `redaction` (`find`, `replace`, `input`, issue #156): replaces text in the
     data of the events and keeps each time. The paragraphs on the redaction
     panel above give its rules.
@@ -6379,8 +6385,8 @@ The editing engine of the crate has five parts:
   The filters of issue #154 parse their options as a Rust type, so the render
   refuses a missing option, a value of the wrong type, and a key that the
   filter does not know. The window cannot add them yet. Issue #804 adds the
-  click on the timeline that places a pause. Issues #157 to #167 add more
-  filters.
+  click on the timeline that places a pause. Issues #157, #158, #160, #162 to
+  #164, #166, and #167 add more filters.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
@@ -6404,6 +6410,78 @@ becomes shorter, the delay becomes shorter by the same ratio. The option
 `jitter` (0 when missing, and below 1) changes each interval by up to that
 fraction, so the typing does not look mechanical. Each render gives the same
 times. The window cannot add the filter to a project yet.
+
+The keystroke HUD filter (`keystroke-hud`) shows the keys of the presenter
+in a box with rounded corners, as a screencast tool does. It reads the input
+events of its region. Typed text shows as text, for example `ls -la`. A special
+key shows as a label in the accent color, for example `Enter`, `Tab`, `Ctrl+R`,
+`Alt+.`, or `↑`. Fast typing goes into one box, and `Enter` closes the box.
+The keys of one input event stay in one box. Thus an input event that holds
+`ls`, `Enter`, `pwd`, `Enter` shows as `ls Enter pwd Enter`. A paste gives
+such an event in a shell with no bracketed paste mode. A bracketed paste,
+which zsh and bash turn on by default, shows as one `Paste` label, with none
+of the pasted text. A held key shows once with a count, for example `↓ ×12`.
+The box fades in and out in steps of 24-bit color.
+
+The filter draws with output events: each one saves the cursor, draws the box,
+and restores the cursor. It replays the events through the emulator of
+`termstate`, so it knows the cells under the box. It puts them back when the
+box goes away, and it keeps the box in place when the output scrolls. Thus
+`beta play`, `beta export web`, and `beta export video` show the HUD with no
+change. The filter draws nothing while the output of the program stops inside
+an escape sequence, because the first `ESC` of a draw ends that sequence in the
+viewer. At the end of the region, the last draw writes the start of that
+sequence again, so the output after the region finishes it. The window has no
+panel for the filter yet. A project holds it in its list of filters:
+
+```json
+{
+  "kind": "keystroke-hud",
+  "region": "All",
+  "options": { "position": "bottom-right", "duration": 2.0, "theme": "dracula" }
+}
+```
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `position` | `top-right` | `top-left`, `top-center`, `top-right`, `bottom-left`, `bottom-center`, or `bottom-right` |
+| `duration` | `1.5` | The seconds that a box stays after its last key |
+| `fade` | `0.2` | The seconds of each fade. `0` turns the fade off |
+| `theme` | `auto` | The theme of the export (`beta export --theme`). The fade starts from its background |
+| `text` | `#ffffff` | The color of typed text |
+| `accent` | `#ffc83c` | The color of the labels of special keys |
+| `background` | `#303030` | The color of the inside of the box |
+| `border` | `#808080` | The color of the border |
+
+A redaction of input events (issue #156) must come before the HUD in the list
+of filters of the project. Then the HUD does not show the hidden keys, for
+example a password. A redaction after the HUD does not protect the keys. It
+finds a match in the text that the output writes, but a draw of a box writes
+only the cells that change. Thus a box can show all of the hidden keys, for
+example a whole password.
+
+The limits of the HUD:
+
+- A modifier key alone (Ctrl, Alt, Shift) shows nothing, because a terminal
+  sends no byte for it. A terminal with the kitty keyboard protocol sends a
+  code, and the HUD skips it.
+- The HUD never makes a region longer. A box that is still on the screen at the
+  end of its region goes away there.
+- While the edge of a box covers one half of a wide character of the program
+  (for example `日`), the other half shows blank. A terminal cannot show one
+  half of a wide character.
+- A character of no width, for example a combining accent, does not show in a
+  label. `termstate` gives it no cell.
+- The HUD saves and restores the cursor with `ESC 7` and `ESC 8`, and the
+  program shares that one save of the terminal. When the program saves the
+  cursor, the HUD draws, and then the program restores the cursor, the
+  viewer gets the cursor of the draw. The output of that event goes there
+  first, and the HUD then repairs the screen. If that place is the last
+  row, a newline scrolls the viewer and puts one more line into its
+  scrollback.
+- When the region ends inside a string sequence of the program (OSC or DCS),
+  the viewer gets that sequence twice: first cut at the last draw of the HUD,
+  then whole.
 
 ### The cursor filter
 
@@ -6473,8 +6551,8 @@ a hidden row or column goes out, and the cells after it move up or left. On a
 range, the size stays, each cell keeps its place, and each cell that is not
 visible is blank during the range. At the end of the range, the filter writes
 the full screen again, and it sets the scrolling region, the autowrap mode, the
-pen, the saved cursor, a pending wrap, the character set, and the cursor back to
-the state of the recording.
+pen, the position of the saved cursor, a pending wrap, the character set, and
+the cursor back to the state of the recording.
 
 A wide character, for example 日, covers two cells. If a crop, a hidden column,
 or the mask cuts it in half, the visible half shows as a space. A character of

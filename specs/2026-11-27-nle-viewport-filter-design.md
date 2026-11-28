@@ -237,7 +237,9 @@ correctly.
 - An OSC 8 hyperlink applies to the cells that the paint writes after it.
 - `ESC 7` in a real terminal also saves the pen. The restore saves the pen of
   the emulator at the end of the range, and not the pen at the original
-  `ESC 7`, because `termstate` saves only the position.
+  `ESC 7`. `termstate` saved only the position when this spec was written.
+  It now saves the pen and the character set too, but it has no public reader
+  for them.
 - After SGR 39 or 49, `beta export video` and the preview of `nle` still draw
   the color before it, because `termstate` keeps the RGB value (decision
   H-165-2). The output of the filter writes the default color.

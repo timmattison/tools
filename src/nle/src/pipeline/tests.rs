@@ -1380,3 +1380,122 @@ fn a_span_filter_after_a_screen_filter_gets_the_size_that_the_screen_filter_gave
 
     assert_eq!(seen.lock().unwrap()[0].1, size(40, 10));
 }
+
+// Tests of a screen filter under `FilterRegistry::run_on`.
+
+/// Registers a screen filter `draw` that answers its events and one more
+/// event at `relative`, and keeps the size.
+fn screen_drawer(relative: f64) -> FilterRegistry {
+    let mut registry = FilterRegistry::new();
+    registry.register_screen(kind("draw"), move |events, view, _| {
+        let mut out = events.to_vec();
+        out.push(ev(relative));
+        Ok(Screen {
+            events: out,
+            size: view.size,
+        })
+    });
+    registry
+}
+
+#[test]
+fn run_on_gives_a_screen_filter_its_size_the_events_before_and_its_region() {
+    let (registry, seen) = screen_spy(size(90, 20));
+
+    let out = registry
+        .run_on(
+            events(&[0.5, 0.8, 1.5, 5.0]),
+            &[range("crop", 1.0, 3.0)],
+            size(90, 20),
+        )
+        .unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        seen[0].0,
+        RegionView {
+            length: 2.0,
+            open: false
+        }
+    );
+    assert_eq!(seen[0].1, size(90, 20));
+    assert_eq!(times(&seen[0].2), vec![0.5, 0.8]);
+    // The event inside the region stays, and the mark of the spy lands on the
+    // end of the region.
+    assert_eq!(
+        with_data(&out),
+        vec![
+            (0.5, "e0.5"),
+            (0.8, "e0.8"),
+            (1.5, "e1.5"),
+            (3.0, "mark"),
+            (5.0, "e5")
+        ]
+    );
+}
+
+#[test]
+fn a_screen_filter_on_a_range_keeps_the_later_events_and_the_end_in_place() {
+    let registry = screen_drawer(0.5);
+
+    let out = registry
+        .run_on(
+            events(&[0.5, 1.5, 5.0]),
+            &[range("draw", 1.0, 3.0)],
+            size(100, 30),
+        )
+        .unwrap();
+
+    assert_eq!(times(&out), vec![0.5, 1.5, 1.5, 5.0]);
+
+    let rendered = registry
+        .render(&one_clip_project(vec![range("draw", 1.0, 3.0)]))
+        .unwrap();
+    assert_eq!(rendered.duration, 10.0);
+    assert_eq!(times(&rendered.events), vec![0.0, 1.5, 8.0]);
+}
+
+#[test]
+fn a_screen_filter_may_answer_exactly_the_length_of_its_region() {
+    let registry = screen_drawer(2.0);
+
+    let out = registry
+        .run_on(
+            events(&[0.5, 5.0]),
+            &[range("draw", 1.0, 3.0)],
+            size(100, 30),
+        )
+        .unwrap();
+
+    assert_eq!(times(&out), vec![0.5, 3.0, 5.0]);
+}
+
+#[test]
+fn a_screen_mark_at_the_region_end_lands_on_the_end_when_the_sum_rounds_up() {
+    // The length is 5.79 - 1.73, and that length plus 1.73 is
+    // 5.790000000000001 in f64, one step after the end of the region.
+    let (start, end) = std::hint::black_box((1.73, 5.79));
+    let length = end - start;
+    assert!(length + start > end);
+    let registry = screen_drawer(length);
+    let mark = format!("e{length}");
+
+    let out = registry
+        .run_on(
+            events(&[0.0, start, end]),
+            &[range("draw", start, end)],
+            size(100, 30),
+        )
+        .unwrap();
+
+    assert_eq!(
+        with_data(&out),
+        vec![
+            (0.0, "e0"),
+            (1.73, "e1.73"),
+            (5.79, mark.as_str()),
+            (5.79, "e5.79")
+        ]
+    );
+}
