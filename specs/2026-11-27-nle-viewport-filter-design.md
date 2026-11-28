@@ -5,7 +5,8 @@ Issue: #165 (branch `issue-165`). Parent: #148. Decision: H-165-2 on issue
 
 The dynamic zoom and focus (zoom level, ease in and out, dim or blur of the
 rest) is not in this branch. It goes to a follow-up issue that waits for
-issue #151 and issue #158, because no escape sequence can carry it.
+issue #158 (the export of edited recordings), because no escape sequence can
+carry it.
 
 ## The idea
 

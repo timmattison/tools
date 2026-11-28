@@ -80,7 +80,7 @@ These filters need deeper terminal state analysis or more complex heuristics.
 | Issue | Description | Notes |
 |-------|-------------|-------|
 | #163 | Captions and annotations | Text overlays at timestamps. UI-heavy. |
-| #165 | Terminal crop and zoom | The static crop and the hiding of rows and columns are done. The `viewport` filter (`src/nle/src/filters/viewport.rs`) is a screen filter: it runs the `termstate` emulator, and it writes the visible cells again as escape sequences, so each player and each exporter shows the crop. The dynamic zoom and focus waits for #151 and #158 in a follow-up issue, because no escape sequence can carry it. |
+| #165 | Terminal crop and zoom | The static crop and the hiding of rows and columns are done. The `viewport` filter (`src/nle/src/filters/viewport.rs`) is a screen filter: it runs the `termstate` emulator, and it writes the visible cells again as escape sequences, so each player and each exporter shows the crop. The dynamic zoom and focus waits for #158 in a follow-up issue, because no escape sequence can carry it. |
 | #169 | Plugin architecture | Designed in [the plugin spec](../../specs/2026-11-26-nle-plugin-architecture-design.md): WASM components on wasmtime, with a WIT contract. The spec lists the slices of the implementation. Its slice 0 (the event form `FilterFn` returns a `Result`, like the in-place form and the span form) comes before the first built-in filter of the event form. |
 
 ## Difficulty Assessment
