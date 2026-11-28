@@ -546,6 +546,16 @@ impl Window {
             .unwrap_or_else(|| panic!("no `{name}` listeners in {}", self.html()))
     }
 
+    /// The FPS field and the Resolution field of the export bar, in this
+    /// order. They are the newest `input` listeners after the choice of a
+    /// video kind, because only a video kind shows them.
+    fn video_fields(&self) -> [ElementId; 2] {
+        let inputs = self.newest_listeners_of("input");
+        inputs.try_into().unwrap_or_else(|ids: Vec<ElementId>| {
+            panic!("expected the FPS and Resolution fields: {ids:?}")
+        })
+    }
+
     /// Sends the text to the input element, as if the user typed it, and renders.
     fn type_into(&mut self, id: ElementId, text: &str) {
         self.send_form_event("input", id, text);
@@ -1382,10 +1392,7 @@ async fn a_video_export_carries_the_theme_the_resolution_and_the_optimize_box() 
     let [theme, optimize] = changes[..] else {
         panic!("expected the Theme menu and the Optimize box: {changes:?}");
     };
-    let inputs = window.newest_listeners_of("input");
-    let [_fps, resolution] = inputs[..] else {
-        panic!("expected the FPS and Resolution fields: {inputs:?}");
-    };
+    let [_fps, resolution] = window.video_fields();
     window.choose(theme, "monokai");
     window.type_into(resolution, "1280x720");
     window.choose(optimize, "true");
@@ -2575,7 +2582,8 @@ const REDO_KEYS: Press = Press {
 
 impl Window {
     /// The Start, End, and Speed fields of the speed panel, and the Pattern and
-    /// Replacement text fields of the redaction panel.
+    /// Replacement text fields of the redaction panel. The two text fields of
+    /// the export bar show only for a video kind, thus `video_fields` gives them.
     fn text_fields(&self) -> [ElementId; 5] {
         let [start, end, speed] = self.speed_fields();
         let [_, pattern, _, replacement, _] = self.redaction_fields();
@@ -2622,6 +2630,25 @@ async fn the_keys_keep_their_text_field_behavior_in_each_text_field() {
     for field in window.text_fields() {
         assert!(!window.press(field, &REDO_KEYS), "{field:?}");
         assert_original_speed(&window);
+    }
+}
+
+#[tokio::test]
+async fn the_keys_keep_their_text_field_behavior_in_each_text_field_of_the_export_bar() {
+    for kind in ["mp4", "gif"] {
+        let mut window = open_with_a_speed_change().await;
+        window.choose(window.kind_select(), kind);
+        let fields = window.video_fields();
+        for field in fields {
+            assert!(!window.press(field, &UNDO_KEYS), "{kind} {field:?}");
+            assert_sped_up(&window);
+        }
+
+        window.click(window.undo_button());
+        for field in fields {
+            assert!(!window.press(field, &REDO_KEYS), "{kind} {field:?}");
+            assert_original_speed(&window);
+        }
     }
 }
 
