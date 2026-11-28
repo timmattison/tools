@@ -645,3 +645,152 @@ fn the_budget_lowers_the_depth_on_a_large_terminal() {
     let rendered = render(2048, 512, events).unwrap();
     assert_eq!(rendered.events, expected);
 }
+
+// Tests of the marks of an earlier filter.
+
+/// The kind of the test filter that puts marks on the timeline.
+const MARKER: &str = "test-marker";
+
+/// Render a recording of 80 by 24 with `events`. First, a span filter on the
+/// region `All` puts the mark `m<n>` at the time of item `n` of `marks`. Then
+/// the backspace removal filter runs on `region`. The duration of the source
+/// is the largest event time.
+fn render_marked(
+    events: Vec<Event>,
+    marks: &[f64],
+    region: FilterRegion,
+) -> Result<crate::pipeline::Rendered, NleError> {
+    let mut source = Recording::test_fixture();
+    source.width = 80;
+    source.height = 24;
+    source.duration = events.iter().map(|event| event.time).fold(0.0, f64::max);
+    source.events = events;
+    let mut project = EditProject::from_recording(Arc::new(source))?;
+    project.filters.push(AppliedFilter {
+        kind: FilterKind::new(MARKER),
+        region: FilterRegion::All,
+        options: FilterOptions::new(),
+    });
+    project.filters.push(applied_to(region));
+    let mut registry = FilterRegistry::new();
+    register(&mut registry);
+    let times = marks.to_vec();
+    registry.register_span(FilterKind::new(MARKER), move |mut span, _, _| {
+        span.marks.extend(
+            times
+                .iter()
+                .enumerate()
+                .map(|(n, &time)| crate::pipeline::Mark {
+                    time,
+                    label: format!("m{n}"),
+                }),
+        );
+        Ok(span)
+    });
+    registry.render_with_marks(&project)
+}
+
+/// The times of `marks`.
+fn mark_times(marks: &[crate::pipeline::Mark]) -> Vec<f64> {
+    marks.iter().map(|mark| mark.time).collect()
+}
+
+/// The labels of `marks`.
+fn mark_labels(marks: &[crate::pipeline::Mark]) -> Vec<&str> {
+    marks.iter().map(|mark| mark.label.as_str()).collect()
+}
+
+#[test]
+fn a_mark_moves_earlier_by_the_cuts_before_it_and_a_mark_in_a_cut_moves_to_the_cut() {
+    // The typo `r` and its backspace go: the cut is from 1.5 s to the `e` at
+    // 2.5 s. The Enter at 4 s keeps a time after the cut.
+    let mut events = typo_then_backspace("\x7f");
+    events.extend([input(4.0, "\r"), out(4.0, "\r\n")]);
+
+    let rendered = render_marked(events, &[1.25, 1.75, 2.5, 3.0], FilterRegion::All).unwrap();
+
+    // The mark before the cut keeps its time. The mark inside the cut and the
+    // mark at the `e` move to 1.5 s, where the `e` goes. The mark after the
+    // cut moves 1 s earlier, as the Enter does.
+    assert_eq!(mark_times(&rendered.marks), vec![1.25, 1.5, 1.5, 2.0]);
+    assert_eq!(mark_labels(&rendered.marks), vec!["m0", "m1", "m2", "m3"]);
+    assert_eq!(rendered.recording.duration, 3.0);
+}
+
+#[test]
+fn with_two_cuts_a_mark_moves_earlier_by_the_sum_of_the_cuts_before_it() {
+    // Two typos go: the cut of the `r` is from 1.5 s to the `e` at 2.5 s, and
+    // the cut of the `x` is from 3 s to the `l` at 4 s.
+    let events = vec![
+        out(0.0, "$ "),
+        input(1.0, "h"),
+        out(1.0, "h"),
+        input(1.5, "r"),
+        out(1.5, "r"),
+        input(2.0, "\x7f"),
+        out(2.0, "\x08 \x08"),
+        input(2.5, "e"),
+        out(2.5, "e"),
+        input(3.0, "x"),
+        out(3.0, "x"),
+        input(3.5, "\x7f"),
+        out(3.5, "\x08 \x08"),
+        input(4.0, "l"),
+        out(4.0, "l"),
+        input(5.0, "\r"),
+        out(5.0, "\r\n"),
+    ];
+
+    let rendered = render_marked(events, &[3.25, 4.5], FilterRegion::All).unwrap();
+
+    // The mark inside the second cut moves to 3 s less the first cut, where
+    // the `l` goes. The mark after both cuts moves 2 s earlier. It is before
+    // the new end at 3 s, so the limit of the length does not hide its time.
+    assert_eq!(rendered.recording.duration, 3.0);
+    assert_eq!(mark_times(&rendered.marks), vec![2.0, 2.5]);
+    assert_eq!(mark_labels(&rendered.marks), vec!["m0", "m1"]);
+}
+
+#[test]
+fn a_mark_in_a_cut_at_the_end_of_the_span_moves_to_the_new_end() {
+    // Nothing comes after the backspace, so the cut is from the `r` at 1.5 s
+    // to the end of the span at 2 s.
+    let events = vec![
+        out(0.0, "$ "),
+        input(1.0, "h"),
+        out(1.0, "h"),
+        input(1.5, "r"),
+        out(1.5, "r"),
+        input(2.0, "\x7f"),
+        out(2.0, "\x08 \x08"),
+    ];
+
+    let rendered =
+        render_marked(events, &[1.75, 2.0], FilterRegion::All).expect("the render must not fail");
+
+    assert_eq!(rendered.recording.duration, 1.5);
+    assert_eq!(mark_times(&rendered.marks), vec![1.5, 1.5]);
+}
+
+#[test]
+fn on_a_range_a_mark_in_a_cut_moves_to_the_cut_and_a_mark_after_the_range_moves_by_the_shift() {
+    let events = vec![
+        out(0.0, "$ "),
+        input(1.0, "h"),
+        out(1.0, "h"),
+        input(1.5, "r"),
+        out(1.5, "r"),
+        input(2.0, "\x7f"),
+        out(2.0, "\x08 \x08"),
+        input(2.5, "e"),
+        out(2.5, "e"),
+        input(4.0, "\r"),
+        out(4.0, "\r\n"),
+    ];
+
+    let rendered = render_marked(events, &[1.75, 3.5], range(1.0, 3.0)).unwrap();
+
+    // The cut takes 1 s from the range: the mark at 1.75 s moves to 1.5 s,
+    // where the `e` goes, and the mark at 3.5 s moves to 2.5 s.
+    assert_eq!(mark_times(&rendered.marks), vec![1.5, 2.5]);
+}

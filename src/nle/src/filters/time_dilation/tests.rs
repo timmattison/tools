@@ -209,3 +209,45 @@ fn speed_of_is_none_for_other_kinds_and_bad_options() {
 fn the_shipped_registry_holds_time_dilation() {
     assert!(filters::registry().contains(&kind()));
 }
+
+#[test]
+fn a_mark_inside_the_region_moves_with_the_speed() {
+    use crate::pipeline::{Mark, Span};
+    let mut registry = filters::registry();
+    registry.register_span(
+        FilterKind::new("mark"),
+        |mut span: Span, _, _: &FilterOptions| {
+            span.marks.push(Mark {
+                time: 6.0,
+                label: "m".to_string(),
+            });
+            Ok(span)
+        },
+    );
+    let recording = Recording {
+        version: 2,
+        width: 80,
+        height: 24,
+        timestamp: 0.0,
+        duration: 10.0,
+        command: String::new(),
+        title: String::new(),
+        env: BTreeMap::new(),
+        events: events(&[0.0, 9.0]),
+    };
+    let mut project = EditProject::from_recording(Arc::new(recording)).unwrap();
+    project.filters = vec![
+        AppliedFilter {
+            kind: FilterKind::new("mark"),
+            region: FilterRegion::All,
+            options: FilterOptions::new(),
+        },
+        dilation(2.0, 10.0, 2.0),
+    ];
+
+    let rendered = registry.render_with_marks(&project).unwrap();
+
+    // The mark is 4 s into the region, and a speed of 2 makes that 2 s.
+    let times: Vec<f64> = rendered.marks.iter().map(|mark| mark.time).collect();
+    assert_eq!(times, vec![4.0]);
+}

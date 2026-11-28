@@ -354,7 +354,7 @@ impl Fakes {
                 Box::pin(answer.resolve())
             },
             move |editor, request, sender| {
-                let render = editor.render().expect("a render");
+                let render = Recording::clone(&editor.render().expect("a render"));
                 let mut script = export_script.lock().expect("the script lock");
                 script.exports.push(ExportCall { request, render });
                 let fake = script
@@ -399,6 +399,8 @@ struct Window {
     newest_listeners: BTreeMap<String, Vec<ElementId>>,
     /// The Apply Speed button, when a test noted it.
     apply: Option<ElementId>,
+    /// The Compress Idle Time button, when a test noted it.
+    compress: Option<ElementId>,
     /// The Apply Redaction button, when a test noted it.
     redact: Option<ElementId>,
     /// The Play and Pause button, when a test noted it.
@@ -426,6 +428,7 @@ impl Window {
             listeners: BTreeMap::new(),
             newest_listeners: BTreeMap::new(),
             apply: None,
+            compress: None,
             redact: None,
             play: None,
             stop: None,
@@ -630,13 +633,13 @@ impl Window {
     }
 
     /// The input listeners that the open render created, in creation order:
-    /// the Start, End, and Speed fields of the speed panel, then the Find,
-    /// Pattern, Replace with, Replacement text, and Events fields of the
-    /// redaction panel, then the playhead control of the timeline. The
-    /// properties panel mounts before the timeline, so the playhead is the
-    /// last one. An export bar that shows no video settings has no `input`
-    /// listener.
-    fn open_inputs(&self) -> [ElementId; 9] {
+    /// the Start, End, and Speed fields of the speed panel, the four fields of
+    /// the idle panel, then the Find, Pattern, Replace with, Replacement text,
+    /// and Events fields of the redaction panel, then the playhead control of
+    /// the timeline. The properties panel mounts before the timeline, so the
+    /// playhead is the last one. An export bar that shows no video settings
+    /// has no `input` listener.
+    fn open_inputs(&self) -> [ElementId; 13] {
         self.listeners
             .get("input")
             .cloned()
@@ -651,10 +654,18 @@ impl Window {
         [start, end, speed]
     }
 
+    /// The four fields of the idle panel, in the order of the page. They come
+    /// after the three fields of the speed panel.
+    fn idle_fields(&self) -> [ElementId; 4] {
+        let [_, _, _, threshold, compress_to, top, bottom, ..] = self.open_inputs();
+        [threshold, compress_to, top, bottom]
+    }
+
     /// The Find, Pattern, Replace with, Replacement text, and Events fields,
-    /// in this order.
+    /// in this order. They come after the four fields of the idle panel.
     fn redaction_fields(&self) -> [ElementId; 5] {
-        let [_, _, _, find, pattern, replace, replacement, events, _] = self.open_inputs();
+        let [_, _, _, _, _, _, _, find, pattern, replace, replacement, events, _] =
+            self.open_inputs();
         [find, pattern, replace, replacement, events]
     }
 
@@ -662,6 +673,23 @@ impl Window {
     fn playhead_control(&self) -> ElementId {
         let [.., playhead] = self.open_inputs();
         playhead
+    }
+
+    /// The Compress Idle Time button. `open_recording` noted it.
+    fn compress_button(&self) -> ElementId {
+        self.compress.expect("a window with an idle panel")
+    }
+
+    /// Fills the four fields of the idle panel and clicks Compress Idle Time.
+    fn compress_idle(&mut self, threshold: &str, compress_to: &str, top: &str, bottom: &str) {
+        let fields = self.idle_fields();
+        for (field, text) in fields
+            .into_iter()
+            .zip([threshold, compress_to, top, bottom])
+        {
+            self.type_into(field, text);
+        }
+        self.click(self.compress_button());
     }
 
     /// The Apply Redaction button. `open_recording` noted it.
@@ -688,14 +716,22 @@ impl Window {
         self.click(self.redact_button());
     }
 
-    /// Notes the seven click listeners that the render of an open recording
+    /// Notes the eight click listeners that the render of an open recording
     /// created beside the Export button of the export bar. The render creates
-    /// them in this order: Apply Speed, Apply Redaction, the Zoom out, Zoom
-    /// in, and Fit buttons of the timeline, Play, Stop. The properties panel
-    /// mounts before the timeline, and the timeline before the preview
-    /// toolbar. The speed panel comes before the redaction panel, and the Play
-    /// button comes before the Stop button.
+    /// them in this order: Apply Speed, Compress Idle Time, Apply Redaction,
+    /// the Zoom out, Zoom in, and Fit buttons of the timeline, Play, Stop. The
+    /// properties panel mounts before the timeline, as it does for the input
+    /// listeners, and the timeline mounts before the preview toolbar. The
+    /// three panels come in the order of the page, and the Play button comes
+    /// before the Stop button.
     fn note_open_buttons(&mut self) {
+        let page = self.html();
+        let labels = [APPLY_SPEED_LABEL, APPLY_IDLE_LABEL, APPLY_REDACTION_LABEL]
+            .map(|label| page.find(label));
+        assert!(
+            matches!(labels, [Some(speed), Some(idle), Some(redact)] if speed < idle && idle < redact),
+            "the page does not hold {APPLY_SPEED_LABEL}, then {APPLY_IDLE_LABEL}, then {APPLY_REDACTION_LABEL}: {page}"
+        );
         let export = self.export_button();
         let buttons: Vec<ElementId> = self
             .newest
@@ -703,10 +739,14 @@ impl Window {
             .copied()
             .filter(|id| *id != export)
             .collect();
-        let [apply, redact, _, zoom_in, _, play, stop] = buttons[..] else {
-            panic!("the open render made {:?}", self.newest)
+        let [apply, compress, redact, _, zoom_in, _, play, stop] = buttons[..] else {
+            panic!(
+                "the open render made {:?}, not the Export button, the {APPLY_SPEED_LABEL}, the {APPLY_IDLE_LABEL}, the {APPLY_REDACTION_LABEL}, the three zoom, the Play, and the Stop buttons",
+                self.newest
+            )
         };
         self.apply = Some(apply);
+        self.compress = Some(compress);
         self.redact = Some(redact);
         self.zoom_in = Some(zoom_in);
         self.play = Some(play);
@@ -1474,14 +1514,14 @@ fn edited_row(text: &str) -> String {
     metadata_row("Edited duration", text, None)
 }
 
-/// Opens the fixture recording through the fakes, and notes the four click
+/// Opens the fixture recording through the fakes, and notes the eight click
 /// listeners that the open render creates beside the Export button
 /// (`Window::note_open_buttons`).
 async fn open_recording() -> Window {
     open_loaded(fixture()).await
 }
 
-/// Opens `loaded` through the fakes, and notes the four click listeners as
+/// Opens `loaded` through the fakes, and notes the eight click listeners as
 /// `open_recording` does.
 async fn open_loaded(loaded: LoadedRecording) -> Window {
     let fakes = Fakes::new().pick(picked()).load(Answer::Ready(Ok(loaded)));
@@ -1501,7 +1541,7 @@ async fn the_speed_panel_shows_its_fields_and_the_edited_duration() {
     let page = window.html();
     for text in [
         "Speed",
-        "Times are in seconds, on the timeline after the speed changes above.",
+        "Times are in seconds, on the timeline after each earlier speed change and idle compression.",
         "Start (s)",
         "End (s)",
         "Apply Speed",
@@ -1762,6 +1802,150 @@ fn an_edit_after_a_speed_change_shows_the_duration_after_it() {
         edited_duration(&Some(document)),
         format_duration(65.3 / 4.0)
     );
+}
+
+// The idle panel and the marks of the timeline.
+
+/// The start tag of the strip of the marks. The style sheet of the page names
+/// the class too, so a test looks for the attribute.
+const MARK_STRIP: &str = "class=\"mark-strip\"";
+
+/// The row text of an idle compression of the whole timeline.
+fn idle_row(text: &str) -> String {
+    format!("<span>the whole timeline, {text}</span>")
+}
+
+#[tokio::test]
+async fn the_idle_panel_shows_its_fields_with_their_defaults() {
+    let window = open_recording().await;
+    let page = window.html();
+    for text in [
+        "Idle Time",
+        "Compresses each stretch of the whole timeline with no key and no change on the screen.",
+        "Idle after (s)",
+        "Compress to (s)",
+        "Ignore top rows",
+        "Ignore bottom rows",
+        "Compress Idle Time",
+    ] {
+        assert!(page.contains(text), "{text} missing in {page}");
+    }
+    // The fields of the idle panel end at its button. The redaction panel
+    // after it has values of its own.
+    let idle = text_between(&page, "Idle after (s)", APPLY_IDLE_LABEL);
+    let values: Vec<&str> = idle
+        .split("value=\"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .collect();
+    assert_eq!(values, vec!["3", "1", "0", "0"], "{page}");
+    assert!(!page.contains(MARK_STRIP), "{page}");
+}
+
+#[tokio::test]
+async fn compressing_idle_time_adds_a_row_shortens_the_recording_and_marks_the_timeline() {
+    let mut window = open_recording().await;
+
+    window.compress_idle("3", "1", "0", "0");
+
+    let page = window.html();
+    assert!(!page.contains("role=\"alert\""), "{page}");
+    assert!(
+        page.contains(&idle_row("idle of 3 s or more to 1 s")),
+        "{page}"
+    );
+    // The 42 events end at 4.1 s, and the idle time to 65.3 s becomes 1 s.
+    assert!(page.contains(&edited_row("0m 5.1s")), "{page}");
+    assert!(page.contains("1 mark on the edited recording"), "{page}");
+    let mark = "title=\"Idle time: 1m 1.2s compressed to 0m 1.0s at 0m 4.1s\"";
+    assert!(page.contains(mark), "{mark} missing in {page}");
+    // 4.1 s of 5.1 s.
+    assert!(page.contains("left: 80.39%"), "{page}");
+}
+
+#[tokio::test]
+async fn removing_an_idle_row_restores_the_duration_and_removes_the_marks() {
+    let mut window = open_recording().await;
+    window.compress_idle("3", "1", "0", "0");
+    assert!(window.html().contains(MARK_STRIP), "{}", window.html());
+
+    window.click(window.remove_button());
+
+    let page = window.html();
+    assert!(!page.contains("idle of 3 s"), "{page}");
+    assert!(!page.contains(MARK_STRIP), "{page}");
+    assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
+}
+
+#[tokio::test]
+async fn an_idle_row_shows_the_ignored_rows() {
+    let mut window = open_recording().await;
+
+    window.compress_idle("2.5", "0", "1", "2");
+
+    let page = window.html();
+    let row = idle_row("idle of 2.5 s or more to 0 s, ignores 1 top and 2 bottom rows");
+    assert!(page.contains(&row), "{row} missing in {page}");
+    // Each event of the fixture writes on the top row, which is ignored, so
+    // the whole recording is one idle period.
+    let mark = "title=\"Idle time: 1m 5.3s removed at 0m 0.0s\"";
+    assert!(page.contains(mark), "{mark} missing in {page}");
+    assert!(page.contains(&edited_row("0m 0.0s")), "{page}");
+    assert!(page.contains("left: 0.00%"), "{page}");
+}
+
+#[tokio::test]
+async fn a_bad_idle_change_shows_the_reason_and_adds_no_row() {
+    let cases = [
+        (("abc", "1", "0", "0"), "the idle threshold is not a number"),
+        (("3", "", "0", "0"), "the compressed length is not a number"),
+        (
+            ("3", "1", "1.5", "0"),
+            "the top rows are not a whole number from 0 to 65535",
+        ),
+        (
+            ("3", "1", "0", "-1"),
+            "the bottom rows are not a whole number from 0 to 65535",
+        ),
+        (
+            ("0", "0", "0", "0"),
+            "Invalid idle compression: the threshold 0 s must be finite and above zero",
+        ),
+        (
+            ("3", "5", "0", "0"),
+            "Invalid idle compression: the compressed length 5 s",
+        ),
+        // The filter takes the rows of the screen from the recording, so the
+        // render refuses the rows to ignore.
+        (
+            ("3", "1", "30", "20"),
+            "Render failed: filter &#34;idle-compression&#34; failed: the 30 top and 20 bottom rows to ignore are more than the 40 rows of the screen",
+        ),
+    ];
+    for ((threshold, compress_to, top, bottom), reason) in cases {
+        let mut window = open_recording().await;
+        window.compress_idle(threshold, compress_to, top, bottom);
+        let page = window.html();
+        let banner = format!("Failed to compress idle time: {reason}");
+        assert!(page.contains(&banner), "{banner} missing in {page}");
+        assert!(!page.contains("idle of "), "{page}");
+        assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
+    }
+}
+
+#[tokio::test]
+async fn a_speed_change_after_an_idle_compression_moves_the_mark() {
+    let mut window = open_recording().await;
+    window.compress_idle("3", "1", "0", "0");
+
+    // The region from 0 s to 4 s plays twice as fast, so the edited recording
+    // is 3.1 s, and the mark moves from 4.1 s to 2.1 s.
+    window.apply_speed("0", "4", "2");
+
+    let page = window.html();
+    assert!(page.contains(&edited_row("0m 3.1s")), "{page}");
+    assert!(page.contains("at 0m 2.1s\""), "{page}");
+    assert!(page.contains("left: 67.74%"), "{page}");
 }
 
 // The redaction panel.
@@ -2581,13 +2765,25 @@ const REDO_KEYS: Press = Press {
 };
 
 impl Window {
-    /// The Start, End, and Speed fields of the speed panel, and the Pattern and
-    /// Replacement text fields of the redaction panel. The two text fields of
-    /// the export bar show only for a video kind, thus `video_fields` gives them.
-    fn text_fields(&self) -> [ElementId; 5] {
+    /// The Start, End, and Speed fields of the speed panel, the four fields of
+    /// the idle panel, and the Pattern and Replacement text fields of the
+    /// redaction panel. The two text fields of the export bar show only for a
+    /// video kind, thus `video_fields` gives them.
+    fn text_fields(&self) -> [ElementId; 9] {
         let [start, end, speed] = self.speed_fields();
+        let [threshold, compress_to, top, bottom] = self.idle_fields();
         let [_, pattern, _, replacement, _] = self.redaction_fields();
-        [start, end, speed, pattern, replacement]
+        [
+            start,
+            end,
+            speed,
+            threshold,
+            compress_to,
+            top,
+            bottom,
+            pattern,
+            replacement,
+        ]
     }
 
     /// Elements that have the focus in turn and are not text fields: the

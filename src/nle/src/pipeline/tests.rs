@@ -805,6 +805,7 @@ fn scale_span(
                 })
                 .collect(),
             length: span.length * factor,
+            marks: span.marks,
         })
     }
 }
@@ -946,6 +947,7 @@ fn a_span_filter_that_answers_a_bad_length_fails_and_names_the_kind() {
             Ok(Span {
                 events: span.events,
                 length,
+                marks: span.marks,
             })
         });
 
@@ -967,6 +969,7 @@ fn a_span_filter_may_answer_a_length_equal_to_its_largest_time() {
         Ok(Span {
             events: span.events,
             length: 3.0,
+            marks: span.marks,
         })
     });
 
@@ -989,6 +992,274 @@ fn register_span_and_register_replace_each_other_under_one_kind() {
     registry.register_span(kind("f"), scale_span(2.0));
     let out = registry.run(events(&[1.0, 2.0]), &[all("f")]).unwrap();
     assert_eq!(times(&out), vec![2.0, 4.0]);
+}
+
+// Tests of the marks.
+
+/// A span filter that keeps its span and adds a mark at `at`, relative to
+/// the start of its region.
+fn marker(
+    at: f64,
+    label: &'static str,
+) -> impl Fn(Span, SpanContext<'_>, &FilterOptions) -> Result<Span, String> + Send + Sync {
+    move |mut span, _, _| {
+        span.marks.push(Mark {
+            time: at,
+            label: label.to_string(),
+        });
+        Ok(span)
+    }
+}
+
+fn mark_times(marks: &[Mark]) -> Vec<f64> {
+    marks.iter().map(|mark| mark.time).collect()
+}
+
+/// The marks of the render of `one_clip_project(filters)` through `registry`.
+fn rendered_marks(registry: &FilterRegistry, filters: Vec<AppliedFilter>) -> Vec<Mark> {
+    registry
+        .render_with_marks(&one_clip_project(filters))
+        .unwrap()
+        .marks
+}
+
+#[test]
+fn a_mark_of_a_span_filter_goes_onto_the_timeline_from_the_start_of_its_region() {
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("mark"), marker(1.5, "here"));
+
+    let marks = rendered_marks(&registry, vec![range("mark", 2.0, 6.0)]);
+
+    assert_eq!(
+        marks,
+        vec![Mark {
+            time: 3.5,
+            label: "here".to_string()
+        }]
+    );
+}
+
+#[test]
+fn a_later_span_filter_gets_the_marks_inside_its_region_relative_to_its_start() {
+    let seen = TestArc::new(Mutex::new(Vec::new()));
+    let captured = TestArc::clone(&seen);
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("mark"), marker(1.5, "inside"));
+    registry.register_span(kind("early"), marker(0.5, "before"));
+    registry.register_span(kind("spy"), move |span, _, _| {
+        captured.lock().unwrap().push(mark_times(&span.marks));
+        Ok(span)
+    });
+
+    // The marks go to 3.5 and 0.5. The spy starts at 3, so it sees 0.5 only.
+    rendered_marks(
+        &registry,
+        vec![
+            all("early"),
+            range("mark", 2.0, 6.0),
+            range("spy", 3.0, 8.0),
+        ],
+    );
+
+    assert_eq!(*seen.lock().unwrap(), vec![vec![0.5]]);
+}
+
+#[test]
+fn a_later_span_filter_moves_the_marks_that_it_answers() {
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("mark"), marker(4.0, "m"));
+    registry.register_span(kind("halve"), |span: Span, _, _: &FilterOptions| {
+        Ok(Span {
+            marks: span
+                .marks
+                .into_iter()
+                .map(|mark| Mark {
+                    time: mark.time / 2.0,
+                    ..mark
+                })
+                .collect(),
+            ..span
+        })
+    });
+
+    let marks = rendered_marks(&registry, vec![all("mark"), range("halve", 2.0, 6.0)]);
+
+    // The mark is 2 s into the region, and the filter halves that.
+    assert_eq!(mark_times(&marks), vec![3.0]);
+}
+
+#[test]
+fn a_mark_after_a_later_region_moves_by_its_shift_and_a_mark_before_it_stays() {
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("early"), marker(1.0, "early"));
+    registry.register_span(kind("late"), marker(8.0, "late"));
+    registry.register_span(kind("halve"), scale_span(0.5));
+
+    let marks = rendered_marks(
+        &registry,
+        vec![all("early"), all("late"), range("halve", 2.0, 6.0)],
+    );
+
+    // The length 4 becomes 2, so the mark at 8 moves by -2.
+    assert_eq!(mark_times(&marks), vec![1.0, 6.0]);
+}
+
+#[test]
+fn a_mark_inside_the_region_of_an_event_filter_keeps_its_time() {
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("mark"), marker(4.0, "m"));
+    registry.register(kind("double"), double());
+
+    let marks = rendered_marks(&registry, vec![all("mark"), range("double", 2.0, 9.0)]);
+
+    assert_eq!(mark_times(&marks), vec![4.0]);
+}
+
+#[test]
+fn a_mark_after_the_region_of_an_event_filter_moves_by_its_shift() {
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("mark"), marker(9.0, "m"));
+    registry.register(kind("add"), add_one());
+
+    // The event at 0 moves to 1, so the shift is 1.
+    let marks = rendered_marks(&registry, vec![all("mark"), range("add", 0.0, 5.0)]);
+
+    assert_eq!(mark_times(&marks), vec![10.0]);
+}
+
+#[test]
+fn a_mark_never_comes_after_the_end_of_the_timeline() {
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("mark"), marker(9.0, "m"));
+    registry.register(kind("halve"), mapper(|t| t / 2.0));
+
+    // The halve moves the event at 8 to 4, so the end 10 moves to 6, and the
+    // mark inside the region keeps its time 9.
+    let rendered = registry
+        .render_with_marks(&one_clip_project(vec![all("mark"), all("halve")]))
+        .unwrap();
+
+    assert_eq!(rendered.recording.duration, 6.0);
+    assert_eq!(mark_times(&rendered.marks), vec![6.0]);
+}
+
+#[test]
+fn the_marks_of_a_render_are_in_time_order() {
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("late"), marker(5.0, "late"));
+    registry.register_span(kind("early"), marker(2.0, "early"));
+    registry.register_span(kind("tie"), marker(5.0, "tie"));
+
+    let marks = rendered_marks(&registry, vec![all("late"), all("early"), all("tie")]);
+
+    let labels: Vec<&str> = marks.iter().map(|mark| mark.label.as_str()).collect();
+    assert_eq!(labels, vec!["early", "late", "tie"]);
+}
+
+#[test]
+fn a_span_filter_that_answers_a_bad_mark_fails_and_names_the_kind() {
+    // The project lasts 10 s, so a mark above 10 is after the answered length.
+    for time in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 10.5] {
+        let mut registry = FilterRegistry::new();
+        registry.register_span(kind("badmark"), move |mut span, _, _| {
+            span.marks.push(Mark {
+                time,
+                label: String::new(),
+            });
+            Ok(span)
+        });
+
+        let result = registry.render_with_marks(&one_clip_project(vec![all("badmark")]));
+
+        match result {
+            Err(NleError::RenderError(message)) => {
+                assert!(message.contains("badmark"), "mark {time}: {message}");
+            }
+            other => panic!("mark {time}: expected a RenderError, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_span_filter_may_answer_a_mark_at_its_length() {
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("mark"), marker(10.0, "end"));
+
+    let marks = rendered_marks(&registry, vec![all("mark")]);
+
+    assert_eq!(mark_times(&marks), vec![10.0]);
+}
+
+#[test]
+fn a_mark_inside_or_after_the_region_of_an_in_place_filter_keeps_its_time() {
+    let (mut registry, _seen) = in_place_spy(|view| view.length);
+    registry.register_span(kind("inside"), marker(3.0, "inside"));
+    registry.register_span(kind("after"), marker(8.0, "after"));
+
+    let marks = rendered_marks(
+        &registry,
+        vec![all("inside"), all("after"), range("spot", 2.0, 6.0)],
+    );
+
+    assert_eq!(mark_times(&marks), vec![3.0, 8.0]);
+}
+
+#[test]
+fn a_mark_inside_the_region_of_an_event_or_in_place_filter_keeps_its_exact_time() {
+    // In f64, (0.407 - 0.1) + 0.1 is 0.4069999999999999, so a mark that goes
+    // to the relative time and back moves by one step.
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("mark"), marker(0.407, "m"));
+    registry.register(kind("same"), mapper(|time| time));
+    registry.register_in_place(kind("same in place"), |events, _, _| Ok(events.to_vec()));
+
+    for name in ["same", "same in place"] {
+        let marks = rendered_marks(&registry, vec![all("mark"), range(name, 0.1, 5.0)]);
+
+        assert_eq!(mark_times(&marks), vec![0.407], "{name}");
+    }
+}
+
+/// Registers a span filter under "halve" that records the mark times that it
+/// gets, and halves its length and its event times. It answers its marks as
+/// it got them.
+fn halving_mark_spy(registry: &mut FilterRegistry) -> TestArc<Mutex<Vec<Vec<f64>>>> {
+    let seen = TestArc::new(Mutex::new(Vec::new()));
+    let captured = TestArc::clone(&seen);
+    let halve = scale_span(0.5);
+    registry.register_span(
+        kind("halve"),
+        move |span: Span, context: SpanContext<'_>, options: &FilterOptions| {
+            captured.lock().unwrap().push(mark_times(&span.marks));
+            halve(span, context, options)
+        },
+    );
+    seen
+}
+
+#[test]
+fn a_mark_at_the_start_of_a_region_is_inside_it_at_the_relative_time_zero() {
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("mark"), marker(2.0, "start"));
+    let seen = halving_mark_spy(&mut registry);
+
+    let marks = rendered_marks(&registry, vec![all("mark"), range("halve", 2.0, 6.0)]);
+
+    assert_eq!(*seen.lock().unwrap(), vec![vec![0.0]]);
+    assert_eq!(mark_times(&marks), vec![2.0]);
+}
+
+#[test]
+fn a_mark_at_the_end_of_a_region_is_after_it_and_moves_by_the_shift() {
+    let mut registry = FilterRegistry::new();
+    registry.register_span(kind("mark"), marker(6.0, "end"));
+    let seen = halving_mark_spy(&mut registry);
+
+    // The length 4 becomes 2, so the mark at 6 moves by -2.
+    let marks = rendered_marks(&registry, vec![all("mark"), range("halve", 2.0, 6.0)]);
+
+    assert_eq!(*seen.lock().unwrap(), vec![Vec::<f64>::new()]);
+    assert_eq!(mark_times(&marks), vec![4.0]);
 }
 
 // Tests of the screen form.
@@ -1170,6 +1441,25 @@ fn a_screen_filter_moves_nothing() {
 
     assert_eq!(times(&rendered.events), vec![0.0, 8.0, 10.0]);
     assert_eq!(rendered.duration, 10.0);
+}
+
+#[test]
+fn a_mark_inside_or_after_the_region_of_a_screen_filter_keeps_its_time() {
+    // On the range, the spy keeps the header size 100x30. On All, it changes
+    // the size, and both marks are inside the region.
+    let cases = [
+        (range("crop", 2.0, 6.0), size(100, 30)),
+        (all("crop"), size(40, 10)),
+    ];
+    for (crop, answer) in cases {
+        let (mut registry, _seen) = screen_spy(answer);
+        registry.register_span(kind("inside"), marker(3.0, "inside"));
+        registry.register_span(kind("after"), marker(8.0, "after"));
+
+        let marks = rendered_marks(&registry, vec![all("inside"), all("after"), crop]);
+
+        assert_eq!(mark_times(&marks), vec![3.0, 8.0], "{answer:?}");
+    }
 }
 
 #[test]

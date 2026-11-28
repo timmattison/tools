@@ -545,7 +545,7 @@ fn render_equals_the_registry_render_of_an_edited_project() {
 
     let rendered = editor.render().unwrap();
 
-    assert_eq!(rendered, registry().render(editor.project()).unwrap());
+    assert_eq!(*rendered, registry().render(editor.project()).unwrap());
     // The filter doubled the time of the event at 1.5.
     assert!(rendered.events.iter().any(|e| e.time == 3.0));
 }
@@ -621,7 +621,7 @@ async fn save_recording_writes_the_rendered_recording() {
         .unwrap();
 
     let loaded = Recording::load(&file).unwrap();
-    assert_eq!(loaded, editor.render().unwrap());
+    assert_eq!(loaded, *editor.render().unwrap());
     assert_ne!(loaded, Recording::test_fixture());
 }
 
@@ -636,7 +636,7 @@ async fn the_save_future_does_not_borrow_the_editor() {
     drop(editor);
     future.await.unwrap();
 
-    assert_eq!(Recording::load(&file).unwrap(), expected);
+    assert_eq!(Recording::load(&file).unwrap(), *expected);
 }
 
 #[tokio::test]
@@ -697,7 +697,7 @@ async fn export_reports_rendering_first_and_writes_the_rendered_recording() {
         [ExportProgress::Rendering, ExportProgress::Writing]
     );
     assert_eq!(result.unwrap(), file);
-    assert_eq!(Recording::load(&file).unwrap(), editor.render().unwrap());
+    assert_eq!(Recording::load(&file).unwrap(), *editor.render().unwrap());
 }
 
 #[tokio::test]
@@ -711,7 +711,7 @@ async fn the_export_future_does_not_borrow_the_editor() {
     drop(editor);
     future.await.unwrap();
 
-    assert_eq!(Recording::load(&file).unwrap(), expected);
+    assert_eq!(Recording::load(&file).unwrap(), *expected);
 }
 
 #[tokio::test]
@@ -728,7 +728,7 @@ async fn export_writes_the_render_with_the_filters_of_the_project() {
         .unwrap();
 
     let written = Recording::load(&file).unwrap();
-    assert_eq!(written, editor.render().unwrap());
+    assert_eq!(written, *editor.render().unwrap());
     assert_ne!(written.duration, unfiltered.duration);
 }
 
@@ -783,4 +783,205 @@ fn apply_renderable_applies_a_filter_that_renders_and_clears_the_redo_history() 
     assert_eq!(editor.project().filters.len(), 1);
     assert!(editor.can_undo());
     assert!(!editor.can_redo());
+}
+
+// Tests of the marks of the render.
+
+/// The kind of the filter of `marking_registry`.
+const MARK_KIND: &str = "mark";
+
+/// A registry with one span filter that keeps its span and adds a mark at
+/// 1 s, and the count of the renders that ran that filter.
+fn marking_registry() -> (Arc<FilterRegistry>, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let renders = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&renders);
+    let mut registry = FilterRegistry::new();
+    registry.register_span(FilterKind::new(MARK_KIND), move |mut span, _, _| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        span.marks.push(Mark {
+            time: 1.0,
+            label: "m".to_string(),
+        });
+        Ok(span)
+    });
+    (Arc::new(registry), renders)
+}
+
+fn add_mark() -> Edit {
+    Edit::AddFilter {
+        index: 0,
+        filter: filter(MARK_KIND),
+    }
+}
+
+fn render_count(renders: &std::sync::atomic::AtomicUsize) -> usize {
+    renders.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[test]
+fn rendered_marks_gives_the_marks_of_the_render() {
+    let (filters, _) = marking_registry();
+    let mut editor = Editor::new(project(), filters).unwrap();
+
+    editor.apply_renderable(add_mark()).unwrap();
+
+    assert_eq!(
+        editor.rendered_marks().unwrap(),
+        vec![Mark {
+            time: 1.0,
+            label: "m".to_string()
+        }]
+    );
+}
+
+#[test]
+fn an_edit_that_renders_gives_its_duration_and_its_marks_in_one_render() {
+    let (filters, renders) = marking_registry();
+    let mut editor = Editor::new(project(), filters).unwrap();
+
+    editor.apply_renderable(add_mark()).unwrap();
+    editor.rendered_duration().unwrap();
+    editor.rendered_marks().unwrap();
+
+    assert_eq!(render_count(&renders), 1);
+}
+
+#[test]
+fn the_recording_for_the_preview_after_an_edit_that_renders_makes_no_second_render() {
+    let (filters, renders) = marking_registry();
+    let mut editor = Editor::new(project(), filters).unwrap();
+
+    editor.apply_renderable(add_mark()).unwrap();
+    let recording = editor.render().unwrap();
+
+    assert_eq!(render_count(&renders), 1);
+    assert_eq!(recording.duration, editor.rendered_duration().unwrap());
+}
+
+#[test]
+fn after_an_undo_one_render_gives_the_duration_and_the_recording_for_the_preview() {
+    let (filters, renders) = marking_registry();
+    let mut editor = Editor::new(project(), filters).unwrap();
+    editor.apply_renderable(add_mark()).unwrap();
+    editor.apply(Edit::AddTrack { id: TrackId(3) }).unwrap();
+    assert!(editor.undo());
+
+    editor.rendered_duration().unwrap();
+    editor.render().unwrap();
+    editor.render().unwrap();
+
+    assert_eq!(render_count(&renders), 2);
+}
+
+#[test]
+fn after_an_edit_with_no_render_one_render_gives_the_duration_and_the_marks() {
+    let (filters, renders) = marking_registry();
+    let mut editor = Editor::new(project(), filters).unwrap();
+    editor.apply_renderable(add_mark()).unwrap();
+    editor.apply(Edit::AddTrack { id: TrackId(3) }).unwrap();
+
+    editor.rendered_marks().unwrap();
+    editor.rendered_duration().unwrap();
+    editor.rendered_marks().unwrap();
+
+    assert_eq!(render_count(&renders), 2);
+    assert_eq!(editor.rendered_marks().unwrap().len(), 1);
+}
+
+#[test]
+fn an_undo_gives_the_marks_of_the_project_before_the_edit() {
+    let (filters, _) = marking_registry();
+    let mut editor = Editor::new(project(), filters).unwrap();
+    editor.apply_renderable(add_mark()).unwrap();
+    assert_eq!(editor.rendered_marks().unwrap().len(), 1);
+
+    assert!(editor.undo());
+
+    assert!(editor.rendered_marks().unwrap().is_empty());
+    assert!(editor.redo().unwrap());
+    assert_eq!(editor.rendered_marks().unwrap().len(), 1);
+}
+
+#[test]
+fn a_render_that_fails_is_not_kept_and_the_next_read_renders_again() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let renders = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&renders);
+    let mut registry = FilterRegistry::new();
+    registry.register_span(FilterKind::new("flaky"), move |mut span, _, _| {
+        if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err("the first render fails".to_string());
+        }
+        span.marks.push(Mark {
+            time: 1.0,
+            label: "m".to_string(),
+        });
+        Ok(span)
+    });
+    let mut editor = Editor::new(project(), Arc::new(registry)).unwrap();
+    editor
+        .apply(Edit::AddFilter {
+            index: 0,
+            filter: filter("flaky"),
+        })
+        .unwrap();
+
+    assert!(editor.rendered_marks().is_err());
+
+    assert_eq!(
+        editor.rendered_marks().unwrap(),
+        vec![Mark {
+            time: 1.0,
+            label: "m".to_string()
+        }]
+    );
+    assert_eq!(render_count(&renders), 2);
+}
+
+#[tokio::test]
+async fn an_export_after_a_kept_render_writes_that_render_with_no_second_render() {
+    let (filters, renders) = marking_registry();
+    let mut editor = Editor::new(project(), filters).unwrap();
+    editor.apply_renderable(add_mark()).unwrap();
+    let kept = editor.render().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("out.json");
+
+    editor
+        .export(recording_request(&file), |_| {})
+        .await
+        .unwrap();
+
+    assert_eq!(render_count(&renders), 1);
+    assert_eq!(Recording::load(&file).unwrap(), *kept);
+}
+
+#[tokio::test]
+async fn an_export_of_a_kept_render_writes_that_render_with_no_copy() {
+    let (filters, _renders) = marking_registry();
+    let mut editor = Editor::new(project(), filters).unwrap();
+    editor.apply_renderable(add_mark()).unwrap();
+    let kept = Arc::downgrade(&editor.render().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("out.json");
+    let holders = Arc::new(std::sync::Mutex::new(None));
+    let seen = Arc::clone(&holders);
+
+    editor
+        .export(recording_request(&file), move |progress| {
+            if matches!(progress, ExportProgress::Writing) {
+                *seen.lock().unwrap() = Some(kept.strong_count());
+            }
+        })
+        .await
+        .unwrap();
+
+    // The editor holds the kept render. A second holder at the write is the
+    // export, which thus writes that render and not a copy of it.
+    let holders = *holders.lock().unwrap();
+    assert!(
+        matches!(holders, Some(count) if count > 1),
+        "holders of the kept render at the write: {holders:?}"
+    );
 }

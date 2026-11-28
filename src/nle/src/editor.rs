@@ -1,12 +1,13 @@
 //! The editing state of the app: the edit operations, the project with its
 //! undo and redo history, and the export of the rendered recording.
 
+use std::cell::OnceCell;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::error::NleError;
 use crate::export::{ExportProgress, ExportRequest, ExportTarget};
-use crate::pipeline::FilterRegistry;
+use crate::pipeline::{FilterRegistry, Mark, Rendered};
 use crate::types::{
     AppliedFilter, Clip, ClipId, EditProject, Recording, Seconds, TimelineTrack, TrackId,
 };
@@ -233,9 +234,26 @@ fn track_position(project: &EditProject, id: TrackId) -> Result<usize, NleError>
         .ok_or_else(|| missing_track(id))
 }
 
+/// What the editor keeps of the render of its project: the recording and the
+/// marks. The recording is shared, so the preview holds it with no copy.
+#[derive(Debug, Clone, PartialEq)]
+struct Kept {
+    recording: Arc<Recording>,
+    marks: Vec<Mark>,
+}
+
+impl From<Rendered> for Kept {
+    fn from(rendered: Rendered) -> Self {
+        Self {
+            recording: Arc::new(rendered.recording),
+            marks: rendered.marks,
+        }
+    }
+}
+
 /// The check of `Editor::apply` and `Editor::redo`: the rules of
-/// `EditProject::validate`, with no render, so no duration to keep.
-fn validate_without_render(next: &EditProject) -> Result<Option<f64>, NleError> {
+/// `EditProject::validate`, with no render, so nothing to keep.
+fn validate_without_render(next: &EditProject) -> Result<Option<Kept>, NleError> {
     next.validate().map(|()| None)
 }
 
@@ -251,9 +269,10 @@ struct Applied {
 #[derive(Debug)]
 pub struct Editor {
     project: EditProject,
-    /// The duration of the render of `project`, when the check of the last
-    /// edit rendered it. Each change of `project` sets it again.
-    kept_duration: Option<f64>,
+    /// The recording and the marks of the render of `project`, after the check
+    /// of the last edit or a read of the render made them. Each change of
+    /// `project` empties it, so it never holds the render of an earlier state.
+    kept: OnceCell<Kept>,
     undo: Vec<Applied>,
     redo: Vec<Edit>,
     filters: Arc<FilterRegistry>,
@@ -268,7 +287,7 @@ impl Editor {
         project.validate()?;
         Ok(Self {
             project,
-            kept_duration: None,
+            kept: OnceCell::new(),
             undo: Vec::new(),
             redo: Vec::new(),
             filters,
@@ -311,8 +330,8 @@ impl Editor {
         let filters = Arc::clone(&self.filters);
         self.commit(edit, move |next| {
             filters
-                .render(next)
-                .map(|recording| Some(recording.duration))
+                .render_with_marks(next)
+                .map(|rendered| Some(Kept::from(rendered)))
         })?;
         self.redo.clear();
         Ok(())
@@ -320,19 +339,19 @@ impl Editor {
 
     /// Apply `edit` to a copy of the project, run `check` on the copy, and
     /// only then make it the project and put the edit on the undo history.
-    /// `check` answers the duration of the render of the copy when it
+    /// `check` answers what to keep of the render of the copy when it
     /// rendered the copy. A failure of the edit or of `check` changes
     /// nothing. It leaves the redo history alone.
     fn commit(
         &mut self,
         edit: Edit,
-        check: impl FnOnce(&EditProject) -> Result<Option<f64>, NleError>,
+        check: impl FnOnce(&EditProject) -> Result<Option<Kept>, NleError>,
     ) -> Result<(), NleError> {
         let mut next = self.project.clone();
         edit.apply_to(&mut next)?;
-        let kept_duration = check(&next)?;
+        let kept = check(&next)?;
         let before = std::mem::replace(&mut self.project, next);
-        self.kept_duration = kept_duration;
+        self.kept = kept.map_or_else(OnceCell::new, OnceCell::from);
         self.undo.push(Applied { edit, before });
         Ok(())
     }
@@ -343,7 +362,7 @@ impl Editor {
             return false;
         };
         self.project = applied.before;
-        self.kept_duration = None;
+        self.kept = OnceCell::new();
         self.redo.push(applied.edit);
         true
     }
@@ -375,18 +394,33 @@ impl Editor {
         !self.redo.is_empty()
     }
 
-    /// Render the project in its present state into one recording.
+    /// The recording of the render of the project in its present state. One
+    /// render of a state gives its recording, its duration, and its marks.
     ///
     /// # Errors
     /// Returns the errors of `FilterRegistry::render`.
-    pub fn render(&self) -> Result<Recording, NleError> {
-        self.filters.render(&self.project)
+    pub fn render(&self) -> Result<Arc<Recording>, NleError> {
+        self.kept().map(|kept| Arc::clone(&kept.recording))
     }
 
-    /// Render the project in its present state, and export it as `request`
-    /// asks. The future holds a copy of the state, so it borrows nothing from
-    /// the editor. It reports `ExportProgress::Rendering` first, then the
-    /// stages of `export::export_recording`.
+    /// What the editor keeps of the render of the project in its present
+    /// state. It renders the project only when no check and no earlier read
+    /// rendered this state. A render that fails is not kept, so the next read
+    /// renders again.
+    fn kept(&self) -> Result<&Kept, NleError> {
+        if let Some(kept) = self.kept.get() {
+            return Ok(kept);
+        }
+        let rendered = self.filters.render_with_marks(&self.project)?;
+        Ok(self.kept.get_or_init(|| Kept::from(rendered)))
+    }
+
+    /// Export the render of the project in its present state as `request`
+    /// asks. When the editor keeps that render, the export writes it with no
+    /// copy. Else the export renders a copy of the state on a blocking thread.
+    /// The future borrows nothing from the editor. It reports
+    /// `ExportProgress::Rendering` first, then the stages of
+    /// `export::export_recording`.
     ///
     /// # Errors
     /// The future gives the errors of `FilterRegistry::render` and of
@@ -397,23 +431,39 @@ impl Editor {
         request: ExportRequest,
         mut progress: impl FnMut(ExportProgress) + Send + 'static,
     ) -> impl std::future::Future<Output = Result<PathBuf, NleError>> + Send + 'static {
+        let kept = self.kept.get().map(|kept| Arc::clone(&kept.recording));
         let project = self.project.clone();
         let filters = Arc::clone(&self.filters);
         async move {
             progress(ExportProgress::Rendering);
-            let recording = crate::commands::run_blocking(move || filters.render(&project)).await?;
+            let recording = match kept {
+                Some(kept) => kept,
+                None => {
+                    crate::commands::run_blocking(move || filters.render(&project).map(Arc::new))
+                        .await?
+                }
+            };
             crate::export::export_recording(recording, request, progress).await
         }
     }
 
-    /// The duration of the render of the project in its present state. It
-    /// renders the project only when the check of the last edit did not.
+    /// The duration of the render of the project in its present state. One
+    /// render of a state gives its recording, its duration, and its marks.
     ///
     /// # Errors
     /// Returns the errors of `FilterRegistry::render`.
     pub fn rendered_duration(&self) -> Result<f64, NleError> {
-        self.kept_duration
-            .map_or_else(|| self.render().map(|recording| recording.duration), Ok)
+        self.kept().map(|kept| kept.recording.duration)
+    }
+
+    /// The marks of the render of the project in its present state, in time
+    /// order. One render of a state gives its recording, its duration, and its
+    /// marks.
+    ///
+    /// # Errors
+    /// Returns the errors of `FilterRegistry::render`.
+    pub fn rendered_marks(&self) -> Result<Vec<Mark>, NleError> {
+        self.kept().map(|kept| kept.marks.clone())
     }
 
     /// Write the rendered recording of this state to `path`.

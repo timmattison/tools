@@ -295,12 +295,14 @@ fn missing(key: &str) -> String {
     format!("the option \"{key}\" is missing or is not valid")
 }
 
-/// Replace the text that the options name.
+/// Replace the text that the options name. The length and each mark keep
+/// their time, as each event does.
 fn redact(span: Span, _context: SpanContext<'_>, options: &FilterOptions) -> Result<Span, String> {
     let redaction = read_options(options)?;
     Ok(Span {
         events: stream::rewrite(span.events, &redaction)?,
         length: span.length,
+        marks: span.marks,
     })
 }
 

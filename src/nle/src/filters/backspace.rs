@@ -56,7 +56,10 @@
 //! the typist made no error. The cut of a run is the time from its first event
 //! to the next kept event, or to the end of the span. Each kept event moves
 //! earlier by the cuts before it. The length of the span becomes the old
-//! length less all cuts, but never below the last kept event.
+//! length less all cuts, but never below the last kept event. A mark of an
+//! earlier filter moves earlier by the cuts before it, as a kept event does. A
+//! mark inside a cut moves to the place of the cut, where the next kept event
+//! goes.
 //!
 //! The screen starts empty. The filter feeds the output events before the
 //! region into it, so a filter on a range sees the screen that the viewer
@@ -98,7 +101,7 @@ use std::ops::Range;
 use serde::Deserialize;
 use termstate::{TerminalState, TerminalTheme};
 
-use crate::pipeline::{FilterRegistry, Span, SpanContext};
+use crate::pipeline::{FilterRegistry, Mark, Span, SpanContext};
 use crate::types::{Event, EventType, FilterKind, FilterOptions};
 
 /// The kind of the backspace removal filter.
@@ -443,17 +446,22 @@ fn feed(screen: &mut TerminalState, event: &Event) -> Result<(), String> {
 /// For each run of removed events, the cut is the time from the first event of
 /// the run to the next kept event, or to the end of the span. Each kept event
 /// moves earlier by the cuts before it. The length is the old length less all
-/// cuts, but never below the last kept event.
+/// cuts, but never below the last kept event. Each mark moves by `moved_time`,
+/// but never after the new length.
 fn cut_removed(span: Span, removed: Vec<bool>) -> Span {
     let mut kept = Vec::new();
     let mut cut = 0.0;
+    // The start and the end of each cut on the old timeline, in time order.
+    let mut cuts = Vec::new();
     let mut run_start: Option<f64> = None;
     for (event, gone) in span.events.into_iter().zip(removed) {
         if gone {
             run_start.get_or_insert(event.time);
         } else {
             if let Some(start) = run_start.take() {
-                cut += (event.time - start).max(0.0);
+                let end = event.time.max(start);
+                cut += end - start;
+                cuts.push((start, end));
             }
             kept.push(Event {
                 time: (event.time - cut).max(0.0),
@@ -462,13 +470,47 @@ fn cut_removed(span: Span, removed: Vec<bool>) -> Span {
         }
     }
     if let Some(start) = run_start {
-        cut += (span.length - start).max(0.0);
+        let end = span.length.max(start);
+        cut += end - start;
+        cuts.push((start, end));
     }
     let last = kept.iter().map(|event| event.time).fold(0.0, f64::max);
+    let length = (span.length - cut).max(last).max(0.0);
+    let marks = span
+        .marks
+        .into_iter()
+        .map(|mark| Mark {
+            time: moved_time(mark.time, &cuts).min(length),
+            ..mark
+        })
+        .collect();
     Span {
         events: kept,
-        length: (span.length - cut).max(last).max(0.0),
+        length,
+        marks,
     }
+}
+
+/// The new time of a mark at `time` after the cuts. `cuts` holds the start and
+/// the end of each cut on the old timeline, in time order.
+///
+/// A mark moves earlier by each cut that ends at or before it, as a kept event
+/// does. Thus a mark at the time of a kept event gets the new time of that
+/// event. A mark inside a cut, or at its start, moves to the start of that cut
+/// less the cuts before it. That is the place where the next kept event goes.
+/// The new time is never below zero.
+fn moved_time(time: f64, cuts: &[(f64, f64)]) -> f64 {
+    let mut earlier = 0.0;
+    for &(start, end) in cuts {
+        if time <= start {
+            break;
+        }
+        if time < end {
+            return (start - earlier).max(0.0);
+        }
+        earlier += end - start;
+    }
+    (time - earlier).max(0.0)
 }
 
 #[cfg(test)]

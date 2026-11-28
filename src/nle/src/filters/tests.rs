@@ -8,6 +8,7 @@ use serde_json::json;
 
 use super::*;
 use crate::error::NleError;
+use crate::pipeline::Mark;
 use crate::types::{
     AppliedFilter, EditProject, Event, EventType, FilterKind, FilterOptions, FilterRegion,
     Recording, Seconds,
@@ -72,6 +73,12 @@ fn try_render(
     duration: f64,
     filter: AppliedFilter,
 ) -> Result<Recording, NleError> {
+    registry().render(&project(events, duration, vec![filter]))
+}
+
+/// A project of one recording that holds `events` and ends at `duration`,
+/// with `filters` applied in order.
+fn project(events: Vec<Event>, duration: f64, filters: Vec<AppliedFilter>) -> EditProject {
     let source = Recording {
         version: 2,
         width: 80,
@@ -84,8 +91,8 @@ fn try_render(
         events,
     };
     let mut project = EditProject::from_recording(Arc::new(source)).unwrap();
-    project.filters = vec![filter];
-    registry().render(&project)
+    project.filters = filters;
+    project
 }
 
 /// Asserts that `result` is a render error that names the kind of `filter`,
@@ -540,6 +547,160 @@ fn auto_trim_refuses_invalid_options() {
 
         assert_invalid_options(result, AUTO_TRIM, reason);
     }
+}
+
+// Tests of the marks of an earlier filter.
+
+/// The kind of a test span filter that puts marks into its region.
+const MARKER: &str = "marker";
+
+/// The app registry, with a span filter under `MARKER` that puts a mark at
+/// each of `times`, relative to the start of its region.
+fn marking(times: &[f64]) -> FilterRegistry {
+    let times = times.to_vec();
+    let mut registry = registry();
+    registry.register_span(
+        FilterKind::new(MARKER),
+        move |mut span: Span, _, _: &FilterOptions| {
+            span.marks.extend(times.iter().map(|&time| Mark {
+                time,
+                label: format!("m{time}"),
+            }));
+            Ok(span)
+        },
+    );
+    registry
+}
+
+/// The mark times of the render of `project(events, duration, ...)`: the
+/// marker puts a mark at each of `marks` on the whole timeline, then `filter`
+/// runs.
+fn moved_marks(
+    marks: &[f64],
+    events: Vec<Event>,
+    duration: f64,
+    filter: AppliedFilter,
+) -> Vec<f64> {
+    let filters = vec![all(MARKER, FilterOptions::new()), filter];
+    marking(marks)
+        .render_with_marks(&project(events, duration, filters))
+        .expect("the render must not fail")
+        .marks
+        .iter()
+        .map(|mark| mark.time)
+        .collect()
+}
+
+#[test]
+fn pause_removal_moves_a_mark_inside_a_shortened_gap_in_proportion() {
+    // The gap from 1 s to 5 s becomes 1 s long. A mark in a gap that stays
+    // keeps its time, a mark in the shortened gap shrinks with it, and a mark
+    // at the time of an event moves with that event.
+    let marks = moved_marks(
+        &[0.5, 3.0, 5.0],
+        outputs(&[0.0, 1.0, 5.0, 6.0]),
+        8.0,
+        all(PAUSE_REMOVAL, removal(2.0, 1.0)),
+    );
+
+    assert_eq!(marks, vec![0.5, 1.5, 2.0]);
+}
+
+#[test]
+fn pause_removal_moves_a_mark_after_the_last_event_back_by_the_removed_time() {
+    // The gap from 1 s to 5 s loses 3 s, so the time after the last event
+    // and the mark in it move back by 3 s.
+    let marks = moved_marks(
+        &[7.0],
+        outputs(&[0.0, 1.0, 5.0, 6.0]),
+        8.0,
+        all(PAUSE_REMOVAL, removal(2.0, 1.0)),
+    );
+
+    assert_eq!(marks, vec![4.0]);
+}
+
+#[test]
+fn pause_removal_keeps_the_time_of_a_mark_before_the_first_event() {
+    // The first event at 2 s keeps its time, so the mark at 1 s before it
+    // keeps its time too. The gap from 3 s to 8 s becomes 1 s long, so the
+    // mark at 5.5 s goes to 3.5 s.
+    let marks = moved_marks(
+        &[1.0, 5.5],
+        outputs(&[2.0, 3.0, 8.0]),
+        10.0,
+        all(PAUSE_REMOVAL, removal(2.0, 1.0)),
+    );
+
+    assert_eq!(marks, vec![1.0, 3.5]);
+}
+
+#[test]
+fn pause_insertion_moves_each_mark_at_or_after_the_point_later_by_the_duration() {
+    let marks = moved_marks(
+        &[1.0, 2.0, 4.5],
+        outputs(&[0.0, 2.0, 4.0]),
+        5.0,
+        all(PAUSE_INSERTION, insertion(2.0, 3.0)),
+    );
+
+    assert_eq!(marks, vec![1.0, 5.0, 7.5]);
+}
+
+#[test]
+fn auto_trim_moves_the_marks_back_with_the_cut_at_the_start() {
+    // The first input event is at 2 s, so each time moves back by 2 s, and a
+    // mark before it moves to the start, as an output event does.
+    let events = vec![output(1.0), input(2.0), output(3.0), output(5.0)];
+
+    let marks = moved_marks(&[1.0, 2.5], events, 8.0, all(AUTO_TRIM, trim(true, false)));
+
+    assert_eq!(marks, vec![0.0, 0.5]);
+}
+
+#[test]
+fn auto_trim_moves_a_mark_after_the_last_output_event_back_to_it() {
+    let events = vec![input(0.0), output(3.0)];
+
+    let marks = moved_marks(&[1.0, 6.0], events, 8.0, all(AUTO_TRIM, trim(false, true)));
+
+    assert_eq!(marks, vec![1.0, 3.0]);
+}
+
+#[test]
+fn pause_insertion_moves_a_mark_at_the_start_of_its_range_after_an_in_place_filter() {
+    // The in-place filter on the range from 0.1 s keeps the mark at 0.407 s.
+    // The pause at the start of the range from 0.407 s then moves it by 1 s.
+    let mut registry = marking(&[0.407]);
+    registry.register_in_place(FilterKind::new("same"), |events, _, _| Ok(events.to_vec()));
+    let filters = vec![
+        all(MARKER, FilterOptions::new()),
+        range("same", 0.1, 2.0, FilterOptions::new()),
+        range(PAUSE_INSERTION, 0.407, 2.0, insertion(0.0, 1.0)),
+    ];
+
+    let rendered = registry
+        .render_with_marks(&project(outputs(&[0.0, 1.0]), 2.0, filters))
+        .expect("the render must not fail");
+
+    let marks: Vec<f64> = rendered.marks.iter().map(|mark| mark.time).collect();
+    assert_eq!(marks, vec![1.0 + 0.407]);
+}
+
+#[test]
+fn the_viewport_filter_on_all_keeps_the_time_of_each_mark() {
+    // The crop changes the screen of 80x24 to 80x10, and moves no time.
+    let crop: FilterOptions =
+        serde_json::from_value(json!({ "rows": { "start": 0, "end": 10 } })).unwrap();
+
+    let marks = moved_marks(
+        &[1.0, 3.0],
+        outputs(&[0.0, 2.0]),
+        5.0,
+        all(viewport::VIEWPORT, crop),
+    );
+
+    assert_eq!(marks, vec![1.0, 3.0]);
 }
 
 // Tests of the cursor filter in the app registry.

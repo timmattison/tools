@@ -28,6 +28,9 @@ pub enum NleError {
     #[error("Invalid speed: {0} (a speed must be finite and above zero)")]
     InvalidSpeed(f64),
 
+    #[error("Invalid idle compression: {0}")]
+    InvalidIdleCompression(String),
+
     #[error("Invalid redaction: {0}")]
     InvalidRedaction(String),
 

@@ -127,7 +127,7 @@ fn a_video_export_runs_beta_on_the_rendered_recording() {
     let reported = Reported::default();
 
     let result = block_on(export_recording_with(
-        recording(),
+        Arc::new(recording()),
         request,
         collector(&reported),
         finder_vars(&home),
@@ -182,7 +182,7 @@ fn a_web_export_runs_beta_with_the_theme_and_compress() {
     };
 
     let result = block_on(export_recording_with(
-        recording(),
+        Arc::new(recording()),
         request,
         |_| {},
         finder_vars(&home),
@@ -218,7 +218,7 @@ fn a_recording_export_writes_the_file_and_reports_writing() {
     let reported = Reported::default();
 
     let result = block_on(export_recording_with(
-        recording(),
+        Arc::new(recording()),
         request,
         collector(&reported),
         |_| None,
@@ -239,7 +239,7 @@ fn a_recording_export_keeps_the_save_error_of_a_refused_name() {
     };
 
     let result = block_on(export_recording_with(
-        recording(),
+        Arc::new(recording()),
         request,
         |_| {},
         |_| None,
@@ -285,7 +285,7 @@ fn an_output_path_that_is_not_utf8_is_refused_before_the_export() {
         let reported = Reported::default();
 
         let result = block_on(export_recording_with(
-            recording(),
+            Arc::new(recording()),
             request,
             collector(&reported),
             finder_vars(&home),
@@ -320,7 +320,7 @@ fn a_failed_beta_gives_an_export_error_and_removes_the_work_file() {
     };
 
     let result = block_on(export_recording_with(
-        recording(),
+        Arc::new(recording()),
         request,
         |_| {},
         finder_vars(&home),

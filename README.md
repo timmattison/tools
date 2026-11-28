@@ -6231,7 +6231,8 @@ cargo tauri build --no-bundle   # the binary is target/release/msgs
 A desktop application for the terminal recordings that `beta` writes. It opens
 a `.json` or `.json.gz` recording, makes an edit project of it, shows its
 metadata, shows its clips on a timeline, plays the edited recording in its
-preview pane, and exports the edited recording.
+preview pane, and exports the edited recording. Under the tracks, the timeline
+shows the marks of the filters on a strip of the edited recording.
 
 The preview pane draws the terminal of the edited recording at the playhead.
 Drag the playhead control under **Timeline** to go to a time. **Play** plays
@@ -6269,12 +6270,25 @@ start and the end of the region in seconds and a speed, then click
 at half speed. Each later event moves by the change in the length of the
 region, also when the region holds no event, for example a silent build step.
 Each region gets a row with a **Remove** button, and different regions can have
-different speeds. The times of a new region are on the timeline after the
-speed changes above it. The panel shows the duration of the edited recording.
-The panel refuses a change after which the recording does not render, and it
-shows the reason in the banner.
+different speeds. The times of a new region are on the timeline after each
+speed change and idle compression before it. The panel shows the duration of
+the edited recording. The panel refuses a change after which the recording does
+not render, and it shows the reason in the banner.
 
-The redaction panel under the speed panel finds text on the whole timeline and
+The idle panel under the speed panel compresses idle time. The terminal is idle
+when no key is pressed and no cell of the screen changes. A cursor move, a
+change of the window title, or a redraw of the same text changes no cell. Type
+the shortest idle stretch to compress (**Idle after**, 3 s at first) and its
+new length (**Compress to**, 1 s at first), then click **Compress Idle Time**.
+A length of 0 removes the idle time. If a status bar shows a clock, type its
+rows in **Ignore top rows** or **Ignore bottom rows**, so that a tick of the
+clock is not activity. The compression covers the whole timeline, and each
+later event moves back by the time that the idle stretches before it lost. Each
+compression gets a row with a **Remove** button. The strip of the timeline gets
+a tick at the start of each compressed stretch, and the text of the tick gives
+its length before and after.
+
+The redaction panel under the idle panel finds text on the whole timeline and
 replaces it, for example to remove API keys, tokens, hostnames, or user names
 from a recording. **Find** takes an exact text, a regular expression, or a
 preset: email addresses, IP addresses, AWS keys, tokens, or hostnames.
@@ -6340,12 +6354,14 @@ The editing engine of the crate has five parts:
   a new length, and the later events move by the change in the length. A span
   filter also gets the events before and after its region and the size of the
   terminal: the size of the clip that starts first, or 80 by 24 in
-  `FilterRegistry::run`. A screen filter (`register_screen`) also gets the
-  size of the screen and the events before its region. It rewrites its region,
-  moves nothing, and on the region `All` it can change the size of the screen.
-  A later span filter gets that size, and the rendered recording has the size
-  that the last screen filter gives. `FilterRegistry::run` has no header, so a
-  screen filter fails there.
+  `FilterRegistry::run`. A span filter can also mark places on the timeline.
+  It gets the marks inside its region and answers the marks of its result, and
+  `render_with_marks` gives the marks with the recording. A screen filter
+  (`register_screen`) also gets the size of the screen and the events before
+  its region. It rewrites its region, moves nothing, and on the region `All`
+  it can change the size of the screen. A later span filter gets that size,
+  and the rendered recording has the size that the last screen filter gives.
+  `FilterRegistry::run` has no header, so a screen filter fails there.
   `filters::registry()` holds the filters that ship. The cursor filter is an
   in-place filter, the viewport filter is a screen filter, and each other one
   is a span filter:
@@ -6360,16 +6376,23 @@ The editing engine of the crate has five parts:
     each burst of typing at one rate. The paragraph on this filter below gives
     its rules.
   - `pause-removal` (`threshold`, `max_pause`, issue #154): each gap between two
-    events that is longer than `threshold` becomes `max_pause` long.
-  - `pause-insertion` (`at`, `duration`, issue #154): each event at or after
-    `at` moves later by `duration`, and so do the events after a range and the
-    end of the timeline. An `at` past the end of the region by more than a
+    events that is longer than `threshold` becomes `max_pause` long. A mark in
+    a shortened gap shrinks with it in proportion.
+  - `pause-insertion` (`at`, `duration`, issue #154): each event and each mark
+    at or after `at` moves later by `duration`, and so do the events after a
+    range and the end of the timeline. An `at` past the end of the region by more than a
     microsecond is an error.
   - `auto-trim` (`leading`, `trailing`, both on when not set, issue #154):
     removes the time before the first input event and the time after the last
-    output event.
+    output event. A mark moves as an event at its time does.
+  - `idle-compression` (`threshold`, `compress_to`, `ignore_top_rows`,
+    `ignore_bottom_rows`, issue #167): compresses each idle stretch, and marks
+    the start of each one. It replays the output through the terminal emulator
+    of the `termstate` crate, on the size of the recording, and it replays the
+    output before its region first. The idle panel below gives its rules.
   - `backspace-removal` (no options, issue #152): removes each typo, the erase
-    key after it, their output, and their time.
+    key after it, their output, and their time. A mark moves as a kept event
+    at its time does, and a mark inside the removed time moves to the cut.
     [The backspace removal filter](#the-backspace-removal-filter) below gives
     its rules.
   - `viewport` (`rows`, `columns`, `hide_rows`, `hide_columns`, issue #165):
@@ -6379,7 +6402,7 @@ The editing engine of the crate has five parts:
   The filters of issue #154 parse their options as a Rust type, so the render
   refuses a missing option, a value of the wrong type, and a key that the
   filter does not know. The window cannot add them yet. Issue #804 adds the
-  click on the timeline that places a pause. Issues #157 to #167 add more
+  click on the timeline that places a pause. Issues #157 to #166 add more
   filters.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
@@ -6400,10 +6423,11 @@ option is missing) keeps its length, and so does the gap after a key that
 holds a line end. Thus each hesitation inside a command goes away, and each
 pause between two commands stays. An output keeps its delay after the key
 before it, so the echo of a key follows the key. When the gap to the next key
-becomes shorter, the delay becomes shorter by the same ratio. The option
-`jitter` (0 when missing, and below 1) changes each interval by up to that
-fraction, so the typing does not look mechanical. Each render gives the same
-times. The window cannot add the filter to a project yet.
+becomes shorter, the delay becomes shorter by the same ratio. A mark of an
+earlier filter, for example the start of an idle period, moves as an output
+does. The option `jitter` (0 when missing, and below 1) changes each interval
+by up to that fraction, so the typing does not look mechanical. Each render
+gives the same times. The window cannot add the filter to a project yet.
 
 ### The cursor filter
 
@@ -6501,7 +6525,10 @@ The `backspace-removal` filter removes the typing errors of a recording. It
 removes a typed key, the key that erased it, and the output of both, so the
 recording shows the text that the typist meant. It also removes their time, so
 no pause shows where the error was. For example, `h`, `r`, Backspace, `e`
-becomes `h`, `e`, and the `e` comes at the time of the `r`.
+becomes `h`, `e`, and the `e` comes at the time of the `r`. A mark of an
+earlier filter, for example the start of a compressed idle stretch, moves
+earlier by the removed time before it. A mark inside the removed time moves to
+the place of the cut, where the `e` goes.
 
 The filter removes keys only when the screen proves that the removal changes
 nothing that a viewer sees after it. The filter keeps a model of the screen,
@@ -6598,8 +6625,9 @@ that `beta` reports (`Processed frame N / M`). When the export ends, the bar
 shows the path of the file. If the export fails, the error banner shows the
 reason.
 
-In code, `Editor::export` does the render and the export, and reports each
-stage through an `ExportProgress` callback. `Editor::save_recording` writes the
+In code, `Editor::export` writes the render that the editor keeps, or renders
+the project when it keeps none, and reports each stage through an
+`ExportProgress` callback. `Editor::save_recording` writes the
 rendered recording only.
 
 The crate also has functions that list the recordings in a directory, and
