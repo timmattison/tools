@@ -1444,6 +1444,25 @@ fn a_screen_filter_moves_nothing() {
 }
 
 #[test]
+fn a_mark_inside_or_after_the_region_of_a_screen_filter_keeps_its_time() {
+    // On the range, the spy keeps the header size 100x30. On All, it changes
+    // the size, and both marks are inside the region.
+    let cases = [
+        (range("crop", 2.0, 6.0), size(100, 30)),
+        (all("crop"), size(40, 10)),
+    ];
+    for (crop, answer) in cases {
+        let (mut registry, _seen) = screen_spy(answer);
+        registry.register_span(kind("inside"), marker(3.0, "inside"));
+        registry.register_span(kind("after"), marker(8.0, "after"));
+
+        let marks = rendered_marks(&registry, vec![all("inside"), all("after"), crop]);
+
+        assert_eq!(mark_times(&marks), vec![3.0, 8.0], "{answer:?}");
+    }
+}
+
+#[test]
 fn run_with_a_screen_filter_fails_and_names_the_kind() {
     let (registry, _seen) = screen_spy(size(40, 10));
 

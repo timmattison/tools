@@ -687,6 +687,22 @@ fn pause_insertion_moves_a_mark_at_the_start_of_its_range_after_an_in_place_filt
     assert_eq!(marks, vec![1.0 + 0.407]);
 }
 
+#[test]
+fn the_viewport_filter_on_all_keeps_the_time_of_each_mark() {
+    // The crop changes the screen of 80x24 to 80x10, and moves no time.
+    let crop: FilterOptions =
+        serde_json::from_value(json!({ "rows": { "start": 0, "end": 10 } })).unwrap();
+
+    let marks = moved_marks(
+        &[1.0, 3.0],
+        outputs(&[0.0, 2.0]),
+        5.0,
+        all(viewport::VIEWPORT, crop),
+    );
+
+    assert_eq!(marks, vec![1.0, 3.0]);
+}
+
 // Tests of the cursor filter in the app registry.
 
 #[test]
