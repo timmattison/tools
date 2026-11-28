@@ -510,3 +510,63 @@ fn a_redaction_of_input_after_the_hud_does_not_hide_the_typed_keys() {
     // 34 does not change. Thus no output event holds the password in one run.
     assert_eq!(text(&replay(&result, 1.65, WIDE), 2, 28, 39), "│ xyzzy42 │");
 }
+
+/// The output events of `result` at `time`, other than the events of
+/// `recording`.
+fn draws_at(result: &[Event], recording: &[Event], time: f64) -> usize {
+    let count = |events: &[Event]| {
+        events
+            .iter()
+            .filter(|event| event.event_type == EventType::Output && event.time == time)
+            .count()
+    };
+    count(result) - count(recording)
+}
+
+#[test]
+fn a_wide_character_in_the_label_takes_two_cells_and_stays() {
+    let events = ended(vec![
+        out(0.0, "$ "),
+        inp(1.0, "日a"),
+        out(1.01, "日a"),
+        out(1.2, "x"),
+        out(1.3, "y"),
+    ]);
+    let result = hud(&events, &plain(), WIDE);
+
+    // `日` covers two cells, thus the box is one cell wider than for two
+    // narrow keys. The second cell of `日` holds the continuation mark.
+    let screen = replay(&result, 1.5, WIDE);
+    assert_eq!(text(&screen, 1, 32, 39), "╭─────╮");
+    assert_eq!(text(&screen, 2, 32, 39), "│ 日\0a │");
+    assert_eq!(text(&screen, 3, 32, 39), "╰─────╯");
+    // The output of the program changes no cell of the box, thus the HUD
+    // writes nothing more.
+    assert_eq!(draws_at(&result, &events, 1.2), 0);
+    assert_eq!(draws_at(&result, &events, 1.3), 0);
+    assert!(result.iter().all(|event| !event.data.contains('\0')));
+}
+
+#[test]
+fn a_wide_character_of_the_program_under_an_edge_of_the_box_shows_as_blank_halves() {
+    // The box of `ls` stands in columns 33 to 38. `日` of the program covers
+    // columns 32 and 33, and `本` covers columns 38 and 39.
+    let events = ended(vec![
+        out(0.0, "\x1b[2;33H日\x1b[2;39H本\x1b[1;1H"),
+        inp(1.0, "l"),
+        out(1.01, "l"),
+        inp(1.1, "s"),
+        out(1.11, "s"),
+        out(1.2, "x"),
+    ]);
+    let result = hud(&events, &plain(), WIDE);
+
+    let screen = replay(&result, 1.5, WIDE);
+    assert_eq!(text(&screen, 1, 32, 40), " ╭────╮ ");
+    assert_eq!(draws_at(&result, &events, 1.2), 0);
+    assert!(result.iter().all(|event| !event.data.contains('\0')));
+
+    // When the box goes away, both wide characters come back.
+    let end = replay(&result, END, WIDE);
+    assert_same_screen(&end, &replay(&events, END, WIDE));
+}

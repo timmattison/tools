@@ -280,6 +280,16 @@ fn a_long_label_keeps_its_end() {
 }
 
 #[test]
+fn a_cut_label_starts_with_no_second_half_of_a_wide_character() {
+    // A screen of 12 columns has room for a label of 6 cells. The label
+    // `a日日日` takes 7 cells, and a cut of its first cell leaves the second
+    // half of the first `日`.
+    let overlay = box_of(size(12, 6), Position::TopLeft, "a日日日");
+    let label: String = overlay.rows[1].iter().map(|cell| cell.ch).collect();
+    assert_eq!(label, "│ …日\0日\0 │");
+}
+
+#[test]
 fn a_small_terminal_has_no_box() {
     assert!(!fits(size(6, 10)));
     assert!(!fits(size(40, 4)));
