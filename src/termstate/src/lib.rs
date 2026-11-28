@@ -7,6 +7,10 @@
 //! A clone of a `TerminalState` is exact. It copies the screen, and it replays the
 //! bytes of an unfinished escape sequence into its own parser.
 //!
+//! A wide character, such as `日`, takes two cells: the character and a
+//! continuation cell after it (`WIDE_CONTINUATION`). A character of no width,
+//! such as a combining mark, takes no cell.
+//!
 //! Two terminals are equal when each later byte has the same effect on both. The
 //! backspace removal filter of `nle` uses this equality: it compares the screen
 //! before a typed key with the screen after the key that erased it.
@@ -15,7 +19,13 @@
 //! layout, and the ffmpeg pipe.
 
 use anyhow::Result;
+use unicode_width::UnicodeWidthChar;
 use vte::{Parser, Perform};
+
+/// The character of the cell after a wide character. It covers both cells of
+/// the wide character. `vte` runs NUL as a control and never prints it, thus no
+/// printed character has this value.
+pub const WIDE_CONTINUATION: char = '\0';
 
 /// Narrows an SGR colour offset to the palette index it names.
 ///
@@ -42,6 +52,62 @@ const fn sgr_palette_index(offset: u16) -> u8 {
 )]
 const fn sgr_color_byte(param: u16) -> u8 {
     param as u8
+}
+
+/// An extended color that SGR 38, 48 or 58 names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtendedColor {
+    /// A color of the 256-color palette.
+    Indexed(u8),
+    /// A 24-bit color.
+    Rgb(u8, u8, u8),
+}
+
+/// Reads the colon form of an extended color from the subparameters after the
+/// code. `5:n` is indexed. `2:r:g:b` and `2:cs:r:g:b` are RGB, and the color
+/// space `cs` is ignored. Each other length gives no color.
+fn read_colon_color(subparams: &[u16]) -> Option<ExtendedColor> {
+    match *subparams {
+        [5, n] => Some(ExtendedColor::Indexed(sgr_color_byte(n))),
+        [2, r, g, b] | [2, _, r, g, b] => Some(ExtendedColor::Rgb(
+            sgr_color_byte(r),
+            sgr_color_byte(g),
+            sgr_color_byte(b),
+        )),
+        _ => None,
+    }
+}
+
+/// Reads the semicolon form of an extended color from the groups that follow
+/// its code, starting at index `at`. Gives the color when it is complete, and
+/// the count of groups that the arguments take. An incomplete color takes each
+/// group that is left. A mode other than 2 or 5, or no mode, takes none.
+fn read_semicolon_color(groups: &[&[u16]], at: usize) -> (Option<ExtendedColor>, usize) {
+    let value = |offset: usize| {
+        groups
+            .get(at + offset)
+            .and_then(|group| group.first())
+            .copied()
+    };
+    let left = groups.len().saturating_sub(at);
+    match value(0) {
+        Some(5) => match value(1) {
+            Some(n) => (Some(ExtendedColor::Indexed(sgr_color_byte(n))), 2),
+            None => (None, left),
+        },
+        Some(2) => match (value(1), value(2), value(3)) {
+            (Some(r), Some(g), Some(b)) => (
+                Some(ExtendedColor::Rgb(
+                    sgr_color_byte(r),
+                    sgr_color_byte(g),
+                    sgr_color_byte(b),
+                )),
+                4,
+            ),
+            _ => (None, left),
+        },
+        _ => (None, 0),
+    }
 }
 
 /// The colors of one terminal theme: the default background and foreground,
@@ -282,6 +348,22 @@ impl TerminalTheme {
     }
 }
 
+/// Where a color came from. The emulator keeps it next to each RGB value, so a
+/// writer can say the color again in the form that the source used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColorSource {
+    /// The default color of the theme. SGR 0, RIS, and a cleared cell give it.
+    #[default]
+    Default,
+    /// One of the 16 base colors, from 0 to 15. SGR 30-37 and 40-47 give 0 to
+    /// 7. SGR 90-97 and 100-107 give 8 to 15.
+    Base(u8),
+    /// A color of the 256-color palette, from SGR 38;5;n or 48;5;n.
+    Indexed(u8),
+    /// A 24-bit color, from SGR 38;2;r;g;b or 48;2;r;g;b.
+    Rgb(u8, u8, u8),
+}
+
 /// One character cell of the screen grid, with its colors and attributes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
@@ -291,6 +373,10 @@ pub struct Cell {
     pub fg_color: (u8, u8, u8),
     /// The background color.
     pub bg_color: (u8, u8, u8),
+    /// The source of the foreground color.
+    pub fg_source: ColorSource,
+    /// The source of the background color.
+    pub bg_source: ColorSource,
     /// Whether the character is bold.
     pub bold: bool,
     /// Whether the character is italic. The emulator tracks it, and `beta` does
@@ -298,6 +384,21 @@ pub struct Cell {
     pub italic: bool,
     /// Whether the character is underlined.
     pub underline: bool,
+    /// Whether the character is dim. The emulator tracks it, and `beta` does not
+    /// draw it yet.
+    pub dim: bool,
+    /// Whether the character is blinking. The emulator tracks it, and `beta` does not
+    /// draw it yet.
+    pub blink: bool,
+    /// Whether the character is in reverse video. The emulator tracks it, and `beta` does not
+    /// draw it yet.
+    pub reverse: bool,
+    /// Whether the character is hidden. The emulator tracks it, and `beta` does not
+    /// draw it yet.
+    pub hidden: bool,
+    /// Whether the character is struck through. The emulator tracks it, and `beta` does not
+    /// draw it yet.
+    pub strikethrough: bool,
 }
 
 /// Tells if the parser is settled after one character: in the ground state, with
@@ -331,6 +432,18 @@ fn replayed_parser(pending: &[u8]) -> Parser {
         parser.advance(&mut Discard, &[*byte]);
     }
     parser
+}
+
+/// The count that parameter `index` of `params` gives: its value, or 1 when
+/// the parameter is missing or 0. A terminal reads a count of 0 as 1.
+///
+/// `vte` 0.15 gives a missing parameter as 0, so `unwrap_or(1)` alone is not
+/// enough.
+fn count_param(params: &vte::Params, index: usize) -> usize {
+    match params.iter().nth(index).and_then(|p| p.first().copied()) {
+        None | Some(0) => 1,
+        Some(n) => usize::from(n),
+    }
 }
 
 /// A performer that ignores each callback. It serves the replay of `pending`.
@@ -393,6 +506,7 @@ impl Clone for TerminalState {
     fn clone(&self) -> Self {
         Self {
             grid: self.grid.clone(),
+            changed_rows: self.changed_rows.clone(),
             cursor_x: self.cursor_x,
             cursor_y: self.cursor_y,
             width: self.width,
@@ -400,9 +514,16 @@ impl Clone for TerminalState {
             theme: self.theme.clone(),
             current_fg: self.current_fg,
             current_bg: self.current_bg,
+            current_fg_source: self.current_fg_source,
+            current_bg_source: self.current_bg_source,
             bold: self.bold,
             italic: self.italic,
             underline: self.underline,
+            dim: self.dim,
+            blink: self.blink,
+            reverse: self.reverse,
+            hidden: self.hidden,
+            strikethrough: self.strikethrough,
             parser: replayed_parser(&self.pending),
             pending: self.pending.clone(),
             saved_cursor_x: self.saved_cursor_x,
@@ -410,6 +531,8 @@ impl Clone for TerminalState {
             scroll_top: self.scroll_top,
             scroll_bottom: self.scroll_bottom,
             use_acs: self.use_acs,
+            autowrap: self.autowrap,
+            wrap_pending: self.wrap_pending,
             cursor_visible: self.cursor_visible,
             dynamic_palette: self.dynamic_palette.clone(),
             selection_fg: self.selection_fg,
@@ -420,21 +543,35 @@ impl Clone for TerminalState {
     }
 }
 
+impl Cell {
+    /// Tells if the cell is the continuation of a wide character: the second
+    /// cell of the two that the wide character covers.
+    pub fn is_wide_continuation(&self) -> bool {
+        self.ch == WIDE_CONTINUATION
+    }
+}
+
 /// Two terminals are equal when each later byte has the same effect on both.
 ///
 /// Thus they hold the same screen, cursor, pen, saved cursor, scroll region,
-/// character set, cursor visibility, palette, selection and override colors,
-/// theme, and size, and the same unfinished escape sequence.
+/// character set, autowrap mode, pending wrap, cursor visibility, palette,
+/// selection and override colors, theme, and size, and the same unfinished
+/// escape sequence. The pen is the colors, the source of each color, and each
+/// attribute that the next printed character gets.
 ///
 /// The parser is not compared. By the argument on `Clone`, a parser is in the
 /// state that `Parser::new()` reaches after it reads `pending`, so two equal
 /// `pending` buffers give two parsers in the same state.
+///
+/// The marks of `take_changed_rows` are not compared. They record which rows
+/// changed, and no later byte reads them.
 impl PartialEq for TerminalState {
     fn eq(&self, other: &Self) -> bool {
         // A destructure, so that a new field fails to compile until this
         // comparison names it.
         let Self {
             grid,
+            changed_rows: _,
             cursor_x,
             cursor_y,
             width,
@@ -442,9 +579,16 @@ impl PartialEq for TerminalState {
             theme,
             current_fg,
             current_bg,
+            current_fg_source,
+            current_bg_source,
             bold,
             italic,
             underline,
+            dim,
+            blink,
+            reverse,
+            hidden,
+            strikethrough,
             parser: _,
             pending,
             saved_cursor_x,
@@ -452,6 +596,8 @@ impl PartialEq for TerminalState {
             scroll_top,
             scroll_bottom,
             use_acs,
+            autowrap,
+            wrap_pending,
             cursor_visible,
             dynamic_palette,
             selection_fg,
@@ -465,15 +611,24 @@ impl PartialEq for TerminalState {
             && *height == other.height
             && *current_fg == other.current_fg
             && *current_bg == other.current_bg
+            && *current_fg_source == other.current_fg_source
+            && *current_bg_source == other.current_bg_source
             && *bold == other.bold
             && *italic == other.italic
             && *underline == other.underline
+            && *dim == other.dim
+            && *blink == other.blink
+            && *reverse == other.reverse
+            && *hidden == other.hidden
+            && *strikethrough == other.strikethrough
             && *pending == other.pending
             && *saved_cursor_x == other.saved_cursor_x
             && *saved_cursor_y == other.saved_cursor_y
             && *scroll_top == other.scroll_top
             && *scroll_bottom == other.scroll_bottom
             && *use_acs == other.use_acs
+            && *autowrap == other.autowrap
+            && *wrap_pending == other.wrap_pending
             && *cursor_visible == other.cursor_visible
             && *selection_fg == other.selection_fg
             && *selection_bg == other.selection_bg
@@ -493,9 +648,16 @@ impl Default for Cell {
             ch: ' ',
             fg_color: (255, 255, 255),
             bg_color: (0, 0, 0),
+            fg_source: ColorSource::Default,
+            bg_source: ColorSource::Default,
             bold: false,
             italic: false,
             underline: false,
+            dim: false,
+            blink: false,
+            reverse: false,
+            hidden: false,
+            strikethrough: false,
         }
     }
 }
@@ -505,6 +667,9 @@ impl Default for Cell {
 pub struct TerminalState {
     /// The screen grid, one `Vec` of cells for each row.
     pub grid: Vec<Vec<Cell>>,
+    /// One flag for each row. A flag is `true` when the emulator changed a cell
+    /// of that row since the last call of `take_changed_rows`.
+    changed_rows: Vec<bool>,
     /// The cursor column, counted from zero.
     pub cursor_x: usize,
     /// The cursor row, counted from zero.
@@ -519,12 +684,26 @@ pub struct TerminalState {
     pub current_fg: (u8, u8, u8),
     /// The background color that the next printed character gets.
     pub current_bg: (u8, u8, u8),
+    /// The source of `current_fg`.
+    pub current_fg_source: ColorSource,
+    /// The source of `current_bg`.
+    pub current_bg_source: ColorSource,
     /// Whether the next printed character is bold.
     pub bold: bool,
     /// Whether the next printed character is italic.
     pub italic: bool,
     /// Whether the next printed character is underlined.
     pub underline: bool,
+    /// Whether the next printed character is dim.
+    pub dim: bool,
+    /// Whether the next printed character is blinking.
+    pub blink: bool,
+    /// Whether the next printed character is in reverse video.
+    pub reverse: bool,
+    /// Whether the next printed character is hidden.
+    pub hidden: bool,
+    /// Whether the next printed character is struck through.
+    pub strikethrough: bool,
     parser: Parser,
     // The bytes fed since the parser was last settled: in the ground state with
     // no unfinished sequence. Empty means the parser equals `Parser::new()`.
@@ -537,6 +716,10 @@ pub struct TerminalState {
     scroll_bottom: usize,
     // Character set state
     use_acs: bool,
+    // Autowrap mode (DECAWM, mode 7)
+    autowrap: bool,
+    // A character went into the last column with autowrap on
+    wrap_pending: bool,
     // Cursor visibility
     cursor_visible: bool,
     // Dynamic color palette for OSC sequences
@@ -552,7 +735,13 @@ pub struct TerminalState {
 
 impl TerminalState {
     /// Creates a blank terminal of `width` columns and `height` rows.
+    ///
+    /// A dimension of 0 becomes 1. The size often comes from outside the
+    /// program, for example from the header of a recording, and the cursor
+    /// needs one cell. Thus the last column and the last row always exist.
     pub fn new(width: usize, height: usize, theme: TerminalTheme) -> Self {
+        let width = width.max(1);
+        let height = height.max(1);
         let mut grid = Vec::new();
         for _ in 0..height {
             let mut row = Vec::new();
@@ -575,15 +764,23 @@ impl TerminalState {
 
         Self {
             grid,
+            changed_rows: vec![false; height],
             cursor_x: 0,
             cursor_y: 0,
             width,
             height,
             current_fg: theme.foreground,
             current_bg: theme.background,
+            current_fg_source: ColorSource::Default,
+            current_bg_source: ColorSource::Default,
             bold: false,
             italic: false,
             underline: false,
+            dim: false,
+            blink: false,
+            reverse: false,
+            hidden: false,
+            strikethrough: false,
             theme,
             parser: Parser::new(),
             pending: Vec::new(),
@@ -592,6 +789,8 @@ impl TerminalState {
             scroll_top: 0,
             scroll_bottom: height - 1,
             use_acs: false,
+            autowrap: true,
+            wrap_pending: false,
             cursor_visible: true,
             dynamic_palette,
             selection_fg: Some((0, 0, 0)), // Default selection: black on yellow
@@ -635,6 +834,20 @@ impl TerminalState {
         Ok(())
     }
 
+    /// Returns the rows whose cells changed since the last call, in order,
+    /// counted from zero. The call clears the marks. A write to `grid` from
+    /// outside the emulator does not mark its row.
+    pub fn take_changed_rows(&mut self) -> Vec<usize> {
+        let rows = self
+            .changed_rows
+            .iter()
+            .enumerate()
+            .filter_map(|(row, changed)| changed.then_some(row))
+            .collect();
+        self.changed_rows.fill(false);
+        rows
+    }
+
     /// Returns the screen grid, one `Vec` of cells for each row.
     pub fn get_grid(&self) -> &Vec<Vec<Cell>> {
         &self.grid
@@ -658,6 +871,37 @@ impl TerminalState {
     /// Returns the cursor position as `(column, row)`, counted from zero.
     pub fn get_cursor_position(&self) -> (usize, usize) {
         (self.cursor_x, self.cursor_y)
+    }
+
+    /// Returns the scrolling region as `(top, bottom)`, counted from zero,
+    /// with both rows included.
+    pub fn scroll_region(&self) -> (usize, usize) {
+        (self.scroll_top, self.scroll_bottom)
+    }
+
+    /// Returns the saved cursor position as `(column, row)`, counted from
+    /// zero. `ESC 7`, `CSI s`, and `CSI ? 1049 h` save it.
+    pub fn saved_cursor_position(&self) -> (usize, usize) {
+        (self.saved_cursor_x, self.saved_cursor_y)
+    }
+
+    /// Returns whether the line-drawing character set is on. `ESC ( 0` turns it
+    /// on, and `ESC ( B` turns it off.
+    pub fn uses_line_drawing(&self) -> bool {
+        self.use_acs
+    }
+
+    /// Returns whether autowrap is on (mode 7, DECAWM). `CSI ? 7 h` turns it
+    /// on, and `CSI ? 7 l` turns it off. It is on after `new` and after RIS.
+    pub fn uses_autowrap(&self) -> bool {
+        self.autowrap
+    }
+
+    /// Returns whether a wrap is pending. A character went into the last
+    /// column with autowrap on, and the next printed character goes to the
+    /// start of the next row.
+    pub fn is_wrap_pending(&self) -> bool {
+        self.wrap_pending
     }
 
     /// Returns whether the application has the cursor visible.
@@ -757,6 +1001,58 @@ fn is_light_color_terminal(color: (u8, u8, u8)) -> bool {
 }
 
 impl TerminalState {
+    /// Moves the cursor down one row. On the bottom row of the scrolling
+    /// region, the region scrolls up and the cursor stays. On the last row of
+    /// the screen below the region, the cursor stays and nothing scrolls, as
+    /// in xterm.
+    fn line_feed(&mut self) {
+        if self.cursor_y == self.scroll_bottom {
+            self.scroll_up();
+        } else if self.cursor_y + 1 < self.height {
+            self.cursor_y += 1;
+        }
+    }
+
+    /// Moves the cursor down `count` rows, for CUD and CNL. As CursorDown in
+    /// xterm's cursor.c, the move stops on the bottom margin of the
+    /// scrolling region when the cursor starts on it or above it. From below
+    /// the region, it stops on the last row of the screen. Nothing scrolls.
+    fn cursor_down(&mut self, count: usize) {
+        let limit = if self.cursor_y <= self.scroll_bottom {
+            self.scroll_bottom
+        } else {
+            self.height - 1
+        };
+        self.cursor_y = self.cursor_y.saturating_add(count).min(limit);
+    }
+
+    /// Moves the cursor up `count` rows, for CUU and CPL. As CursorUp in
+    /// xterm's cursor.c, the move stops on the top margin of the scrolling
+    /// region when the cursor starts on it or below it. From above the
+    /// region, it stops on the first row of the screen. Nothing scrolls.
+    fn cursor_up(&mut self, count: usize) {
+        let limit = if self.cursor_y >= self.scroll_top {
+            self.scroll_top
+        } else {
+            0
+        };
+        self.cursor_y = self.cursor_y.saturating_sub(count).max(limit);
+    }
+
+    /// Marks one row as changed. A row outside the screen is ignored.
+    fn mark_row(&mut self, row: usize) {
+        if let Some(flag) = self.changed_rows.get_mut(row) {
+            *flag = true;
+        }
+    }
+
+    /// Marks the rows from `first` to `last`, both included, as changed.
+    fn mark_rows(&mut self, first: usize, last: usize) {
+        for row in first..=last {
+            self.mark_row(row);
+        }
+    }
+
     fn put_char(&mut self, ch: char) {
         // Convert ACS characters to Unicode box drawing if needed
         let display_char = if self.use_acs {
@@ -778,25 +1074,131 @@ impl TerminalState {
             ch
         };
 
+        // A character of no width, such as a combining mark, takes no cell,
+        // and thus it keeps a pending wrap.
+        let width = UnicodeWidthChar::width(display_char).unwrap_or(1);
+        if width == 0 {
+            return;
+        }
+
+        // A character after the last column goes to the start of the next row.
+        if self.wrap_pending {
+            self.wrap_pending = false;
+            self.cursor_x = 0;
+            self.line_feed();
+        }
+
+        if width >= 2 && self.cursor_x + 2 > self.width {
+            // A wide character does not fit in the last column.
+            if self.autowrap && self.width >= 2 {
+                self.cursor_x = 0;
+                self.line_feed();
+            } else {
+                return;
+            }
+        }
+
         if self.cursor_y < self.height && self.cursor_x < self.width {
-            self.grid[self.cursor_y][self.cursor_x] = Cell {
+            let x = self.cursor_x;
+            let cells = if width >= 2 { 2 } else { 1 };
+            self.mark_row(self.cursor_y);
+            self.split_wide_pairs_around(x, cells);
+            let cell = Cell {
                 ch: display_char,
                 fg_color: self.current_fg,
                 bg_color: self.current_bg,
+                fg_source: self.current_fg_source,
+                bg_source: self.current_bg_source,
                 bold: self.bold,
                 italic: self.italic,
                 underline: self.underline,
+                dim: self.dim,
+                blink: self.blink,
+                reverse: self.reverse,
+                hidden: self.hidden,
+                strikethrough: self.strikethrough,
             };
-            self.cursor_x += 1;
-
-            // Don't auto-wrap at line end - just stop at the edge
-            if self.cursor_x >= self.width {
+            let row = &mut self.grid[self.cursor_y];
+            if cells == 2 {
+                if let Some(next) = row.get_mut(x + 1) {
+                    *next = Cell {
+                        ch: WIDE_CONTINUATION,
+                        ..cell
+                    };
+                }
+            }
+            row[x] = cell;
+            if x + cells >= self.width {
+                // Stay in the last column. The wrap happens at the next character.
                 self.cursor_x = self.width - 1;
+                self.wrap_pending = self.autowrap;
+            } else {
+                self.cursor_x += cells;
+            }
+        }
+    }
+
+    /// A blank cell: a space with the default colors and no attribute.
+    fn blank_cell(&self) -> Cell {
+        Cell {
+            ch: ' ',
+            fg_color: self.theme.foreground,
+            bg_color: self.theme.background,
+            ..Default::default()
+        }
+    }
+
+    /// Keeps the rule of the wide characters before a write of `cells` cells at
+    /// column `x` of the cursor row. A write that starts on a continuation cell
+    /// blanks the wide character before it. A write that ends before a
+    /// continuation cell blanks that cell.
+    fn split_wide_pairs_around(&mut self, x: usize, cells: usize) {
+        let blank = self.blank_cell();
+        let Some(row) = self.grid.get_mut(self.cursor_y) else {
+            return;
+        };
+        if x > 0 && row.get(x).is_some_and(Cell::is_wide_continuation) {
+            if let Some(previous) = row.get_mut(x - 1) {
+                *previous = blank.clone();
+            }
+        }
+        if let Some(after) = row.get_mut(x + cells) {
+            if after.is_wide_continuation() {
+                *after = blank;
+            }
+        }
+    }
+
+    /// Repairs the cursor row after an edit that can cut a wide character. A
+    /// continuation cell that does not follow a wide character becomes blank,
+    /// and a wide character that no continuation cell follows becomes blank.
+    fn repair_wide_pairs(&mut self) {
+        self.mark_row(self.cursor_y);
+        let blank = self.blank_cell();
+        let Some(row) = self.grid.get_mut(self.cursor_y) else {
+            return;
+        };
+        for x in 0..row.len() {
+            let is_head = row
+                .get(x)
+                .is_some_and(|cell| UnicodeWidthChar::width(cell.ch) == Some(2));
+            let followed = row.get(x + 1).is_some_and(Cell::is_wide_continuation);
+            let is_continuation = row.get(x).is_some_and(Cell::is_wide_continuation);
+            let after_head = x > 0
+                && row
+                    .get(x - 1)
+                    .is_some_and(|cell| UnicodeWidthChar::width(cell.ch) == Some(2));
+            let broken = (is_head && !followed) || (is_continuation && !after_head);
+            if broken {
+                if let Some(cell) = row.get_mut(x) {
+                    *cell = blank.clone();
+                }
             }
         }
     }
 
     fn scroll_up(&mut self) {
+        self.mark_rows(self.scroll_top, self.scroll_bottom);
         // Only scroll within the scrolling region
         for y in (self.scroll_top + 1)..=self.scroll_bottom {
             for x in 0..self.width {
@@ -817,6 +1219,7 @@ impl TerminalState {
 
     fn clear_line(&mut self, line: usize) {
         if line < self.height {
+            self.mark_row(line);
             for x in 0..self.width {
                 self.grid[line][x] = Cell {
                     ch: ' ',
@@ -829,6 +1232,7 @@ impl TerminalState {
     }
 
     fn clear_screen(&mut self) {
+        self.mark_rows(0, self.height.saturating_sub(1));
         for y in 0..self.height {
             for x in 0..self.width {
                 self.grid[y][x] = Cell {
@@ -843,108 +1247,148 @@ impl TerminalState {
         self.cursor_y = 0;
     }
 
+    /// Turns an extended color into its RGB value and its source. An indexed
+    /// color reads the dynamic palette when the index is inside it.
+    fn resolve_extended_color(&self, color: ExtendedColor) -> ((u8, u8, u8), ColorSource) {
+        match color {
+            ExtendedColor::Indexed(index) => {
+                let rgb = self
+                    .dynamic_palette
+                    .get(usize::from(index))
+                    .copied()
+                    .unwrap_or_else(|| TerminalTheme::get_256_color(index));
+                (rgb, ColorSource::Indexed(index))
+            }
+            ExtendedColor::Rgb(r, g, b) => ((r, g, b), ColorSource::Rgb(r, g, b)),
+        }
+    }
+
+    /// Applies the groups of one SGR sequence to the pen. A group with colon
+    /// subparameters takes no other group. A group with none can take the
+    /// groups after it as the arguments of an extended color (38, 48 or 58).
     fn process_sgr_params(&mut self, params: &vte::Params) {
-        let param_vec: Vec<u16> = params.iter().flatten().copied().collect();
+        let groups: Vec<&[u16]> = params.iter().collect();
         let mut i = 0;
 
-        while i < param_vec.len() {
-            let param = param_vec[i];
+        while let Some(group) = groups.get(i) {
+            let Some((&code, subparams)) = group.split_first() else {
+                i += 1;
+                continue;
+            };
+            i += 1;
 
-            match param {
+            if !subparams.is_empty() {
+                // The colon form: this group holds its own arguments.
+                match code {
+                    4 => self.underline = subparams.first().copied() != Some(0),
+                    38 | 48 => {
+                        if let Some(color) = read_colon_color(subparams) {
+                            self.set_extended_color(code, color);
+                        }
+                    }
+                    // 58 is the underline color, which the model lacks.
+                    _ => {}
+                }
+                continue;
+            }
+
+            match code {
                 0 => {
                     // Reset
                     self.current_fg = self.theme.foreground;
                     self.current_bg = self.theme.background;
+                    self.current_fg_source = ColorSource::Default;
+                    self.current_bg_source = ColorSource::Default;
                     self.bold = false;
                     self.italic = false;
                     self.underline = false;
+                    self.dim = false;
+                    self.blink = false;
+                    self.reverse = false;
+                    self.hidden = false;
+                    self.strikethrough = false;
                 }
                 1 => self.bold = true,
+                2 => self.dim = true,
                 3 => self.italic = true,
                 4 => self.underline = true,
-                22 => self.bold = false,
+                5 => self.blink = true,
+                7 => self.reverse = true,
+                8 => self.hidden = true,
+                9 => self.strikethrough = true,
+                22 => {
+                    // Normal intensity: neither bold nor dim.
+                    self.bold = false;
+                    self.dim = false;
+                }
                 23 => self.italic = false,
                 24 => self.underline = false,
+                25 => self.blink = false,
+                27 => self.reverse = false,
+                28 => self.hidden = false,
+                29 => self.strikethrough = false,
+                39 => {
+                    // Only the source changes. Decision H-165-2 keeps the RGB
+                    // value for each existing caller.
+                    self.current_fg_source = ColorSource::Default;
+                }
+                49 => {
+                    // Only the source changes. Decision H-165-2 keeps the RGB
+                    // value for each existing caller.
+                    self.current_bg_source = ColorSource::Default;
+                }
                 30..=37 => {
                     // Foreground colors
-                    let color_index = sgr_palette_index(param - 30);
+                    let color_index = sgr_palette_index(code - 30);
                     self.current_fg = self.theme.get_color(color_index);
+                    self.current_fg_source = ColorSource::Base(color_index);
                 }
-                38
-                    // Extended foreground color
-                    if i + 1 < param_vec.len() => {
-                        match param_vec[i + 1] {
-                            5
-                                // 256-color mode: ESC[38;5;n
-                                if i + 2 < param_vec.len() => {
-                                    let color_index = sgr_color_byte(param_vec[i + 2]);
-                                    if (color_index as usize) < self.dynamic_palette.len() {
-                                        self.current_fg =
-                                            self.dynamic_palette[color_index as usize];
-                                    } else {
-                                        self.current_fg = TerminalTheme::get_256_color(color_index);
-                                    }
-                                    i += 2; // Skip the 5 and color index
-                                }
-                            2
-                                // 24-bit RGB mode: ESC[38;2;r;g;b
-                                if i + 4 < param_vec.len() => {
-                                    let r = sgr_color_byte(param_vec[i + 2]);
-                                    let g = sgr_color_byte(param_vec[i + 3]);
-                                    let b = sgr_color_byte(param_vec[i + 4]);
-                                    self.current_fg = (r, g, b);
-                                    i += 4; // Skip the 2, r, g, b
-                                }
-                            _ => {}
-                        }
-                    }
                 40..=47 => {
                     // Background colors
-                    let color_index = sgr_palette_index(param - 40);
+                    let color_index = sgr_palette_index(code - 40);
                     self.current_bg = self.theme.get_color(color_index);
+                    self.current_bg_source = ColorSource::Base(color_index);
                 }
-                48
-                    // Extended background color
-                    if i + 1 < param_vec.len() => {
-                        match param_vec[i + 1] {
-                            5
-                                // 256-color mode: ESC[48;5;n
-                                if i + 2 < param_vec.len() => {
-                                    let color_index = sgr_color_byte(param_vec[i + 2]);
-                                    if (color_index as usize) < self.dynamic_palette.len() {
-                                        self.current_bg =
-                                            self.dynamic_palette[color_index as usize];
-                                    } else {
-                                        self.current_bg = TerminalTheme::get_256_color(color_index);
-                                    }
-                                    i += 2; // Skip the 5 and color index
-                                }
-                            2
-                                // 24-bit RGB mode: ESC[48;2;r;g;b
-                                if i + 4 < param_vec.len() => {
-                                    let r = sgr_color_byte(param_vec[i + 2]);
-                                    let g = sgr_color_byte(param_vec[i + 3]);
-                                    let b = sgr_color_byte(param_vec[i + 4]);
-                                    self.current_bg = (r, g, b);
-                                    i += 4; // Skip the 2, r, g, b
-                                }
-                            _ => {}
+                38 | 48 | 58 => {
+                    // Extended color, semicolon form: the next groups are its
+                    // arguments. 58 is the underline color, which the model
+                    // lacks, so it reads its arguments and changes nothing.
+                    let (color, taken) = read_semicolon_color(&groups, i);
+                    i += taken;
+                    if code != 58 {
+                        if let Some(color) = color {
+                            self.set_extended_color(code, color);
                         }
                     }
+                }
+                // Default underline color, which the model lacks.
+                59 => {}
                 90..=97 => {
                     // Bright foreground colors
-                    let color_index = sgr_palette_index(param - 90 + 8);
+                    let color_index = sgr_palette_index(code - 90 + 8);
                     self.current_fg = self.theme.get_color(color_index);
+                    self.current_fg_source = ColorSource::Base(color_index);
                 }
                 100..=107 => {
                     // Bright background colors
-                    let color_index = sgr_palette_index(param - 100 + 8);
+                    let color_index = sgr_palette_index(code - 100 + 8);
                     self.current_bg = self.theme.get_color(color_index);
+                    self.current_bg_source = ColorSource::Base(color_index);
                 }
                 _ => {}
             }
+        }
+    }
 
-            i += 1;
+    /// Sets the foreground (`code` 38) or the background (`code` 48) pen color.
+    fn set_extended_color(&mut self, code: u16, color: ExtendedColor) {
+        let (rgb, source) = self.resolve_extended_color(color);
+        if code == 38 {
+            self.current_fg = rgb;
+            self.current_fg_source = source;
+        } else {
+            self.current_bg = rgb;
+            self.current_bg_source = source;
         }
     }
 
@@ -1018,23 +1462,18 @@ impl TerminalState {
     }
 
     fn execute(&mut self, byte: u8) {
+        // LF, CR, BS and HT move the cursor, so they end a pending wrap.
+        if matches!(byte, b'\n' | b'\r' | b'\x08' | b'\t') {
+            self.wrap_pending = false;
+        }
         match byte {
-            b'\n' => {
-                self.cursor_y += 1;
-                // Check if we need to scroll within the scrolling region
-                if self.cursor_y > self.scroll_bottom {
-                    self.scroll_up();
-                    self.cursor_y = self.scroll_bottom;
-                }
-            }
+            b'\n' => self.line_feed(),
             b'\r' => {
                 self.cursor_x = 0;
             }
             b'\t' => {
-                let spaces = 8 - (self.cursor_x % 8);
-                for _ in 0..spaces {
-                    self.put_char(' ');
-                }
+                // A tab moves the cursor and writes no cell.
+                self.cursor_x = ((self.cursor_x / 8 + 1) * 8).min(self.width - 1);
             }
             b'\x08'
                 // Backspace
@@ -1160,6 +1599,10 @@ impl TerminalState {
                     // DECSET - Set Mode
                     for param in params.iter().flatten() {
                         match *param {
+                            7 => {
+                                self.autowrap = true;
+                                self.wrap_pending = false;
+                            }
                             25 => self.cursor_visible = true,
                             1049 => {
                                 self.saved_cursor_x = self.cursor_x;
@@ -1174,8 +1617,13 @@ impl TerminalState {
                     // DECRST - Reset Mode
                     for param in params.iter().flatten() {
                         match *param {
+                            7 => {
+                                self.autowrap = false;
+                                self.wrap_pending = false;
+                            }
                             25 => self.cursor_visible = false,
                             1049 => {
+                                self.wrap_pending = false;
                                 self.cursor_x = self.saved_cursor_x;
                                 self.cursor_y = self.saved_cursor_y;
                             }
@@ -1188,56 +1636,77 @@ impl TerminalState {
             return;
         }
 
+        // Each cursor move and each edit ends a pending wrap. SGR, save
+        // cursor, scroll, and the device attributes request do not. DECSTBM
+        // ends it only when it moves the cursor home, in its own arm.
+        if matches!(
+            action,
+            'H' | 'f'
+                | 'A'
+                | 'B'
+                | 'C'
+                | 'D'
+                | 'E'
+                | 'F'
+                | 'G'
+                | '`'
+                | 'd'
+                | 'J'
+                | 'K'
+                | 'X'
+                | 'P'
+                | '@'
+                | 'L'
+                | 'M'
+                | 'u'
+        ) {
+            self.wrap_pending = false;
+        }
+
         match action {
             'H' | 'f' => {
                 // Cursor position
-                let row = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1);
-                let col = params
-                    .iter()
-                    .nth(1)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1);
-                self.cursor_y = ((row as usize).saturating_sub(1)).min(self.height - 1);
-                self.cursor_x = ((col as usize).saturating_sub(1)).min(self.width - 1);
+                let row = count_param(params, 0);
+                let col = count_param(params, 1);
+                self.cursor_y = row.saturating_sub(1).min(self.height - 1);
+                self.cursor_x = col.saturating_sub(1).min(self.width - 1);
             }
             'A' => {
                 // Cursor up
-                let count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
-                self.cursor_y = self.cursor_y.saturating_sub(count);
+                self.cursor_up(count_param(params, 0));
             }
             'B' => {
                 // Cursor down
-                let count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
-                self.cursor_y = (self.cursor_y + count).min(self.height - 1);
+                self.cursor_down(count_param(params, 0));
+            }
+            'G' | '`' => {
+                // CHA and HPA: cursor to a column
+                let col = count_param(params, 0);
+                self.cursor_x = col.saturating_sub(1).min(self.width - 1);
+            }
+            'd' => {
+                // VPA: cursor to a row
+                let row = count_param(params, 0);
+                self.cursor_y = row.saturating_sub(1).min(self.height - 1);
+            }
+            'E' => {
+                // CNL: cursor down, to the first column
+                self.cursor_down(count_param(params, 0));
+                self.cursor_x = 0;
+            }
+            'F' => {
+                // CPL: cursor up, to the first column
+                self.cursor_up(count_param(params, 0));
+                self.cursor_x = 0;
             }
             'C' => {
                 // Cursor right
-                let count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
+                let count = count_param(params, 0);
                 self.cursor_x = (self.cursor_x + count).min(self.width - 1);
             }
             'D' => {
                 // Cursor left
-                let count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
+                let count = count_param(params, 0);
                 self.cursor_x = self.cursor_x.saturating_sub(count);
             }
             'J' => {
@@ -1250,6 +1719,7 @@ impl TerminalState {
                 match mode {
                     0 => {
                         // Clear from cursor to end of screen
+                        self.mark_row(self.cursor_y);
                         for x in self.cursor_x..self.width {
                             self.grid[self.cursor_y][x] = Cell {
                                 ch: ' ',
@@ -1264,6 +1734,7 @@ impl TerminalState {
                     }
                     1 => {
                         // Clear from start of screen to cursor
+                        self.mark_row(self.cursor_y);
                         for y in 0..self.cursor_y {
                             self.clear_line(y);
                         }
@@ -1282,6 +1753,9 @@ impl TerminalState {
                     }
                     _ => {}
                 }
+                if matches!(mode, 0 | 1) {
+                    self.repair_wide_pairs();
+                }
             }
             'K' => {
                 // Erase in line
@@ -1293,6 +1767,7 @@ impl TerminalState {
                 match mode {
                     0 => {
                         // Clear from cursor to end of line
+                        self.mark_row(self.cursor_y);
                         for x in self.cursor_x..self.width {
                             self.grid[self.cursor_y][x] = Cell {
                                 ch: ' ',
@@ -1304,6 +1779,7 @@ impl TerminalState {
                     }
                     1 => {
                         // Clear from start of line to cursor
+                        self.mark_row(self.cursor_y);
                         for x in 0..=self.cursor_x {
                             self.grid[self.cursor_y][x] = Cell {
                                 ch: ' ',
@@ -1319,32 +1795,32 @@ impl TerminalState {
                     }
                     _ => {}
                 }
+                self.repair_wide_pairs();
             }
             'm' => {
                 // Set graphics rendition (colors, bold, etc.)
                 self.process_sgr_params(params);
             }
             'r' => {
-                // Set scrolling region (DECSTBM)
-                let top = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
-                let bottom = params
-                    .iter()
-                    .nth(1)
-                    .and_then(|p| p.first().copied())
-                    .map_or(self.height, usize::from);
+                // Set scrolling region (DECSTBM). As CASE_DECSTBM in xterm's
+                // charproc.c, read a bottom that is missing, 0, or below the
+                // screen as the last row.
+                let top = count_param(params, 0);
+                let bottom = match params.iter().nth(1).and_then(|p| p.first().copied()) {
+                    None | Some(0) => self.height,
+                    Some(n) => usize::from(n).min(self.height),
+                };
 
-                // Validate and set scrolling region
-                if top > 0 && bottom <= self.height && top < bottom {
+                // xterm ignores a DECSTBM whose top is not above its bottom.
+                if top > 0 && top < bottom {
                     self.scroll_top = top - 1; // Convert to 0-based
                     self.scroll_bottom = bottom - 1;
 
-                    // DECSTBM also moves cursor to home position
+                    // DECSTBM also moves cursor to home position, thus it ends
+                    // a pending wrap. An ignored DECSTBM keeps it, as in xterm.
                     self.cursor_x = 0;
                     self.cursor_y = 0;
+                    self.wrap_pending = false;
                 }
             }
             'c' => {
@@ -1364,22 +1840,15 @@ impl TerminalState {
             }
             'S' => {
                 // Scroll up
-                let count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
+                let count = count_param(params, 0);
                 for _ in 0..count {
                     self.scroll_up();
                 }
             }
             'T' => {
                 // Scroll down: shift content DOWN within scroll region, clear top
-                let count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
+                let count = count_param(params, 0);
+                self.mark_rows(self.scroll_top, self.scroll_bottom);
                 for _ in 0..count {
                     for y in (self.scroll_top + 1..=self.scroll_bottom).rev() {
                         for x in 0..self.width {
@@ -1391,11 +1860,8 @@ impl TerminalState {
             }
             'L' => {
                 // Insert lines
-                let count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
+                let count = count_param(params, 0);
+                self.mark_rows(self.cursor_y, self.height.saturating_sub(1));
                 for _ in 0..count {
                     // Move lines down from current cursor position
                     for y in (self.cursor_y + 1..self.height).rev() {
@@ -1410,11 +1876,8 @@ impl TerminalState {
             }
             'M' => {
                 // Delete lines
-                let count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
+                let count = count_param(params, 0);
+                self.mark_rows(self.cursor_y, self.height.saturating_sub(1));
                 for _ in 0..count {
                     // Move lines up from current cursor position
                     for y in self.cursor_y..(self.height - 1) {
@@ -1427,13 +1890,10 @@ impl TerminalState {
             }
             'P' => {
                 // Delete characters (clamped to avoid usize underflow)
-                let raw_count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
+                let raw_count = count_param(params, 0);
                 let count = raw_count.min(self.width.saturating_sub(self.cursor_x));
                 let start_x = self.cursor_x;
+                self.mark_row(self.cursor_y);
                 for x in start_x..self.width.saturating_sub(count) {
                     self.grid[self.cursor_y][x] = self.grid[self.cursor_y][x + count].clone();
                 }
@@ -1445,16 +1905,14 @@ impl TerminalState {
                         ..Default::default()
                     };
                 }
+                self.repair_wide_pairs();
             }
             '@' => {
                 // Insert characters (clamped to avoid usize underflow)
-                let raw_count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
+                let raw_count = count_param(params, 0);
                 let count = raw_count.min(self.width.saturating_sub(self.cursor_x));
                 let start_x = self.cursor_x;
+                self.mark_row(self.cursor_y);
                 for x in (start_x..self.width.saturating_sub(count)).rev() {
                     self.grid[self.cursor_y][x + count] = self.grid[self.cursor_y][x].clone();
                 }
@@ -1466,14 +1924,12 @@ impl TerminalState {
                         ..Default::default()
                     };
                 }
+                self.repair_wide_pairs();
             }
             'X' => {
                 // Erase characters
-                let count = params
-                    .iter()
-                    .nth(0)
-                    .and_then(|p| p.first().copied())
-                    .unwrap_or(1) as usize;
+                let count = count_param(params, 0);
+                self.mark_row(self.cursor_y);
                 for i in 0..count {
                     if self.cursor_x + i < self.width {
                         self.grid[self.cursor_y][self.cursor_x + i] = Cell {
@@ -1484,12 +1940,17 @@ impl TerminalState {
                         };
                     }
                 }
+                self.repair_wide_pairs();
             }
             _ => {}
         }
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        // DECRC, IND, NEL, RI and RIS move the cursor, so they end a pending wrap.
+        if matches!(byte, b'8' | b'D' | b'E' | b'M' | b'c') {
+            self.wrap_pending = false;
+        }
         match byte {
             b'7' => {
                 // Save cursor position (DECSC)
@@ -1502,25 +1963,18 @@ impl TerminalState {
                 self.cursor_y = self.saved_cursor_y;
             }
             b'D' => {
-                // Index (IND) - move cursor down, scroll if at bottom
-                self.cursor_y += 1;
-                if self.cursor_y > self.scroll_bottom {
-                    self.scroll_up();
-                    self.cursor_y = self.scroll_bottom;
-                }
+                // Index (IND) - a line feed
+                self.line_feed();
             }
             b'E' => {
-                // Next Line (NEL) - move to first column of next line
+                // Next Line (NEL) - the first column, then a line feed
                 self.cursor_x = 0;
-                self.cursor_y += 1;
-                if self.cursor_y > self.scroll_bottom {
-                    self.scroll_up();
-                    self.cursor_y = self.scroll_bottom;
-                }
+                self.line_feed();
             }
             b'M' => {
                 // Reverse Index (RI) - move cursor up, scroll if at top
                 if self.cursor_y == self.scroll_top {
+                    self.mark_rows(self.scroll_top, self.scroll_bottom);
                     // Scroll down by moving lines down and clearing the top
                     for y in (self.scroll_top + 1..=self.scroll_bottom).rev() {
                         for x in 0..self.width {
@@ -1549,11 +2003,20 @@ impl TerminalState {
                 self.clear_screen();
                 self.current_fg = self.theme.foreground;
                 self.current_bg = self.theme.background;
+                self.current_fg_source = ColorSource::Default;
+                self.current_bg_source = ColorSource::Default;
                 self.bold = false;
                 self.italic = false;
                 self.underline = false;
+                self.dim = false;
+                self.blink = false;
+                self.reverse = false;
+                self.hidden = false;
+                self.strikethrough = false;
                 self.cursor_visible = true;
                 self.use_acs = false;
+                self.autowrap = true;
+                self.wrap_pending = false;
             }
             _ => {
                 // Ignore unhandled escape sequences

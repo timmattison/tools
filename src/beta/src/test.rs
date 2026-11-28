@@ -154,4 +154,46 @@ mod tests {
             "Colored text on the last row should not trigger tmux detection"
         );
     }
+
+    /// The terminal that `beta export video` builds for a recording whose
+    /// header states `width` columns and `height` rows, after the terminal takes
+    /// text, a tab, and a cursor position (CUP).
+    ///
+    /// The export passes the size of the header to `TerminalState::new` with no
+    /// check, and a header is a value from outside the program.
+    fn replay_header_of(width: u16, height: u16) -> TerminalState {
+        let header = format!(
+            r#"{{"version":2,"width":{width},"height":{height},"timestamp":0.0,"duration":0.0,"command":"bash","title":"","env":{{}},"events":[]}}"#
+        );
+        let recording: Recording = serde_json::from_str(&header).unwrap();
+        let mut state = TerminalState::new(
+            usize::from(recording.width),
+            usize::from(recording.height),
+            TerminalTheme::auto(),
+        );
+        state.process_output("hello").unwrap();
+        state.process_output("\t").unwrap();
+        state.process_output("\x1b[5;5H").unwrap();
+        state
+    }
+
+    /// The size of the grid of `state`, as `(columns, rows)`.
+    fn grid_size(state: &TerminalState) -> (usize, usize) {
+        let grid = state.get_grid();
+        (grid.first().map_or(0, Vec::len), grid.len())
+    }
+
+    #[test]
+    fn a_header_of_zero_columns_gives_a_terminal_of_one_column() {
+        let state = replay_header_of(0, 24);
+
+        assert_eq!(grid_size(&state), (1, 24));
+    }
+
+    #[test]
+    fn a_header_of_zero_rows_gives_a_terminal_of_one_row() {
+        let state = replay_header_of(80, 0);
+
+        assert_eq!(grid_size(&state), (80, 1));
+    }
 }

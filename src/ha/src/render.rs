@@ -46,8 +46,9 @@ const TIME_WIDTH: usize = 7;
 /// The header word of the job-sum column.
 const JOB_SUM_HEADER: &str = "JOB SUM";
 /// The width of the job-sum column. It is the width of the time column. The
-/// cell holds a `format_elapsed` text on a run row and a `format_remaining`
-/// text on a job row, and neither is wider than 7 columns. The header word
+/// cell holds a `format_remaining` text on a job row. A run row holds the same
+/// text when it has an estimate, and a `format_elapsed` text of its job sum
+/// when it has none. Neither text is wider than 7 columns. The header word
 /// fills the cell.
 const JOB_SUM_WIDTH: usize = TIME_WIDTH;
 /// The header word of the cost column.
@@ -563,9 +564,11 @@ where
 /// the end, or to `now` for an active run.
 /// A stale run has the [`STALE_MARK`] before its repository name. `cells`
 /// puts the mark there and cuts the name at its start when the name does not
-/// fit. The job-sum cell shows `job_sum`, or it is blank when `job_sum` is
-/// `None`. The cost cell shows `cost`, or it is blank when `cost` is `None`,
-/// which is the case until the jobs of the run load. The line holds the spans of `cells`: the two marker cells keep
+/// fit. The job-sum cell shows `remaining`, the estimate of the time until the
+/// run finishes, when it is `Some`. Otherwise it shows `job_sum`, or it is
+/// blank when `job_sum` is `None`. The cost cell shows `cost`, or it is blank
+/// when `cost` is `None`, which is the case until the jobs of the run load.
+/// The line holds the spans of `cells`: the two marker cells keep
 /// `Color::Reset`, and the text cells take the style that the caller gives
 /// the line.
 #[expect(
@@ -578,6 +581,7 @@ fn run_line<Tz: TimeZone>(
     ended: Option<DateTime<Utc>>,
     is_stale: bool,
     job_sum: Option<Duration>,
+    remaining: Option<Remaining>,
     cost: Option<RunCost>,
     now: DateTime<Utc>,
     tz: &Tz,
@@ -602,7 +606,10 @@ where
         EndCells {
             started: &format_clock(clock_instant, now, tz),
             time: &time,
-            job_sum: &job_sum.map(format_elapsed).unwrap_or_default(),
+            job_sum: &remaining
+                .map(format_remaining)
+                .or_else(|| job_sum.map(format_elapsed))
+                .unwrap_or_default(),
             cost: &cost.map(|cost| cost.to_string()).unwrap_or_default(),
         },
     )
@@ -1444,12 +1451,13 @@ fn draw_row<Tz: TimeZone>(
             selected,
             stale,
             job_sum,
+            remaining,
             ended,
             cost,
             ..
         } => put_selectable(
             run_line(
-                run, *state, *ended, *stale, *job_sum, *cost, now, tz, widths,
+                run, *state, *ended, *stale, *job_sum, *remaining, *cost, now, tz, widths,
             ),
             *selected,
         ),
@@ -1492,11 +1500,11 @@ fn draw_row<Tz: TimeZone>(
 /// rows show when each pull request left the queue. With no merge history, the
 /// recent header holds the word, because its rows show when each run finished.
 /// The job-sum column stands after the right marker cell. A run row shows its
-/// `job_sum` there (see [`run_line`]), a job row shows the time left of its job
-/// (see [`job_line`]), and the other rows leave it blank. The cost column
-/// stands after the job-sum column, at the right edge. A run row and a job row
-/// show their `cost` there (see [`run_line`] and [`job_line`]),
-/// and the other rows leave it blank.
+/// estimate there when it has one, and its `job_sum` when it has none (see
+/// [`run_line`]). A job row shows the time left of its job (see [`job_line`]),
+/// and the other rows leave it blank. The cost column stands after the job-sum
+/// column, at the right edge. A run row and a job row show their `cost` there
+/// (see [`run_line`] and [`job_line`]), and the other rows leave it blank.
 /// This function never panics, whatever the size of the frame.
 pub fn draw<Tz: TimeZone>(
     frame: &mut Frame,
@@ -2086,13 +2094,15 @@ pub fn format_elapsed(d: Duration) -> String {
     }
 }
 
-/// Writes the time that a running job has left, in at most 7 columns.
+/// Writes the time that a running job or an active run has left, in at most 7
+/// columns.
 ///
 /// The text is a sign and a time. The sign is `~` for `Remaining::Left`, the
-/// time before the job reaches its estimate. The sign is `+` for
-/// `Remaining::Over`, the time that the job ran past its estimate. An estimate
-/// is a mean of a few jobs and is not correct to the second. Thus the text
-/// gets less precise as the time increases:
+/// time before the job or the run reaches its estimate. The sign is `>` for
+/// `Remaining::AtLeast`, a time left that is a minimum, because it comes from
+/// a job that waits. The sign is `+` for `Remaining::Over`, the time past the
+/// estimate. An estimate is a mean of a few jobs and is not correct to the
+/// second. Thus the text gets less precise as the time increases:
 ///
 /// - Under 1 minute: seconds, for example `~45s`.
 /// - Under 10 minutes: minutes and seconds, for example `~3m 02s`.
@@ -2106,6 +2116,7 @@ pub fn format_elapsed(d: Duration) -> String {
 pub fn format_remaining(remaining: Remaining) -> String {
     let (sign, time) = match remaining {
         Remaining::Left(time) => ('~', time),
+        Remaining::AtLeast(time) => ('>', time),
         Remaining::Over(time) => ('+', time),
     };
     let total = time.as_secs();
@@ -2880,6 +2891,11 @@ mod tests {
                 format!("+{expected}"),
                 "over by {seconds}s"
             );
+            assert_eq!(
+                format_remaining(Remaining::AtLeast(d)),
+                format!(">{expected}"),
+                "at least {seconds}s"
+            );
         }
     }
 
@@ -2890,6 +2906,7 @@ mod tests {
             let d = Duration::from_secs(seconds);
             for text in [
                 format_remaining(Remaining::Left(d)),
+                format_remaining(Remaining::AtLeast(d)),
                 format_remaining(Remaining::Over(d)),
             ] {
                 assert!(
@@ -2901,6 +2918,7 @@ mod tests {
         }
         let max = Duration::from_secs(u64::MAX);
         assert_eq!(format_remaining(Remaining::Left(max)), "~>99h");
+        assert_eq!(format_remaining(Remaining::AtLeast(max)), ">>99h");
         assert_eq!(format_remaining(Remaining::Over(max)), "+>99h");
     }
 
@@ -3573,6 +3591,110 @@ mod tests {
                 text[y]
             );
             assert_eq!(job_sum_cells(&text, y), "~3m 00s", "width {width}");
+            let run_y = row_holding(&text, "9002");
+            assert_eq!(job_sum_cells(&text, run_y), "~3m 00s", "width {width}");
+        }
+    }
+
+    /// The board of [`estimate_board`] with a second job `Lint` in each run.
+    /// In the history run, `Lint` passed on `m1-ts` in 2 minutes. In the
+    /// active run, `Lint` is queued with no runner. `TypeScript` runs since
+    /// 11:58:00.
+    fn estimate_board_with_queued_lint() -> Board {
+        let mut board = estimate_board("2026-10-14T11:58:00Z");
+        board.set_jobs(
+            RunId(9_001),
+            vec![
+                Job {
+                    runner: RunnerName::new("m1-ts".to_owned()),
+                    ..job(
+                        501,
+                        "TypeScript",
+                        RunState::Passed,
+                        Some("2026-10-14T11:00:00Z"),
+                        Some("2026-10-14T11:05:00Z"),
+                    )
+                },
+                Job {
+                    runner: RunnerName::new("m1-ts".to_owned()),
+                    ..job(
+                        503,
+                        "Lint",
+                        RunState::Passed,
+                        Some("2026-10-14T11:00:00Z"),
+                        Some("2026-10-14T11:02:00Z"),
+                    )
+                },
+            ],
+        );
+        board.set_jobs(
+            RunId(9_002),
+            vec![
+                Job {
+                    runner: RunnerName::new("m1-ts".to_owned()),
+                    ..job(
+                        502,
+                        "TypeScript",
+                        RunState::Running,
+                        Some("2026-10-14T11:58:00Z"),
+                        None,
+                    )
+                },
+                job(504, "Lint", RunState::Queued, None, None),
+            ],
+        );
+        board
+    }
+
+    #[test]
+    fn a_run_row_shows_the_time_until_the_run_finishes_under_the_job_sum_header() {
+        for width in [80_u16, 120, 200] {
+            let cases = [
+                (estimate_board("2026-10-14T11:58:00Z"), "~3m 00s"),
+                (estimate_board("2026-10-14T11:53:50Z"), "+1m 10s"),
+                (estimate_board_with_queued_lint(), ">5m 00s"),
+            ];
+            for (mut board, want) in cases {
+                let text = lines(&render_with(width, 12, &mut board, &loaded()));
+                let run_y = row_holding(&text, "9002");
+                assert_eq!(job_sum_cells(&text, run_y), want, "width {width}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_active_run_with_no_estimate_keeps_its_job_sum() {
+        for width in [80_u16, 120, 200] {
+            let mut board = Board::new(Duration::from_hours(8));
+            board.replace(
+                repo("timmattison/megarepo"),
+                vec![run(
+                    9_002,
+                    "timmattison/megarepo",
+                    "CI",
+                    "main",
+                    "live",
+                    RunState::Running,
+                    "2026-10-14T11:58:00Z",
+                    "2026-10-14T11:59:00Z",
+                )],
+                now(),
+            );
+            board.set_jobs(
+                RunId(9_002),
+                vec![Job {
+                    runner: RunnerName::new("m1-ts".to_owned()),
+                    ..job(
+                        502,
+                        "TypeScript",
+                        RunState::Running,
+                        Some("2026-10-14T11:58:00Z"),
+                        None,
+                    )
+                }],
+            );
+            board.expand(now());
+            let text = lines(&render_with(width, 12, &mut board, &loaded()));
             let run_y = row_holding(&text, "9002");
             assert_eq!(job_sum_cells(&text, run_y), "2m 00s", "width {width}");
         }
@@ -4726,6 +4848,7 @@ mod tests {
                     RunState::Running,
                     None,
                     is_stale,
+                    None,
                     None,
                     None,
                     now(),
@@ -6689,6 +6812,10 @@ mod tests {
     /// each row. It repeats the left marker, one blank column follows the time
     /// cell, and the header leaves the right marker cell blank.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the test checks each column at each width in one pass"
+    )]
     fn the_id_started_and_time_columns_stay_put_at_every_width() {
         let first_width = u16::try_from(FIXED_COLUMNS).expect("the fixed columns fit in u16");
         for w in first_width..=200 {
@@ -6763,8 +6890,19 @@ mod tests {
                     "2026-10-14T11:00:00Z",
                     "2026-10-14T11:30:00Z",
                 );
-                let line = run_line(&run, state, None, false, None, None, now(), &utc(), widths)
-                    .to_string();
+                let line = run_line(
+                    &run,
+                    state,
+                    None,
+                    false,
+                    None,
+                    None,
+                    None,
+                    now(),
+                    &utc(),
+                    widths,
+                )
+                .to_string();
                 assert_eq!(display_width(&line), usize::from(w), "{state:?}: {line:?}");
             }
             for (id, state) in MARKER_JOB_STATES {
@@ -7794,6 +7932,7 @@ mod tests {
             RunState::Running,
             None,
             false,
+            None,
             None,
             None,
             now(),
