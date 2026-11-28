@@ -1,10 +1,10 @@
 //! Guard: every binary the workspace builds must appear in both tool indexes.
 //!
-//! The repository documents its tools twice, and on purpose. `README.md`
-//! carries the long entry — what the tool is for, how to run it, how to install
-//! it. `TLDR.md` carries one line per tool, alphabetized, for a reader who only
-//! needs to know which tool to reach for. A tool missing from either one is a
-//! tool nobody finds.
+//! The long entry of a tool — what the tool is for, how to run it, how to
+//! install it — is in `src/<tool>/README.md`. `README.md` gives each tool one
+//! line, with a link to that file. `TLDR.md` carries one line per tool,
+//! alphabetized, for a reader who only needs to know which tool to reach for. A
+//! tool missing from either index is a tool nobody finds.
 //!
 //! Nothing enforced this before. The omission is spelled as an *absence*, which
 //! is why it spread: a crate that nobody remembers to document is born
