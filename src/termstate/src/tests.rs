@@ -243,6 +243,22 @@ fn each_restore_brings_back_the_color_sources_and_each_attribute_that_the_save_s
 }
 
 #[test]
+fn each_restore_of_the_cursor_ends_a_pending_wrap() {
+    let pairs = [
+        ("\x1b7", "\x1b8"),
+        ("\x1b[s", "\x1b[u"),
+        ("\x1b[?1048h", "\x1b[?1048l"),
+        ("\x1b[?1049h", "\x1b[?1049l"),
+    ];
+    for (save, restore) in pairs {
+        // The ten digits fill the first row of the 10 by 3 terminal, and a
+        // wrap is pending. The restore moves the cursor back to the start.
+        let state = feed_text(&format!("{save}0123456789{restore}x"));
+        assert_eq!(state.get_grid()[0][0].ch, 'x', "{save:?} {restore:?}");
+    }
+}
+
+#[test]
 fn csi_s_and_csi_u_save_and_restore_like_decsc() {
     let state = feed_new("\x1b[31m\x1b[s\x1b[32;1;3;4m\x1b[ux");
     assert_red_plain_x(&state);
