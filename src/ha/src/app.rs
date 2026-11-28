@@ -3206,6 +3206,50 @@ mod tests {
     }
 
     #[test]
+    fn enter_on_a_merge_queue_row_with_no_run_opens_the_pull_request_and_tells_why() {
+        let channels = channels();
+        send_queue(&channels, vec![queue_entry(7)], Ok(Vec::new()));
+        send_runs(&channels, vec![active_run(1, 5)]);
+        let opener = opener(false);
+        let (result, frame) = run_app(
+            &opener,
+            &channels,
+            vec![press(KeyCode::Enter), press(KeyCode::Char('q'))],
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            *opener.urls.borrow(),
+            ["https://github.com/acme/widgets/pull/7"]
+        );
+        assert!(
+            frame[11].contains("no run of the merge group of #7: opened the pull request"),
+            "{:?}",
+            frame[11]
+        );
+    }
+
+    #[test]
+    fn a_failed_open_of_a_merge_queue_row_with_no_run_shows_the_failure_and_no_notice() {
+        let channels = channels();
+        send_queue(&channels, vec![queue_entry(7)], Ok(Vec::new()));
+        let (_, frame) = run_app(
+            &opener(true),
+            &channels,
+            vec![press(KeyCode::Enter), press(KeyCode::Char('q'))],
+        );
+        assert!(
+            frame[11].contains("could not open a browser: https://github.com/acme/widgets/pull/7"),
+            "{:?}",
+            frame[11]
+        );
+        assert!(
+            !frame[11].contains("no run of the merge group"),
+            "{:?}",
+            frame[11]
+        );
+    }
+
+    #[test]
     fn c_on_a_pull_request_row_says_that_it_is_not_a_run_and_shows_no_box() {
         let channels = channels();
         send_queue(&channels, vec![queue_entry(7)], Ok(Vec::new()));
