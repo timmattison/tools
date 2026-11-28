@@ -1008,7 +1008,10 @@ async fn an_added_recording_plays_after_the_end_of_the_timeline() {
     // The rendered recording ends at the end of the second clip.
     assert!(page.contains(&edited_row("1m 10.3s")), "{page}");
     // The properties still show the file that the project came from.
-    assert!(page.contains(&metadata_row("Title", "Demo Recording", None)), "{page}");
+    assert!(
+        page.contains(&metadata_row("Title", "Demo Recording", None)),
+        "{page}"
+    );
 }
 
 #[tokio::test]

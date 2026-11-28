@@ -509,7 +509,10 @@ fn append_recording_with_a_duration_that_is_not_a_time_fails() {
 
     let result = Edit::append_recording(&project(), Arc::new(broken));
 
-    assert!(matches!(result, Err(NleError::InvalidTime(_))), "{result:?}");
+    assert!(
+        matches!(result, Err(NleError::InvalidTime(_))),
+        "{result:?}"
+    );
 }
 
 // Tests of filter edits.

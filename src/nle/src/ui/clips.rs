@@ -15,8 +15,7 @@ use crate::types::ClipId;
 /// The heading of the clip list.
 const CLIPS_HEADING: &str = "Clips";
 /// The hint of the clip list.
-const CLIPS_HINT: &str =
-    "The clips of a track play in this order. A move puts them back to back.";
+const CLIPS_HINT: &str = "The clips of a track play in this order. A move puts them back to back.";
 /// The text of the button that moves a clip one place earlier.
 const MOVE_EARLIER_LABEL: &str = "Move Earlier";
 /// The text of the button that moves a clip one place later.
