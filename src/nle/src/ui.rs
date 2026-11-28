@@ -2,11 +2,12 @@
 //!
 //! This module holds the window settings, the root component, and the four
 //! regions of the window: the menu bar, the preview pane, the timeline, and
-//! the properties panel. The menu bar holds the Open Recording button, the
-//! Undo button and the Redo button of the `history` module, and the export bar
-//! of the `export` module. The open document lives in the state of
-//! `App`: the `Editor` of its project, and the metadata of the recording file
-//! that it came from.
+//! the properties panel. The properties panel holds the speed panel, the
+//! fast-forward panel, and the redaction panel. The menu bar holds the Open
+//! Recording button, the Undo button and the Redo button of the `history`
+//! module, and the export bar of the `export` module. The open document lives
+//! in the state of `App`: the `Editor` of its project, and the metadata of the
+//! recording file that it came from.
 //!
 //! `App` also owns one `busy` signal. It is true from a click on Open Recording
 //! or Export until its dialog and its work end, and it disables both buttons.
@@ -22,6 +23,7 @@ use dioxus::prelude::*;
 use crate::editor::{Edit, Editor};
 use crate::error::NleError;
 use crate::export::{ExportProgress, ExportRequest};
+use crate::filters::fast_forward::{self, Acceleration, Mode};
 use crate::filters::redaction::{self, Find, Preset, Redaction, Replacement};
 use crate::filters::time_dilation::{self, Speed};
 use crate::pipeline::FilterRegistry;
@@ -61,12 +63,32 @@ const OPEN_FAILED_PREFIX: &str = "Failed to open recording";
 
 /// The heading of the speed panel.
 const SPEED_HEADING: &str = "Speed";
-/// The hint of the speed panel.
-const SPEED_HINT: &str = "Times are in seconds, on the timeline after the speed changes above.";
+/// The hint under the heading of the speed panel and the fast-forward panel.
+/// A new filter goes to the end of the list of the project, and the pipeline
+/// runs the list in order, so this rule holds for both panels.
+const EDIT_TIMES_HINT: &str = "Times are in seconds, on the timeline after the speed changes and fast-forwards that you applied before.";
 /// The label of the field for the start of a region.
 const START_LABEL: &str = "Start (s)";
 /// The label of the field for the end of a region.
 const END_LABEL: &str = "End (s)";
+/// The heading of the fast-forward panel.
+const FAST_FORWARD_HEADING: &str = "Fast-Forward";
+/// The label of the field for the acceleration of Accelerate.
+const ACCELERATION_LABEL: &str = "Speed (Accelerate)";
+/// The label of the field for the first lines of Summarize.
+const FIRST_LINES_LABEL: &str = "First lines (Summarize)";
+/// The label of the field for the last lines of Summarize.
+const LAST_LINES_LABEL: &str = "Last lines (Summarize)";
+/// The text of the button that skips to the end of a region.
+const SKIP_TO_END_LABEL: &str = "Skip to End";
+/// The text of the button that accelerates a region.
+const ACCELERATE_LABEL: &str = "Accelerate";
+/// The text of the button that summarizes a region.
+const SUMMARIZE_LABEL: &str = "Summarize";
+/// The first text of the field for the acceleration.
+const DEFAULT_ACCELERATION: &str = "20";
+/// The first text of each field for a line count.
+const DEFAULT_SUMMARY_LINES: &str = "3";
 /// The label of the field for the speed.
 const SPEED_LABEL: &str = "Speed";
 /// The text of the button that applies the speed.
@@ -74,9 +96,11 @@ const APPLY_SPEED_LABEL: &str = "Apply Speed";
 /// The label of the row for the duration after the edits.
 const EDITED_DURATION_LABEL: &str = "Edited duration";
 
-/// The text of the button that removes a speed change.
+/// The start of the message for a fast-forward that does not apply.
+const FAST_FORWARD_FAILED_PREFIX: &str = "Failed to fast-forward";
+/// The text of the button that removes a speed change or a fast-forward.
 const REMOVE_LABEL: &str = "Remove";
-/// The text for a speed change that covers the whole timeline.
+/// The region text of a row whose filter covers the whole timeline.
 const WHOLE_TIMELINE: &str = "the whole timeline";
 /// The start of the message for a speed change that does not apply.
 const SPEED_FAILED_PREFIX: &str = "Failed to change the speed";
@@ -88,6 +112,13 @@ const END_NOT_A_NUMBER: &str = "the end is not a number";
 const SPEED_NOT_A_NUMBER: &str = "the speed is not a number";
 /// The reason for an end that is not above the start.
 const END_BEFORE_START: &str = "the end must come after the start";
+
+/// The reason for a first line count that is not a whole number.
+const FIRST_LINES_NOT_A_COUNT: &str = "the first lines are not a whole number of 0 or more";
+/// The reason for a last line count that is not a whole number.
+const LAST_LINES_NOT_A_COUNT: &str = "the last lines are not a whole number of 0 or more";
+/// The row text of a fast-forward that skips to the end of its region.
+const SKIP_TO_END_TEXT: &str = "skip to end";
 
 /// The heading of the redaction panel.
 const REDACTION_HEADING: &str = "Redaction";
@@ -499,21 +530,28 @@ fn summary(open: &Document) -> String {
     )
 }
 
-/// The metadata of the open recording, the speed panel, and the redaction
-/// panel. `on_result` gets the outcome of each edit: `Ok`, or the message of
-/// the banner.
+/// The metadata of the open recording, the speed panel, the fast-forward panel,
+/// the duration after all edits, and the redaction panel. `on_result` gets the
+/// outcome of each edit: `Ok`, or the message of the banner.
 #[component]
 fn PropertiesPanel(
     loaded: Signal<Option<Document>>,
     on_result: EventHandler<Result<(), String>>,
 ) -> Element {
     let metadata = loaded.read().as_ref().map(|open| open.metadata.clone());
+    // A hook runs on each render, before any condition.
+    let edited = use_memo(move || edited_duration(&loaded.read()));
     rsx! {
         div { class: "properties-panel",
             h3 { "Properties" }
             if let Some(metadata) = metadata {
                 {metadata_rows(&metadata)}
                 SpeedPanel { loaded, on_result }
+                FastForwardPanel { loaded, on_result }
+                div { class: "metadata-item",
+                    span { class: "metadata-label", {EDITED_DURATION_LABEL} }
+                    span { class: "metadata-value", "{edited}" }
+                }
                 RedactionPanel { loaded, on_result }
             } else {
                 div { class: "placeholder", "No recording loaded" }
@@ -533,13 +571,12 @@ fn SpeedPanel(
     let mut start = use_signal(String::new);
     let mut end = use_signal(String::new);
     let mut speed = use_signal(String::new);
-    let edited = use_memo(move || edited_duration(&loaded.read()));
     let rows = speed_rows(&loaded.read());
     rsx! {
-        div { class: "speed-panel",
+        div { class: "edit-panel",
             h3 { {SPEED_HEADING} }
-            p { class: "speed-hint", {SPEED_HINT} }
-            label { class: "speed-field",
+            p { class: "edit-hint", {EDIT_TIMES_HINT} }
+            label { class: "edit-field",
                 {START_LABEL}
                 input {
                     r#type: "number",
@@ -550,7 +587,7 @@ fn SpeedPanel(
                     onkeydown: keep_keys_in_field,
                 }
             }
-            label { class: "speed-field",
+            label { class: "edit-field",
                 {END_LABEL}
                 input {
                     r#type: "number",
@@ -561,7 +598,7 @@ fn SpeedPanel(
                     onkeydown: keep_keys_in_field,
                 }
             }
-            label { class: "speed-field",
+            label { class: "edit-field",
                 {SPEED_LABEL}
                 input {
                     r#type: "number",
@@ -579,11 +616,105 @@ fn SpeedPanel(
                 },
                 {APPLY_SPEED_LABEL}
             }
-            {filter_rows(loaded, on_result, "speed-row", SPEED_FAILED_PREFIX, rows)}
-            div { class: "metadata-item",
-                span { class: "metadata-label", {EDITED_DURATION_LABEL} }
-                span { class: "metadata-value", "{edited}" }
+            {filter_rows(loaded, on_result, SPEED_FAILED_PREFIX, rows)}
+        }
+    }
+}
+
+/// The fast-forward panel: five fields for a region and the settings of the
+/// three modes, one button for each mode, and the fast-forward filters of the
+/// project. A button reads only the fields that its mode uses. `on_result`
+/// gets the outcome of each button and each Remove.
+#[component]
+fn FastForwardPanel(
+    loaded: Signal<Option<Document>>,
+    on_result: EventHandler<Result<(), String>>,
+) -> Element {
+    let mut start = use_signal(String::new);
+    let mut end = use_signal(String::new);
+    let mut acceleration = use_signal(|| DEFAULT_ACCELERATION.to_owned());
+    let mut first = use_signal(|| DEFAULT_SUMMARY_LINES.to_owned());
+    let mut last = use_signal(|| DEFAULT_SUMMARY_LINES.to_owned());
+    let rows = fast_forward_rows(&loaded.read());
+    // Reads the fields and adds the filter of `button` at the end of the list.
+    let add = move |button: FastForwardButton| {
+        let change = fast_forward_change(
+            button,
+            &FastForwardFields {
+                start: &start.read(),
+                end: &end.read(),
+                speed: &acceleration.read(),
+                first: &first.read(),
+                last: &last.read(),
+            },
+        );
+        add_filter(loaded, on_result, FAST_FORWARD_FAILED_PREFIX, change);
+    };
+    rsx! {
+        div { class: "edit-panel",
+            h3 { {FAST_FORWARD_HEADING} }
+            p { class: "edit-hint", {EDIT_TIMES_HINT} }
+            label { class: "edit-field",
+                {START_LABEL}
+                input {
+                    r#type: "number",
+                    step: "any",
+                    min: "0",
+                    value: "{start}",
+                    oninput: move |event| start.set(event.value()),
+                    onkeydown: keep_keys_in_field,
+                }
             }
+            label { class: "edit-field",
+                {END_LABEL}
+                input {
+                    r#type: "number",
+                    step: "any",
+                    min: "0",
+                    value: "{end}",
+                    oninput: move |event| end.set(event.value()),
+                    onkeydown: keep_keys_in_field,
+                }
+            }
+            label { class: "edit-field",
+                {ACCELERATION_LABEL}
+                input {
+                    r#type: "number",
+                    step: "any",
+                    min: "0",
+                    value: "{acceleration}",
+                    oninput: move |event| acceleration.set(event.value()),
+                    onkeydown: keep_keys_in_field,
+                }
+            }
+            label { class: "edit-field",
+                {FIRST_LINES_LABEL}
+                input {
+                    r#type: "number",
+                    step: "1",
+                    min: "0",
+                    value: "{first}",
+                    oninput: move |event| first.set(event.value()),
+                    onkeydown: keep_keys_in_field,
+                }
+            }
+            label { class: "edit-field",
+                {LAST_LINES_LABEL}
+                input {
+                    r#type: "number",
+                    step: "1",
+                    min: "0",
+                    value: "{last}",
+                    oninput: move |event| last.set(event.value()),
+                    onkeydown: keep_keys_in_field,
+                }
+            }
+            div { class: "edit-buttons",
+                button { onclick: move |_| add(FastForwardButton::SkipToEnd), {SKIP_TO_END_LABEL} }
+                button { onclick: move |_| add(FastForwardButton::Accelerate), {ACCELERATE_LABEL} }
+                button { onclick: move |_| add(FastForwardButton::Summarize), {SUMMARIZE_LABEL} }
+            }
+            {filter_rows(loaded, on_result, FAST_FORWARD_FAILED_PREFIX, rows)}
         }
     }
 }
@@ -605,10 +736,10 @@ fn RedactionPanel(
     // and compiles the pattern of each one, only when the project changes.
     let rows = use_memo(move || redaction_rows(&loaded.read()));
     rsx! {
-        div { class: "redaction-panel",
+        div { class: "edit-panel",
             h3 { {REDACTION_HEADING} }
-            p { class: "redaction-hint", {REDACTION_HINT} }
-            label { class: "redaction-field",
+            p { class: "edit-hint", {REDACTION_HINT} }
+            label { class: "edit-field",
                 {FIND_LABEL}
                 select { value: "{find}", oninput: move |event| find.set(event.value()),
                     option { value: FIND_TEXT, {FIND_TEXT_LABEL} }
@@ -618,7 +749,7 @@ fn RedactionPanel(
                     }
                 }
             }
-            label { class: "redaction-field",
+            label { class: "edit-field",
                 {PATTERN_LABEL}
                 input {
                     r#type: "text",
@@ -628,7 +759,7 @@ fn RedactionPanel(
                     onkeydown: keep_keys_in_field,
                 }
             }
-            label { class: "redaction-field",
+            label { class: "edit-field",
                 {REPLACE_LABEL}
                 select {
                     value: "{replace}",
@@ -638,7 +769,7 @@ fn RedactionPanel(
                     option { value: REPLACE_TEXT, {REPLACE_TEXT_LABEL} }
                 }
             }
-            label { class: "redaction-field",
+            label { class: "edit-field",
                 {REPLACEMENT_LABEL}
                 input {
                     r#type: "text",
@@ -648,7 +779,7 @@ fn RedactionPanel(
                     onkeydown: keep_keys_in_field,
                 }
             }
-            label { class: "redaction-field",
+            label { class: "edit-field",
                 {EVENTS_LABEL}
                 select {
                     value: "{events}",
@@ -670,7 +801,7 @@ fn RedactionPanel(
                 },
                 {APPLY_REDACTION_LABEL}
             }
-            {filter_rows(loaded, on_result, "redaction-row", REDACTION_FAILED_PREFIX, rows())}
+            {filter_rows(loaded, on_result, REDACTION_FAILED_PREFIX, rows())}
         }
     }
 }
@@ -694,9 +825,9 @@ fn edit_document(
     })
 }
 
-/// Sends the outcome of an edit to `on_result`: `Ok` for an edit that applied,
-/// or the message of the banner for an edit that did not. The message starts
-/// with `prefix`.
+/// Sends the outcome of an edit to `on_result`: `Ok` for an edit that
+/// applied, or the message of the banner for an edit that did not. The message
+/// is `prefix`, a colon, and the reason.
 fn report(on_result: EventHandler<Result<(), String>>, prefix: &str, outcome: Result<(), String>) {
     on_result.call(outcome.map_err(|reason| format!("{prefix}: {reason}")));
 }
@@ -721,18 +852,16 @@ fn add_filter(
 
 /// The rows of the filters of one panel. Each row shows its text and a
 /// Remove button that removes the filter at its index in the project.
-/// `class` is the class of each row, and `prefix` starts the banner text of
-/// a remove that fails.
+/// `prefix` starts the banner text of a remove that fails.
 fn filter_rows(
     loaded: Signal<Option<Document>>,
     on_result: EventHandler<Result<(), String>>,
-    class: &'static str,
     prefix: &'static str,
     rows: Vec<(usize, String)>,
 ) -> Element {
     rsx! {
         for (index, text) in rows {
-            div { class: "{class}", key: "{index}",
+            div { class: "edit-row", key: "{index}",
                 span { "{text}" }
                 button {
                     onclick: move |_| {
@@ -744,6 +873,29 @@ fn filter_rows(
             }
         }
     }
+}
+
+/// The text of a region for a row: the whole timeline, or the start and the
+/// end in seconds.
+fn region_text(region: &FilterRegion) -> String {
+    match region {
+        FilterRegion::All => WHOLE_TIMELINE.to_owned(),
+        // The seconds as the fields take them, so no two regions share a row text.
+        FilterRegion::Range { start, end } => format!("{} s to {} s", start.get(), end.get()),
+    }
+}
+
+/// Reads the Start and End fields as a region in seconds. The answer is the
+/// region, or the reason why the fields do not make one.
+fn region_from(start: &str, end: &str) -> Result<FilterRegion, String> {
+    let start: f64 = start.trim().parse().map_err(|_| START_NOT_A_NUMBER)?;
+    let end: f64 = end.trim().parse().map_err(|_| END_NOT_A_NUMBER)?;
+    let start = Seconds::new(start).map_err(|error| error.to_string())?;
+    let end = Seconds::new(end).map_err(|error| error.to_string())?;
+    if f64::from(end) <= f64::from(start) {
+        return Err(END_BEFORE_START.to_owned());
+    }
+    Ok(FilterRegion::Range { start, end })
 }
 
 /// One row for each time dilation filter of the project: the index of the
@@ -760,13 +912,7 @@ fn speed_rows(document: &Option<Document>) -> Vec<(usize, String)> {
         .enumerate()
         .filter_map(|(index, filter)| {
             let speed = time_dilation::speed_of(filter)?;
-            let region = match filter.region {
-                FilterRegion::All => WHOLE_TIMELINE.to_owned(),
-                // The seconds as the fields take them, so no two regions share a row text.
-                FilterRegion::Range { start, end } => {
-                    format!("{} s to {} s", start.get(), end.get())
-                }
-            };
+            let region = region_text(&filter.region);
             Some((index, format!("{region} at {}\u{d7}", speed.get())))
         })
         .collect()
@@ -776,19 +922,100 @@ fn speed_rows(document: &Option<Document>) -> Vec<(usize, String)> {
 /// region in seconds, and a speed. The answer is the filter to add, or the
 /// reason why the fields do not make one.
 fn speed_change(start: &str, end: &str, speed: &str) -> Result<AppliedFilter, String> {
-    let start: f64 = start.trim().parse().map_err(|_| START_NOT_A_NUMBER)?;
-    let end: f64 = end.trim().parse().map_err(|_| END_NOT_A_NUMBER)?;
+    let region = region_from(start, end)?;
     let speed: f64 = speed.trim().parse().map_err(|_| SPEED_NOT_A_NUMBER)?;
-    let start = Seconds::new(start).map_err(|error| error.to_string())?;
-    let end = Seconds::new(end).map_err(|error| error.to_string())?;
-    if f64::from(end) <= f64::from(start) {
-        return Err(END_BEFORE_START.to_owned());
-    }
     let speed = Speed::new(speed).map_err(|error| error.to_string())?;
-    Ok(time_dilation::applied(
-        FilterRegion::Range { start, end },
-        speed,
-    ))
+    Ok(time_dilation::applied(region, speed))
+}
+
+/// The button of the fast-forward panel that a click pressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FastForwardButton {
+    /// Skip to End.
+    SkipToEnd,
+    /// Accelerate.
+    Accelerate,
+    /// Summarize.
+    Summarize,
+}
+
+/// The text of the five fields of the fast-forward panel.
+#[derive(Debug, Clone, Copy)]
+struct FastForwardFields<'a> {
+    /// The start of the region.
+    start: &'a str,
+    /// The end of the region.
+    end: &'a str,
+    /// The speed of Accelerate.
+    speed: &'a str,
+    /// The number of first lines of Summarize.
+    first: &'a str,
+    /// The number of last lines of Summarize.
+    last: &'a str,
+}
+
+/// Reads the fields that `button` uses. The answer is the filter to add, or
+/// the reason why those fields do not make one.
+fn fast_forward_change(
+    button: FastForwardButton,
+    fields: &FastForwardFields,
+) -> Result<AppliedFilter, String> {
+    let region = region_from(fields.start, fields.end)?;
+    let mode = match button {
+        FastForwardButton::SkipToEnd => Mode::SkipToEnd,
+        FastForwardButton::Accelerate => {
+            let speed: f64 = fields
+                .speed
+                .trim()
+                .parse()
+                .map_err(|_| SPEED_NOT_A_NUMBER)?;
+            Mode::Accelerate(Acceleration::new(speed).map_err(|error| error.to_string())?)
+        }
+        FastForwardButton::Summarize => Mode::Summary {
+            head: fields
+                .first
+                .trim()
+                .parse()
+                .map_err(|_| FIRST_LINES_NOT_A_COUNT)?,
+            tail: fields
+                .last
+                .trim()
+                .parse()
+                .map_err(|_| LAST_LINES_NOT_A_COUNT)?,
+        },
+    };
+    Ok(fast_forward::applied(region, mode))
+}
+
+/// The text of a fast-forward mode for a row.
+fn mode_text(mode: Mode) -> String {
+    match mode {
+        Mode::SkipToEnd => SKIP_TO_END_TEXT.to_owned(),
+        Mode::Accelerate(acceleration) => format!("accelerate at {}\u{d7}", acceleration.get()),
+        Mode::Summary { head, tail } => {
+            format!("summary of the first {head} and the last {tail} lines")
+        }
+    }
+}
+
+/// One row for each fast-forward filter of the project: the index of the
+/// filter in the project, and the text of its row. Filters of other kinds
+/// have no row, but they keep their place in the index.
+fn fast_forward_rows(document: &Option<Document>) -> Vec<(usize, String)> {
+    let Some(open) = document else {
+        return Vec::new();
+    };
+    open.editor
+        .project()
+        .filters
+        .iter()
+        .enumerate()
+        .filter_map(|(index, filter)| {
+            let mode = fast_forward::mode_of(filter)?;
+            let region = region_text(&filter.region);
+            Some((index, format!("{region}: {}", mode_text(mode))))
+        })
+        .collect()
 }
 
 /// One row for each redaction filter of the project: the index of the filter

@@ -28,6 +28,9 @@ pub enum NleError {
     #[error("Invalid speed: {0} (a speed must be finite and above zero)")]
     InvalidSpeed(f64),
 
+    #[error("Invalid acceleration: {0} (an acceleration must be finite and above 1)")]
+    InvalidAcceleration(f64),
+
     #[error("Invalid redaction: {0}")]
     InvalidRedaction(String),
 

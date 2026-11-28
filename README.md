@@ -6270,11 +6270,42 @@ at half speed. Each later event moves by the change in the length of the
 region, also when the region holds no event, for example a silent build step.
 Each region gets a row with a **Remove** button, and different regions can have
 different speeds. The times of a new region are on the timeline after the
-speed changes above it. The panel shows the duration of the edited recording.
-The panel refuses a change after which the recording does not render, and it
-shows the reason in the banner.
+speed changes and fast-forwards that you applied before it.
 
-The redaction panel under the speed panel finds text on the whole timeline and
+The fast-forward panel under the speed panel compresses a region that holds a
+long burst of command output, for example a build, an install, or a test run.
+Type the start and the end of the region in seconds, then click one of three
+buttons:
+
+- **Skip to End** jumps straight to the final state of the region. Each event
+  of the region moves to the start of the region, and the region gets no
+  length.
+- **Accelerate** plays the region at the speed in **Speed (Accelerate)**, which
+  is 20 at first. The speed must be above 1. To slow a region, use the speed
+  panel.
+- **Summarize** keeps the first and the last lines of the output of the region
+  (**First lines** and **Last lines**, 3 each at first), with a `...` line in
+  place of the lines between them. The time of the dropped lines goes away. A
+  summary also drops each terminal change that the dropped lines hold, for
+  example a color or a cursor movement. Thus it suits line-oriented output,
+  such as a build log, and not a full-screen application. A summary after a
+  screen filter, for example `viewport`, on the same part of the timeline
+  fails, because the screen filter writes no line feed. The banner gives the
+  reason. A speed change, a fast-forward, or a redaction between them moves
+  that part with its events. A filter between them that removes or adds events
+  in its region, for example backspace removal, or that answers its events in a
+  different order, makes the failure cover the whole region of that filter. In the `filters` list of the project file, put
+  the summary before the screen filter.
+
+A button reads only the fields that its mode uses. Each fast-forward gets a row
+with a **Remove** button. The panel does not find a burst of output itself, so
+you give the region by its times.
+
+Under the two panels, the properties panel shows the duration of the edited
+recording. Each panel refuses a change after which the recording does not
+render, and it shows the reason in the banner.
+
+The redaction panel under the duration finds text on the whole timeline and
 replaces it, for example to remove API keys, tokens, hostnames, or user names
 from a recording. **Find** takes an exact text, a regular expression, or a
 preset: email addresses, IP addresses, AWS keys, tokens, or hostnames.
@@ -6338,7 +6369,8 @@ The editing engine of the crate has five parts:
   whether anything comes after it. It rewrites its region and moves nothing. A
   span filter (`register_span`) also gets the length of its region and answers
   a new length, and the later events move by the change in the length. A span
-  filter also gets the events before and after its region and the size of the
+  filter also gets the events before and after its region, whether a screen
+  filter at an earlier step rewrote part of its region, and the size of the
   terminal: the size of the clip that starts first, or 80 by 24 in
   `FilterRegistry::run`. A screen filter (`register_screen`) also gets the
   size of the screen and the events before its region. It rewrites its region,
@@ -6353,6 +6385,9 @@ The editing engine of the crate has five parts:
     the cursor looks. [The cursor filter](#the-cursor-filter) below gives its
     options.
   - `time-dilation` (`speed`, issue #153): plays its region faster or slower.
+  - `fast-forward` (`mode`, `speed`, `head`, `tail`, issue #162): compresses a
+    region of command output. The `mode` is `skip-to-end`, `accelerate`, or
+    `summary`. The fast-forward panel above adds it.
   - `redaction` (`find`, `replace`, `input`, issue #156): replaces text in the
     data of the events and keeps each time. The paragraphs on the redaction
     panel above give its rules.
@@ -6379,8 +6414,8 @@ The editing engine of the crate has five parts:
   The filters of issue #154 parse their options as a Rust type, so the render
   refuses a missing option, a value of the wrong type, and a key that the
   filter does not know. The window cannot add them yet. Issue #804 adds the
-  click on the timeline that places a pause. Issues #157 to #167 add more
-  filters.
+  click on the timeline that places a pause. Issues #157 to #161, and #163 to
+  #167 add more filters.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an

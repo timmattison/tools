@@ -121,6 +121,114 @@ pub struct SpanContext<'a> {
     pub after: &'a [Event],
     /// The size of the terminal that the events draw on.
     pub size: TerminalSize,
+    /// True when a screen filter at an earlier step rewrote an event that is
+    /// in the region at this step. A screen filter writes cells of the screen,
+    /// so the output that it rewrote holds no line feed. A step that changes
+    /// times and overlaps such a part moves the part with its events when
+    /// each event of its answer pairs with the event of the region at the
+    /// same index. Else, for example after a backspace removal or a step that
+    /// answers its events in a different order, the part covers the whole
+    /// answer of that step, so the value can be true for an event that no
+    /// screen filter wrote.
+    pub screen_rewritten: bool,
+}
+
+/// The parts of the timeline that screen filters rewrote. Each part is a
+/// closed interval `[a, b]` of times on the timeline.
+#[derive(Debug, Default)]
+struct RewrittenParts(Vec<(f64, f64)>);
+
+impl RewrittenParts {
+    /// Record that a screen filter rewrote the events from `start` to `top`.
+    fn add(&mut self, start: f64, top: f64) {
+        self.0.push((start, top));
+    }
+
+    /// Whether a part overlaps the region that holds the events with
+    /// `start <= time < region_end`. A screen filter answers events in the
+    /// closed range up to `top`, so its restore event sits at `top`. Thus a
+    /// region that starts at `top` overlaps, and a region that ends at `a`
+    /// does not.
+    fn overlaps(&self, start: f64, region_end: f64) -> bool {
+        self.0.iter().any(|&(a, b)| a < region_end && b >= start)
+    }
+
+    /// Move each part through one step that changes times. A part before the
+    /// region stays. A part after the region moves by `shift`. A part that
+    /// overlaps the region goes to the new times of its own events when the
+    /// step is paired. Else the part grows to cover `start` to
+    /// `answered_end`. A part with no event left in it drops.
+    ///
+    /// A filter need not answer its events in their order, so an index alone
+    /// does not pair two events. The step is paired when it answers as many
+    /// events as its region held, and event `i` of the answer has the type of
+    /// event `i` of the region and keeps its data or its time. A change of
+    /// speed keeps the data, and a redaction keeps the time.
+    fn move_through(&mut self, step: &TimeStep<'_>) {
+        let paired = step.answer.len() == step.old.len()
+            && step.old.iter().zip(step.answer).all(|(old, new)| {
+                old.event_type == new.event_type && (old.data == new.data || old.time == new.time)
+            });
+        self.0 = self
+            .0
+            .iter()
+            .filter_map(|&(a, b)| {
+                let mut low = f64::INFINITY;
+                let mut high = f64::NEG_INFINITY;
+                let mut cover = |time: f64| {
+                    low = low.min(time);
+                    high = high.max(time);
+                };
+                // The piece before the region stays.
+                if a < step.start {
+                    cover(a);
+                    cover(b.min(step.start));
+                }
+                // The piece after the region moves by the shift.
+                if b >= step.region_end {
+                    cover(a.max(step.region_end) + step.shift);
+                    cover(b + step.shift);
+                }
+                // The piece inside the region goes where the step put its events.
+                if a < step.region_end && b >= step.start {
+                    if paired {
+                        for (&old, event) in step.old_times.iter().zip(step.answer) {
+                            if (a..=b).contains(&old) {
+                                cover(step.start + event.time);
+                            }
+                        }
+                    } else {
+                        cover(step.start);
+                        cover(step.answered_end);
+                    }
+                }
+                // A part with no event left in it drops.
+                (low <= high).then_some((low, high))
+            })
+            .collect();
+    }
+}
+
+/// One step that changes times, as the rewritten parts see it.
+struct TimeStep<'a> {
+    /// The start of the region of the step on the timeline.
+    start: f64,
+    /// The end of the region. The region holds the events with
+    /// `start <= time < region_end`.
+    region_end: f64,
+    /// How far the step moves the events after its region.
+    shift: f64,
+    /// The time on the timeline of each event of the region before the step,
+    /// in the order of the region.
+    old_times: &'a [f64],
+    /// The events of the region before the step, with times relative to
+    /// `start`, in the order of the region. Only a part that overlaps the
+    /// region reads them, so a step that no part overlaps can give none.
+    old: &'a [Event],
+    /// The answer of the step, with times relative to `start`.
+    answer: &'a [Event],
+    /// The end of the answer on the timeline.
+    answered_end: f64,
 }
 
 /// A region of the timeline as a span filter sees it.
@@ -146,7 +254,8 @@ pub struct Span {
 ///    length 0. For the region `All`, the length is the end of the timeline.
 /// 2. The filter gets a `Span` with the events inside the region, relative to
 ///    its start, and the length. It also gets a `SpanContext`: the events
-///    before the region, the events after it, and the size of the terminal.
+///    before the region, the events after it, the size of the terminal, and
+///    whether a screen filter at an earlier step rewrote part of the region.
 ///    It answers `Ok` with a new `Span`, or `Err` with a message.
 /// 3. An `Err` fails the pipeline with a render error. Its text names the kind
 ///    and holds the message.
@@ -331,12 +440,18 @@ impl FilterRegistry {
     /// `SpanFilterFn`, or on `ScreenFilterFn`. The events draw on a terminal
     /// of `size`, and only a screen filter changes it. When `size` is `None`,
     /// a span filter gets the size of a VT100 and a screen filter fails.
+    /// `rewritten` holds the parts of the timeline that the screen filters of
+    /// earlier steps rewrote. A screen filter adds its part, and a step that
+    /// changes times moves each part to the new times of its own events, or
+    /// over its whole answer when the step does not pair its answer with the
+    /// events of its region.
     fn apply(
         &self,
         events: Vec<Event>,
         applied: &AppliedFilter,
         end: &mut f64,
         size: &mut Option<TerminalSize>,
+        rewritten: &mut RewrittenParts,
     ) -> Result<Vec<Event>, NleError> {
         let filter = self.lookup(&applied.kind)?;
         let (start, region_end) = match &applied.region {
@@ -346,11 +461,14 @@ impl FilterRegistry {
 
         let mut before = Vec::new();
         let mut inside = Vec::new();
+        // The time on the timeline of each event that goes into `inside`.
+        let mut old_times = Vec::new();
         let mut after = Vec::new();
         for event in events {
             if event.time < start {
                 before.push(event);
             } else if event.time < region_end {
+                old_times.push(event.time);
                 inside.push(Event {
                     time: event.time - start,
                     ..event
@@ -375,6 +493,15 @@ impl FilterRegistry {
             Registered::Events(filter) => {
                 let answer = filter(&inside, &applied.options);
                 let shift = last_time(&answer) - last_time(&inside);
+                rewritten.move_through(&TimeStep {
+                    start,
+                    region_end,
+                    shift,
+                    old_times: &old_times,
+                    old: &inside,
+                    answer: &answer,
+                    answered_end: start + last_time(&answer),
+                });
                 (answer, None, f64::INFINITY, shift)
             }
             Registered::InPlace(filter) => {
@@ -414,11 +541,23 @@ impl FilterRegistry {
                         current.width, current.height
                     )));
                 }
+                if answer.events != inside {
+                    rewritten.add(start, top);
+                }
                 *size = Some(answer.size);
                 (answer.events, Some(view), top, 0.0)
             }
             Registered::Span(filter) => {
                 let length = view.length;
+                let screen_rewritten = rewritten.overlaps(start, region_end);
+                // The filter takes the events of the region. A part that
+                // overlaps the region pairs them with the answer, so they are
+                // kept only for such a part.
+                let old = if screen_rewritten {
+                    inside.clone()
+                } else {
+                    Vec::new()
+                };
                 let span = Span {
                     events: inside,
                     length,
@@ -427,6 +566,7 @@ impl FilterRegistry {
                     before: &before,
                     after: &after,
                     size: size.unwrap_or(TerminalSize::VT100),
+                    screen_rewritten,
                 };
                 let answer = filter(span, context, &applied.options).map_err(|message| {
                     NleError::RenderError(format!("filter \"{kind}\" failed: {message}"))
@@ -440,6 +580,15 @@ impl FilterRegistry {
                     )));
                 }
                 let shift = answer.length - length;
+                rewritten.move_through(&TimeStep {
+                    start,
+                    region_end,
+                    shift,
+                    old_times: &old_times,
+                    old: &old,
+                    answer: &answer.events,
+                    answered_end: start + answer.length,
+                });
                 (answer.events, None, f64::INFINITY, shift)
             }
         };
@@ -531,8 +680,9 @@ impl FilterRegistry {
         let mut events = events;
         let mut end = end;
         let mut size = size;
+        let mut rewritten = RewrittenParts::default();
         for applied in filters {
-            events = self.apply(events, applied, &mut end, &mut size)?;
+            events = self.apply(events, applied, &mut end, &mut size, &mut rewritten)?;
         }
         // A shift or the arithmetic of a clip can still overflow to infinity.
         for event in &events {

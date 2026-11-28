@@ -1283,20 +1283,21 @@ fn register_screen_and_each_other_form_replace_each_other_under_one_kind() {
 // Tests of the context of a span filter.
 
 /// The contexts that a spy got: the events before its region and the size.
-type SeenContexts = TestArc<Mutex<Vec<(Vec<Event>, TerminalSize)>>>;
+type SeenContexts = TestArc<Mutex<Vec<(Vec<Event>, TerminalSize, bool)>>>;
 
 /// Registers a span filter under "look" that records each context that it
-/// gets, as the events before its region and the size, and answers with the
-/// span that it got.
+/// gets, as the events before its region, the size, and whether a screen
+/// filter rewrote part of the region, and answers with the span that it got.
 fn context_spy_registry() -> (FilterRegistry, SeenContexts) {
     let seen = TestArc::new(Mutex::new(Vec::new()));
     let captured = TestArc::clone(&seen);
     let mut registry = FilterRegistry::new();
     registry.register_span(kind("look"), move |span, context, _| {
-        captured
-            .lock()
-            .unwrap()
-            .push((context.before.to_vec(), context.size));
+        captured.lock().unwrap().push((
+            context.before.to_vec(),
+            context.size,
+            context.screen_rewritten,
+        ));
         Ok(span)
     });
     (registry, seen)
@@ -1379,4 +1380,409 @@ fn a_span_filter_after_a_screen_filter_gets_the_size_that_the_screen_filter_gave
         .unwrap();
 
     assert_eq!(seen.lock().unwrap()[0].1, size(40, 10));
+}
+
+#[test]
+fn a_span_filter_after_a_screen_filter_that_rewrote_its_region_is_told_so() {
+    let (mut registry, seen) = context_spy_registry();
+    let screens = TestArc::new(Mutex::new(Vec::new()));
+    register_screen_spy(&mut registry, "crop", size(80, 24), &screens);
+
+    registry
+        .render(&one_clip_project(vec![all("crop"), all("look")]))
+        .unwrap();
+
+    assert!(seen.lock().unwrap()[0].2);
+}
+
+#[test]
+fn a_span_filter_after_a_screen_filter_that_changed_nothing_is_not_told_so() {
+    let (mut registry, seen) = context_spy_registry();
+    registry.register_screen(kind("same"), |events, view, _| {
+        Ok(Screen {
+            events: events.to_vec(),
+            size: view.size,
+        })
+    });
+
+    registry
+        .render(&one_clip_project(vec![all("same"), all("look")]))
+        .unwrap();
+
+    assert!(!seen.lock().unwrap()[0].2);
+}
+
+#[test]
+fn a_span_filter_with_no_screen_filter_before_it_is_not_told_so() {
+    let (registry, seen) = context_spy_registry();
+
+    registry
+        .render(&one_clip_project(vec![all("look")]))
+        .unwrap();
+
+    assert!(!seen.lock().unwrap()[0].2);
+}
+
+/// A project of one clip that holds the events `items`, each a time, a type,
+/// and data, with the filters `filters`.
+fn typed_project(items: &[(f64, EventType, &str)], filters: Vec<AppliedFilter>) -> EditProject {
+    let mut recording = source("typed", &[], 10.0);
+    recording.events = items
+        .iter()
+        .map(|(time, event_type, data)| Event {
+            time: *time,
+            event_type: event_type.clone(),
+            data: (*data).to_string(),
+        })
+        .collect();
+    let mut project = EditProject::from_recording(Arc::new(recording)).unwrap();
+    project.filters = filters;
+    project
+}
+
+/// Registers a screen filter under "crop" that writes "c" in place of the data
+/// of each output event of its region. It keeps the input events, the times,
+/// and the size.
+fn register_output_rewriter(registry: &mut FilterRegistry) {
+    registry.register_screen(kind("crop"), |events, view, _| {
+        let events = events
+            .iter()
+            .map(|event| match event.event_type {
+                EventType::Output => Event {
+                    data: "c".to_string(),
+                    ..event.clone()
+                },
+                EventType::Input => event.clone(),
+            })
+            .collect();
+        Ok(Screen {
+            events,
+            size: view.size,
+        })
+    });
+}
+
+/// The input events of `events` and then the output events, each in the order
+/// that it had.
+fn inputs_first(events: Vec<Event>) -> Vec<Event> {
+    let (mut inputs, outputs): (Vec<Event>, Vec<Event>) = events
+        .into_iter()
+        .partition(|event| event.event_type == EventType::Input);
+    inputs.extend(outputs);
+    inputs
+}
+
+/// The events of the timeline after "crop" rewrote the output event at 1 s.
+/// The input at 2 s holds "c" too, as an echo does.
+const ECHOED: [(f64, EventType, &str); 3] = [
+    (1.0, EventType::Output, "a"),
+    (2.0, EventType::Input, "c"),
+    (3.0, EventType::Output, "b"),
+];
+
+#[test]
+fn a_span_filter_after_a_span_step_that_answered_its_inputs_first_is_told_so() {
+    let (mut registry, seen) = context_spy_registry();
+    register_output_rewriter(&mut registry);
+    // The step keeps each event and its time, and lists the inputs first.
+    registry.register_span(kind("inputs-first"), |span, _, _| {
+        Ok(Span {
+            events: inputs_first(span.events),
+            length: span.length,
+        })
+    });
+
+    registry
+        .render(&typed_project(
+            &ECHOED,
+            vec![
+                range("crop", 0.5, 1.5),
+                all("inputs-first"),
+                range("look", 0.0, 1.5),
+            ],
+        ))
+        .unwrap();
+
+    assert!(seen.lock().unwrap()[0].2);
+}
+
+#[test]
+fn a_span_filter_after_an_event_step_that_answered_its_inputs_first_is_told_so() {
+    let (mut registry, seen) = context_spy_registry();
+    register_output_rewriter(&mut registry);
+    registry.register(kind("inputs-first"), |events, _| {
+        inputs_first(events.to_vec())
+    });
+
+    registry
+        .render(&typed_project(
+            &ECHOED,
+            vec![
+                range("crop", 0.5, 1.5),
+                all("inputs-first"),
+                range("look", 0.0, 1.5),
+            ],
+        ))
+        .unwrap();
+
+    assert!(seen.lock().unwrap()[0].2);
+}
+
+#[test]
+fn a_span_filter_after_a_step_that_reversed_its_outputs_is_told_so() {
+    let (mut registry, seen) = context_spy_registry();
+    register_output_rewriter(&mut registry);
+    // The step keeps each event and its time, and lists them last to first.
+    registry.register_span(kind("reverse"), |span, _, _| {
+        let mut events = span.events;
+        events.reverse();
+        Ok(Span {
+            events,
+            length: span.length,
+        })
+    });
+
+    registry
+        .render(&typed_project(
+            &[(1.0, EventType::Output, "a"), (3.0, EventType::Output, "b")],
+            vec![
+                range("crop", 0.5, 1.5),
+                all("reverse"),
+                range("look", 0.0, 1.5),
+            ],
+        ))
+        .unwrap();
+
+    assert!(seen.lock().unwrap()[0].2);
+}
+
+#[test]
+fn a_span_filter_after_a_step_that_changed_only_data_is_told_only_of_the_rewritten_part() {
+    let (mut registry, seen) = context_spy_registry();
+    register_output_rewriter(&mut registry);
+    // As a redaction does, the step changes the data of each event and keeps
+    // its time, its type, and its index.
+    registry.register_span(kind("mask"), |span, _, _| {
+        let events = span
+            .events
+            .into_iter()
+            .map(|event| Event {
+                data: "*".to_string(),
+                ..event
+            })
+            .collect();
+        Ok(Span {
+            events,
+            length: span.length,
+        })
+    });
+
+    registry
+        .render(&typed_project(
+            &[(1.0, EventType::Output, "a"), (3.0, EventType::Output, "b")],
+            vec![
+                range("crop", 0.5, 1.5),
+                all("mask"),
+                range("look", 0.0, 1.5),
+                range("look", 2.5, 3.5),
+            ],
+        ))
+        .unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert!(seen[0].2, "the part of the crop stays at 1 s");
+    assert!(!seen[1].2, "the part of the crop does not cover 3 s");
+}
+
+// Tests of the moves of the rewritten parts.
+
+fn moved_parts(parts: &[(f64, f64)], step: &TimeStep<'_>) -> Vec<(f64, f64)> {
+    let mut rewritten = RewrittenParts(parts.to_vec());
+    rewritten.move_through(step);
+    rewritten.0
+}
+
+/// The events that a step got when it changes only their times: each event of
+/// `answer` at its time before the step, `old_times` relative to `start`.
+fn retimed(answer: &[Event], start: f64, old_times: &[f64]) -> Vec<Event> {
+    answer
+        .iter()
+        .zip(old_times)
+        .map(|(event, &old)| Event {
+            time: old - start,
+            ..event.clone()
+        })
+        .collect()
+}
+
+#[test]
+fn a_part_before_a_step_stays() {
+    let answer = [ev(1.0), ev(3.0)];
+    let old_times = [6.0, 8.0];
+    let step = TimeStep {
+        start: 5.0,
+        region_end: 10.0,
+        shift: 3.0,
+        old_times: &old_times,
+        old: &retimed(&answer, 5.0, &old_times),
+        answer: &answer,
+        answered_end: 8.0,
+    };
+    assert_eq!(moved_parts(&[(1.0, 2.0)], &step), vec![(1.0, 2.0)]);
+}
+
+#[test]
+fn a_part_that_ends_at_the_start_of_a_step_goes_through_the_step() {
+    let answer = [ev(1.0), ev(3.0)];
+    let old_times = [5.0, 7.0];
+    let step = TimeStep {
+        start: 5.0,
+        region_end: 10.0,
+        shift: 1.0,
+        old_times: &old_times,
+        old: &retimed(&answer, 5.0, &old_times),
+        answer: &answer,
+        answered_end: 11.0,
+    };
+    assert_eq!(moved_parts(&[(1.0, 5.0)], &step), vec![(1.0, 6.0)]);
+}
+
+#[test]
+fn a_part_after_a_step_moves_by_the_shift() {
+    let answer = [ev(1.0)];
+    let old_times = [6.0];
+    let step = TimeStep {
+        start: 5.0,
+        region_end: 10.0,
+        shift: 3.0,
+        old_times: &old_times,
+        old: &retimed(&answer, 5.0, &old_times),
+        answer: &answer,
+        answered_end: 9.0,
+    };
+    assert_eq!(moved_parts(&[(12.0, 14.0)], &step), vec![(15.0, 17.0)]);
+    assert_eq!(moved_parts(&[(10.0, 14.0)], &step), vec![(13.0, 17.0)]);
+}
+
+#[test]
+fn a_part_inside_a_paired_step_goes_to_the_new_times_of_its_events() {
+    let answer = [ev(2.5), ev(5.0), ev(7.5), ev(10.0), ev(15.0)];
+    let old_times = [5.0, 10.0, 15.0, 20.0, 30.0];
+    let step = TimeStep {
+        start: 0.0,
+        region_end: f64::INFINITY,
+        shift: -20.0,
+        old_times: &old_times,
+        old: &retimed(&answer, 0.0, &old_times),
+        answer: &answer,
+        answered_end: 20.0,
+    };
+    assert_eq!(moved_parts(&[(10.0, 20.0)], &step), vec![(5.0, 10.0)]);
+}
+
+#[test]
+fn a_part_over_the_start_of_a_step_keeps_its_piece_before_the_step() {
+    let answer = [ev(0.5), ev(1.5), ev(2.0)];
+    let old_times = [6.0, 8.0, 9.0];
+    let step = TimeStep {
+        start: 5.0,
+        region_end: 10.0,
+        shift: -2.5,
+        old_times: &old_times,
+        old: &retimed(&answer, 5.0, &old_times),
+        answer: &answer,
+        answered_end: 7.5,
+    };
+    assert_eq!(moved_parts(&[(2.0, 8.0)], &step), vec![(2.0, 6.5)]);
+}
+
+#[test]
+fn a_part_over_the_end_of_a_step_keeps_its_piece_after_the_step() {
+    let answer = [ev(0.5), ev(1.5), ev(2.0)];
+    let old_times = [6.0, 8.0, 9.0];
+    let step = TimeStep {
+        start: 5.0,
+        region_end: 10.0,
+        shift: -2.5,
+        old_times: &old_times,
+        old: &retimed(&answer, 5.0, &old_times),
+        answer: &answer,
+        answered_end: 7.5,
+    };
+    assert_eq!(moved_parts(&[(8.0, 14.0)], &step), vec![(6.5, 11.5)]);
+}
+
+#[test]
+fn a_part_inside_a_step_that_changes_the_count_covers_the_whole_answer() {
+    let answer = [ev(0.5)];
+    let old_times = [6.0, 7.0, 8.0];
+    let step = TimeStep {
+        start: 5.0,
+        region_end: 10.0,
+        shift: -2.0,
+        old_times: &old_times,
+        old: &events(&old_times.map(|time| time - 5.0)),
+        answer: &answer,
+        answered_end: 8.0,
+    };
+    assert_eq!(moved_parts(&[(6.0, 8.0)], &step), vec![(5.0, 8.0)]);
+}
+
+#[test]
+fn a_part_over_the_end_of_a_step_that_changes_the_count_covers_the_answer_and_the_rest() {
+    let answer = [ev(0.5)];
+    let old_times = [6.0, 7.0, 8.0];
+    let step = TimeStep {
+        start: 5.0,
+        region_end: 10.0,
+        shift: -2.0,
+        old_times: &old_times,
+        old: &events(&old_times.map(|time| time - 5.0)),
+        answer: &answer,
+        answered_end: 8.0,
+    };
+    assert_eq!(moved_parts(&[(8.0, 14.0)], &step), vec![(5.0, 12.0)]);
+}
+
+#[test]
+fn a_part_inside_a_step_that_keeps_the_count_in_a_new_order_covers_the_whole_answer() {
+    let old_times = [6.0, 8.0];
+    let old = events(&old_times.map(|time| time - 5.0));
+    // The step answers the two events of its region in reverse order, at twice the speed.
+    let answer = [
+        Event {
+            time: 0.5,
+            ..old[1].clone()
+        },
+        Event {
+            time: 1.5,
+            ..old[0].clone()
+        },
+    ];
+    let step = TimeStep {
+        start: 5.0,
+        region_end: 10.0,
+        shift: -2.5,
+        old_times: &old_times,
+        old: &old,
+        answer: &answer,
+        answered_end: 7.5,
+    };
+    assert_eq!(moved_parts(&[(6.0, 7.0)], &step), vec![(5.0, 7.5)]);
+}
+
+#[test]
+fn a_part_with_no_event_left_in_a_paired_step_drops() {
+    let answer = [ev(0.1), ev(1.0)];
+    let old_times = [5.5, 8.0];
+    let step = TimeStep {
+        start: 5.0,
+        region_end: 10.0,
+        shift: 0.0,
+        old_times: &old_times,
+        old: &retimed(&answer, 5.0, &old_times),
+        answer: &answer,
+        answered_end: 10.0,
+    };
+    assert_eq!(moved_parts(&[(6.0, 7.0)], &step), Vec::<(f64, f64)>::new());
 }

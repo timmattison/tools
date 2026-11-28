@@ -401,20 +401,24 @@ h3 {
   font-size: 13px;
 }
 
-.speed-panel,
-.redaction-panel {
+.edit-panel {
   margin-top: 16px;
 }
 
-.speed-hint,
-.redaction-hint {
+.edit-hint {
   color: #6c7086;
   font-size: 12px;
   margin-bottom: 8px;
 }
 
-.speed-field,
-.redaction-field {
+.edit-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.edit-field {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -423,9 +427,8 @@ h3 {
   font-size: 12px;
 }
 
-.speed-field input,
-.redaction-field input,
-.redaction-field select {
+.edit-field input,
+.edit-field select {
   width: 100%;
   background: #1e1e2e;
   color: #cdd6f4;
@@ -435,8 +438,7 @@ h3 {
   font-size: 13px;
 }
 
-.speed-row,
-.redaction-row {
+.edit-row {
   display: flex;
   justify-content: space-between;
   align-items: center;

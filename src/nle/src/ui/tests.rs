@@ -21,6 +21,7 @@ use tokio::sync::oneshot;
 use crate::editor::Edit;
 use crate::error::NleError;
 use crate::export::{ExportProgress, ExportRequest, ExportTarget, Theme};
+use crate::filters::fast_forward::{self, Acceleration, Mode};
 use crate::types::{ClipId, Seconds};
 use crate::ui::export::SaveDialog;
 use std::num::NonZeroU32;
@@ -399,6 +400,8 @@ struct Window {
     newest_listeners: BTreeMap<String, Vec<ElementId>>,
     /// The Apply Speed button, when a test noted it.
     apply: Option<ElementId>,
+    /// The Skip to End, Accelerate, and Summarize buttons, when a test noted them.
+    fast_forward_buttons: Option<[ElementId; 3]>,
     /// The Apply Redaction button, when a test noted it.
     redact: Option<ElementId>,
     /// The Play and Pause button, when a test noted it.
@@ -426,6 +429,7 @@ impl Window {
             listeners: BTreeMap::new(),
             newest_listeners: BTreeMap::new(),
             apply: None,
+            fast_forward_buttons: None,
             redact: None,
             play: None,
             stop: None,
@@ -630,13 +634,13 @@ impl Window {
     }
 
     /// The input listeners that the open render created, in creation order:
-    /// the Start, End, and Speed fields of the speed panel, then the Find,
-    /// Pattern, Replace with, Replacement text, and Events fields of the
-    /// redaction panel, then the playhead control of the timeline. The
-    /// properties panel mounts before the timeline, so the playhead is the
-    /// last one. An export bar that shows no video settings has no `input`
-    /// listener.
-    fn open_inputs(&self) -> [ElementId; 9] {
+    /// the three fields of the speed panel, the five fields of the
+    /// fast-forward panel, the Find, Pattern, Replace with, Replacement text,
+    /// and Events fields of the redaction panel, then the playhead control of
+    /// the timeline. The properties panel mounts before the timeline, so the
+    /// playhead is the last one. An export bar that shows no video settings
+    /// has no `input` listener.
+    fn open_inputs(&self) -> [ElementId; 14] {
         self.listeners
             .get("input")
             .cloned()
@@ -645,16 +649,23 @@ impl Window {
             .unwrap_or_else(|ids: Vec<ElementId>| panic!("the page has the inputs {ids:?}"))
     }
 
-    /// The Start, End, and Speed fields, in this order.
+    /// The Start, End, and Speed fields of the speed panel, in this order.
     fn speed_fields(&self) -> [ElementId; 3] {
         let [start, end, speed, ..] = self.open_inputs();
         [start, end, speed]
     }
 
+    /// The Start, End, Speed, First lines, and Last lines fields of the
+    /// fast-forward panel, in this order.
+    fn fast_forward_fields(&self) -> [ElementId; 5] {
+        let [_, _, _, start, end, speed, first, last, ..] = self.open_inputs();
+        [start, end, speed, first, last]
+    }
+
     /// The Find, Pattern, Replace with, Replacement text, and Events fields,
     /// in this order.
     fn redaction_fields(&self) -> [ElementId; 5] {
-        let [_, _, _, find, pattern, replace, replacement, events, _] = self.open_inputs();
+        let [.., find, pattern, replace, replacement, events, _] = self.open_inputs();
         [find, pattern, replace, replacement, events]
     }
 
@@ -688,13 +699,14 @@ impl Window {
         self.click(self.redact_button());
     }
 
-    /// Notes the seven click listeners that the render of an open recording
+    /// Notes the ten click listeners that the render of an open recording
     /// created beside the Export button of the export bar. The render creates
-    /// them in this order: Apply Speed, Apply Redaction, the Zoom out, Zoom
-    /// in, and Fit buttons of the timeline, Play, Stop. The properties panel
-    /// mounts before the timeline, and the timeline before the preview
-    /// toolbar. The speed panel comes before the redaction panel, and the Play
-    /// button comes before the Stop button.
+    /// them in this order: Apply Speed, Skip to End, Accelerate, Summarize,
+    /// Apply Redaction, the Zoom out, Zoom in, and Fit buttons of the
+    /// timeline, Play, Stop. The properties panel mounts before the timeline,
+    /// and the timeline before the preview toolbar. The speed panel comes
+    /// before the fast-forward panel, the fast-forward panel comes before the
+    /// redaction panel, and the Play button comes before the Stop button.
     fn note_open_buttons(&mut self) {
         let export = self.export_button();
         let buttons: Vec<ElementId> = self
@@ -703,10 +715,12 @@ impl Window {
             .copied()
             .filter(|id| *id != export)
             .collect();
-        let [apply, redact, _, zoom_in, _, play, stop] = buttons[..] else {
+        let [apply, skip, accelerate, summarize, redact, _, zoom_in, _, play, stop] = buttons[..]
+        else {
             panic!("the open render made {:?}", self.newest)
         };
         self.apply = Some(apply);
+        self.fast_forward_buttons = Some([skip, accelerate, summarize]);
         self.redact = Some(redact);
         self.zoom_in = Some(zoom_in);
         self.play = Some(play);
@@ -716,6 +730,18 @@ impl Window {
     /// The Apply Speed button. `open_recording` noted it.
     fn apply_button(&self) -> ElementId {
         self.apply.expect("a window with an open recording")
+    }
+
+    /// The button of the fast-forward panel. `open_recording` noted it.
+    fn fast_forward_button(&self, button: FastForwardButton) -> ElementId {
+        let [skip, accelerate, summarize] = self
+            .fast_forward_buttons
+            .expect("a window with an open recording");
+        match button {
+            FastForwardButton::SkipToEnd => skip,
+            FastForwardButton::Accelerate => accelerate,
+            FastForwardButton::Summarize => summarize,
+        }
     }
 
     /// The Play and Pause button. `open_recording` noted it.
@@ -762,6 +788,15 @@ impl Window {
         self.type_into(end_field, end);
         self.type_into(speed_field, speed);
         self.click(self.apply_button());
+    }
+
+    /// Fills the Start and End fields of the fast-forward panel and clicks
+    /// `button`. The other fields keep their text.
+    fn fast_forward(&mut self, button: FastForwardButton, start: &str, end: &str) {
+        let [start_field, end_field, ..] = self.fast_forward_fields();
+        self.type_into(start_field, start);
+        self.type_into(end_field, end);
+        self.click(self.fast_forward_button(button));
     }
 
     /// Runs the tasks of the app until they have no more work, and renders
@@ -1474,14 +1509,14 @@ fn edited_row(text: &str) -> String {
     metadata_row("Edited duration", text, None)
 }
 
-/// Opens the fixture recording through the fakes, and notes the four click
+/// Opens the fixture recording through the fakes, and notes the ten click
 /// listeners that the open render creates beside the Export button
 /// (`Window::note_open_buttons`).
 async fn open_recording() -> Window {
     open_loaded(fixture()).await
 }
 
-/// Opens `loaded` through the fakes, and notes the four click listeners as
+/// Opens `loaded` through the fakes, and notes the ten click listeners as
 /// `open_recording` does.
 async fn open_loaded(loaded: LoadedRecording) -> Window {
     let fakes = Fakes::new().pick(picked()).load(Answer::Ready(Ok(loaded)));
@@ -1501,7 +1536,7 @@ async fn the_speed_panel_shows_its_fields_and_the_edited_duration() {
     let page = window.html();
     for text in [
         "Speed",
-        "Times are in seconds, on the timeline after the speed changes above.",
+        "Times are in seconds, on the timeline after the speed changes and fast-forwards that you applied before.",
         "Start (s)",
         "End (s)",
         "Apply Speed",
@@ -1510,6 +1545,7 @@ async fn the_speed_panel_shows_its_fields_and_the_edited_duration() {
     }
     assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
     assert_eq!(window.speed_fields().len(), 3);
+    assert_eq!(page.matches("Edited duration").count(), 1, "{page}");
     assert!(!page.contains("role=\"alert\""), "{page}");
 }
 
@@ -1764,6 +1800,412 @@ fn an_edit_after_a_speed_change_shows_the_duration_after_it() {
     );
 }
 
+// The pure parts of the fast-forward panel.
+
+/// The text of the fields of a fresh fast-forward panel, with a region.
+fn fields<'a>(start: &'a str, end: &'a str) -> FastForwardFields<'a> {
+    FastForwardFields {
+        start,
+        end,
+        speed: "20",
+        first: "3",
+        last: "3",
+    }
+}
+
+/// The region from `start` to `end` seconds.
+fn range(start: f64, end: f64) -> FilterRegion {
+    FilterRegion::Range {
+        start: Seconds::new(start).expect("a time"),
+        end: Seconds::new(end).expect("a time"),
+    }
+}
+
+#[test]
+fn skip_to_end_reads_the_region_and_nothing_else() {
+    let all_bad = FastForwardFields {
+        speed: "abc",
+        first: "x",
+        last: "-1",
+        ..fields(" 10 ", "20")
+    };
+    let filter = fast_forward_change(FastForwardButton::SkipToEnd, &all_bad).expect("a filter");
+    assert_eq!(
+        filter,
+        fast_forward::applied(range(10.0, 20.0), Mode::SkipToEnd)
+    );
+}
+
+#[test]
+fn accelerate_reads_the_region_and_the_speed_only() {
+    let bad_lines = FastForwardFields {
+        first: "x",
+        last: "y",
+        speed: " 25.5 ",
+        ..fields("10", "30")
+    };
+    let filter = fast_forward_change(FastForwardButton::Accelerate, &bad_lines).expect("a filter");
+    let acceleration = Acceleration::new(25.5).expect("an acceleration");
+    assert_eq!(
+        filter,
+        fast_forward::applied(range(10.0, 30.0), Mode::Accelerate(acceleration))
+    );
+}
+
+#[test]
+fn summarize_reads_the_region_and_the_lines_only() {
+    let bad_speed = FastForwardFields {
+        speed: "abc",
+        first: " 2 ",
+        last: "0",
+        ..fields("1", "5")
+    };
+    let filter = fast_forward_change(FastForwardButton::Summarize, &bad_speed).expect("a filter");
+    assert_eq!(
+        filter,
+        fast_forward::applied(range(1.0, 5.0), Mode::Summary { head: 2, tail: 0 })
+    );
+}
+
+#[test]
+fn each_button_gives_the_reason_of_its_bad_field() {
+    use FastForwardButton::{Accelerate, SkipToEnd, Summarize};
+    let cases = [
+        (SkipToEnd, fields("abc", "20"), "the start is not a number"),
+        (SkipToEnd, fields("10", "xyz"), "the end is not a number"),
+        (
+            SkipToEnd,
+            fields("10", "5"),
+            "the end must come after the start",
+        ),
+        (
+            SkipToEnd,
+            fields("-1", "20"),
+            "Invalid time: -1 (a time must be finite and not below zero)",
+        ),
+        (
+            Accelerate,
+            FastForwardFields {
+                speed: "abc",
+                ..fields("10", "20")
+            },
+            "the speed is not a number",
+        ),
+        (
+            Accelerate,
+            FastForwardFields {
+                speed: "1",
+                ..fields("10", "20")
+            },
+            "Invalid acceleration: 1 (an acceleration must be finite and above 1)",
+        ),
+        (
+            Summarize,
+            FastForwardFields {
+                first: "-1",
+                ..fields("10", "20")
+            },
+            "the first lines are not a whole number of 0 or more",
+        ),
+        (
+            Summarize,
+            FastForwardFields {
+                last: "1.5",
+                ..fields("10", "20")
+            },
+            "the last lines are not a whole number of 0 or more",
+        ),
+    ];
+    for (button, fields, reason) in cases {
+        assert_eq!(
+            fast_forward_change(button, &fields).expect_err("a reason"),
+            reason,
+            "{button:?}"
+        );
+    }
+}
+
+/// A document whose project holds a time dilation filter at index 0, and
+/// two fast-forward filters at the indexes 1 and 2.
+#[test]
+fn fast_forward_rows_keep_the_place_of_each_filter_in_the_project() {
+    let mut document = app_document();
+    document
+        .editor
+        .apply(double_speed())
+        .expect("an edit that applies");
+    let skip = fast_forward::applied(range(10.0, 20.0), Mode::SkipToEnd);
+    let accelerate = fast_forward::applied(
+        FilterRegion::All,
+        Mode::Accelerate(Acceleration::new(20.0).expect("an acceleration")),
+    );
+    let summary = fast_forward::applied(range(1.0, 2.5), Mode::Summary { head: 3, tail: 0 });
+    for (index, filter) in [(1, skip), (2, accelerate), (3, summary)] {
+        document
+            .editor
+            .apply(Edit::AddFilter { index, filter })
+            .expect("an edit that applies");
+    }
+    assert_eq!(
+        fast_forward_rows(&Some(document)),
+        vec![
+            (1, "10 s to 20 s: skip to end".to_owned()),
+            (2, "the whole timeline: accelerate at 20\u{d7}".to_owned()),
+            (
+                3,
+                "1 s to 2.5 s: summary of the first 3 and the last 0 lines".to_owned()
+            ),
+        ]
+    );
+    assert!(fast_forward_rows(&None).is_empty());
+}
+
+// The fast-forward panel.
+
+/// The row text of a fast-forward as the page shows it.
+fn fast_forward_row(text: &str) -> String {
+    format!("<span>{text}</span>")
+}
+
+#[tokio::test]
+async fn the_fast_forward_panel_shows_its_fields_buttons_and_hint() {
+    let window = open_recording().await;
+    let page = window.html();
+    for text in [
+        "Fast-Forward",
+        "Speed (Accelerate)",
+        "First lines (Summarize)",
+        "Last lines (Summarize)",
+        ">Skip to End</button>",
+        ">Accelerate</button>",
+        ">Summarize</button>",
+        "value=\"20\"",
+    ] {
+        assert!(page.contains(text), "{text} missing in {page}");
+    }
+    assert_eq!(page.matches("value=\"3\"").count(), 2, "{page}");
+    assert_eq!(page.matches("Start (s)").count(), 2, "{page}");
+    assert_eq!(page.matches("End (s)").count(), 2, "{page}");
+    let hint = "Times are in seconds, on the timeline after the speed changes and fast-forwards that you applied before.";
+    assert_eq!(page.matches(hint).count(), 2, "{page}");
+    assert_eq!(page.matches("Edited duration").count(), 1, "{page}");
+    assert_eq!(window.fast_forward_fields().len(), 5);
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn the_edited_duration_follows_both_panels() {
+    let page = open_recording().await.html();
+    let edited = page.find("Edited duration").expect("the row");
+    assert!(
+        edited > page.find("Fast-Forward").expect("the panel"),
+        "{page}"
+    );
+}
+
+#[tokio::test]
+async fn skip_to_end_adds_a_row_and_shortens_the_recording() {
+    let mut window = open_recording().await;
+    window.fast_forward(FastForwardButton::SkipToEnd, "10", "20");
+    let page = window.html();
+    assert!(
+        page.contains(&fast_forward_row("10 s to 20 s: skip to end")),
+        "{page}"
+    );
+    assert!(page.contains(&edited_row(&format_duration(55.3))), "{page}");
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn accelerate_adds_a_row_and_shortens_the_recording() {
+    let mut window = open_recording().await;
+    window.fast_forward(FastForwardButton::Accelerate, "10", "30");
+    let page = window.html();
+    assert!(
+        page.contains(&fast_forward_row("10 s to 30 s: accelerate at 20\u{d7}")),
+        "{page}"
+    );
+    // 20 s at 20 times the speed take 1 s, thus the recording is 19 s shorter.
+    assert!(page.contains(&edited_row(&format_duration(46.3))), "{page}");
+}
+
+#[tokio::test]
+async fn a_fast_forward_row_and_a_speed_row_stay_in_their_own_lists() {
+    let mut window = open_recording().await;
+    window.apply_speed("10", "20", "2");
+    window.fast_forward(FastForwardButton::SkipToEnd, "30", "40");
+    let page = window.html();
+    for row in [
+        speed_row("10 s to 20 s", "2"),
+        fast_forward_row("30 s to 40 s: skip to end"),
+    ] {
+        assert_eq!(page.matches(&row).count(), 1, "{row} in {page}");
+    }
+}
+
+#[tokio::test]
+async fn a_field_that_the_mode_does_not_read_does_not_block_it() {
+    let mut window = open_recording().await;
+    let [_, _, speed, first, last] = window.fast_forward_fields();
+    window.type_into(speed, "abc");
+    window.type_into(first, "x");
+    window.type_into(last, "x");
+    window.fast_forward(FastForwardButton::SkipToEnd, "10", "20");
+    let page = window.html();
+    assert!(
+        page.contains(&fast_forward_row("10 s to 20 s: skip to end")),
+        "{page}"
+    );
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+/// A recording of 20 output lines, one for each second from 1 to 20, in a
+/// recording of 30 seconds.
+fn line_recording() -> LoadedRecording {
+    let mut loaded = fixture();
+    loaded.recording.duration = 30.0;
+    loaded.metadata.duration = 30.0;
+    loaded.recording.events = (1..=20)
+        .map(|line| Event {
+            time: f64::from(line),
+            event_type: EventType::Output,
+            data: format!("line{line}\r\n"),
+        })
+        .collect();
+    loaded.metadata.event_count = 20;
+    loaded
+}
+
+#[tokio::test]
+async fn summarize_adds_a_row_and_removes_the_time_of_the_dropped_lines() {
+    let mut window = open_loaded(line_recording()).await;
+    window.fast_forward(FastForwardButton::Summarize, "0", "30");
+    let page = window.html();
+    assert!(
+        page.contains(&fast_forward_row(
+            "0 s to 30 s: summary of the first 3 and the last 3 lines"
+        )),
+        "{page}"
+    );
+    // The summary keeps lines 1 to 3 and lines 18 to 20. It drops lines 4 to
+    // 17, which start at 4 s and end at 17 s. The 13 s between those two
+    // times go away, thus the recording of 30 s becomes one of 17 s.
+    assert!(page.contains(&edited_row(&format_duration(17.0))), "{page}");
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn removing_a_fast_forward_row_restores_the_duration() {
+    let mut window = open_recording().await;
+    window.fast_forward(FastForwardButton::SkipToEnd, "10", "20");
+    assert!(window.html().contains(": skip to end"), "{}", window.html());
+    window.click(window.remove_button());
+    let page = window.html();
+    assert!(!page.contains(": skip to end"), "{page}");
+    assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn removing_a_fast_forward_row_keeps_the_speed_row_before_it() {
+    let mut window = open_recording().await;
+    window.apply_speed("10", "20", "2");
+    window.fast_forward(FastForwardButton::SkipToEnd, "30", "40");
+    window.click(window.remove_button());
+    let page = window.html();
+    assert!(!page.contains(": skip to end"), "{page}");
+    assert!(page.contains(&speed_row("10 s to 20 s", "2")), "{page}");
+    assert!(page.contains(&edited_row("1m 0.3s")), "{page}");
+}
+
+/// Skip to End over the whole recording leaves no time for the slow speed
+/// change after it, thus the project renders. A Remove of the fast-forward
+/// gives that change 10 s of time, and the render then fails.
+#[tokio::test]
+async fn a_remove_of_a_fast_forward_after_which_the_render_fails_is_refused() {
+    let mut window = open_recording().await;
+    window.fast_forward(FastForwardButton::SkipToEnd, "0", "100");
+    let remove = window.remove_button();
+    window.apply_speed("0", "10", "1e-308");
+    let page = window.html();
+    assert!(!page.contains("role=\"alert\""), "{page}");
+    window.click(remove);
+    let page = window.html();
+    assert!(page.contains("Failed to fast-forward: "), "{page}");
+    assert!(page.contains("answered the length inf s"), "{page}");
+    assert!(
+        page.contains(&fast_forward_row("0 s to 100 s: skip to end")),
+        "{page}"
+    );
+    assert!(
+        page.contains(&speed_row("0 s to 10 s", &1e-308_f64.to_string())),
+        "{page}"
+    );
+}
+
+#[tokio::test]
+async fn a_bad_fast_forward_shows_the_reason_and_adds_no_row() {
+    use FastForwardButton::{Accelerate, SkipToEnd, Summarize};
+    // Each case: the button, the fields to type (start, end, speed, first,
+    // last), and the reason.
+    let cases = [
+        (
+            SkipToEnd,
+            ["abc", "20", "20", "3", "3"],
+            "the start is not a number",
+        ),
+        (
+            SkipToEnd,
+            ["10", "xyz", "20", "3", "3"],
+            "the end is not a number",
+        ),
+        (
+            SkipToEnd,
+            ["20", "10", "20", "3", "3"],
+            "the end must come after the start",
+        ),
+        (
+            Accelerate,
+            ["10", "20", "abc", "3", "3"],
+            "the speed is not a number",
+        ),
+        (
+            Accelerate,
+            ["10", "20", "1", "3", "3"],
+            "Invalid acceleration: 1",
+        ),
+        (
+            Summarize,
+            ["10", "20", "20", "-1", "3"],
+            "the first lines are not a whole number of 0 or more",
+        ),
+        (
+            Summarize,
+            ["10", "20", "20", "x", "3"],
+            "the first lines are not a whole number of 0 or more",
+        ),
+        (
+            Summarize,
+            ["10", "20", "20", "3", "1.5"],
+            "the last lines are not a whole number of 0 or more",
+        ),
+    ];
+    for (button, texts, reason) in cases {
+        let mut window = open_recording().await;
+        for (field, text) in window.fast_forward_fields().into_iter().zip(texts) {
+            window.type_into(field, text);
+        }
+        window.click(window.fast_forward_button(button));
+        let page = window.html();
+        let banner = format!("Failed to fast-forward: {reason}");
+        assert!(page.contains(&banner), "{banner} missing in {page}");
+        assert!(!page.contains(": skip to end"), "{page}");
+        assert!(!page.contains(": accelerate at"), "{page}");
+        assert!(!page.contains(": summary of"), "{page}");
+        assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
+    }
+}
+
 // The redaction panel.
 
 #[tokio::test]
@@ -1848,7 +2290,7 @@ async fn a_bad_redaction_shows_the_reason_and_adds_no_row() {
         let page = window.html();
         let banner = format!("Failed to redact: {reason}");
         assert!(page.contains(&banner), "{banner} missing in {page}");
-        assert!(!page.contains("class=\"redaction-row\""), "{page}");
+        assert!(!page.contains("class=\"edit-row\""), "{page}");
     }
 }
 
@@ -1885,7 +2327,7 @@ async fn removing_a_redaction_row_removes_it() {
     window.apply_redaction("text", "hunter2", "asterisks", "", "output");
     window.click(window.remove_button());
     let page = window.html();
-    assert!(!page.contains("class=\"redaction-row\""), "{page}");
+    assert!(!page.contains("class=\"edit-row\""), "{page}");
     assert!(!page.contains("\u{2192} asterisks"), "{page}");
     assert!(page.contains(&edited_row("1m 5.3s")), "{page}");
 }
@@ -2581,13 +3023,27 @@ const REDO_KEYS: Press = Press {
 };
 
 impl Window {
-    /// The Start, End, and Speed fields of the speed panel, and the Pattern and
-    /// Replacement text fields of the redaction panel. The two text fields of
-    /// the export bar show only for a video kind, thus `video_fields` gives them.
-    fn text_fields(&self) -> [ElementId; 5] {
+    /// The Start, End, and Speed fields of the speed panel, the Start, End,
+    /// Speed, First lines, and Last lines fields of the fast-forward panel, and
+    /// the Pattern and Replacement text fields of the redaction panel. The two
+    /// text fields of the export bar show only for a video kind, thus
+    /// `video_fields` gives them.
+    fn text_fields(&self) -> [ElementId; 10] {
         let [start, end, speed] = self.speed_fields();
+        let [ff_start, ff_end, ff_speed, first, last] = self.fast_forward_fields();
         let [_, pattern, _, replacement, _] = self.redaction_fields();
-        [start, end, speed, pattern, replacement]
+        [
+            start,
+            end,
+            speed,
+            ff_start,
+            ff_end,
+            ff_speed,
+            first,
+            last,
+            pattern,
+            replacement,
+        ]
     }
 
     /// Elements that have the focus in turn and are not text fields: the
