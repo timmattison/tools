@@ -262,31 +262,62 @@ pub(crate) fn layout(size: TerminalSize, options: &HudOptions, shown: &Shown) ->
 }
 
 /// The SGR sequence that sets the style of a cell: it resets the attributes,
-/// then sets bold, italic and underline of `cell` and the sources of its two
-/// colors.
+/// then sets each text flag of `cell` and the sources of its two colors.
 fn sgr(cell: &Cell) -> String {
-    let bold = if cell.bold { "1;" } else { "" };
-    let italic = if cell.italic { "3;" } else { "" };
-    let underline = if cell.underline { "4;" } else { "" };
+    let flags: String = [
+        (cell.bold, "1;"),
+        (cell.dim, "2;"),
+        (cell.italic, "3;"),
+        (cell.underline, "4;"),
+        (cell.blink, "5;"),
+        (cell.reverse, "7;"),
+        (cell.hidden, "8;"),
+        (cell.strikethrough, "9;"),
+    ]
+    .into_iter()
+    .filter_map(|(on, code)| on.then_some(code))
+    .collect();
     format!(
-        "\x1b[0;{bold}{italic}{underline}{};{}m",
+        "\x1b[0;{flags}{};{}m",
         fg_code(cell.fg_source),
         bg_code(cell.bg_source)
     )
 }
 
 /// Whether the viewer shows the cells `a` and `b` the same, for each part of a
-/// cell that `sgr` writes: the character, the source of each color, and bold,
-/// italic and underline. The viewer draws a color from its source in its own
-/// theme, thus the RGB value of a replay does not count. That value can also
-/// be stale: SGR 39 and SGR 49 change only the source.
+/// cell that `sgr` writes: the character, the source of each color, and each
+/// text flag. The viewer draws a color from its source in its own theme, thus
+/// the RGB value of a replay does not count. That value can also be stale:
+/// SGR 39 and SGR 49 change only the source.
 fn same_look(a: &Cell, b: &Cell) -> bool {
-    a.ch == b.ch
-        && a.fg_source == b.fg_source
-        && a.bg_source == b.bg_source
-        && a.bold == b.bold
-        && a.italic == b.italic
-        && a.underline == b.underline
+    // A destructure, so that a new field of `Cell` fails to compile until this
+    // comparison names it.
+    let Cell {
+        ch,
+        fg_color: _,
+        bg_color: _,
+        fg_source,
+        bg_source,
+        bold,
+        italic,
+        underline,
+        dim,
+        blink,
+        reverse,
+        hidden,
+        strikethrough,
+    } = a;
+    *ch == b.ch
+        && *fg_source == b.fg_source
+        && *bg_source == b.bg_source
+        && *bold == b.bold
+        && *italic == b.italic
+        && *underline == b.underline
+        && *dim == b.dim
+        && *blink == b.blink
+        && *reverse == b.reverse
+        && *hidden == b.hidden
+        && *strikethrough == b.strikethrough
 }
 
 /// The sequence that moves the cursor to `row` and `column`, counted from zero.
@@ -310,6 +341,16 @@ struct Pen {
     italic: bool,
     /// Whether the text is underlined.
     underline: bool,
+    /// Whether the text is dim.
+    dim: bool,
+    /// Whether the text blinks.
+    blink: bool,
+    /// Whether the text is in reverse video.
+    reverse: bool,
+    /// Whether the text is hidden.
+    hidden: bool,
+    /// Whether the text is struck through.
+    strikethrough: bool,
     /// Whether the DEC line drawing set is active.
     use_acs: bool,
 }
@@ -324,6 +365,11 @@ impl Pen {
             bold: screen.bold,
             italic: screen.italic,
             underline: screen.underline,
+            dim: screen.dim,
+            blink: screen.blink,
+            reverse: screen.reverse,
+            hidden: screen.hidden,
+            strikethrough: screen.strikethrough,
             use_acs: screen.uses_line_drawing(),
         }
     }
@@ -338,6 +384,11 @@ impl Pen {
             bold: self.bold,
             italic: self.italic,
             underline: self.underline,
+            dim: self.dim,
+            blink: self.blink,
+            reverse: self.reverse,
+            hidden: self.hidden,
+            strikethrough: self.strikethrough,
             ..Cell::default()
         };
         let charset = match (self.use_acs, from.use_acs) {
