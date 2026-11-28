@@ -1665,7 +1665,7 @@ fn a_part_after_a_step_moves_by_the_shift() {
 }
 
 #[test]
-fn a_part_inside_a_step_that_keeps_the_count_goes_to_the_new_times_of_its_events() {
+fn a_part_inside_a_paired_step_goes_to_the_new_times_of_its_events() {
     let answer = [ev(2.5), ev(5.0), ev(7.5), ev(10.0), ev(15.0)];
     let old_times = [5.0, 10.0, 15.0, 20.0, 30.0];
     let step = TimeStep {
@@ -1745,7 +1745,34 @@ fn a_part_over_the_end_of_a_step_that_changes_the_count_covers_the_answer_and_th
 }
 
 #[test]
-fn a_part_with_no_event_left_in_a_step_that_keeps_the_count_drops() {
+fn a_part_inside_a_step_that_keeps_the_count_in_a_new_order_covers_the_whole_answer() {
+    let old_times = [6.0, 8.0];
+    let old = events(&old_times.map(|time| time - 5.0));
+    // The step answers the two events of its region in reverse order, at half speed.
+    let answer = [
+        Event {
+            time: 0.5,
+            ..old[1].clone()
+        },
+        Event {
+            time: 1.5,
+            ..old[0].clone()
+        },
+    ];
+    let step = TimeStep {
+        start: 5.0,
+        region_end: 10.0,
+        shift: -2.5,
+        old_times: &old_times,
+        old: &old,
+        answer: &answer,
+        answered_end: 7.5,
+    };
+    assert_eq!(moved_parts(&[(6.0, 7.0)], &step), vec![(5.0, 7.5)]);
+}
+
+#[test]
+fn a_part_with_no_event_left_in_a_paired_step_drops() {
     let answer = [ev(0.1), ev(1.0)];
     let old_times = [5.5, 8.0];
     let step = TimeStep {
