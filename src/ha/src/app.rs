@@ -3045,6 +3045,7 @@ mod tests {
     /// An entry of the merge queue of `acme/widgets` for pull request `pull`.
     fn queue_entry(pull: u64) -> QueueEntry {
         QueueEntry {
+            merge_group_commit: None,
             repo: repo(),
             pull: PullNumber(pull),
             title: format!("pull {pull}"),

@@ -1473,6 +1473,7 @@ fn parse_entries(body: &str, repo: &RepoName) -> Result<Vec<QueueEntry>, SourceE
         .filter_map(|node| {
             let pull = node.pull_request?;
             Some(QueueEntry {
+                merge_group_commit: None,
                 repo: repo.clone(),
                 pull: PullNumber(pull.number),
                 title: pull.title,
@@ -4356,9 +4357,10 @@ mod tests {
     }
 
     const ENTRIES_JSON: &str = r#"{"data":{"repository":{"mergeQueue":{"entries":{"nodes":[
-        {"position":2,"state":"QUEUED","enqueuedAt":"2026-10-22T17:00:00Z",
+        {"position":2,"state":"QUEUED","enqueuedAt":"2026-10-22T17:00:00Z","headCommit":null,
          "pullRequest":{"number":17060,"title":"Second","url":"https://github.com/rust-lang/rust-clippy/pull/17060","headRefName":"second"}},
         {"position":1,"state":"AWAITING_CHECKS","enqueuedAt":"2026-10-22T16:57:18Z",
+         "headCommit":{"oid":"e8dc7f8f0a3c4b5d6e7f8091a2b3c4d5e6f70812"},
          "pullRequest":{"number":17051,"title":"First","url":"https://github.com/rust-lang/rust-clippy/pull/17051","headRefName":"target-feature-unsafety"}},
         null,
         {"position":3,"state":"MERGEABLE","enqueuedAt":"2026-10-22T17:01:00Z","pullRequest":null}]}}}}}"#;
@@ -4373,6 +4375,9 @@ mod tests {
             entries,
             [
                 QueueEntry {
+                    merge_group_commit: Some(CommitSha(
+                        "e8dc7f8f0a3c4b5d6e7f8091a2b3c4d5e6f70812".to_owned()
+                    )),
                     repo: clippy.clone(),
                     pull: PullNumber(17051),
                     title: "First".to_owned(),
@@ -4383,6 +4388,7 @@ mod tests {
                     url: "https://github.com/rust-lang/rust-clippy/pull/17051".to_owned(),
                 },
                 QueueEntry {
+                    merge_group_commit: None,
                     repo: clippy,
                     pull: PullNumber(17060),
                     title: "Second".to_owned(),
@@ -4402,6 +4408,7 @@ mod tests {
         let query = field(&requests[0], "query").expect("a query");
         assert!(query.contains("mergeQueue"), "{query}");
         assert!(query.contains("entries(first: 100)"), "{query}");
+        assert!(query.contains("headCommit { oid }"), "{query}");
     }
 
     #[test]

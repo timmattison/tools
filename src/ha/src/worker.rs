@@ -4561,6 +4561,7 @@ mod tests {
     /// An entry of the queue of `acme/a` for pull request `pull`.
     fn entry(pull: u64, branch: &str) -> QueueEntry {
         QueueEntry {
+            merge_group_commit: None,
             repo: repo("acme/a"),
             pull: PullNumber(pull),
             title: format!("pull {pull}"),

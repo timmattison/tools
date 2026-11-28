@@ -4402,6 +4402,7 @@ mod tests {
     /// `position`. It joined the queue `minutes` before `now()`.
     fn queue_entry(repo_text: &str, pull: u64, position: u32, minutes: i64) -> QueueEntry {
         QueueEntry {
+            merge_group_commit: None,
             repo: repo(repo_text),
             pull: PullNumber(pull),
             title: format!("pull {pull}"),

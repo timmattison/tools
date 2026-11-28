@@ -7875,6 +7875,7 @@ mod tests {
         enqueued: &str,
     ) -> QueueEntry {
         QueueEntry {
+            merge_group_commit: None,
             repo: repo("rust-lang/cargo"),
             pull: PullNumber(pull),
             title: title.to_owned(),
