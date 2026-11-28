@@ -14,7 +14,7 @@ use crate::preview::PreviewTheme;
 use crate::types::{Event, EventType, Recording, RecordingMetadata};
 use dioxus::html::SerializedFormData;
 use dioxus_core::{ElementId, Mutation};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use tokio::sync::oneshot;
 
@@ -401,6 +401,8 @@ struct Window {
     apply: Option<ElementId>,
     /// The Apply Redaction button, when a test noted it.
     redact: Option<ElementId>,
+    /// The Apply Color Scheme button, when a test noted it.
+    apply_color: Option<ElementId>,
     /// The Play and Pause button, when a test noted it.
     play: Option<ElementId>,
     /// The Stop button, when a test noted it.
@@ -427,6 +429,7 @@ impl Window {
             newest_listeners: BTreeMap::new(),
             apply: None,
             redact: None,
+            apply_color: None,
             play: None,
             stop: None,
             zoom_in: None,
@@ -614,29 +617,43 @@ impl Window {
         !event.default_action_enabled()
     }
 
-    /// The theme menu of the preview toolbar. The open render makes two
-    /// `change` listeners: the kind select of the export bar and this menu.
-    fn theme_menu(&self) -> ElementId {
+    /// The change listeners that the open render created beside the kind
+    /// select of the export bar, in creation order: the five menus of the
+    /// color scheme panel, then the theme menu of the preview toolbar. The
+    /// properties panel mounts before the preview toolbar. The menus of the
+    /// redaction panel take input listeners, so `open_inputs` holds them.
+    fn open_changes(&self) -> [ElementId; 6] {
         let kind = self.kind_select();
         let others: Vec<ElementId> = self.listeners["change"]
             .iter()
             .copied()
             .filter(|id| *id != kind)
             .collect();
-        let [theme] = others[..] else {
-            panic!("the page has the change listeners {others:?} beside the kind select")
-        };
-        theme
+        others.try_into().unwrap_or_else(|ids: Vec<ElementId>| {
+            panic!("the page has the menus {ids:?} beside the kind select")
+        })
+    }
+
+    /// The theme menu of the preview toolbar.
+    fn theme_menu(&self) -> ElementId {
+        self.open_changes()[5]
+    }
+
+    /// The five menus of the color scheme panel, in page order: the target
+    /// theme, the default colors, the cube, the grayscale, and the truecolor.
+    fn color_menus(&self) -> [ElementId; 5] {
+        let [theme, colors, cube, grayscale, truecolor, _] = self.open_changes();
+        [theme, colors, cube, grayscale, truecolor]
     }
 
     /// The input listeners that the open render created, in creation order:
     /// the Start, End, and Speed fields of the speed panel, then the Find,
     /// Pattern, Replace with, Replacement text, and Events fields of the
-    /// redaction panel, then the playhead control of the timeline. The
-    /// properties panel mounts before the timeline, so the playhead is the
-    /// last one. An export bar that shows no video settings has no `input`
-    /// listener.
-    fn open_inputs(&self) -> [ElementId; 9] {
+    /// redaction panel, then the Start and End fields of the color scheme
+    /// panel, then the playhead control of the timeline. The properties panel
+    /// mounts before the timeline, so the playhead is the last one. An export
+    /// bar that shows no video settings has no `input` listener.
+    fn open_inputs(&self) -> [ElementId; 11] {
         self.listeners
             .get("input")
             .cloned()
@@ -654,8 +671,14 @@ impl Window {
     /// The Find, Pattern, Replace with, Replacement text, and Events fields,
     /// in this order.
     fn redaction_fields(&self) -> [ElementId; 5] {
-        let [_, _, _, find, pattern, replace, replacement, events, _] = self.open_inputs();
+        let [_, _, _, find, pattern, replace, replacement, events, ..] = self.open_inputs();
         [find, pattern, replace, replacement, events]
+    }
+
+    /// The Start and End fields of the color scheme panel, in this order.
+    fn color_fields(&self) -> [ElementId; 2] {
+        let [.., start, end, _] = self.open_inputs();
+        [start, end]
     }
 
     /// The playhead control of the timeline.
@@ -688,12 +711,13 @@ impl Window {
         self.click(self.redact_button());
     }
 
-    /// Notes the seven click listeners that the render of an open recording
+    /// Notes the eight click listeners that the render of an open recording
     /// created beside the Export button of the export bar. The render creates
-    /// them in this order: Apply Speed, Apply Redaction, the Zoom out, Zoom
-    /// in, and Fit buttons of the timeline, Play, Stop. The properties panel
-    /// mounts before the timeline, and the timeline before the preview
-    /// toolbar. The speed panel comes before the redaction panel, and the Play
+    /// them in this order: Apply Speed, Apply Redaction, Apply Color Scheme,
+    /// the Zoom out, Zoom in, and Fit buttons of the timeline, Play, Stop. The
+    /// properties panel mounts before the timeline, and the timeline before
+    /// the preview toolbar. The speed panel comes before the redaction panel,
+    /// the redaction panel comes before the color scheme panel, and the Play
     /// button comes before the Stop button.
     fn note_open_buttons(&mut self) {
         let export = self.export_button();
@@ -703,11 +727,12 @@ impl Window {
             .copied()
             .filter(|id| *id != export)
             .collect();
-        let [apply, redact, _, zoom_in, _, play, stop] = buttons[..] else {
+        let [apply, redact, apply_color, _, zoom_in, _, play, stop] = buttons[..] else {
             panic!("the open render made {:?}", self.newest)
         };
         self.apply = Some(apply);
         self.redact = Some(redact);
+        self.apply_color = Some(apply_color);
         self.zoom_in = Some(zoom_in);
         self.play = Some(play);
         self.stop = Some(stop);
@@ -716,6 +741,11 @@ impl Window {
     /// The Apply Speed button. `open_recording` noted it.
     fn apply_button(&self) -> ElementId {
         self.apply.expect("a window with an open recording")
+    }
+
+    /// The Apply Color Scheme button. `open_recording` noted it.
+    fn apply_color_button(&self) -> ElementId {
+        self.apply_color.expect("a window with an open recording")
     }
 
     /// The Play and Pause button. `open_recording` noted it.
@@ -762,6 +792,19 @@ impl Window {
         self.type_into(end_field, end);
         self.type_into(speed_field, speed);
         self.click(self.apply_button());
+    }
+
+    /// Fills the two fields, chooses the five menus, and clicks Apply Color
+    /// Scheme. `menus` holds the values of the theme, the default colors, the
+    /// cube, the grayscale, and the truecolor menus, in this order.
+    fn apply_color_scheme(&mut self, start: &str, end: &str, menus: [&str; 5]) {
+        let [start_field, end_field] = self.color_fields();
+        self.type_into(start_field, start);
+        self.type_into(end_field, end);
+        for (menu, value) in self.color_menus().into_iter().zip(menus) {
+            self.choose(menu, value);
+        }
+        self.click(self.apply_color_button());
     }
 
     /// Runs the tasks of the app until they have no more work, and renders
@@ -836,6 +879,54 @@ fn app_renders_the_style_sheet_first() {
             .is_some_and(|at| at < page.find("menu-bar\"").unwrap_or(0)),
         "{page}"
     );
+}
+
+/// Each selector of each rule of the style sheet, with its spaces made single.
+/// The text of a comment is not a selector.
+fn each_style_selector() -> BTreeSet<String> {
+    let uncommented: String = STYLE
+        .split("/*")
+        .enumerate()
+        .map(|(at, part)| match at {
+            0 => part,
+            _ => part.split_once("*/").map_or("", |(_, after)| after),
+        })
+        .collect();
+    uncommented
+        .split('}')
+        .filter_map(|rule| rule.split_once('{').map(|(selectors, _)| selectors))
+        .flat_map(|selectors| selectors.split(','))
+        .map(|selector| selector.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|selector| !selector.is_empty())
+        .collect()
+}
+
+/// A field of a panel that holds an input or a menu gets a rule of the style
+/// sheet for that control. Else the control shows the default white style of
+/// the webview.
+#[tokio::test]
+async fn each_control_of_a_field_has_a_rule_of_the_style_sheet() {
+    let page = open_recording().await.html();
+    let selectors = each_style_selector();
+    let mut controls = 0;
+    let mut unstyled = Vec::new();
+    for label in page.split("<label class=\"").skip(1) {
+        let (class, rest) = label.split_once('"').expect("a closed class attribute");
+        let body = rest.split_once("</label>").map_or(rest, |(body, _)| body);
+        for control in ["input", "select"] {
+            if body.contains(&format!("<{control}")) {
+                controls += 1;
+                let styled = class
+                    .split_whitespace()
+                    .any(|one| selectors.contains(&format!(".{one} {control}")));
+                if !styled {
+                    unstyled.push(format!(".{class} {control}"));
+                }
+            }
+        }
+    }
+    assert!(controls > 0, "no field holds a control in {page}");
+    assert!(unstyled.is_empty(), "no rule for {unstyled:?}");
 }
 
 #[test]
@@ -1474,14 +1565,14 @@ fn edited_row(text: &str) -> String {
     metadata_row("Edited duration", text, None)
 }
 
-/// Opens the fixture recording through the fakes, and notes the four click
+/// Opens the fixture recording through the fakes, and notes the click
 /// listeners that the open render creates beside the Export button
 /// (`Window::note_open_buttons`).
 async fn open_recording() -> Window {
     open_loaded(fixture()).await
 }
 
-/// Opens `loaded` through the fakes, and notes the four click listeners as
+/// Opens `loaded` through the fakes, and notes the click listeners as
 /// `open_recording` does.
 async fn open_loaded(loaded: LoadedRecording) -> Window {
     let fakes = Fakes::new().pick(picked()).load(Answer::Ready(Ok(loaded)));
@@ -2132,8 +2223,8 @@ fn theme_option(choice: PreviewTheme, selected: bool) -> String {
 async fn the_theme_menu_lists_the_five_themes() {
     let window = open_recording().await;
     let page = window.html();
-    // The redaction panel has menus of its own, so the test reads only the
-    // label of the theme menu.
+    // The redaction panel and the color scheme panel have menus of their own,
+    // so the test reads only the label of the theme menu.
     let theme = text_between(&page, "<label class=\"preview-theme\">", "</label>");
     assert!(theme.starts_with("Theme<select"), "{theme}");
     assert_eq!(theme.matches("<select").count(), 1, "{theme}");
@@ -2374,6 +2465,161 @@ fn the_style_sheet_fits_the_grid_to_the_pane() {
     );
 }
 
+#[tokio::test]
+async fn the_color_scheme_panel_shows_its_fields_and_menus() {
+    let window = open_recording().await;
+    let page = window.html();
+    for text in [
+        "Color Scheme",
+        "Times are in seconds, on the timeline after the filters above. Leave both times empty for the whole timeline.",
+        "Start (s)",
+        "End (s)",
+        "Target theme",
+        "Default colors",
+        "Color cube (16-231)",
+        "Grayscale (232-255)",
+        "Truecolor",
+        "Auto",
+        "Dracula",
+        "Monokai",
+        "Solarized Dark",
+        "Solarized Light",
+        "As in the theme",
+        "Swapped",
+        "Keep",
+        "Nearest theme color",
+        "Invert",
+        "Invert lightness",
+        "Apply Color Scheme",
+    ] {
+        assert!(page.contains(text), "{text} missing in {page}");
+    }
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+/// The page markup of the row of a color scheme filter.
+fn color_row(text: &str) -> String {
+    format!("<span>{text}</span>")
+}
+
+/// The menu values of a color scheme with every option at its default.
+const DEFAULT_MENUS_WITH_LIGHT: [&str; 5] = ["solarized-light", "theme", "keep", "keep", "keep"];
+
+#[tokio::test]
+async fn applying_a_color_scheme_adds_a_row_and_recolors_the_preview() {
+    let mut window = open_recording().await;
+    let control = window.playhead_control();
+    window.type_into(control, "1.0");
+
+    window.apply_color_scheme("", "", DEFAULT_MENUS_WITH_LIGHT);
+
+    let page = window.html();
+    assert!(
+        page.contains(&color_row("the whole timeline: Solarized Light")),
+        "{page}"
+    );
+    assert!(!page.contains("role=\"alert\""), "{page}");
+    assert!(
+        page.contains("class=\"preview-screen\" style=\"background-color:#fdf6e3\""),
+        "{page}"
+    );
+}
+
+#[tokio::test]
+async fn the_color_scheme_panel_starts_at_the_default_of_each_menu() {
+    let mut window = open_recording().await;
+    let [start, end] = window.color_fields();
+    window.type_into(start, "1");
+    window.type_into(end, "2");
+
+    window.click(window.apply_color_button());
+
+    let page = window.html();
+    assert!(page.contains(&color_row("1 s to 2 s: Auto")), "{page}");
+}
+
+#[tokio::test]
+async fn a_row_names_each_option_that_is_not_the_default() {
+    let mut window = open_recording().await;
+
+    window.apply_color_scheme(
+        "10",
+        "20",
+        [
+            "dracula",
+            "swapped",
+            "nearest",
+            "invert",
+            "invert-lightness",
+        ],
+    );
+
+    let page = window.html();
+    assert!(
+        page.contains(&color_row(
+            "10 s to 20 s: Dracula, swapped colors, nearest cube colors, \
+             inverted grayscale, inverted truecolor lightness"
+        )),
+        "{page}"
+    );
+    assert!(!page.contains("role=\"alert\""), "{page}");
+}
+
+#[tokio::test]
+async fn removing_a_color_scheme_row_restores_the_theme_background() {
+    let mut window = open_recording().await;
+    let control = window.playhead_control();
+    window.type_into(control, "1.0");
+    window.apply_color_scheme("", "", DEFAULT_MENUS_WITH_LIGHT);
+    assert!(window.html().contains("background-color:#fdf6e3"));
+
+    window.click(window.remove_button());
+
+    let page = window.html();
+    assert!(!page.contains("Solarized Light</span>"), "{page}");
+    assert!(!page.contains("background-color:#fdf6e3"), "{page}");
+    assert!(
+        page.contains("class=\"preview-screen\" style=\"background-color:#000000\""),
+        "{page}"
+    );
+}
+
+#[tokio::test]
+async fn a_bad_color_scheme_range_shows_the_reason_and_adds_no_row() {
+    let cases = [
+        (("abc", "20"), "the start is not a number"),
+        (("10", ""), "the end is not a number"),
+        (("10", "5"), "the end must come after the start"),
+        (("-1", "20"), "Invalid time: -1"),
+    ];
+    for ((start, end), reason) in cases {
+        let mut window = open_recording().await;
+        window.apply_color_scheme(start, end, DEFAULT_MENUS_WITH_LIGHT);
+        let page = window.html();
+        let banner = format!("Failed to change the color scheme: {reason}");
+        assert!(page.contains(&banner), "{banner} missing in {page}");
+        assert!(!page.contains("class=\"color-scheme-row\""), "{page}");
+    }
+}
+
+#[tokio::test]
+async fn a_speed_row_and_a_color_scheme_row_keep_their_own_remove() {
+    let mut window = open_recording().await;
+    window.apply_speed("10", "20", "2");
+    let remove_speed = window.remove_button();
+    window.apply_color_scheme("", "", DEFAULT_MENUS_WITH_LIGHT);
+    let remove_color = window.remove_button();
+
+    window.click(remove_color);
+    let page = window.html();
+    assert!(page.contains(&speed_row("10 s to 20 s", "2")), "{page}");
+    assert!(!page.contains("Solarized Light</span>"), "{page}");
+
+    window.click(remove_speed);
+    let page = window.html();
+    assert!(!page.contains(" at 2\u{d7}"), "{page}");
+}
+
 // The Undo and Redo buttons of the menu bar.
 
 /// The page markup of a run of `count` asterisks: the run ends at the cursor.
@@ -2581,13 +2827,23 @@ const REDO_KEYS: Press = Press {
 };
 
 impl Window {
-    /// The Start, End, and Speed fields of the speed panel, and the Pattern and
-    /// Replacement text fields of the redaction panel. The two text fields of
-    /// the export bar show only for a video kind, thus `video_fields` gives them.
-    fn text_fields(&self) -> [ElementId; 5] {
+    /// The Start, End, and Speed fields of the speed panel, the Pattern and
+    /// Replacement text fields of the redaction panel, and the Start and End
+    /// fields of the color scheme panel. The two text fields of the export bar
+    /// show only for a video kind, thus `video_fields` gives them.
+    fn text_fields(&self) -> [ElementId; 7] {
         let [start, end, speed] = self.speed_fields();
         let [_, pattern, _, replacement, _] = self.redaction_fields();
-        [start, end, speed, pattern, replacement]
+        let [color_start, color_end] = self.color_fields();
+        [
+            start,
+            end,
+            speed,
+            pattern,
+            replacement,
+            color_start,
+            color_end,
+        ]
     }
 
     /// Elements that have the focus in turn and are not text fields: the

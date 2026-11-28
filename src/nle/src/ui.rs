@@ -4,9 +4,10 @@
 //! regions of the window: the menu bar, the preview pane, the timeline, and
 //! the properties panel. The menu bar holds the Open Recording button, the
 //! Undo button and the Redo button of the `history` module, and the export bar
-//! of the `export` module. The open document lives in the state of
-//! `App`: the `Editor` of its project, and the metadata of the recording file
-//! that it came from.
+//! of the `export` module. The properties panel holds the metadata of the
+//! recording, the speed panel, the redaction panel, and the color scheme panel.
+//! The open document lives in the state of `App`: the `Editor` of its project,
+//! and the metadata of the recording file that it came from.
 //!
 //! `App` also owns one `busy` signal. It is true from a click on Open Recording
 //! or Export until its dialog and its work end, and it disables both buttons.
@@ -32,12 +33,14 @@ use crate::format::{file_name, format_duration, format_recorded};
 use crate::types::{LoadedRecording, RecordingMetadata};
 use export::SaveDialog;
 
+mod color_scheme;
 mod history;
 use history::{
     keep_keys_in_field, key_forwarder, step_history, window_shortcut, HistoryButtons, HistoryStep,
 };
 
 mod preview;
+use color_scheme::ColorSchemePanel;
 use preview::{end_of, render_of, PreviewPane, RenderedState};
 mod timeline;
 use timeline::TimelineView;
@@ -499,9 +502,9 @@ fn summary(open: &Document) -> String {
     )
 }
 
-/// The metadata of the open recording, the speed panel, and the redaction
-/// panel. `on_result` gets the outcome of each edit: `Ok`, or the message of
-/// the banner.
+/// The metadata of the open recording, the speed panel, the redaction panel,
+/// and the color scheme panel. `on_result` gets the outcome of each edit: `Ok`,
+/// or the message of the banner.
 #[component]
 fn PropertiesPanel(
     loaded: Signal<Option<Document>>,
@@ -515,6 +518,7 @@ fn PropertiesPanel(
                 {metadata_rows(&metadata)}
                 SpeedPanel { loaded, on_result }
                 RedactionPanel { loaded, on_result }
+                ColorSchemePanel { loaded, on_result }
             } else {
                 div { class: "placeholder", "No recording loaded" }
             }
@@ -695,8 +699,8 @@ fn edit_document(
 }
 
 /// Sends the outcome of an edit to `on_result`: `Ok` for an edit that applied,
-/// or the message of the banner for an edit that did not. The message starts
-/// with `prefix`.
+/// or the message of the banner for an edit that did not. The message is
+/// `prefix`, a colon, and the reason.
 fn report(on_result: EventHandler<Result<(), String>>, prefix: &str, outcome: Result<(), String>) {
     on_result.call(outcome.map_err(|reason| format!("{prefix}: {reason}")));
 }
@@ -760,35 +764,44 @@ fn speed_rows(document: &Option<Document>) -> Vec<(usize, String)> {
         .enumerate()
         .filter_map(|(index, filter)| {
             let speed = time_dilation::speed_of(filter)?;
-            let region = match filter.region {
-                FilterRegion::All => WHOLE_TIMELINE.to_owned(),
-                // The seconds as the fields take them, so no two regions share a row text.
-                FilterRegion::Range { start, end } => {
-                    format!("{} s to {} s", start.get(), end.get())
-                }
-            };
+            let region = region_text(&filter.region);
             Some((index, format!("{region} at {}\u{d7}", speed.get())))
         })
         .collect()
+}
+
+/// The text of a region in a row of a panel: the whole timeline, or the start
+/// and the end in seconds as the fields take them. Thus no two regions share a
+/// row text.
+fn region_text(region: &FilterRegion) -> String {
+    match region {
+        FilterRegion::All => WHOLE_TIMELINE.to_owned(),
+        FilterRegion::Range { start, end } => format!("{} s to {} s", start.get(), end.get()),
+    }
+}
+
+/// Reads the start and the end fields of a panel as a range of the timeline in
+/// seconds. The answer is the region, or the reason why the fields do not make
+/// one.
+fn range_from(start: &str, end: &str) -> Result<FilterRegion, String> {
+    let start: f64 = start.trim().parse().map_err(|_| START_NOT_A_NUMBER)?;
+    let end: f64 = end.trim().parse().map_err(|_| END_NOT_A_NUMBER)?;
+    let start = Seconds::new(start).map_err(|error| error.to_string())?;
+    let end = Seconds::new(end).map_err(|error| error.to_string())?;
+    if f64::from(end) <= f64::from(start) {
+        return Err(END_BEFORE_START.to_owned());
+    }
+    Ok(FilterRegion::Range { start, end })
 }
 
 /// Reads the three fields of the speed panel: the start and the end of a
 /// region in seconds, and a speed. The answer is the filter to add, or the
 /// reason why the fields do not make one.
 fn speed_change(start: &str, end: &str, speed: &str) -> Result<AppliedFilter, String> {
-    let start: f64 = start.trim().parse().map_err(|_| START_NOT_A_NUMBER)?;
-    let end: f64 = end.trim().parse().map_err(|_| END_NOT_A_NUMBER)?;
+    let region = range_from(start, end)?;
     let speed: f64 = speed.trim().parse().map_err(|_| SPEED_NOT_A_NUMBER)?;
-    let start = Seconds::new(start).map_err(|error| error.to_string())?;
-    let end = Seconds::new(end).map_err(|error| error.to_string())?;
-    if f64::from(end) <= f64::from(start) {
-        return Err(END_BEFORE_START.to_owned());
-    }
     let speed = Speed::new(speed).map_err(|error| error.to_string())?;
-    Ok(time_dilation::applied(
-        FilterRegion::Range { start, end },
-        speed,
-    ))
+    Ok(time_dilation::applied(region, speed))
 }
 
 /// One row for each redaction filter of the project: the index of the filter

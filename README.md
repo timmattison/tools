@@ -6309,6 +6309,13 @@ sequences:
 
 The timeline does not show where the redactions are yet (issue #818).
 
+The color scheme panel under the redaction panel plays the recording in the
+colors of another theme. Pick a **Target theme** and the options, then click
+**Apply Color Scheme**. Leave both times empty for the whole timeline, or type
+the start and the end of a range in seconds. Each color scheme gets a row with
+a **Remove** button. See [The color scheme filter](#the-color-scheme-filter)
+for the options.
+
 **Undo** and **Redo** in the menu bar take back the last edit of the project
 and apply it again, for example a speed change, a redaction, or the removal of
 a row. The keys are Cmd+Z and Cmd+Shift+Z on macOS, and Ctrl+Z and
@@ -6346,11 +6353,15 @@ The editing engine of the crate has five parts:
   A later span filter gets that size, and the rendered recording has the size
   that the last screen filter gives. `FilterRegistry::run` has no header, so a
   screen filter fails there.
-  `filters::registry()` holds the filters that ship. The cursor filter is an
-  in-place filter, the viewport filter is a screen filter, and each other one
-  is a span filter:
+  `filters::registry()` holds the filters that ship. The cursor filter and the
+  color scheme filter are in-place filters, the viewport filter is a screen
+  filter, and each other one is a span filter:
   - `cursor` (`visibility`, `shape`, `blink`, `color`, issue #168): sets how
     the cursor looks. [The cursor filter](#the-cursor-filter) below gives its
+    options.
+  - `color-scheme` (`theme`, `swap`, `cube`, `grayscale`, `truecolor`, issue
+    #166): plays its region in the colors of another theme.
+    [The color scheme filter](#the-color-scheme-filter) below gives its
     options.
   - `time-dilation` (`speed`, issue #153): plays its region faster or slower.
   - `redaction` (`find`, `replace`, `input`, issue #156): replaces text in the
@@ -6379,8 +6390,12 @@ The editing engine of the crate has five parts:
   The filters of issue #154 parse their options as a Rust type, so the render
   refuses a missing option, a value of the wrong type, and a key that the
   filter does not know. The window cannot add them yet. Issue #804 adds the
-  click on the timeline that places a pause. Issues #157 to #167 add more
-  filters.
+  click on the timeline that places a pause. Issues #157 to #165 and #167 add
+  more filters.
+
+  The two in-place filters read the escape sequences with one reader, and one
+  splicer (`filters/splice.rs`) puts each rewritten sequence back into the
+  event where it ends.
 - **Render**: the registry flattens a project into one `beta` recording.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
@@ -6440,6 +6455,54 @@ the state of the recording back at the end. The filter sees only its range,
 thus it takes the state before the range to be the default of a terminal: a
 visible cursor, DECSCUSR 0, and the default color. After a reset of the
 terminal (RIS or DECSTR) in the recording, the filter sets the cursor again.
+
+### The color scheme filter
+
+The `color-scheme` filter plays a recording in the colors of another theme.
+For example, it plays a recording made in Dracula in the colors of Solarized
+Light. It rewrites the SGR color parameters in the output events, and it sets
+the default foreground and background of the theme through OSC 10 and OSC 11.
+The events keep their times. Thus the preview, `beta play`, and the web and
+video exports of `beta` show the colors of the theme, with each `--theme`.
+
+The color scheme panel adds the filter. A project file names it in its
+`filters` list:
+
+```json
+{
+  "kind": "color-scheme",
+  "region": "All",
+  "options": { "theme": "solarized-light", "swap": false, "cube": "nearest", "grayscale": "invert", "truecolor": "invert-lightness" }
+}
+```
+
+| Option | Values | What it does |
+|---|---|---|
+| `theme` | `auto`, `dracula`, `monokai`, `solarized-dark`, `solarized-light` | Necessary. The 16 base colors (`30`-`37`, `40`-`47`, `90`-`97`, `100`-`107`, and `38;5;n`, `48;5;n`, `58;5;n` with n below 16) become the 24-bit colors of this theme. The default foreground and background become the colors of this theme. These are the palettes of `beta export --theme`. |
+| `swap` | `true`, `false` (the default) | `true` swaps the default foreground and the default background of the theme. The panel calls it **Default colors**. |
+| `cube` | `keep` (the default), `nearest` | For the 6x6x6 cube, the indexes 16 to 231. `nearest` gives the nearest of the 16 colors of the theme, by the distance in RGB. |
+| `grayscale` | `keep` (the default), `invert` | For the grayscale ramp, the indexes 232 to 255. `invert` swaps the ends of the ramp, thus 232 becomes 255. Use it for a change between a dark and a light theme. |
+| `truecolor` | `keep` (the default), `invert-lightness` | For a 24-bit color. `invert-lightness` changes the lightness L of the color to 1 - L, and it keeps the hue and the saturation. Use it for a change between a dark and a light theme. |
+
+An unknown key or value fails the render, and the message names it. The filter
+also reads the colon form of a color (`38:2::r:g:b`), and it writes each new
+color in the semicolon form, which the emulator of `termstate` reads. It drops
+each default color that the recording sets: OSC 10, OSC 11, OSC 110, OSC 111,
+and the default-color values of an OSC 10 or 11 list. After a reset of the
+terminal (RIS) in the recording, it sets the default colors of the theme
+again.
+
+At the end of a range that does not reach the end of the timeline, the filter
+writes OSC 110, then the default foreground that the recording set, then OSC
+111, then the default background that the recording set, and then the SGR
+colors that the recording set inside the range. A soft reset of the terminal
+(DECSTR) in the range clears those SGR colors, and it keeps the default colors.
+Thus the text after the range has the colors of the recording. The filter sees
+only its range, thus a color that the recording set before the start of the
+range stays as the recording wrote it, until the next SGR in the range. The
+filter does not read OSC 4. A terminal that shows bold text in the bright colors
+does not do so for a converted base color, because that color is a 24-bit
+color.
 
 ### The viewport filter
 

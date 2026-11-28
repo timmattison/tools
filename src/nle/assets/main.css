@@ -402,19 +402,22 @@ h3 {
 }
 
 .speed-panel,
-.redaction-panel {
+.redaction-panel,
+.color-scheme-panel {
   margin-top: 16px;
 }
 
 .speed-hint,
-.redaction-hint {
+.redaction-hint,
+.color-scheme-hint {
   color: #6c7086;
   font-size: 12px;
   margin-bottom: 8px;
 }
 
 .speed-field,
-.redaction-field {
+.redaction-field,
+.color-scheme-field {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -425,7 +428,9 @@ h3 {
 
 .speed-field input,
 .redaction-field input,
-.redaction-field select {
+.redaction-field select,
+.color-scheme-field input,
+.color-scheme-field select {
   width: 100%;
   background: #1e1e2e;
   color: #cdd6f4;
@@ -436,7 +441,8 @@ h3 {
 }
 
 .speed-row,
-.redaction-row {
+.redaction-row,
+.color-scheme-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
