@@ -551,12 +551,14 @@ fn a_screen_with_no_cell_or_too_many_cells_fails_the_filter() {
 #[test]
 fn events_out_of_time_order_replay_in_time_order() {
     let filter = applied(FilterRegion::All, settings());
+    // In time order, the redraw at 5 s writes the first cell and the output
+    // at 10 s writes the second cell. Out of time order, the redraw writes
+    // the cell that the output at 10 s wrote, and changes no cell.
+    let events = vec![output(10.0, "x"), output(5.0, "\x1b[1;1Hx")];
 
-    let out = filters::registry()
-        .run(vec![output(10.0, "b"), output(0.0, "a")], &[filter])
-        .unwrap();
+    let out = filters::registry().run(events, &[filter]).unwrap();
 
-    assert_eq!(times(&out), vec![0.0, 1.0]);
+    assert_eq!(times(&out), vec![1.0, 2.0]);
 }
 
 #[test]
