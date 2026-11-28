@@ -6633,7 +6633,36 @@ The playhead control above the tracks is in the time of the edited recording,
 after the filters. Thus a filter that changes the speed moves the playhead
 away from the time of the ruler.
 
-The speed panel under the metadata changes the speed of a region. Type the
+**Add Recording** in the menu bar puts one more recording into the open
+project, for example a second take, a step of a tutorial that you recorded
+alone, or an intro. The recording becomes one clip of the whole recording,
+after the end of the timeline, on the first track. **Open Recording** still
+starts a new project. One **Undo** removes an added recording.
+
+The edited recording plays the clips in the order of their start on the
+timeline:
+
+- Each clip after the first starts with a hard cut. The cut resets the colors
+  and the scroll region, clears the screen, and moves the cursor home, so no
+  output of one clip stays under the next clip.
+- When two clips overlap, for example on two tracks, the later start wins. The
+  start of a clip ends each clip that still plays, and the rest of the earlier
+  clip does not play.
+- The edited recording has the largest width and the largest height of its
+  clips. A smaller clip draws at the top left, and a clip with fewer rows
+  scrolls in its own rows. A narrower clip does not wrap at its own width. The
+  timeline then shows a warning that names the padded size.
+- A clip that starts after the beginning of its recording shows only the
+  changes after its start. Issue #840 repaints the screen of such a clip at a
+  cut, and adds a fade transition.
+
+The clip list under the metadata shows the clips of each track in their play
+order, with the title and the length of each one. **Move Earlier** and
+**Move Later** move a clip one place. The clips of the track then play back to
+back, from the start of the first clip of the track, and one **Undo** puts the
+order back. Issue #841 adds a drag on the timeline that reorders the clips.
+
+The speed panel under the clip list changes the speed of a region. Type the
 start and the end of the region in seconds and a speed, then click
 **Apply Speed**. A speed of 2 plays the region twice as fast, and 0.5 plays it
 at half speed. Each later event moves by the change in the length of the
@@ -6709,8 +6738,8 @@ The editing engine of the crate has five parts:
   span filter (`register_span`) also gets the length of its region and answers
   a new length, and the later events move by the change in the length. A span
   filter also gets the events before and after its region and the size of the
-  terminal: the size of the clip that starts first, or 80 by 24 in
-  `FilterRegistry::run`.
+  terminal: the largest width and the largest height of the clips, or 80 by 24
+  in `FilterRegistry::run`.
   `filters::registry()` holds the filters that ship. The cursor filter is an
   in-place filter, and each other one is a span filter:
   - `cursor` (`visibility`, `shape`, `blink`, `color`, issue #168): sets how
@@ -6742,7 +6771,9 @@ The editing engine of the crate has five parts:
   filter does not know. The window cannot add them yet. Issue #804 adds the
   click on the timeline that places a pause. Issues #157 to #167 add more
   filters.
-- **Render**: the registry flattens a project into one `beta` recording.
+- **Render**: the registry flattens a project into one `beta` recording. It
+  splices the clips by the rules above: the play order, the hard cut, the
+  later start that wins, and the padded size.
 - **Edits and history** (`Editor`): each change of a project is an `Edit`. The
   editor refuses an edit that breaks a rule of the project, and it keeps an
   undo and redo history. The Undo and Redo controls of the window step
