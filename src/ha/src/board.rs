@@ -2612,7 +2612,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_url_is_the_url_of_the_selected_run() {
+    fn selected_link_is_the_url_of_the_selected_run() {
         let mut board = four_runs_in_two_sections();
         assert_eq!(
             board.selected_link(now()).map(|link| link.url).as_deref(),
@@ -4425,7 +4425,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_url_on_a_job_row_is_the_url_of_the_job() {
+    fn selected_link_on_a_job_row_is_the_url_of_the_job() {
         let mut board = two_run_board();
         board.expand(now());
         board.set_jobs(
@@ -4451,7 +4451,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_url_on_a_job_row_without_a_url_is_the_url_of_the_run() {
+    fn selected_link_on_a_job_row_without_a_url_is_the_url_of_the_run() {
         let mut board = two_run_board();
         select_job(&mut board, &[(11, "a")], 0);
         assert_eq!(selected_text(&mut board).as_deref(), Some("LastJob(11)*"));
