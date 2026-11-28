@@ -2361,7 +2361,8 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
     It shows how much runner time the run used. The `TIME` column shows the wall-clock time of
     the run. A run with two parallel jobs of 15 minutes shows `15m 00s` under `TIME` and
     `30m 00s` under `JOB SUM`. Thus you can find the runs that use many runners in parallel,
-    and how much runner time a change costs.
+    and how much runner time a change costs. An active run row can show an estimate of the time
+    until the run finishes in place of its sum, as a later item tells.
     - The time of one job is the time that its job row shows after the job starts: from its
       start to its finish, or to now while it runs. Thus the sum of an active run increases
       each second. A job that waits for a runner or for an approval (`⏳`) adds nothing, because
@@ -2401,6 +2402,31 @@ cannot hang the caller. Used by `cwt`, `drun`, `gsw`, and `ha`.
       - The estimate needs no more request to GitHub. It reads the jobs that `ha` already loads
         for the job sum. `ha` keeps no history after it stops. Thus after a start, the
         estimates fill in over the first refreshes, as the jobs of the recent runs load.
+    - An active run row shows an estimate of the time until the run finishes, in place of its
+      sum. It uses the same signs and the same text as a job row, with one more sign:
+      - `~9m 00s` means that the run finishes in about 9 minutes.
+      - `>12m` means that the run finishes in 12 minutes or more. The latest end comes from a
+        job that waits for a runner or for an approval. The start of that job is unknown, and
+        an approval can take hours.
+      - `+30s` means that the run is 30 seconds past its estimate.
+      - Each job of the run gives a time when the run can finish. A job that passed gives its
+        end. A job that runs gives the end of its estimate, or now when it is past its estimate.
+        A job that waits gives now plus the mean time of its name on any runner. Each of these
+        times then adds the tail of the job name. The latest time is the estimate.
+      - The tail of a job name is the mean time from the end of that job to the end of its run,
+        in the newest 5 passed runs of the same repository and workflow in the window. The end
+        of a run is the end of its last job. Thus the tail holds the time of each job that runs
+        after the job. This includes a job that GitHub did not create yet, for example a job
+        that `needs:` a job that still runs.
+      - A failed, cancelled, or skipped job of the active run does not change the estimate.
+      - The run row keeps its sum when a running job shows a blank cell on its job row, when a
+        waiting job has no passed match on any runner, and when a job name has no tail. It keeps
+        its sum when no job passed, runs, or waits, for example when each job failed, was
+        cancelled, or was skipped. It also keeps its sum before its jobs load, and after the run
+        finishes.
+      - A past run on a different branch can skip jobs that this run does not skip. Its tails
+        then mix two shapes of the run. In the estimate, a job that waits starts now, because
+        `ha` does not estimate when a runner gets free.
     - A finished run can show a `JOB SUM` smaller than its `TIME`, also when its jobs ran in
       parallel. The `TIME` cell of a finished run ends at the last update of the run, and GitHub
       sometimes makes that update some minutes after the last job finished.
