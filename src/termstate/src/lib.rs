@@ -1207,9 +1207,11 @@ impl TerminalState {
         self.saved[usize::from(self.alt_screen)] = self.cursor_state();
     }
 
-    /// Restores the cursor state from the slot of the current screen.
+    /// Restores the cursor state from the slot of the current screen. A
+    /// restore moves the cursor, thus it ends a pending wrap.
     fn restore_cursor(&mut self) {
         self.restores = self.restores.wrapping_add(1);
+        self.wrap_pending = false;
         // A destructure, so that a new field fails to compile until the
         // restore names it.
         let SavedCursor {
@@ -1872,7 +1874,6 @@ impl TerminalState {
                             }
                             25 => self.cursor_visible = false,
                             1049 => {
-                                self.wrap_pending = false;
                                 // Switch to the normal screen, then restore its slot
                                 self.alt_screen = false;
                                 self.restore_cursor();
