@@ -161,4 +161,4 @@ This utility is designed to work on:
 
 ## Note
 
-The clipboard needs a graphical session or a mosh-rs session. In a mosh-rs session (`MOSH_OPEN_SOCKET` is set), the tool writes through the `pbcopy` shim and never opens the native clipboard. In a mosh-rs session, the data goes to the clipboard of your client computer, through the `pbcopy` shim that the mosh-rs server puts on `PATH`. Outside a mosh-rs session, the tool uses the native clipboard first. If the native clipboard fails, the tool runs `pbcopy` from `PATH`. A headless environment, such as CI, has none of these routes. In that case, use the `--dry-run` flag.
+The clipboard needs a graphical session or a mosh-rs session. In a mosh-rs session (`MOSH_OPEN_SOCKET` is set), the tool writes through the `pbcopy` shim that the mosh-rs server puts on `PATH`, thus the data goes to the clipboard of your client computer, and the tool never opens the native clipboard. Outside a mosh-rs session, the tool uses the native clipboard first. If the native clipboard fails, the tool runs `pbcopy` from `PATH`. A headless environment, such as CI, has none of these routes. In that case, use the `--dry-run` flag.
