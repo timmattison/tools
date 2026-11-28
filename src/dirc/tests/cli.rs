@@ -195,7 +195,7 @@ const COLLECT: &str = "string collect";
 /// together with a space between them.
 const TAB_NAME: &str = "holds\ta tab";
 
-/// The file that documents every tool of this workspace.
+/// The file that documents this tool, in the directory of its crate.
 const README: &str = "README.md";
 
 /// The temporary directory of one test, and the clipboard file inside it.
@@ -410,16 +410,13 @@ fn with_built_binary(idiom: &str) -> String {
     idiom.replace(TOOL_WORD, BINARY_REFERENCE)
 }
 
-/// The text of the README of this repository.
+/// The text of the README of this crate.
 ///
-/// `CARGO_MANIFEST_DIR` names `src/dirc`, so the root of the repository is two
-/// directories above it. A read that fails stops the test, because a test that
-/// found no file must not report that the file agrees with the help.
+/// `CARGO_MANIFEST_DIR` names `src/dirc`, which holds the README. A read that
+/// fails stops the test, because a test that found no file must not report that
+/// the file agrees with the help.
 fn readme() -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join(README);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(README);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|failure| panic!("{README} is read from {path:?}: {failure}"))
 }

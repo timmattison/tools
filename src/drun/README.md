@@ -1,4 +1,4 @@
-# drun
+# drun (Docker run on the least busy host)
 
 `drun` runs a Docker container on the least busy of your Docker hosts, and
 finds the container again later. Use it when this computer is short of memory
@@ -20,6 +20,14 @@ $ drun ps
 HOST   NAME               IMAGE  STATUS        PORTS
 box-b  quirky-otter-4821  nginx  Up 2 minutes  0.0.0.0:8080->80/tcp
 ```
+
+## Usage
+
+Usage: `drun run -d -p 8080:80 nginx`, `drun run --rm alpine uname -a`, `drun ps`,
+`drun status quirky-otter-4821`, `drun logs -f quirky-otter-4821`,
+`drun wait quirky-otter-4821`, `drun cp quirky-otter-4821:/out/result.json .`,
+`drun rm quirky-otter-4821`, `drun hosts`,
+`drun buildx create --name multiarch --driver docker-container --use`
 
 ## Set up the hosts
 
@@ -189,6 +197,9 @@ When a host does not answer in `host_timeout_secs`, or answers with an error,
 `drun run` writes a warning and chooses between the other hosts. When no host
 answers, `drun` stops with exit status 125 and gives the reason for each
 host.
+
+`drun hosts` shows how busy each host is. `drun pick` prints the host that
+`drun` chooses, for `docker --context "$(drun pick)" compose up -d`.
 
 ## What changes when a container runs on another computer
 
