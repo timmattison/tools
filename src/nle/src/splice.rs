@@ -77,12 +77,13 @@ pub(crate) struct Spliced<'a> {
 /// 1. The clips play in `play_order`.
 /// 2. The later start wins. A clip plays from its start to its end on the
 ///    timeline (`timeline_offset + out_point - in_point`), or to the start of
-///    the next clip in the play order when that comes first. Thus the start
-///    of a clip cuts each clip that still plays at that time, and the rest of
-///    the earlier clip does not play. A tie of two starts goes to the clip
-///    later in the play order.
+///    the next clip with a length in the play order when that comes first.
+///    Thus the start of a clip with a length cuts each clip that still plays
+///    at that time, and the rest of the earlier clip does not play. A tie of
+///    two starts goes to the clip later in the play order.
 /// 3. A clip whose part does not end after its start plays nothing. It gets
-///    no cut, and its events do not play.
+///    no cut, and its events do not play. A clip with no length
+///    (`out_point == in_point`) cuts no clip.
 /// 4. A clip that plays holds the events of `Clip::timeline_events`. A clip
 ///    that a later start cuts holds only the events before that start.
 /// 5. The terminal has the largest width and the largest height of the
@@ -114,10 +115,12 @@ pub(crate) fn splice(project: &EditProject) -> Option<Spliced<'_>> {
     for (index, clip) in order.iter().enumerate() {
         let start = clip.timeline_offset.get();
         let full_end = start + (clip.out_point.get() - clip.in_point.get());
-        // The next clip starts at or after this start, so the part never
-        // ends before its start.
+        // The next clip with a length starts at or after this start, so the
+        // part never ends before its start.
         let part_end = order
-            .get(index + 1)
+            .iter()
+            .skip(index + 1)
+            .find(|next| has_length(next))
             .map_or(full_end, |next| full_end.min(next.timeline_offset.get()));
         end = end.max(part_end);
         if part_end <= start {
@@ -152,6 +155,12 @@ pub(crate) fn splice(project: &EditProject) -> Option<Spliced<'_>> {
         size,
         header: header.unwrap_or(first),
     })
+}
+
+/// True when `clip` has a length: its out point is after its in point. Only
+/// the start of such a clip cuts the clips before it.
+fn has_length(clip: &Clip) -> bool {
+    clip.out_point.get() > clip.in_point.get()
 }
 
 /// The text of the output event of a hard cut. `rows` is the height of the

@@ -439,9 +439,10 @@ impl FilterRegistry {
     /// 1. A project with no clip fails with `NleError::RenderError`.
     /// 2. The events are the clips spliced by the rules of the private
     ///    `splice` module. The clips play in the order of their start (a tie
-    ///    keeps track order, then clip order). The start of a clip cuts each
-    ///    clip that still plays at that time, and each clip that plays after
-    ///    the first starts with a hard cut that clears the screen.
+    ///    keeps track order, then clip order). The start of a clip with a
+    ///    length cuts each clip that still plays at that time, and each clip
+    ///    that plays after the first starts with a hard cut that clears the
+    ///    screen.
     /// 3. The filters of the project run on them by the steps of their form,
     ///    with the end of the timeline starting at the end of the splice: the
     ///    latest end of the part of a clip that plays. With no overlap, it is

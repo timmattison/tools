@@ -6647,7 +6647,7 @@ timeline:
   output of one clip stays under the next clip.
 - When two clips overlap, for example on two tracks, the later start wins. The
   start of a clip ends each clip that still plays, and the rest of the earlier
-  clip does not play.
+  clip does not play. A clip with no length plays nothing, and it ends no clip.
 - The edited recording has the largest width and the largest height of its
   clips. A smaller clip draws at the top left, and a clip with fewer rows
   scrolls in its own rows. A narrower clip does not wrap at its own width. The
