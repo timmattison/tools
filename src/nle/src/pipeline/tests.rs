@@ -588,6 +588,84 @@ fn render_gives_a_tie_of_two_starts_to_the_clip_later_in_track_order() {
     assert_eq!(rendered.duration, 2.0);
 }
 
+/// `recording` with a terminal of `width` columns and `height` rows.
+fn sized(mut recording: Recording, width: u16, height: u16) -> Recording {
+    recording.width = width;
+    recording.height = height;
+    recording
+}
+
+/// Three clips on one track, back to back: 80x24, then 120x40, then 100x40.
+fn three_sizes_project() -> EditProject {
+    EditProject {
+        clips: vec![
+            clip_of(1, sized(texts("a", &[0.0], 1.0), 80, 24), 0.0),
+            clip_of(2, sized(texts("b", &[0.0], 1.0), 120, 40), 1.0),
+            clip_of(3, sized(texts("c", &[0.0], 1.0), 100, 40), 2.0),
+        ],
+        timeline: vec![TimelineTrack {
+            id: TrackId(1),
+            clips: vec![ClipId(1), ClipId(2), ClipId(3)],
+        }],
+        filters: Vec::new(),
+    }
+}
+
+#[test]
+fn render_pads_the_terminal_to_the_largest_width_and_the_largest_height() {
+    let mut project = three_sizes_project();
+    project.clips[1].source = Arc::new(sized(texts("b", &[0.0], 1.0), 120, 30));
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    // The header names "a", and the size holds every clip.
+    assert_eq!(rendered.title, "a");
+    assert_eq!((rendered.width, rendered.height), (120, 40));
+}
+
+#[test]
+fn render_gives_a_clip_that_is_shorter_than_the_terminal_a_scroll_region_of_its_rows() {
+    let rendered = FilterRegistry::new()
+        .render(&three_sizes_project())
+        .unwrap();
+
+    // "a" has 24 of the 40 rows, so it starts with a scroll region of its rows.
+    // "b" and "c" have all 40 rows, so their cuts reset the scroll region. A
+    // narrower clip keeps the whole width.
+    assert_eq!(
+        timed_data(&rendered),
+        vec![
+            (0.0, "\x1b[1;24r"),
+            (0.0, "a0"),
+            (1.0, CUT),
+            (1.0, "b0"),
+            (2.0, CUT),
+            (2.0, "c0"),
+        ]
+    );
+}
+
+#[test]
+fn render_sets_the_scroll_region_at_a_cut_into_a_shorter_clip() {
+    let mut project = three_sizes_project();
+    project.clips.swap(0, 1);
+    project.clips[0].timeline_offset = Seconds::ZERO;
+    project.clips[1].timeline_offset = Seconds::new(1.0).unwrap();
+
+    let rendered = FilterRegistry::new().render(&project).unwrap();
+
+    assert_eq!(
+        timed_data(&rendered),
+        vec![
+            (0.0, "b0"),
+            (1.0, "\x1b[0m\x1b[1;24r\x1b[2J\x1b[H"),
+            (1.0, "a0"),
+            (2.0, CUT),
+            (2.0, "c0"),
+        ]
+    );
+}
+
 #[test]
 fn render_puts_no_cut_at_a_clip_that_plays_nothing() {
     let mut empty = clip_of(2, texts("e", &[0.0], 1.0), 5.0);
@@ -1202,17 +1280,18 @@ fn run_gives_a_span_filter_the_size_of_a_vt100() {
 }
 
 #[test]
-fn render_gives_a_span_filter_the_size_of_the_clip_that_starts_first() {
+fn render_gives_a_span_filter_the_padded_size_of_the_clips() {
     let (registry, seen) = context_spy_registry();
     let mut project = two_clip_project();
-    // The clip "early" starts first. A size of "late" must not reach the filter.
+    // The clip "early" starts first, and "late" is wider. The terminal holds
+    // the largest width and the largest height of the clips.
     let mut late = (*project.clips[0].source).clone();
     late.width = 132;
-    late.height = 43;
+    late.height = 30;
     project.clips[0].source = Arc::new(late);
     let mut early = (*project.clips[1].source).clone();
     early.width = 120;
-    early.height = 40;
+    early.height = 43;
     project.clips[1].source = Arc::new(early);
     project.filters.push(all("look"));
 
@@ -1221,8 +1300,8 @@ fn render_gives_a_span_filter_the_size_of_the_clip_that_starts_first() {
     assert_eq!(
         seen.lock().unwrap()[0].1,
         TerminalSize {
-            width: 120,
-            height: 40
+            width: 132,
+            height: 43
         }
     );
 }
