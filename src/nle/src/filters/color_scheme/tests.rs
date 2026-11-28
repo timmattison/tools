@@ -895,6 +895,24 @@ fn a_reset_or_a_default_in_the_range_clears_what_the_restore_sets() {
 }
 
 #[test]
+fn a_soft_reset_in_the_range_clears_the_sgr_colors_and_keeps_the_default_colors() {
+    let colors = restored(vec![out(0.0, "\x1b[31m\x1b[!pA"), out(5.0, "B")], json!({}));
+    let defaults = restored(
+        vec![out(0.0, "\x1b]10;#123456\x07\x1b[31m\x1b[!pA"), out(5.0, "B")],
+        json!({}),
+    );
+
+    assert_eq!(colors.get(2), Some(&(2.0, RESET_COLORS.to_string())));
+    assert_eq!(
+        defaults.get(2),
+        Some(&(
+            2.0,
+            "\x1b]110\x1b\\\x1b]10;#123456\x1b\\\x1b]111\x1b\\".to_string()
+        ))
+    );
+}
+
+#[test]
 fn the_restore_sets_the_foreground_background_and_underline_in_one_sgr() {
     let answer = restored(
         vec![out(0.0, "\x1b[58;5;1m\x1b[44m\x1b[31mA"), out(5.0, "B")],
