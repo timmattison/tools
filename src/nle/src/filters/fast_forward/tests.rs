@@ -722,6 +722,83 @@ fn summary_after_a_viewport_range_that_a_slow_down_moved_into_its_region_fails_t
 }
 
 #[test]
+fn summary_after_a_speed_up_that_moved_a_viewport_range_out_of_its_region_drops_the_middle_lines() {
+    let lines: Vec<(f64, String)> = (1..=40)
+        .map(|n| (f64::from(n), format!("l{n}\r\n")))
+        .collect();
+    let rendered = render_with(
+        &borrowed(&lines),
+        41.0,
+        vec![
+            crop(range(10.0, 20.0)),
+            time_dilation::applied(FilterRegion::All, Speed::new(2.0).unwrap()),
+            summary(15.0, 20.0, 1, 1),
+        ],
+    )
+    .unwrap();
+    assert!(
+        rendered
+            .events
+            .iter()
+            .any(|e| e.time == 15.0 && e.data == "l30\r\n"),
+        "{:?}",
+        rendered.events
+    );
+    assert!(
+        rendered.events.iter().any(|e| e.data == SUMMARY_MARKER),
+        "{:?}",
+        rendered.events
+    );
+    assert!(
+        rendered.events.iter().all(|e| e.data != "l31\r\n"),
+        "{:?}",
+        rendered.events
+    );
+}
+
+#[test]
+fn summary_after_a_redaction_of_the_whole_timeline_and_a_viewport_range_drops_the_middle_lines() {
+    use crate::filters::redaction::{Find, Redaction, Replacement};
+    let lines: Vec<(f64, String)> = (1..=40)
+        .map(|n| (f64::from(n), format!("l{n}\r\n")))
+        .collect();
+    let redaction = Redaction::new(
+        Find::Text("secret".to_string()),
+        Replacement::Asterisks,
+        false,
+    )
+    .unwrap();
+    let rendered = render_with(
+        &borrowed(&lines),
+        41.0,
+        vec![
+            crop(range(10.0, 20.0)),
+            crate::filters::redaction::applied(FilterRegion::All, &redaction),
+            summary(25.0, 35.0, 1, 1),
+        ],
+    )
+    .unwrap();
+    assert!(
+        rendered
+            .events
+            .iter()
+            .any(|e| e.time == 25.0 && e.data == "l25\r\n"),
+        "{:?}",
+        rendered.events
+    );
+    assert!(
+        rendered.events.iter().any(|e| e.data == SUMMARY_MARKER),
+        "{:?}",
+        rendered.events
+    );
+    assert!(
+        rendered.events.iter().all(|e| e.data != "l26\r\n"),
+        "{:?}",
+        rendered.events
+    );
+}
+
+#[test]
 fn summary_that_starts_where_a_viewport_range_ends_fails_the_render() {
     let lines = numbered_lines(11.0, 10);
     let result = render_with(
