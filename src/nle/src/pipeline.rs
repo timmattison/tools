@@ -156,10 +156,10 @@ impl RewrittenParts {
     /// region stays. A part after the region moves by `shift`. A part that
     /// overlaps the region goes to the new times of its own events when the
     /// step answers as many events as its region held, because each shipped
-    /// step keeps the count and the order of its events. Then event `i` of the
-    /// region pairs with event `i` of the answer. When the count changes, the
-    /// part grows to cover `start` to `answered_end`. A part with no event
-    /// left in it drops.
+    /// step that keeps the count of its events also keeps their order. Then
+    /// event `i` of the region pairs with event `i` of the answer. When the
+    /// count changes, the part grows to cover `start` to `answered_end`. A
+    /// part with no event left in it drops.
     fn move_through(&mut self, step: &TimeStep<'_>) {
         let paired = step.answer.len() == step.old_times.len();
         self.0 = self

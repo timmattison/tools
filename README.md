@@ -6652,11 +6652,11 @@ buttons:
   such as a build log, and not a full-screen application. A summary after a
   screen filter, for example `viewport`, on the same part of the timeline
   fails, because the screen filter writes no line feed. The banner gives the
-  reason. A speed change, a fast-forward, or a redaction between them moves that part
-  with its events. A filter between them that removes or adds events on that
-  part, for example backspace removal, makes the failure cover the whole region
-  of that filter. In the `filters` list of the project file, put the summary before the
-  screen filter.
+  reason. A speed change, a fast-forward, or a redaction between them moves
+  that part with its events. A filter between them that removes or adds events
+  on that part, for example backspace removal, makes the failure cover the
+  whole region of that filter. In the `filters` list of the project file, put
+  the summary before the screen filter.
 
 A button reads only the fields that its mode uses. Each fast-forward gets a row
 with a **Remove** button. The panel does not find a burst of output itself, so
