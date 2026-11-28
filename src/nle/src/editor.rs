@@ -415,10 +415,11 @@ impl Editor {
         Ok(self.kept.get_or_init(|| Kept::from(rendered)))
     }
 
-    /// Render the project in its present state, and export it as `request`
-    /// asks. The future holds a copy of the state, so it borrows nothing from
-    /// the editor. It reports `ExportProgress::Rendering` first, then the
-    /// stages of `export::export_recording`.
+    /// Export the render of the project in its present state as `request`
+    /// asks. When the editor keeps that render, the export writes it. Else
+    /// the export renders a copy of the state on a blocking thread. The future
+    /// borrows nothing from the editor. It reports `ExportProgress::Rendering`
+    /// first, then the stages of `export::export_recording`.
     ///
     /// # Errors
     /// The future gives the errors of `FilterRegistry::render` and of
@@ -429,11 +430,17 @@ impl Editor {
         request: ExportRequest,
         mut progress: impl FnMut(ExportProgress) + Send + 'static,
     ) -> impl std::future::Future<Output = Result<PathBuf, NleError>> + Send + 'static {
+        let kept = self.kept.get().map(|kept| Arc::clone(&kept.recording));
         let project = self.project.clone();
         let filters = Arc::clone(&self.filters);
         async move {
             progress(ExportProgress::Rendering);
-            let recording = crate::commands::run_blocking(move || filters.render(&project)).await?;
+            // The copy of a kept recording also runs on the blocking thread.
+            let recording = crate::commands::run_blocking(move || match kept {
+                Some(kept) => Ok(Arc::unwrap_or_clone(kept)),
+                None => filters.render(&project),
+            })
+            .await?;
             crate::export::export_recording(recording, request, progress).await
         }
     }

@@ -6625,8 +6625,9 @@ that `beta` reports (`Processed frame N / M`). When the export ends, the bar
 shows the path of the file. If the export fails, the error banner shows the
 reason.
 
-In code, `Editor::export` does the render and the export, and reports each
-stage through an `ExportProgress` callback. `Editor::save_recording` writes the
+In code, `Editor::export` writes the render that the editor keeps, or renders
+the project when it keeps none, and reports each stage through an
+`ExportProgress` callback. `Editor::save_recording` writes the
 rendered recording only.
 
 The crate also has functions that list the recordings in a directory, and
