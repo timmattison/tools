@@ -1257,7 +1257,8 @@ const BRANCH_BATCH: usize = 100;
 /// is one line in the logs of the tests.
 const ENTRIES_QUERY: &str = "query($owner: String!, $name: String!) { \
     repository(owner: $owner, name: $name) { mergeQueue { entries(first: 100) { nodes { \
-    position state enqueuedAt pullRequest { number title url headRefName } } } } } }";
+    position state enqueuedAt headCommit { oid } \
+    pullRequest { number title url headRefName } } } } } }";
 
 /// Writes `text` as a GraphQL string literal. A JSON string literal is also a
 /// GraphQL string literal.
@@ -1435,7 +1436,16 @@ struct EntryJson {
     position: u32,
     state: String,
     enqueued_at: DateTime<Utc>,
+    /// The commit of the merge group. GitHub gives `null` while it did not
+    /// make the merge group.
+    head_commit: Option<EntryCommitJson>,
     pull_request: Option<EntryPullJson>,
+}
+
+/// The head commit of [`EntryJson`].
+#[derive(Deserialize)]
+struct EntryCommitJson {
+    oid: String,
 }
 
 /// The pull request of [`EntryJson`].
@@ -1473,7 +1483,7 @@ fn parse_entries(body: &str, repo: &RepoName) -> Result<Vec<QueueEntry>, SourceE
         .filter_map(|node| {
             let pull = node.pull_request?;
             Some(QueueEntry {
-                merge_group_commit: None,
+                merge_group_commit: node.head_commit.map(|commit| CommitSha(commit.oid)),
                 repo: repo.clone(),
                 pull: PullNumber(pull.number),
                 title: pull.title,
