@@ -2235,6 +2235,19 @@ These tools keep their long entries in this file until each one moves to `src/<t
       queue two times has two rows.
     - These rows show no workflow runs and no jobs. The runs of a merge group show in "Running"
       and in "Last 8h", on a branch that starts with `gh-readonly-queue/`.
+    - Enter on a "Merge queue" row opens the run of the merge group of that entry. Thus one key
+      press shows the live checks. The runs of an entry are the runs on the board of the same
+      repository that test the commit of its merge group (`head_sha`), on a branch that starts
+      with `gh-readonly-queue/`. Two attempts of one pull request on one base have the same
+      branch, thus only the commit tells them apart. The `push` run of the merged commit tests the
+      same commit, but its branch is the default branch. When a merge group has more than one run,
+      Enter opens a failed run, because that failure takes the entry out of the queue. Else it
+      opens an active run, else the run that GitHub created last, and in a tie the run with the
+      lowest ID. When the board holds no run of the merge group, Enter opens the pull request,
+      and the status line says `no run of the merge group of #<N>: opened the pull request`.
+      This occurs while the entry waits for its turn, because GitHub did not make its merge group
+      yet, and before GitHub starts a run of the merge group. Enter sends no request to GitHub.
+    - Enter on a "Merge history" row opens the pull request.
     - When the queue merges a pull request, `github-merge-queue[bot]` removes it from the queue, and
       GitHub writes the `merged` event in the same second or the next second. `ha` reads the two
       events as one merge. A merge more than 60 seconds after a removal by the queue, or after a
@@ -2489,7 +2502,9 @@ These tools keep their long entries in this file until each one moves to `src/<t
     press of Right or Left on a pull request row does nothing. Two fast presses of Right expand
     every run, and two fast presses of Left collapse every run, also from a pull request row. A
     held Right or Left does the same, because the terminal sends each repeat as a new press. Enter
-    opens the highlighted pull request, run, or job in the browser, and `ha` keeps running. The
+    opens the highlighted run or job in the browser, and `ha` keeps running. On a "Merge queue"
+    row, Enter opens the run of the merge group of the entry, or the pull request when the board
+    holds no such run. On a "Merge history" row, Enter opens the pull request. The
     page of a job shows its log. A job that has no address opens the page of its run. The highlight
     stays on the same job through each refresh. It also stays on the same pull request. When a pull
     request leaves the queue, the highlight stays at the same position.
